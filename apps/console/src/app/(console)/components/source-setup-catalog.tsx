@@ -3,30 +3,32 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Menu } from "@base-ui/react/menu";
 import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Suspense, use, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 import { readinessBlockNote } from "../lib/connector-readiness-copy.ts";
 import {
+  connectorInstallRowModel,
   connectorLookupKey,
   isUninstallableCatalogEntry,
 } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
+import { UpdatesReadySlot } from "../sources/updates-ready.tsx";
+import type { UpdatesReadyModel } from "../sources/updates-ready-model.ts";
 import {
   browserBoundWithStoredCredentials,
   sourceSetupCardModel,
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
-  sourceSetupRank,
   sourceSetupRowIsUnavailable,
-  sourceSetupSecondaryAction,
   sourceSetupStatus,
 } from "../lib/source-setup-presentation.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
@@ -57,46 +59,135 @@ export interface ExistingSourceSetupLink {
   totalRecordsState?: RefCountState;
 }
 
+export type SourceSetupMaturity = "ready" | "testing" | "development";
+
+export interface SourceSummaryRead {
+  byConnector: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  truncated: boolean;
+}
+
+export type SourceSummaryReadResult = { ok: true; value: SourceSummaryRead } | { ok: false };
+
+export function sourceIsInstalled(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null | undefined,
+  existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>
+): boolean {
+  return Boolean(lifecycle?.installed || existingSourcesByConnector?.[entry.connectorKey]?.length);
+}
+
+function maturityFor(entry: ConnectorCatalogEntry): SourceSetupMaturity {
+  if (entry.publicTier === "development") return "development";
+  return entry.publicTier === "preview" || entry.publicTier === "unknown" ? "testing" : "ready";
+}
+
 function sortSourceCatalog(catalog: readonly ConnectorCatalogEntry[]): ConnectorCatalogEntry[] {
-  return [...catalog].sort((a, b) => {
-    const rank = sourceSetupRank(a) - sourceSetupRank(b);
-    return rank === 0 ? a.displayName.localeCompare(b.displayName) : rank;
+  return [...catalog].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+/** Ready and testing rows show by default; development rows only when the filter asks for them. */
+export const DEFAULT_SOURCE_MATURITIES: ReadonlySet<SourceSetupMaturity> = new Set(["ready", "testing"]);
+
+export function filterSourceCatalog(
+  catalog: readonly ConnectorCatalogEntry[],
+  query: string,
+  maturities: ReadonlySet<SourceSetupMaturity>
+): ConnectorCatalogEntry[] {
+  const needle = query.trim().toLowerCase();
+  return sortSourceCatalog(catalog).filter((entry) => {
+    if (!maturities.has(maturityFor(entry))) return false;
+    return !needle || [entry.displayName, entry.connectorKey, entry.disposition, entry.setupModality, entry.supportState]
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
   });
 }
 
-function filterSourceCatalog(catalog: readonly ConnectorCatalogEntry[], query: string): ConnectorCatalogEntry[] {
-  const needle = query.trim().toLowerCase();
-  const sorted = sortSourceCatalog(catalog);
-  if (!needle) {
-    return sorted;
+function MaturityFilter({ value, onChange }: {
+  value: ReadonlySet<SourceSetupMaturity>;
+  onChange: (value: ReadonlySet<SourceSetupMaturity>) => void;
+}) {
+  const toggle = (option: SourceSetupMaturity, checked: boolean) => {
+    const next = new Set(value);
+    if (checked) next.add(option);
+    else next.delete(option);
+    // Keep at least one tier selected so the list never empties by filter alone.
+    if (next.size > 0) onChange(next);
+  };
+  return (
+    <Menu.Root>
+      <Menu.Trigger className={buttonVariants({ size: "sm", variant: "ghost", className: "min-h-11 border-border-strong px-3 sm:min-h-[30px]" })} type="button">Filter</Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner className="z-50" sideOffset={6}>
+          <Menu.Popup className="grid min-w-44 rounded-control border border-border bg-background p-1 text-foreground shadow-lg">
+            {(["ready", "testing", "development"] as const).map((option) => (
+              <Menu.CheckboxItem
+                checked={value.has(option)}
+                className="flex min-h-11 items-center gap-2 rounded-control px-3 py-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                closeOnClick={false}
+                key={option}
+                onCheckedChange={(checked) => toggle(option, checked)}
+              >
+                <span aria-hidden className="w-4">
+                  <Menu.CheckboxItemIndicator>✓</Menu.CheckboxItemIndicator>
+                </span>
+                {option === "ready" ? "Ready to use" : option === "testing" ? "In testing" : "In development"}
+              </Menu.CheckboxItem>
+            ))}
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
+function SortMenu() {
+  return (
+    <Menu.Root>
+      <Menu.Trigger className={buttonVariants({ size: "sm", variant: "ghost", className: "min-h-11 border-border-strong px-3 sm:min-h-[30px]" })} type="button">Sort</Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner className="z-50" sideOffset={6}>
+          <Menu.Popup className="grid min-w-36 rounded-control border border-border bg-background p-1 text-foreground shadow-lg">
+            <Menu.Item className="min-h-11 rounded-control px-3 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled>Name</Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
+function SourceSummaryNotice({ read }: { read: Promise<SourceSummaryReadResult> }) {
+  const result = use(read);
+  if (!result.ok) {
+    return <p className="pdpp-caption py-2 text-muted-foreground" role="alert">Couldn't load data sources. Try again.</p>;
   }
-  return sorted.filter((entry) =>
-    [entry.displayName, entry.connectorKey, entry.disposition, entry.setupModality, entry.supportState]
-      .join(" ")
-      .toLowerCase()
-      .includes(needle)
+  if (!result.value.truncated) return null;
+  return (
+    <p className="pdpp-caption py-2 text-muted-foreground" role="status">
+      Some data sources could not be loaded. Check Data sources before adding another copy.
+    </p>
   );
 }
 
 function pathTone(path: ConnectorAcquisitionPath): string {
   if (path.posture === "primary") {
-    return "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg";
+    return "text-muted-foreground";
   }
   if (path.posture === "advanced") {
-    return "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg";
+    return "text-attention";
   }
-  return "border-border bg-muted/30 text-muted-foreground";
+  return "text-muted-foreground";
 }
 
 function SourceAcquisitionPathRow({ path }: { path: ConnectorAcquisitionPath }) {
   return (
     <li
-      className="grid gap-1 rounded-md border border-border/70 bg-background/60 p-2"
+      className="grid gap-1 border-b border-border py-2"
       data-testid="source-acquisition-path"
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="pdpp-caption font-medium text-foreground">{path.label}</span>
-        <span className={`pdpp-eyebrow rounded border px-1.5 py-0.5 ${pathTone(path)}`}>{path.posture}</span>
+        <span className={`pdpp-caption ${pathTone(path)}`}>{path.posture}</span>
         {path.platform ? <span className="pdpp-caption text-muted-foreground">{path.platform}</span> : null}
       </div>
       {path.detail ? <p className="pdpp-caption text-muted-foreground">{path.detail}</p> : null}
@@ -126,16 +217,14 @@ function SourceAcquisitionPaths({ paths }: { paths: readonly ConnectorAcquisitio
         ))}
       </ul>
       {secondary.length > 0 ? (
-        <details className="group mt-2">
-          <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-            Other ways to add data
-          </summary>
-          <ul className="mt-2 grid gap-2">
+        <div className="mt-2 grid gap-1">
+          <p className="pdpp-caption text-muted-foreground">Other ways to add data</p>
+          <ul className="grid gap-2">
             {secondary.map((path) => (
               <SourceAcquisitionPathRow key={`${path.posture}:${path.label}`} path={path} />
             ))}
           </ul>
-        </details>
+        </div>
       ) : null}
     </div>
   );
@@ -154,19 +243,19 @@ function developmentMethodLine(entry: ConnectorCatalogEntry): string {
   return readinessBlockNote(entry.readiness) ?? "Setup path implemented, not yet proven against a live account.";
 }
 
-function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: number): string {
+function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: number): string | null {
   if (entry.publicTier === "development") {
     return developmentMethodLine(entry);
   }
   if (browserBoundWithStoredCredentials(entry) && entry.disposition === "static_secret_connect") {
-    return "Connect with this source's sign-in details and complete any required steps in the secure browser.";
+    return "Connect with this data source's sign-in details and complete any required steps in the secure browser.";
   }
   if (sourceSetupAvailability(entry) === "not_available_here") {
     return "No proven setup path is available in this dashboard.";
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
-      return "Run the local collector on the machine that has this data.";
+      return "Start the local collector on the machine that has this data.";
     case "static_secret_connect":
       return "Enter the provider credential for this account.";
     case "static_secret_experimental":
@@ -174,11 +263,9 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
     case "provider_auth_connect":
       return "Authorize this account through the provider.";
     case "manual_upload_connect":
-      return existingSourceCount > 0
-        ? `${existingSourceCount} existing ${existingSourceCount === 1 ? "source" : "sources"} can receive another export; choose on the import page.`
-        : "Owner-exported file import.";
+      return existingSourceCount > 0 ? null : "Owner-exported file import.";
     case "provider_auth_deployment_blocked":
-      return "This source needs provider authorization. Configure provider settings before adding an account.";
+      return "This data source needs provider authorization. Configure provider settings before adding an account.";
     case "browser_collector_manual":
     case "browser_bound_runbook":
       return entry.disposition === "browser_collector_manual"
@@ -187,6 +274,34 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
     default:
       return "No setup path is available in this dashboard.";
   }
+}
+
+function unavailableReason(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null
+): string {
+  switch (entry.readiness?.reason) {
+    case "not_implemented": return "This data source is a placeholder and does not collect data yet.";
+    case "not_published": return "No package for this data source is published or installed here.";
+    case "host_requirement_unmet": return "This data source is not available on this server yet.";
+    case "inspection_unavailable": return "This data source could not be checked just now. Try again.";
+    case "catalog_unavailable": return "The package catalog could not be reached. Try again.";
+  }
+  const hostBlockReason = lifecycle ? connectorInstallRowModel(entry, lifecycle).hostBlockReason : null;
+  if (hostBlockReason) return `This data source is not available here: ${hostBlockReason}`;
+  switch (entry.disposition) {
+    case "browser_bound_runbook": return "Browser setup is not available in this app yet.";
+    case "local_collector_unproven": return "This data source needs a local setup that is not available here yet.";
+    case "provider_auth_deployment_blocked": return "This data source needs server settings before setup.";
+    case "manual_upload_pending": return "File import is not available in this app yet.";
+    default: return "Setup is not available here yet.";
+  }
+}
+
+function maturityLabel(entry: ConnectorCatalogEntry): string | null {
+  if (entry.publicTier === "development") return "Experimental";
+  if (entry.publicTier === "preview") return "In testing";
+  return null;
 }
 
 function SourceSetupContext({ entry }: { entry: ConnectorCatalogEntry }) {
@@ -215,61 +330,53 @@ function sourceRecordsHref(connectionId: string): string {
   return `/explore?${params.toString()}`;
 }
 
-function ExistingSourceLinks({
-  connectorKey,
-  icon,
-  sources,
-}: {
+function ExistingSourceIdentity({ connectorKey, sources }: {
   connectorKey: string;
-  icon: ConnectorCatalogEntry["icon"];
   sources: readonly ExistingSourceSetupLink[];
 }) {
-  if (sources.length === 0) {
-    return null;
+  if (sources.length === 1) {
+    const source = sources[0];
+    if (!source) return null;
+    return (
+      <Link
+        aria-label={`Source details for ${source.displayName}`}
+        className="pdpp-caption text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        href={sourceDetailHref(connectorKey, source.connectionId)}
+      >
+        {source.displayName}
+      </Link>
+    );
   }
+  if (sources.length > 1) {
+    return <span className="pdpp-caption text-muted-foreground">{sources.length} data sources</span>;
+  }
+  return null;
+}
+
+function ExistingSourceDetails({ connectorKey, sources }: {
+  connectorKey: string;
+  sources: readonly ExistingSourceSetupLink[];
+}) {
+  if (sources.length === 0) return null;
   return (
-    <div className="mt-4 border-t border-border/60 pt-3" data-testid="existing-source-links">
-      <p className="pdpp-eyebrow text-muted-foreground">Existing accounts</p>
-      <ul className="mt-2 divide-y divide-border/60">
-        {sources.map((source) => {
-          const latestFact = source.latestImportStatus ?? source.status ?? null;
-          return (
-            <li
-              className="grid gap-2 py-2 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_auto]"
-              key={source.connectionId}
-            >
-              <div className="min-w-0">
-                <p className="flex items-center gap-2 pdpp-caption font-medium text-foreground">
-                  <ConnectorMark connectorId={connectorKey} icon={icon} name={source.displayName} />
-                  {source.displayName}
-                </p>
-                <p className="pdpp-caption text-muted-foreground">
-                  {formatTotalRecordsLabel(source.totalRecords, source.totalRecordsState, "records")}
-                  {latestFact ? ` · ${latestFact}` : ""}
-                </p>
-                {source.latestImportFile ? (
-                  <p className="pdpp-caption truncate text-muted-foreground">{source.latestImportFile}</p>
-                ) : null}
-              </div>
-              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                <Link
-                  className={buttonVariants({ size: "sm", variant: "ghost" })}
-                  href={sourceRecordsHref(source.connectionId)}
-                >
-                  Open in Explore
-                </Link>
-                <Link
-                  className={buttonVariants({ size: "sm", variant: "ghost" })}
-                  href={sourceDetailHref(connectorKey, source.connectionId)}
-                >
-                  Source details
-                </Link>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
+    <ul className="grid gap-2" data-testid="existing-source-links">
+      {sources.map((source) => {
+        const latestFact = source.latestImportStatus ?? source.status ?? null;
+        return (
+          <li className="grid gap-1 border-b border-border pb-2 last:border-0" key={source.connectionId}>
+            <Link className="pdpp-caption text-foreground underline underline-offset-2" href={sourceDetailHref(connectorKey, source.connectionId)}>
+              {source.displayName}
+            </Link>
+            <p className="pdpp-caption text-muted-foreground">{formatTotalRecordsLabel(source.totalRecords, source.totalRecordsState, "records")}</p>
+            {latestFact ? <p className="pdpp-caption text-muted-foreground">Latest activity: {latestFact}</p> : null}
+            {source.latestImportFile ? <p className="pdpp-caption break-all text-muted-foreground">Import file: {source.latestImportFile}</p> : null}
+            <Link className="pdpp-caption text-muted-foreground underline underline-offset-2" href={sourceRecordsHref(source.connectionId)}>
+              Open in Explore
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -303,20 +410,15 @@ function SourceSetupDetails({ entry }: { entry: ConnectorCatalogEntry }) {
   }
 
   return (
-    <details className="group mt-2" data-testid="source-setup-details">
-      <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-        {hasRichImportDetail ? "Show import options" : "Provider documentation"}
-      </summary>
-      <div className="mt-2 grid gap-2">
-        {hasRichImportDetail ? (
-          <>
-            <p className="pdpp-caption text-muted-foreground">{guidance}</p>
-            <SourceAcquisitionPaths paths={entry.acquisitionPaths} />
-          </>
-        ) : null}
-        <SourceExternalDocs entry={entry} />
-      </div>
-    </details>
+    <div className="grid gap-2" data-testid="source-setup-details">
+      {hasRichImportDetail ? (
+        <>
+          <p className="pdpp-caption text-muted-foreground">{guidance}</p>
+          <SourceAcquisitionPaths paths={entry.acquisitionPaths} />
+        </>
+      ) : null}
+      <SourceExternalDocs entry={entry} />
+    </div>
   );
 }
 
@@ -453,13 +555,11 @@ function installLifecycleFor(
 function SourceSetupCard({
   entry,
   existingSources,
-  installCatalogRecoveryState,
   installCatalogTransientlyUnavailable,
   installLifecycle,
 }: {
   entry: ConnectorCatalogEntry;
   existingSources: readonly ExistingSourceSetupLink[];
-  installCatalogRecoveryState: ConnectorCatalogRecoveryState;
   installCatalogTransientlyUnavailable: boolean;
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
@@ -474,96 +574,89 @@ function SourceSetupCard({
     setupAction: action,
     unavailable: isUnavailable,
   } = sourceSetupCardModel(entry, installLifecycle, installCatalogTransientlyUnavailable);
-  const secondaryAction = sourceSetupSecondaryAction(entry);
+  const maturity = maturityLabel(entry);
+  const primaryPackageAction = Boolean(
+    !packageAvailabilityUnknown && installModel?.action && (installModel.action.kind === "update" || !action)
+  );
+  const primarySetupAction = Boolean(action && !primaryPackageAction);
+  const setupActionLabel = action?.label === "Add account" && existingSources.length > 0
+    ? "Add another account"
+    : action?.label;
+  const methodLine = !isUnavailable ? sourceMethodLine(entry, existingSources.length) : null;
   return (
     <li
-      className={`grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4 sm:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] sm:items-start ${
-        isUnavailable ? "opacity-70" : ""
-      }`}
+      className="grid min-w-0 gap-3 border-b border-border py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start"
       data-testid={`source-setup-${entry.connectorKey}`}
       data-install-state={installModel?.activationState ?? "unknown"}
       data-row-unavailable={isUnavailable}
       data-tier={entry.publicTier}
     >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <ConnectorMark connectorId={entry.connectorKey} icon={entry.icon} name={entry.displayName} />
+          {maturity ? <span className="pdpp-caption text-muted-foreground">{maturity}</span> : null}
           <h3 className="pdpp-title text-foreground">{entry.displayName}</h3>
-          {/* Current support / blocked fact, kept distinct from the next action. */}
-          {status.label ? (
-            <span
-              aria-label={`${status.label}: ${status.description}`}
-              className={`pdpp-eyebrow rounded border px-1.5 py-0.5 ${status.tone}`}
-              data-testid="source-support-fact"
-              title={status.description}
-            >
-              {status.label}
-            </span>
+          </div>
+          {existingSources.length > 0 ? (
+            <p className="mt-1"><ExistingSourceIdentity connectorKey={entry.connectorKey} sources={existingSources} /></p>
           ) : null}
         </div>
-        <p className="pdpp-caption mt-1 text-muted-foreground">{sourceMethodLine(entry, existingSources.length)}</p>
-        <SourceSetupContext entry={entry} />
-        <ExistingSourceLinks connectorKey={entry.connectorKey} icon={entry.icon} sources={existingSources} />
-        <SourceSetupDetails entry={entry} />
-      </div>
-      <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
-        <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {readinessNote ? (
-          <span className="pdpp-caption mb-2 block text-muted-foreground" data-testid="connector-readiness-note">
-            {readinessNote}
-          </span>
-        ) : null}
-        {noSetupPath ? (
-          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
-            Not installable: no setup path is available here.
-          </span>
-        ) : packageAvailabilityUnknown ? (
-          <span className="pdpp-caption text-status-warning-fg" data-testid="connector-install-catalog-transient">
-            {installCatalogRecoveryState === "scheduled"
-              ? "Package availability is unknown while the catalog is busy; this page will retry once shortly."
-              : installCatalogRecoveryState === "refreshing"
-                ? "Checking package availability now."
-                : "Package availability is unknown while the catalog is busy; use Retry to check again."}
-          </span>
-        ) : installModel ? (
-          <>
-            <ConnectorInstallRow compact model={installModel} />
-            {installCatalogTransientlyUnavailable ? (
-              <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-catalog-transient">
-                {installCatalogRecoveryState === "scheduled"
-                  ? "This page will check the package catalog for updates shortly."
-                  : installCatalogRecoveryState === "refreshing"
-                    ? "Checking the package catalog for updates now."
-                    : "The package catalog is still busy; use Retry to check for updates."}
-              </span>
-            ) : null}
-          </>
-        ) : (
-          <span className="pdpp-caption text-muted-foreground">Package status unavailable</span>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3 sm:border-t-0 sm:justify-end sm:pt-0">
-        {packageNeedsInstall && installModel?.action ? (
-          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
-            Install package first
-          </span>
-        ) : registrationPending ? (
-          <span className="pdpp-caption text-muted-foreground" data-testid="connector-registration-pending">
-            Registration pending. Account setup appears once the server registers this connector.
-          </span>
-        ) : action ? (
-          <>
-            <Link className={buttonVariants({ size: "sm", variant: "default" })} href={action.href}>
-              {action.label}
+        <div className="flex shrink-0 flex-wrap items-center gap-2" data-testid="source-setup-install">
+          {primaryPackageAction && installModel ? (
+            <ConnectorInstallRow model={installModel} presentation="primary-action" />
+          ) : primarySetupAction && action ? (
+            <Link className={buttonVariants({ size: "sm", variant: "ghost", className: "min-h-11 sm:min-h-[30px]" })} href={action.href}>
+              {setupActionLabel}
             </Link>
-            {secondaryAction ? (
-              <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={secondaryAction.href}>
-                {secondaryAction.label}
-              </Link>
-            ) : null}
-          </>
-        ) : null}
+          ) : null}
+        </div>
       </div>
+      <details className="group">
+        <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
+          Details
+        </summary>
+        <div className="mt-2 grid gap-2">
+          {methodLine ? <p className="pdpp-caption text-muted-foreground">{methodLine.replaceAll("connector", "data source")}</p> : null}
+          {existingSources.length ? <ExistingSourceDetails connectorKey={entry.connectorKey} sources={existingSources} /> : null}
+          {isUnavailable ? <p className="pdpp-caption text-muted-foreground">{unavailableReason(entry, installLifecycle)}</p> : null}
+          {status.label ? (
+            <p className="pdpp-caption text-muted-foreground" data-testid="source-support-fact">
+              {status.label}: {status.description}
+            </p>
+          ) : null}
+          {readinessNote ? (
+            <p className="pdpp-caption text-muted-foreground" data-testid="connector-readiness-note">
+              {readinessNote.replaceAll("connector", "data source")}
+            </p>
+          ) : null}
+          {noSetupPath ? (
+            <p className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
+              Not installable: no setup path is available here.
+            </p>
+          ) : null}
+          {packageNeedsInstall ? <p className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">Install package first</p> : null}
+          {installModel?.installedDigest ? (
+            <p className="pdpp-caption text-muted-foreground">
+              Installed digest <code className="font-mono text-foreground" title={installModel.installedDigestFull ?? undefined}>{installModel.installedDigest}</code>
+              {installModel.targetVersion ? ` · Target v${installModel.targetVersion}` : ""}
+            </p>
+          ) : null}
+          {installModel?.hostBlockReason ? <p className="pdpp-caption text-attention">Host blocked: {installModel.hostBlockReason}</p> : null}
+          {registrationPending ? <p className="pdpp-caption text-muted-foreground">Setup appears once the server is ready.</p> : null}
+          {action && !primarySetupAction ? (
+            <Link className="pdpp-caption text-foreground underline underline-offset-2" href={action.href}>{setupActionLabel}</Link>
+          ) : null}
+          {!packageAvailabilityUnknown && installModel ? (
+            <ConnectorInstallRow
+              model={installModel}
+              presentation={primaryPackageAction ? "uninstall-only" : "details-actions"}
+            />
+          ) : null}
+          <SourceSetupContext entry={entry} />
+          <SourceSetupDetails entry={entry} />
+        </div>
+      </details>
     </li>
   );
 }
@@ -573,13 +666,11 @@ function SourceSetupCard({
 function SourceSetupCardList({
   entries,
   existingSourcesByConnector,
-  installCatalogRecoveryState,
   installCatalogTransientlyUnavailable,
   installLifecycleByConnector,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
-  installCatalogRecoveryState: ConnectorCatalogRecoveryState;
   installCatalogTransientlyUnavailable: boolean;
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
@@ -589,7 +680,6 @@ function SourceSetupCardList({
         <SourceSetupCard
           entry={entry}
           existingSources={existingSourcesByConnector?.[entry.connectorKey] ?? []}
-          installCatalogRecoveryState={installCatalogRecoveryState}
           installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
           installLifecycle={installLifecycleFor(entry, installLifecycleByConnector)}
           key={entry.connectorKey}
@@ -599,17 +689,121 @@ function SourceSetupCardList({
   );
 }
 
-export function SourceSetupCatalog({
-  action,
+interface SourceSetupGroupsProps {
+  catalog: readonly ConnectorCatalogEntry[];
+  existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installCatalogTransientlyUnavailable: boolean;
+  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
+  updatesReady?: Promise<UpdatesReadyModel | null>;
+  query: string;
+  maturities: ReadonlySet<SourceSetupMaturity>;
+}
+
+function SourceSetupGroupsContent({
   catalog,
   existingSourcesByConnector,
+  installCatalogTransientlyUnavailable,
+  installLifecycleByConnector,
+  updatesReady,
+  query,
+  maturities,
+  checkingSources = false,
+}: SourceSetupGroupsProps & { checkingSources?: boolean }) {
+  const entries = filterSourceCatalog(catalog, query, maturities);
+  const installedEntries: ConnectorCatalogEntry[] = [];
+  const availableEntries: ConnectorCatalogEntry[] = [];
+  const unavailableEntries: ConnectorCatalogEntry[] = [];
+
+  for (const entry of entries) {
+    const lifecycle = installLifecycleFor(entry, installLifecycleByConnector);
+    const installed = sourceIsInstalled(entry, lifecycle, existingSourcesByConnector);
+    if (installed) {
+      installedEntries.push(entry);
+      continue;
+    }
+    if (!installCatalogTransientlyUnavailable && isUninstallableCatalogEntry(entry, lifecycle)) continue;
+    const { unavailable } = sourceSetupCardModel(entry, lifecycle, installCatalogTransientlyUnavailable);
+    (unavailable ? unavailableEntries : availableEntries).push(entry);
+  }
+
+  const hasVisible = installedEntries.length > 0 || availableEntries.length > 0 || unavailableEntries.length > 0;
+  if (!hasVisible) {
+    return (
+      <p className="pdpp-caption py-3 text-muted-foreground" data-testid="source-catalog-empty">
+        {query ? `No data sources match “${query}”.` : "No data sources are available to add here."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="grid gap-5">
+      <section aria-label="Installed" data-testid="installed-sources">
+        <h2 className="pdpp-eyebrow mb-1 text-muted-foreground">Installed</h2>
+        {updatesReady ? (
+          <Suspense fallback={null}>
+            <UpdatesReadySlot interactive updates={updatesReady} />
+          </Suspense>
+        ) : null}
+        {installedEntries.length ? (
+          <SourceSetupCardList
+            entries={installedEntries}
+            existingSourcesByConnector={existingSourcesByConnector}
+            installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+            installLifecycleByConnector={installLifecycleByConnector}
+          />
+        ) : <p className="pdpp-caption py-2 text-muted-foreground">{checkingSources ? "Checking data sources…" : "No installed data sources."}</p>}
+      </section>
+      <section aria-label="Available" data-testid="available-sources">
+        <h2 className="pdpp-eyebrow mb-1 text-muted-foreground">Available</h2>
+        {availableEntries.length ? (
+          <SourceSetupCardList
+            entries={availableEntries}
+            existingSourcesByConnector={existingSourcesByConnector}
+            installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+            installLifecycleByConnector={installLifecycleByConnector}
+          />
+        ) : <p className="pdpp-caption py-2 text-muted-foreground">No available data sources.</p>}
+      </section>
+      {unavailableEntries.length > 0 ? (
+        <details className="group" data-testid="unavailable-connectors-disclosure">
+          <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
+            Can't be added here ({unavailableEntries.length})
+          </summary>
+          <div className="mt-2">
+            <SourceSetupCardList
+              entries={unavailableEntries}
+              existingSourcesByConnector={existingSourcesByConnector}
+              installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+              installLifecycleByConnector={installLifecycleByConnector}
+            />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function ResolvedSourceSetupGroups({ read, ...props }: SourceSetupGroupsProps & { read: Promise<SourceSummaryReadResult> }) {
+  const result = use(read);
+  return (
+    <SourceSetupGroupsContent
+      {...props}
+      existingSourcesByConnector={result.ok ? result.value.byConnector : props.existingSourcesByConnector}
+    />
+  );
+}
+
+export function SourceSetupCatalog({
+  catalog,
+  existingSourcesByConnector,
+  existingSourcesRead,
   installCatalogBusySnapshotId = null,
   installCatalogTransientlyUnavailable = false,
   installLifecycleByConnector = null,
   installSkippedEntries = 0,
+  updatesReady,
   query,
 }: {
-  action: string;
   catalog: readonly ConnectorCatalogEntry[];
   /**
    * Built from `listConnectionsByConnector` (one exact `GET
@@ -619,14 +813,26 @@ export function SourceSetupCatalog({
    * connector's existing-sources list is exact by construction.
    */
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  existingSourcesRead?: Promise<SourceSummaryReadResult>;
   installCatalogBusySnapshotId?: string | null;
   installCatalogTransientlyUnavailable?: boolean;
   /** Null means the install route is not available on this server. */
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   /** Package offers the console could not read; they are missing from the list. */
   installSkippedEntries?: number;
+  updatesReady?: Promise<UpdatesReadyModel | null>;
   query: string;
 }) {
+  const [searchText, setSearchText] = useState(query);
+  const [maturities, setMaturities] = useState<ReadonlySet<SourceSetupMaturity>>(DEFAULT_SOURCE_MATURITIES);
+  useEffect(() => setSearchText(query), [query]);
+  const updateSearch = (value: string) => {
+    setSearchText(value);
+    const url = new URL(window.location.href);
+    if (value) url.searchParams.set("source_q", value);
+    else url.searchParams.delete("source_q");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
   const developerMode = useSyncExternalStore(
     subscribeToDeveloperMode,
     getDeveloperModeSnapshot,
@@ -636,53 +842,18 @@ export function SourceSetupCatalog({
     installCatalogTransientlyUnavailable,
     installCatalogBusySnapshotId
   );
-  // Developer mode (Settings) is the single control for development-tier
-  // visibility; this surface never grows a second toggle for the same
-  // concept. When it's off, the hidden count stays discoverable via the
-  // quiet line below instead of a silently shrinking list.
-  // A connector with no package, no installed package, and no registration
-  // has nothing the owner can install or set up here, so it is not listed.
-  // While the package catalog is busy every lifecycle reads as "no package",
-  // so nothing is hidden until the catalog answers.
-  const installableCatalog = installCatalogTransientlyUnavailable
-    ? catalog
-    : catalog.filter(
-        (entry) => !isUninstallableCatalogEntry(entry, installLifecycleFor(entry, installLifecycleByConnector))
-      );
-  const visibleCatalog = filterCatalogForDevelopmentVisibility(installableCatalog, developerMode);
-  const hiddenDevelopmentCount = installableCatalog.length - visibleCatalog.length;
-  const filtered = filterSourceCatalog(visibleCatalog, query);
-  // Every visible connector is one row. Tier, lifecycle exceptions, and
-  // package activation are row properties, so Preview and In development do
-  // not create nested containers or disappear from the scan path.
-  // Keep installable packages visible even before their account setup exists.
-  const scannableEntries: ConnectorCatalogEntry[] = [];
-  const unavailableEntries: ConnectorCatalogEntry[] = [];
-  for (const entry of filtered) {
-    const { unavailable } = sourceSetupCardModel(
-      entry,
-      installLifecycleFor(entry, installLifecycleByConnector),
-      installCatalogTransientlyUnavailable
-    );
-    (unavailable ? unavailableEntries : scannableEntries).push(entry);
-  }
-  const anyMatch = filtered.length > 0;
+  // The maturity filter controls which tier is shown here. Developer mode
+  // continues to gate local-source controls; selecting In development is
+  // enough to reveal development entries in this catalog.
+  const includeDevelopment = developerMode || maturities.has("development");
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, includeDevelopment);
   return (
-    <Section
-      description="Choose a connector to add data. Supported is the default; exception labels explain preview, in-development, and setup limits."
-      title="Add data"
-    >
-      {hiddenDevelopmentCount > 0 ? (
-        <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="development-hidden-notice">
-          {hiddenDevelopmentCount} {hiddenDevelopmentCount === 1 ? "connector is" : "connectors are"} hidden by{" "}
-          <Link className="underline underline-offset-4 hover:text-foreground" href="/settings">
-            Developer mode
-          </Link>
-          .
-        </p>
+    <Section>
+      {existingSourcesRead ? (
+        <Suspense fallback={null}><SourceSummaryNotice read={existingSourcesRead} /></Suspense>
       ) : null}
       {installSkippedEntries > 0 ? (
-        <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="install-skipped-notice">
+        <p className="pdpp-caption mb-3 text-muted-foreground" data-testid="install-skipped-notice">
           {installSkippedEntries} package {installSkippedEntries === 1 ? "offer" : "offers"} could not be read and{" "}
           {installSkippedEntries === 1 ? "is" : "are"} not listed. Check the service logs.
         </p>
@@ -692,55 +863,46 @@ export function SourceSetupCatalog({
         recoveryState={connectorCatalogRecovery.recoveryState}
         refreshManually={connectorCatalogRecovery.refreshManually}
       />
-      <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="mb-4 flex min-w-0 flex-wrap items-center gap-2">
         <label className="sr-only" htmlFor="source_q">
           Search data sources
         </label>
-        <IcInput defaultValue={query} id="source_q" name="source_q" placeholder="Search source name or connector key" />
-        <IcButton size="sm" type="submit" variant="ghost">
-          Search
-        </IcButton>
-      </form>
-      {anyMatch ? (
-        <div className="grid gap-3">
-          <div className="hidden grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] gap-4 px-4 sm:grid">
-            <span className="pdpp-eyebrow text-muted-foreground">Connector</span>
-            <span className="pdpp-eyebrow text-muted-foreground">Package state</span>
-            <span className="pdpp-eyebrow text-muted-foreground">Action</span>
-          </div>
-          <SourceSetupCardList
-            entries={scannableEntries}
-            existingSourcesByConnector={existingSourcesByConnector}
-            installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
+        <IcInput autoComplete="off" className="min-w-0 flex-1" id="source_q" name="source_q" onChange={(event) => updateSearch(event.currentTarget.value)} placeholder="Search data sources" type="search" value={searchText} />
+        <SortMenu />
+        <MaturityFilter onChange={setMaturities} value={maturities} />
+      </div>
+      {existingSourcesRead ? (
+        <Suspense fallback={
+          <SourceSetupGroupsContent
+            catalog={visibleCatalog}
             installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
             installLifecycleByConnector={installLifecycleByConnector}
+            query={searchText}
+            maturities={maturities}
+            checkingSources
+            updatesReady={updatesReady}
           />
-          {unavailableEntries.length > 0 ? (
-            <details className="group" data-testid="unavailable-connectors-disclosure">
-              <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-                {unavailableEntries.length}{" "}
-                {unavailableEntries.length === 1 ? "connector cannot" : "connectors cannot"} be added here
-              </summary>
-              <div className="mt-3">
-                <SourceSetupCardList
-                  entries={unavailableEntries}
-                  existingSourcesByConnector={existingSourcesByConnector}
-                  installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
-                  installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-                  installLifecycleByConnector={installLifecycleByConnector}
-                />
-              </div>
-            </details>
-          ) : null}
-        </div>
+        }>
+          <ResolvedSourceSetupGroups
+            catalog={visibleCatalog}
+            installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+            installLifecycleByConnector={installLifecycleByConnector}
+            query={searchText}
+            maturities={maturities}
+            read={existingSourcesRead}
+            updatesReady={updatesReady}
+          />
+        </Suspense>
       ) : (
-        <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
-          {query.trim() ? (
-            <>No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or connector key.</>
-          ) : (
-            "No connectors are available to add."
-          )}
-        </p>
+        <SourceSetupGroupsContent
+          catalog={visibleCatalog}
+          existingSourcesByConnector={existingSourcesByConnector}
+          installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+          installLifecycleByConnector={installLifecycleByConnector}
+          query={searchText}
+          maturities={maturities}
+          updatesReady={updatesReady}
+        />
       )}
     </Section>
   );

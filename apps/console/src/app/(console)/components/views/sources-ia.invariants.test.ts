@@ -30,13 +30,16 @@ const LIST_CONNECTOR_MANIFESTS_RE = /listConnectorManifests\(\)/;
 const LIST_OWNER_CONNECTOR_TEMPLATES_RE = /listOwnerConnectorTemplates\(\)/;
 const BUILD_CONNECTOR_CATALOG_RE = /buildOwnerConnectorCatalog\(manifests, templates, installSnapshot\?\.catalog \?\? \[\]\)/;
 const SOURCE_SETUP_CATALOG_RE = /<SourceSetupCatalog/;
-const SOURCE_SETUP_SECTION_RE = /title="Add data"/;
-const SOURCE_SEARCH_RE = /name="source_q"[\s\S]*?Search source name or connector key/;
+// Add-page decision 1: the page title lives on PageHeader; the catalog has no duplicate heading.
+const ADD_SOURCE_TITLE_RE = /title="Add a data source"/;
+const REMOVED_CATALOG_TITLE_RE = /title="Add data"/;
+// Add-page decision 3: search filters as the person types with no submit button.
+const SOURCE_SEARCH_RE = /name="source_q"[\s\S]*?placeholder="Search data sources"/;
 const SOURCE_CARD_RE = /data-testid=\{`source-setup-\$\{entry\.connectorKey\}`\}/;
 const SOURCE_ACQUISITION_PATHS_RE = /data-testid="source-acquisition-paths"/;
 const SOURCE_ACQUISITION_PATH_RE = /data-testid="source-acquisition-path"/;
 const OTHER_COVERAGE_PATHS_RE = /Other ways to add data/;
-const IMPORT_OPTIONS_DISCLOSURE_RE = /Show import options/;
+const SOURCE_IMPORT_DETAILS_RE = /function SourceSetupDetails[\s\S]*<SourceAcquisitionPaths paths=\{entry\.acquisitionPaths\} \/>/;
 const GENERIC_WHY_THIS_RE = /Why this, and what to expect/;
 const SOURCE_PROVIDER_SPECIFIC_COPY_RE = /\b(Amazon|Gmail|GitHub|Slack|ChatGPT|Chase|Notion|Spotify)\b|app password|personal access token/i;
 const FORBIDDEN_DEV_STRINGS_RE = /pnpm --dir|packages\/[a-z]|PDPP monorepo checkout|env var per account|pdpp owner-agent connectors|connector_instance_id|source_instance_id|device_token/;
@@ -45,7 +48,8 @@ const NAV_APPS_RE = /\{\s*label: "Apps",\s*href: "\/grants"/;
 const NAV_CONNECT_APP_CHILD_RE = /\{ label: "Connect an app", href: "\/connect" \}/;
 const CONNECT_PAGE_TITLE_RE = /title="Connect an app"/;
 // The heading subtitle left (it used banned words); the "Need more data first?" note now points setup to Sources.
-const CONNECT_PAGE_SETUP_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}[\s\S]*?title="Need more data first\?"/;
+// DIRECTION.md Home: setup remains reachable from the app-read page's Add a data source link.
+const CONNECT_PAGE_SETUP_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}>Add a data source/;
 
 async function sourceFile(name: string): Promise<string> {
   return readFile(`${SOURCES}${name}`, "utf8");
@@ -162,13 +166,16 @@ test("the source setup catalog remains on the Add page", async () => {
   assert.match(page, LIST_OWNER_CONNECTOR_TEMPLATES_RE);
   assert.match(page, BUILD_CONNECTOR_CATALOG_RE);
   assert.match(page, SOURCE_SETUP_CATALOG_RE);
-  assert.match(catalog, SOURCE_SETUP_SECTION_RE);
+  assert.match(page, ADD_SOURCE_TITLE_RE);
+  assert.doesNotMatch(catalog, REMOVED_CATALOG_TITLE_RE);
   assert.match(catalog, SOURCE_SEARCH_RE);
   assert.match(catalog, SOURCE_CARD_RE);
   assert.match(catalog, SOURCE_ACQUISITION_PATHS_RE);
   assert.match(catalog, SOURCE_ACQUISITION_PATH_RE);
   assert.match(catalog, OTHER_COVERAGE_PATHS_RE);
-  assert.match(catalog, IMPORT_OPTIONS_DISCLOSURE_RE);
+  // Add-page repair decision 2: import guidance is part of the single row Details fold.
+  assert.match(catalog, SOURCE_IMPORT_DETAILS_RE);
+  assert.doesNotMatch(catalog, /Show import options/);
   assert.doesNotMatch(catalog, GENERIC_WHY_THIS_RE);
 });
 
@@ -250,5 +257,5 @@ test("Connect apps stays a read-access page that points setup to Sources", async
   assert.match(connect, CONNECT_PAGE_TITLE_RE);
   assert.match(connect, CONNECT_PAGE_SETUP_POINTER_RE);
   assert.doesNotMatch(connect, LIST_CONNECTOR_MANIFESTS_RE);
-  assert.doesNotMatch(connect, SOURCE_SETUP_SECTION_RE);
+  assert.doesNotMatch(connect, ADD_SOURCE_TITLE_RE);
 });

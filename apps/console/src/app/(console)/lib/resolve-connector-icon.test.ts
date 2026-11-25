@@ -147,7 +147,8 @@ test("product connector mark API reserves geometry and exposes only text spacing
   const markup = renderToStaticMarkup(
     createElement(ConnectorMark, { connectorId: "claude-code", name: "Account", spacing: "after" })
   );
-  assert.ok(markup.includes('class="pdpp-connector-icon mr-2"'));
+  // Brief decision 5: a single-colour untiled mark adds its mask fill class and keeps shared spacing.
+  assert.match(markup, /class="pdpp-connector-icon(?: [^"]+)* mr-2"/);
 });
 
 test("no two bundled connectors answer to the same identity with different marks", () => {

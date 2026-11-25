@@ -44,7 +44,7 @@ const UNAVAILABLE_PROP = /unavailable\?: boolean/;
 const UNAVAILABLE_TEST_ID = /source-unavailable-fact/;
 const REDUNDANT_NEXT_COPY = /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/;
 const GENERIC_SUPPORT_DETAIL_COPY = /Why this, and what to expect/;
-const IMPORT_OPTIONS_DISCLOSURE = /Show import options/;
+const IMPORT_DETAILS_IN_SOURCE_ROW = /function SourceSetupDetails[\s\S]*<SourceAcquisitionPaths paths=\{entry\.acquisitionPaths\} \/>/;
 const EXISTING_SOURCE_REUSE = /data-testid="existing-source-reuse"/;
 const EXISTING_SOURCE_LINKS = /data-testid="existing-source-links"/;
 const SOURCE_RECORDS_HELPER = /function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
@@ -56,8 +56,9 @@ const SOURCE_DETAIL_HELPER = /function sourceDetailHref[\s\S]*new URLSearchParam
 const STATUS_SOURCE_RECORDS_HELPER = /export function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
 const STATUS_SOURCE_DETAIL_HELPER = /export function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
 const CATALOG_EXPLORE_LINK = /href=\{sourceRecordsHref\(source\.connectionId\)\}[\s\S]*Open in Explore/;
+// Add-page repair decision 2: the account name remains visible; its link has a clear Source details name.
 const CATALOG_SOURCE_DETAILS_LINK =
-  /href=\{sourceDetailHref\(connectorKey, source\.connectionId\)\}[\s\S]*Source details/;
+  /function ExistingSourceIdentity[\s\S]*aria-label=\{`Source details for \$\{source\.displayName\}`\}[\s\S]*href=\{sourceDetailHref\(connectorKey, source\.connectionId\)\}/;
 // RAISE-RULES.md 2 / setup-pages brief 4: the filled action after success is "Open <Source>".
 const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open \{displayName\}/;
 // RAISE-RULES.md 4: "source" alone becomes "data source".
@@ -120,8 +121,9 @@ test("source card keeps the support fact distinct from the recommended next acti
   assert.doesNotMatch(src, REDUNDANT_NEXT_COPY);
   // The old generic disclosure repeated on every row and made the picker noisy.
   assert.doesNotMatch(src, GENERIC_SUPPORT_DETAIL_COPY);
-  // Import-specific detail is still available, but behind explicit import intent.
-  assert.match(src, IMPORT_OPTIONS_DISCLOSURE);
+  // Add-page repair decision 2: import guidance lives inside the row's one Details disclosure.
+  assert.match(src, IMPORT_DETAILS_IN_SOURCE_ROW);
+  assert.doesNotMatch(src, /Show import options/);
   // The existing-vs-new source choice belongs on the import page, not in the picker.
   assert.doesNotMatch(src, EXISTING_SOURCE_REUSE);
 });

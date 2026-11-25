@@ -16,11 +16,13 @@ const REFRESH_RE = /router\.refresh\(\)/;
 const ACTION_RE = /installConnectorAction|updateConnectorAction/;
 const SINGLE_LIFECYCLE_STATUS_RE = /data-testid="connector-package-status"/;
 const NO_DUPLICATE_TIER_RE = /data-testid="connector-tier"/;
-const DIGEST_DISCLOSURE_RE = /Package details/;
+// PAGE-RULES 4: technical package identity is inside the folded Details group.
+const DIGEST_DISCLOSURE_RE = /Details/;
 const UNINSTALL_RE = /uninstallConnectorAction/;
-const UNINSTALL_CONFIRM_RE = /window\.confirm/;
+const UNINSTALL_CONFIRM_RE = /window\.confirm\("Uninstall this package\? This is allowed only when no data sources use it\."\)/;
 const UNINSTALL_REFUSAL_RE = /if \(!result\.ok\) \{\s+setMessage\(\{ message: result\.message, tone: "error" \}\)/;
 
+// RAISE-RULES 5: destructive actions ask for confirmation without exposing an internal package ID.
 test("connector install row keeps mutation feedback inline and non-optimistic", async () => {
   const source = await readFile(ROW_FILE, "utf8");
   assert.match(source, CLIENT_DIRECTIVE_RE);
@@ -34,6 +36,7 @@ test("connector install row keeps mutation feedback inline and non-optimistic", 
   assert.match(source, DIGEST_DISCLOSURE_RE);
   assert.match(source, UNINSTALL_RE);
   assert.match(source, UNINSTALL_CONFIRM_RE);
+  assert.doesNotMatch(source, /window\.confirm\([^)]*\$\{(?:connectorId|connectorKey)\}/);
   assert.match(source, UNINSTALL_REFUSAL_RE);
   assert.doesNotMatch(source, NO_DUPLICATE_TIER_RE);
 });

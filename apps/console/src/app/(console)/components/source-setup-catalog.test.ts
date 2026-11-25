@@ -8,6 +8,8 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
+import type { ExistingSourceSetupLink } from "./source-setup-catalog.tsx";
+import { buildAddSourceDemoCatalog } from "../sources/add/add-source-demo-data.ts";
 import {
   parseConnectorInstallCatalogResponse,
   parseConnectorInstallStatusResponse,
@@ -58,13 +60,14 @@ async function render(
   entry: ConnectorCatalogEntry = reddit,
   lifecycle?: ConnectorInstallLifecycle,
   installSkippedEntries = 0,
+  existingSourcesByConnector: Readonly<Record<string, readonly ExistingSourceSetupLink[]>> = {},
   query = ""
 ): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
     createElement(SourceSetupCatalog, {
-      action: "/sources/add",
       catalog: [entry],
+      existingSourcesByConnector,
       installCatalogTransientlyUnavailable,
       installSkippedEntries,
       // The page builds this from the empty catalog a busy snapshot returns.
@@ -74,16 +77,174 @@ async function render(
   );
 }
 
+function copyOutsideDetails(html: string): string {
+  const detailsTags = /<details\b[^>]*>|<\/details>/gi;
+  const stack: Array<{ bodyStart: number; summary: string }> = [];
+  const hiddenRanges: Array<[number, number]> = [];
+  for (const match of html.matchAll(detailsTags)) {
+    if (match[0].startsWith("</")) {
+      const details = stack.pop();
+      if (details?.summary === "details") hiddenRanges.push([details.bodyStart, match.index ?? 0]);
+      continue;
+    }
+    const summaryEnd = html.indexOf("</summary>", (match.index ?? 0) + match[0].length);
+    if (summaryEnd < 0) continue;
+    const summaryStart = html.indexOf(">", (match.index ?? 0) + match[0].length - 1) + 1;
+    const summary = html
+      .slice(summaryStart, summaryEnd)
+      .replace(/<[^>]*>/g, " ")
+      .trim()
+      .toLowerCase();
+    stack.push({ bodyStart: summaryEnd + "</summary>".length, summary });
+  }
+
+  const mergedRanges: Array<[number, number]> = [];
+  for (const [start, end] of hiddenRanges.sort(([left], [right]) => left - right)) {
+    const previous = mergedRanges.at(-1);
+    if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+    else mergedRanges.push([start, end]);
+  }
+  let visibleHtml = html;
+  for (const [start, end] of mergedRanges.reverse()) {
+    visibleHtml = `${visibleHtml.slice(0, start)}${visibleHtml.slice(end)}`;
+  }
+  const accessibleLabels = [...visibleHtml.matchAll(/\b(?:aria-label|alt|title|placeholder)="([^"]*)"/g)]
+    .map((match) => match[1])
+    .join(" ");
+  const visibleText = visibleHtml
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(?:amp|lt|gt|quot|#x27|#39);/g, " ");
+  return `${visibleText} ${accessibleLabels}`;
+}
+
+function assertNoBannedPageWords(html: string, sample: string): void {
+  const copy = copyOutsideDetails(html);
+  const bannedWords = /\b(?:grant|client|bearer|scope|token|run|stream|connector|manifest|projection|cursor|trace|verdict|coverage|fleet|subscription|exporter|OAuth|PKCE|DCR|JWKS|instance)\b|provider app|reference server|\b\d{4}-\d{2}-\d{2}\b|\braw JSON\b/i;
+  assert.doesNotMatch(copy, bannedWords, sample);
+}
+
+async function renderEntries(
+  catalog: ConnectorCatalogEntry[],
+  options: {
+    existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+    installCatalogTransientlyUnavailable?: boolean;
+    installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>>;
+    installSkippedEntries?: number;
+  } = {}
+): Promise<string> {
+  const { SourceSetupCatalog } = await catalogModule;
+  return renderToStaticMarkup(
+    createElement(SourceSetupCatalog, {
+      catalog,
+      existingSourcesByConnector: options.existingSourcesByConnector ?? {},
+      installCatalogTransientlyUnavailable: options.installCatalogTransientlyUnavailable ?? false,
+      installSkippedEntries: options.installSkippedEntries ?? 0,
+      installLifecycleByConnector: options.installLifecycleByConnector ?? {},
+      query: "",
+    })
+  );
+}
+
 test("a busy package catalog does not hide an unregistered connector", async () => {
   assert.match(await render(true), />Reddit</);
+});
+
+// Brief decisions 3 and 4: typing filters existing catalog data and maturity filters keep tiers separate.
+test("catalog maturity filtering separates ready, testing, and development entries", async () => {
+  const { filterSourceCatalog } = await catalogModule;
+  const entries = [
+    reddit,
+    { ...reddit, connectorKey: "preview", displayName: "Preview source", publicTier: "preview" as const },
+    { ...reddit, connectorKey: "development", displayName: "Development source", publicTier: "development" as const },
+  ];
+  const { DEFAULT_SOURCE_MATURITIES } = await catalogModule;
+  assert.deepEqual(filterSourceCatalog(entries, "", new Set(["ready"])).map((entry) => entry.connectorKey), ["reddit"]);
+  assert.deepEqual(filterSourceCatalog(entries, "", new Set(["testing"])).map((entry) => entry.connectorKey), ["preview"]);
+  assert.deepEqual(filterSourceCatalog(entries, "development", new Set(["development"])).map((entry) => entry.connectorKey), ["development"]);
+  // Brief decision 4: with no filter chosen, testing rows show beside ready rows; development rows stay hidden.
+  assert.deepEqual(filterSourceCatalog(entries, "", DEFAULT_SOURCE_MATURITIES).map((entry) => entry.connectorKey), ["preview", "reddit"]);
+});
+
+// Add-page repair decision 1: an existing data source is installed even without a package lifecycle record.
+test("an existing data source counts as installed when no package is installed", async () => {
+  const { sourceIsInstalled } = await catalogModule;
+  const amazon = buildAddSourceDemoCatalog().catalog.find((entry) => entry.connectorKey === "amazon");
+  assert.ok(amazon);
+  assert.equal(sourceIsInstalled(amazon, null, buildAddSourceDemoCatalog().existingSourcesByConnector), true);
+  assert.equal(sourceIsInstalled(reddit, null, {}), false);
+});
+
+// Brief decision 4: an in-testing data source the person already uses shows under Installed without touching Filter.
+test("an in-testing source with an existing data source shows in the default view", async () => {
+  const preview = { ...reddit, displayName: "Preview source", publicTier: "preview" as const };
+  const html = await render(false, preview, undefined, 0, {
+    reddit: [{ connectionId: "c1", displayName: "Main account", latestImportFile: null, latestImportStatus: null, status: null, totalRecords: 3 }],
+  });
+  const installed = html.slice(html.indexOf('data-testid="installed-sources"'), html.indexOf('data-testid="available-sources"'));
+  assert.match(installed, />Preview source</);
+  assert.match(installed, />In testing</);
 });
 
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
   const empty = await render(false);
   assert.doesNotMatch(empty, />Reddit</);
-  assert.match(empty, /No connectors are available to add\./);
-  assert.doesNotMatch(empty, /No connector matched/);
-  assert.match(await render(false, reddit, undefined, 0, "calendar"), /No connector matched .*calendar.*Try the source name or connector key/);
+  assert.match(empty, /No data sources are available to add here\./);
+  assert.doesNotMatch(empty, /No data sources match/);
+  assert.match(await render(false, reddit, undefined, 0, {}, "calendar"), /No data sources match “calendar”\./);
+});
+
+// Brief decision 3: Enter cannot submit or reload because search is not inside a form.
+test("catalog search renders without a form submission path", async () => {
+  const html = await render(false);
+  assert.match(html, /<input\b[^>]*type="search"/);
+  assert.doesNotMatch(html, /<form(?:\s|>)/);
+});
+
+// RAISE-RULES 8: scan rendered sample states for banned customer-facing words outside folded Details.
+test("sample catalog states keep banned technical words out of rendered copy", async () => {
+  const demo = buildAddSourceDemoCatalog();
+  const unavailableHost = {
+    ...setupCapable,
+    readiness: verdict("host_requirement_unmet", "configure"),
+  };
+  const installCatalog = browserPackage.catalog;
+  assert.ok(installCatalog);
+  const blockedLifecycle: ConnectorInstallLifecycle = {
+    ...browserPackage,
+    catalog: {
+      ...installCatalog,
+      bindings: { browser: { available: false, reason: "Browser unavailable here." } },
+    },
+  };
+  const samples = [
+    ["default demo catalog", await renderEntries(demo.catalog, { existingSourcesByConnector: demo.existingSourcesByConnector })],
+    ["busy package catalog", await renderEntries([setupCapable], { installCatalogTransientlyUnavailable: true })],
+    ["host-restricted source", await renderEntries([unavailableHost])],
+    ["package host restriction", await renderEntries([setupCapable], { installLifecycleByConnector: { [setupCapable.connectorKey]: blockedLifecycle } })],
+    ["existing account", await render(true, reddit, undefined, 0, {
+      reddit: [{ connectionId: "connection-1", displayName: "Work account", latestImportFile: "export.zip", latestImportStatus: "Import complete", status: "Connected", totalRecords: 12 }],
+    })],
+  ] as const;
+  for (const [name, html] of samples) assertNoBannedPageWords(html, name);
+});
+
+// Add-page repair decisions 1 and 2: existing accounts count as installed and keep one quiet source row.
+test("an existing imported data source is one row with its details in one closed disclosure", async () => {
+  const demo = buildAddSourceDemoCatalog();
+  const amazon = demo.catalog.find((entry) => entry.connectorKey === "amazon");
+  assert.ok(amazon);
+  const html = await renderEntries([amazon], { existingSourcesByConnector: demo.existingSourcesByConnector });
+  assert.match(html, /section aria-label="Installed"[\s\S]*data-testid="source-setup-amazon"/);
+  assert.equal((html.match(/data-testid="source-setup-amazon"/g) ?? []).length, 1);
+  assert.match(html, /Amazon household archive/);
+  assert.match(html, /Import file/);
+  assert.doesNotMatch(html, /Existing accounts|can receive another export|Package status unavailable/);
+  const details = /<details class="group">([\s\S]*?)<\/details>/.exec(html)?.[0];
+  assert.ok(details, "the source row should have one Details disclosure");
+  assert.equal((html.match(/<details\b/g) ?? []).length, 1);
+  assert.match(details, /Latest activity: accepted/);
+  assert.match(details, /Import file: orders-2026-demo\.zip/);
+  assert.doesNotMatch(details, /<details[^>]*\sopen(?:\s|=|>)/);
 });
 
 const INSTALL_BUTTON = />Install<\/button>/;
@@ -94,10 +255,9 @@ const BROWSER_SETUP_LINK = /href="\/connect\/browser-session\//;
 const INSTALL_OR_BROWSER_SETUP = />Install<\/button>|href="\/connect\/browser-session\//;
 const NOT_INSTALLABLE = /Not installable: no setup path is available here\./;
 const INSTALL_DISABLED = /data-testid="connector-install-disabled"/;
-const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
-const CANNOT_ADD_HERE = /1 connector cannot be added here/;
+// Brief decision 6: count and label the folded unavailable group.
+const CANNOT_ADD_HERE = /Can(?:'|&#x27;)t be added here \(1\)/;
 const PLATFORM_COPY = /not available on this platform/;
-const UNKNOWN_PACKAGE = /data-testid="connector-install-catalog-transient"/;
 const INSTALL_FIRST = /Install package first/;
 const INSTALL_NEXT_STEP = /data-testid="connector-install-next-step"/;
 const SKIPPED_NOTICE = /data-testid="install-skipped-notice"/;
@@ -107,7 +267,7 @@ const unregisteredBrowser: ConnectorCatalogEntry = {
   ...reddit,
   connectorKey: "new-browser",
   disposition: "browser_bound_runbook",
-  displayName: "New browser connector",
+  displayName: "New browser source",
   ownerActionable: false,
   registrationStatus: "not_registered",
 };
@@ -151,18 +311,19 @@ const verdict = (
 const READINESS_NOTE = /data-testid="connector-readiness-note"/;
 const NOT_BUILT_YET = /Not built yet/;
 
-test("a published, uninstalled browser connector offers Install and is never 'Not built yet'", async () => {
-  // The defect this replaces: LinkedIn and Goodreads are published and
-  // installable, but a vendored roster made them read "Not built yet".
-  const html = await render(
-    false,
-    { ...unregisteredBrowser, readiness: verdict("not_installed", "install") },
-    browserPackage
-  );
-  assert.match(html, INSTALL_BUTTON);
-  assert.doesNotMatch(html, NOT_BUILT_YET);
-  assert.doesNotMatch(html, READINESS_NOTE);
-  assert.match(html, UNAVAILABLE_FALSE);
+test("published, uninstalled LinkedIn and Goodreads entries offer Install, not 'Not built yet'", async () => {
+  // Brief decision 6: an available package is installable even before its runtime registration exists.
+  for (const [connectorKey, displayName] of [["linkedin", "LinkedIn"], ["goodreads", "Goodreads"]] as const) {
+    const html = await render(
+      false,
+      { ...unregisteredBrowser, connectorKey, displayName, readiness: verdict("not_installed", "install") },
+      browserPackage
+    );
+    assert.match(html, INSTALL_BUTTON, connectorKey);
+    assert.doesNotMatch(html, NOT_BUILT_YET, connectorKey);
+    assert.doesNotMatch(html, READINESS_NOTE, connectorKey);
+    assert.match(html, UNAVAILABLE_FALSE, connectorKey);
+  }
 });
 
 // A browser connector's setup path comes from its package: before the reference
@@ -180,7 +341,9 @@ test("a manifest-only browser connector with a published package offers Install,
   const busy = await render(true, entry, browserPackage);
   assert.doesNotMatch(busy, INSTALL_BUTTON);
   assert.doesNotMatch(busy, NOT_INSTALLABLE);
-  assert.match(busy, UNKNOWN_PACKAGE);
+  // Add-page repair decision 2: unknown package state is silent in the row; retry guidance stays at page level.
+  assert.match(busy, /data-testid="connector-install-catalog-recovery"/);
+  assert.doesNotMatch(busy, /Package availability is unknown/);
 });
 
 test("installing is not offered when the verdict says installing cannot make the connector runnable", async () => {
@@ -214,7 +377,9 @@ test("a verdict that blocks setup shows its reason and offers no account setup",
     { catalog: { ...browserPackage.catalog, digest: installed.digest }, installed: { ...installed, connector_id: "new-browser" } }
   );
   assert.match(html, READINESS_NOTE);
-  assert.match(html, /This server is not set up to run this connector yet\./);
+  // DIRECTION.md, Values and words: use "data source" in customer copy.
+  // RAISE-RULES 4: unavailable copy uses plain availability wording.
+  assert.match(html, /This data source is not available on this server yet\./);
   assert.doesNotMatch(html, /No browser surface is configured/, "the server's diagnostic detail is not shown");
   assert.doesNotMatch(html, BROWSER_SETUP_LINK);
   assert.doesNotMatch(html, NOT_BUILT_YET);
@@ -290,7 +455,8 @@ test("a verified package that declares no collection shows the placeholder note 
     { catalog: { ...browserPackage.catalog, digest: installed.digest }, installed: { ...installed, connector_id: "new-browser" } }
   );
   assert.match(html, READINESS_NOTE);
-  assert.match(html, /placeholder and does not collect data yet/);
+  // Brief decision 6: show the readiness fact in plain words when the server says not_implemented.
+  assert.match(html, /This data source is a placeholder and does not collect data yet\./);
   assert.doesNotMatch(html, /Declared by the package/);
   assert.doesNotMatch(html, BROWSER_SETUP_LINK);
 });
@@ -304,7 +470,9 @@ test("an explicit host restriction is displayed without offering Install", async
       bindings: { browser: { available: false, reason: "Browser unavailable here." } },
     },
   });
-  assert.match(html, HOST_BLOCK);
+  // Brief decision 6: explain the actual host restriction in plain words.
+  // RAISE-RULES 4: unavailable copy does not use the banned word “run”.
+  assert.match(html, /This data source is not available here: Browser unavailable here\./);
   assert.doesNotMatch(html, INSTALL_BUTTON);
 });
 
@@ -323,7 +491,9 @@ test("a package without a latest digest does not gain an Install control", async
 
 test("a busy package catalog shows retry guidance without offering an unknown install", async () => {
   const html = await render(true, setupCapable, browserPackage);
-  assert.match(html, UNKNOWN_PACKAGE);
+  // Add-page repair decision 2: the shared retry notice replaces row-level unknown-status copy.
+  assert.match(html, /data-testid="connector-install-catalog-recovery"/);
+  assert.doesNotMatch(html, /Package availability is unknown/);
   assert.match(html, UNAVAILABLE_FALSE);
   assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
 });
@@ -400,13 +570,14 @@ test("an installed connector that the reference has not registered shows registr
     installed: { ...installed, connector_id: "new-browser" },
   };
   const pending = await render(false, setupCapable, lifecycle);
-  assert.match(pending, /Registration pending/);
+  // Brief decision 1: use plain setup status wording.
+  assert.match(pending, /Setup appears once the server is ready\./);
   assert.doesNotMatch(pending, BROWSER_SETUP_LINK, "the setup route answers 404 until the connector is registered");
   assert.doesNotMatch(pending, INSTALL_BUTTON);
   assert.match(pending, UNAVAILABLE_FALSE);
 
   const registered = await render(false, { ...setupCapable, registrationStatus: "registered" }, lifecycle);
-  assert.doesNotMatch(registered, /Registration pending/);
+  assert.doesNotMatch(registered, /Setup appears once the server is ready\./);
   assert.match(registered, NEW_BROWSER_SETUP);
 });
 

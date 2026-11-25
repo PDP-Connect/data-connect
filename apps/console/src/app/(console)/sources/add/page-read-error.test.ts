@@ -8,8 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
+const CATALOG_FILE = fileURLToPath(new URL("../../components/source-setup-catalog.tsx", import.meta.url));
 const HANDLES_DETERMINISTIC_REQUEST_RE = /if \(isDeterministicSourcesReadError\(err\)\)/;
-const RENDERS_SERVER_REASON_RE = /The reference server rejected the source catalog request: \{err\.message\}/;
+// RAISE-RULES 6: the failed sentence ends in one "Try again" link, not the words twice.
+const RENDERS_FIXED_FAILURE_RE = /Couldn't load data sources\. <Link className="underline underline-offset-2" href="\/sources\/add">Try again<\/Link>\./;
 const PRESERVES_FULL_HEADER_RE = /<AddSourceHeader \/>/;
 const TRANSIENT_INSTALL_CATALOG_STATE_RE =
   /installCatalogTransientlyUnavailable = installSnapshot\?\.catalogUnavailableReason === "transient_busy";/;
@@ -19,13 +21,15 @@ const PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE =
   /installCatalogTransientlyUnavailable=\{installCatalogTransientlyUnavailable\}/;
 const PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
   /installCatalogBusySnapshotId=\{installCatalogBusySnapshotId\}/;
-const TAKES_TRUNCATED_FROM_LOOKUP_RE = /truncated: existingSourcesTruncated \} =\s*await existingSourcesByConnectorCatalog/;
-const WARNS_WHEN_TRUNCATED_RE = /\{existingSourcesTruncated \? \(\s*<div[^>]*role="status"[\s\S]*?could not be loaded/;
+const STARTS_SUMMARY_READ_AFTER_CATALOG_RE = /const sourceRead = existingSourcesByConnectorCatalog\(catalog\.map/;
+const PASSES_SUMMARY_READ_TO_PAGE_RE = /existingSourcesRead=\{existingSourcesRead\}/;
 
-test("Add Source renders a deterministic reference request failure before it reaches Next's error boundary", async () => {
+test("Add Source renders a fixed deterministic read failure before it reaches Next's error boundary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, HANDLES_DETERMINISTIC_REQUEST_RE);
-  assert.match(src, RENDERS_SERVER_REASON_RE);
+  // PAGE-RULES 4 and 6: raw server error text stays out of the page; a failure uses one plain sentence.
+  assert.match(src, RENDERS_FIXED_FAILURE_RE);
+  assert.doesNotMatch(src, /err\.message/);
   assert.match(src, PRESERVES_FULL_HEADER_RE);
   assert.doesNotMatch(src, /instanceof RefRequestError/);
   assert.ok(
@@ -45,6 +49,13 @@ test("Add Source preserves transient connector catalog-busy state for package pr
 
 test("Add Source warns that existing sources are missing when the lookup was refused part way", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, TAKES_TRUNCATED_FROM_LOOKUP_RE);
-  assert.match(src, WARNS_WHEN_TRUNCATED_RE);
+  const catalog = await readFile(CATALOG_FILE, "utf8");
+  // Brief decision 8: the catalog draws before the existing-source summary resolves.
+  assert.match(src, STARTS_SUMMARY_READ_AFTER_CATALOG_RE);
+  assert.match(src, PASSES_SUMMARY_READ_TO_PAGE_RE);
+  // Brief decision 8: a rejected summary read resolves to a fixed visible failure instead of rejecting the page.
+  assert.match(src, /\(\): SourceSummaryReadResult => \(\{ ok: false \}\)/);
+  assert.match(catalog, /if \(!result\.ok\)[\s\S]*?Couldn't load data sources\. Try again\./);
+  assert.match(catalog, /result\.value\.truncated/);
+  assert.match(catalog, /Some data sources could not be loaded/);
 });

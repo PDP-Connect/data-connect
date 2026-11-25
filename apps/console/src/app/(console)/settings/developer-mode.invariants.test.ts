@@ -54,7 +54,8 @@ test("developer-only data sources share one settings gate", async () => {
     readFile(SHELL_FILE, "utf8"),
   ])
 
-  assert.match(catalog, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/)
+  // Add-page decision 4: the In development filter controls catalog visibility; Developer mode gates local actions.
+  assert.match(catalog, /filterCatalogForDevelopmentVisibility\(catalog, includeDevelopment\)/)
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
   // RAISE-RULES.md 4: visible copy uses plain words for development data sources.

@@ -20,16 +20,16 @@ test("source cards keep one flat surface with identity, package, and action colu
   assert.match(src, /data-install-state=\{installModel\?\.activationState \?\? "unknown"\}/);
   assert.match(src, /<ConnectorMark[\s\S]*icon=\{entry\.icon\}[\s\S]*name=\{entry\.displayName\}/);
   assert.doesNotMatch(src, /experimental-setup-summary|development-setup-summary|ExperimentalSetupSummary|DevelopmentSetupSummary/);
-  assert.match(src, /Package status unavailable/);
+  // Add-page repair decision 2: unknown package status is omitted from the source row.
+  assert.doesNotMatch(src, /Package status unavailable/);
   assert.doesNotMatch(src, /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/);
-  // Developer mode (Settings) is the single control for development-tier
-  // visibility. This surface must never grow its own second toggle for the
-  // same concept -- it only reports the hidden count with a link back to
-  // Settings.
+  // The maturity filter reveals development rows; Developer mode still gates local-source controls.
   assert.doesNotMatch(src, /show-development-connectors-control|Show in-development connectors/);
-  assert.match(src, /data-testid="development-hidden-notice"/, "hidden development connectors must stay discoverable");
-  assert.match(src, /hidden by/i);
-  assert.match(src, /href="\/settings"/);
+  // Add-page repair decision 3: the Filter menu itself is the only development discovery instruction.
+  assert.doesNotMatch(src, /development-hidden-notice|Choose the In development filter to view them/);
+  // Brief decision 4: development rows appear when that maturity filter is selected.
+  assert.match(src, /const includeDevelopment = developerMode \|\| maturities\.has\("development"\)/);
+  assert.match(src, /"In development"/);
 });
 
 test("source-setup-catalog renders external documentation links with new-tab forewarning", async () => {
@@ -51,13 +51,12 @@ test("source-setup-catalog renders external documentation links with new-tab for
 test("transient install catalog failures disable unknown package actions without hiding installed rows", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(src, /installCatalogTransientlyUnavailable = false/);
-  assert.match(src, /data-testid="connector-install-catalog-transient"/);
-  assert.match(src, /Package availability is unknown while the catalog is busy; this page will retry once shortly\./);
-  assert.match(src, /Package availability is unknown while the catalog is busy; use Retry to check again\./);
-  assert.match(src, /Checking package availability now\./);
-  assert.match(src, /This page will check the package catalog for updates shortly\./);
-  assert.match(src, /The package catalog is still busy; use Retry to check for updates\./);
-  assert.match(src, /Checking the package catalog for updates now\./);
+  // Add-page repair decision 2: when status is unknown, the row says nothing and the page keeps one retry notice.
+  assert.match(src, /!packageAvailabilityUnknown && installModel\?\.action/);
+  assert.match(src, /presentation="primary-action"/);
+  assert.match(src, /presentation=\{primaryPackageAction \? "uninstall-only" : "details-actions"\}/);
+  assert.doesNotMatch(src, /data-testid="connector-install-catalog-transient"/);
+  assert.match(src, /data-testid="connector-install-catalog-recovery"/);
 });
 
 test("transient install catalog notice retries once and keeps a manual retry action", async () => {
@@ -105,9 +104,30 @@ test("transient install catalog notice retries once and keeps a manual retry act
 
 test("uninstallable connectors are filtered out before the list is built", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
-  assert.match(
-    src,
-    /const installableCatalog = installCatalogTransientlyUnavailable\s*\?\s*catalog\s*:\s*catalog\.filter\(\s*\(entry\) => !isUninstallableCatalogEntry\(entry, installLifecycleFor\(entry, installLifecycleByConnector\)\)\s*\);/
-  );
-  assert.match(src, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/);
+  // Add-page repair decision 1: an existing data source stays visible even when there is no package lifecycle entry.
+  assert.match(src, /const installed = sourceIsInstalled\(entry, lifecycle, existingSourcesByConnector\);/);
+  assert.match(src, /if \(!installCatalogTransientlyUnavailable && isUninstallableCatalogEntry\(entry, lifecycle\)\) continue;/);
+  assert.match(src, /filterCatalogForDevelopmentVisibility\(catalog, includeDevelopment\)/);
+});
+
+// Brief decisions 2 to 4: groups stay separate and search, sort, and filter fit the same compact toolbar.
+test("the add page filters as the person types and keeps installed, available, and unavailable groups separate", async () => {
+  const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
+  assert.match(src, /onChange=\{\(event\) => updateSearch\(event\.currentTarget\.value\)\}/);
+  assert.match(src, /window\.history\.replaceState\(window\.history\.state/);
+  assert.doesNotMatch(src, /<form[^>]*action=|type="submit"/);
+  assert.match(src, /aria-label="Installed"/);
+  assert.match(src, /aria-label="Available"/);
+  assert.match(src, /Can't be added here \(\{unavailableEntries\.length\}\)/);
+  assert.match(src, /function SortMenu/);
+  assert.match(src, /Name<\/Menu\.Item>/);
+  assert.match(src, /Ready to use/);
+  assert.match(src, /In testing/);
+  assert.match(src, /In development/);
+});
+
+// Brief decision 10: A8 never rendered because sourceSetupSecondaryAction always returns null.
+test("the catalog no longer renders the unreachable second card action", async () => {
+  const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
+  assert.doesNotMatch(src, /sourceSetupSecondaryAction|secondaryAction/);
 });
