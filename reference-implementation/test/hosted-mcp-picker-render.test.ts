@@ -35,7 +35,7 @@ import {
   encodeHostedMcpStreamSelection,
   hostedMcpSourceKey,
 } from "../server/hosted-mcp-selection.ts";
-import { escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
+import { HOSTED_UI_CSS, escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
 import {
   ActiveBindingLookupError,
   type ConsentPickerBinding,
@@ -43,6 +43,7 @@ import {
   type ConsentUiRenderer,
   listHostedMcpPickerRows,
   renderHostedMcpSourceSelection,
+  renderPendingGrantConsentHtml,
 } from "../server/routes/as-consent-ui-helpers.ts";
 
 // ── Presentational renderer (pass-through) ───────────────────────────────────
@@ -728,12 +729,42 @@ test("an app without a verified domain says so, with a monogram and no logo", as
   const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
 
   // server-consent.md item 1: the trust line is the domain and its state.
-  assert.match(html, /Website \(not verified\)/, "an app without a domain remains unverified");
+  assert.match(html, /Website not verified/, "an app without a domain remains unverified");
+  assert.doesNotMatch(html, /Website \(not verified\)/, "trust wording matches the console");
   assert.equal(html.includes("Verified domain"), false, "nothing was verified, so nothing is claimed");
   // spec-core.md:676 — never a remote logo for a client with no positive
   // trust signal. The monogram is the safe stand-in.
   assert.match(html, /hosted-ui-client-monogram[^>]*>DA</, "a two-letter monogram stands in for the logo");
   assert.equal(/<img[^>]+logo/i.test(html), false, "no logo image is fetched or rendered for an unverified client");
+});
+
+test("the approval summary uses the console's unverified website wording", () => {
+  const html = renderPendingGrantConsentHtml(
+    {
+      request: {
+        client: PREREGISTERED_CLIENT,
+        selection: { streams: [{ name: "top_artists" }] },
+        source_binding: { id: "spotify", kind: "connector" },
+      },
+    },
+    "request-uri",
+    null,
+    "_csrf",
+    "DataConnect",
+    ui
+  );
+  // server-consent-r3 P3: use the console wording for an app without a verified domain.
+  assert.match(html, /Website not verified/);
+  assert.doesNotMatch(html, /Website \(not verified\)/);
+});
+
+test("source choices render as plain rows, with monospace reserved for Details", async () => {
+  const html = await renderPicker();
+  // RAISE-RULES 3 and server-consent-r3 P2: source choices use plain rows and hairlines.
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-option-source\s*\{[^}]*border-bottom:\s*1px solid var\(--border\)/);
+  assert.doesNotMatch(HOSTED_UI_CSS, /\.hosted-ui-option-source\s*\{[^}]*border:\s*1px solid/);
+  assert.doesNotMatch(HOSTED_UI_CSS, /\.hosted-ui-option-meta\s*\{[^}]*font-family:\s*var\(--font-mono\)/);
+  assert.doesNotMatch(html, /\.hosted-ui-option-preview\s*\{[^}]*font-family:\s*var\(--font-mono\)/);
 });
 
 // ── The H1 names the requester and the verb; the URL is not headline material ──

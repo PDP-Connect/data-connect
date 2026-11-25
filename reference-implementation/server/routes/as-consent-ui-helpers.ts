@@ -1328,12 +1328,12 @@ export function renderPendingConsentNotFoundHtml(providerName: string, ui: Conse
     body: [
       ui.renderPageIntro({
         eyebrow: "Data access request",
-        title: "This consent request is no longer available",
+        title: "This request is no longer available",
       }),
       ui.renderSurface({
         ariaLabel: "Consent request expired",
         children: ui.renderResultState({
-          body: "This link is no longer available. Go back to the app and start again.",
+          body: "Go back to the app and start again.",
           title: "Nothing was shared",
           tone: "neutral",
         }),
@@ -1348,11 +1348,12 @@ export function renderPendingConsentNotFoundHtml(providerName: string, ui: Conse
 
 function renderConsentTrustLine(clientDisplay: ConsentClientDisplay | null, ui: ConsentUiRenderer): string {
   if (!clientDisplay) {
-    return '<p class="hosted-ui-client-trust" data-trust="unverified">Website (not verified)</p>';
+    return '<p class="hosted-ui-client-trust" data-trust="unverified">Website not verified</p>';
   }
   if (clientDisplay.isUnverified) {
     const domain = clientDisplay.domainLabel || "Website";
-    return `<p class="hosted-ui-client-trust" data-trust="unverified">${ui.escapeHtml(domain)} (not verified)</p>`;
+    const trustLabel = domain === "Website" ? "Website not verified" : `${domain} (not verified)`;
+    return `<p class="hosted-ui-client-trust" data-trust="unverified">${ui.escapeHtml(trustLabel)}</p>`;
   }
   const trust = clientDisplay.verifiedDomain ? "domain-verified" : "registered";
   return `<p class="hosted-ui-client-trust" data-trust="${trust}"><span class="hosted-ui-trust-verified">Verified</span></p>`;
@@ -2871,10 +2872,11 @@ function renderHostedMcpClientIdentityBlock(
   // published the metadata; it says nothing about whether the application is
   // honest or safe. "Verified app" would be the more flattering phrasing and
   // the more dangerous one, because an owner would act on it.
+  const unverifiedDomain = clientDisplay.domainLabel || "Website";
   const trustLine = clientDisplay.isUnverified
     ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">${ui.escapeHtml(
-        clientDisplay.domainLabel || "Website"
-      )} (not verified)</p>`
+        unverifiedDomain === "Website" ? "Website not verified" : `${unverifiedDomain} (not verified)`
+      )}</p>`
     : clientDisplay.verifiedDomain
       ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status"><span class="hosted-ui-trust-verified">Verified</span> · ${ui.escapeHtml(
           clientDisplay.verifiedDomain
@@ -3341,7 +3343,6 @@ export async function renderHostedMcpSourceSelection(
 }
 .hosted-ui-option-preview {
   display: block;
-  font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.45;
   color: var(--muted-foreground);

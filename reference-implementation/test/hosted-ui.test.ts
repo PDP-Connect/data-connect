@@ -329,6 +329,21 @@ test("hosted-ui: /consent/approve result page uses the shared hosted-UI layer", 
     assert.match(html, /Access approved/, "shows approval result");
     assert.match(html, /data-surface="protocol"/, "technical details use protocol surface");
     assert.match(html, /Grant ID/, "includes grant id label");
+    // server-consent-r3 P2: approval keeps the picker's access-stop reminder.
+    assert.match(html, /You can stop this app reading your data later in DataConnect\./);
+  });
+});
+
+test("hosted-ui: missing consent request uses one clear next step", async () => {
+  await withServer({}, async ({ asUrl }) => {
+    const resp = await fetch(`${asUrl}/consent?request_uri=missing-request`);
+    assert.equal(resp.status, 404);
+    const html = await resp.text();
+    // server-consent-r3 P3: say the request is unavailable once and give one next step.
+    assert.match(html, /This request is no longer available/);
+    assert.match(html, /Nothing was shared/);
+    assert.match(html, /Go back to the app and start again\./);
+    assert.equal((html.match(/no longer available/gi) ?? []).length, 1);
   });
 });
 

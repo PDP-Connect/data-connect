@@ -172,7 +172,7 @@ async function renderApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "Access is ready. You can close this page and go back to the app.",
+          body: "Access is ready. You can close this page and go back to the app. You can stop this app reading your data later in DataConnect.",
           title: "You allowed this app to read your data",
           tone: "neutral",
         }),
@@ -219,7 +219,7 @@ async function renderPackageApproveHtml(
           // `/grants/packages/:packageId`. Reversibility is what makes "yes"
           // feel safe, so promising a granularity the owner cannot reach is
           // worse than saying less.
-          body: "Access is ready. You can close this page and go back to the app.",
+          body: "Access is ready. You can close this page and go back to the app. You can stop this app reading your data later in DataConnect.",
           title: "You allowed this app to read your data",
           tone: "neutral",
         }),

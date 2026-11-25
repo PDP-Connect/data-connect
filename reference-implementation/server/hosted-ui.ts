@@ -593,7 +593,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 }
 
 .hosted-ui-option-meta {
-  font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.45;
   color: var(--muted-foreground);
@@ -619,14 +618,15 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 }
 
 .hosted-ui-option-source {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.25rem 0.75rem 0.75rem;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0;
   margin: 0;
-  background: var(--card);
+  background: transparent;
 }
 .hosted-ui-option-source-legend {
-  padding: 0 0.25rem;
+  padding: 0;
   display: block;
   width: 100%;
 }
@@ -634,7 +634,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   background: transparent;
   border: none;
   box-shadow: none;
-  padding: 0.5rem 0.25rem;
+  padding: 0.75rem 0;
   margin: 0;
 }
 .hosted-ui-option-source-legend .hosted-ui-option:hover {
@@ -649,7 +649,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   display: grid;
   gap: 0.375rem;
   padding: 0.5rem 0.25rem 0.25rem 1.75rem;
-  border-top: 1px dashed var(--border);
+  border-top: 1px solid var(--border);
 }
 
 .hosted-ui-option-streams-empty {
