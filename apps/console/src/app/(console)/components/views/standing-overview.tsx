@@ -4,6 +4,7 @@
 import { Text } from "@pdpp/brand-react";
 import "@pdpp/brand-react/components.css";
 import { buttonVariants } from "@pdpp/operator-ui/ui/button";
+import { cn } from "@pdpp/operator-ui/ui/utils";
 import Link from "next/link";
 import { ConnectorMark } from "../connector-mark.tsx";
 import { SourceStatusText } from "../source-status-text.tsx";
@@ -15,8 +16,16 @@ const FILLED_BUTTON = buttonVariants({
   variant: "default",
 });
 
+// Lead decision (home-pictures 3): every button in the needs-you box is outlined;
+// the box itself is the emphasis. DIRECTION.md, Values: buttons use the stronger line.
+const OUTLINED_BUTTON = cn(
+  buttonVariants({ size: "default", variant: "outline" }),
+  "h-[30px] rounded-[6px] border-border-strong px-2.5 text-[13px] dark:border-border-strong",
+);
+
 const SECTION_LABEL = "text-[13px] font-medium text-muted-foreground";
 const SECOND_LINE = "text-[13px] leading-5 text-muted-foreground";
+const FAINT_TEXT = "text-[color:var(--foreground-faint)]";
 
 function LogoTile({ iconId, name, size = "small" }: { iconId: string; name: string; size?: "large" | "small" }) {
   const dimensions = size === "large" ? "size-10" : "size-8";
@@ -63,9 +72,10 @@ function PageHeading({
   notice?: string;
   showSubtitle?: boolean;
 }) {
+  // Lead decision (home-pictures 8): the title starts where the /sources title
+  // starts; the demo notice sits under the title there too.
   return (
     <header className="mb-8">
-      <DemoNotice notice={notice} />
       {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
       <Text
         as="h1"
@@ -76,6 +86,11 @@ function PageHeading({
       {showSubtitle && data.subtitle ? (
         <Text as="p" className="mt-2 text-[13px] tabular-nums text-muted-foreground">
           {data.subtitle}
+        </Text>
+      ) : null}
+      {notice ? (
+        <Text as="p" className="mt-3 text-[13px] text-muted-foreground">
+          {notice}
         </Text>
       ) : null}
       {data.noSources ? (
@@ -102,43 +117,60 @@ function ReadFailure({ href }: { href: string }) {
   );
 }
 
-function NeedSentence({ need }: { need: HomeNeedRow }) {
+function NeedLines({ need }: { need: HomeNeedRow }) {
   if (need.kind === "approval") {
     return (
-      <Text as="p" className="text-[15px] leading-5 text-foreground">
-        <strong className="font-medium">{need.name}</strong> is asking to read your data
-      </Text>
+      <>
+        <Text as="p" className="text-[15px] leading-5 text-foreground">
+          <strong className="font-medium">{need.name}</strong> is asking to read your data
+        </Text>
+        {need.detail ? (
+          <Text as="p" className={`${SECOND_LINE} mt-0.5 tabular-nums`}>
+            {need.detail}
+          </Text>
+        ) : null}
+      </>
     );
   }
 
+  // Lead decision (home-pictures 1): two lines, the name, then the status words
+  // and, only when there is one, the sync time in faint text.
   return (
-    <Text as="p" className="text-[15px] leading-5 text-foreground">
-      <strong className="font-medium">{need.name}</strong>{" "}
+    <>
+      <Text as="p" className="truncate text-[15px] font-medium leading-5 text-foreground">
+        {need.name}
+      </Text>
       {need.status && need.source ? (
-        <span data-source-id={need.source.connection_id} data-status-row={need.status.row}>
-          <SourceStatusText status={need.status} />
-        </span>
+        <Text as="p" className="mt-0.5 text-[13px] leading-5">
+          <span data-source-id={need.source.connection_id} data-status-row={need.status.row}>
+            <SourceStatusText status={need.status} />
+          </span>
+          {need.syncNote ? (
+            <span className={`${FAINT_TEXT} tabular-nums`}>
+              {" "}
+              · <span className="whitespace-nowrap">{need.syncNote}</span>
+            </span>
+          ) : null}
+        </Text>
       ) : null}
-    </Text>
+    </>
   );
 }
 
 function NeedRow({ need }: { need: HomeNeedRow }) {
+  // Lead decision (home-pictures 4): under 560px the button sits beneath the
+  // text, aligned with it, instead of squeezing the text into a narrow column.
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-3">
-      <div className="flex min-w-0 items-center gap-3">
-        <LogoTile iconId={need.iconId} name={need.name} />
-        <div className="min-w-0">
-          <NeedSentence need={need} />
-          {need.detail ? (
-            <Text as="p" className={`${SECOND_LINE} mt-0.5`}>
-              {need.detail}
-            </Text>
-          ) : null}
-        </div>
+    <div className="grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-3 py-3 min-[560px]:grid-cols-[2rem_minmax(0,1fr)_auto]">
+      <LogoTile iconId={need.iconId} name={need.name} />
+      <div className="min-w-0">
+        <NeedLines need={need} />
       </div>
       {need.actionLabel ? (
-        <Link className={FILLED_BUTTON} href={need.actionHref}>
+        <Link
+          className={`${OUTLINED_BUTTON} col-start-2 justify-self-start min-[560px]:col-start-3 min-[560px]:justify-self-end`}
+          href={need.actionHref}
+        >
           {need.actionLabel}
         </Link>
       ) : null}
@@ -313,14 +345,13 @@ function AppsBlock({ data }: { data: HomeData }) {
         <AppRow app={app} key={app.id} />
       ))}
       {data.activeTokenCount > 0 ? (
+        // Lead decision (home-pictures 7): a quiet line under the apps, not set like an app name.
         <Link
-          className="block border-b border-border/70 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className={`${SECOND_LINE} block py-3 tabular-nums hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
           href={data.tokensHref}
         >
-          <Text as="span" className="text-[15px] font-medium text-foreground">
-            <span className="tabular-nums">{data.activeTokenCount.toLocaleString("en-US")}</span>{" "}
-            {data.activeTokenCount === 1 ? "access token" : "access tokens"} · can read everything
-          </Text>
+          {data.activeTokenCount.toLocaleString("en-US")}{" "}
+          {data.activeTokenCount === 1 ? "access token" : "access tokens"} · can read everything
         </Link>
       ) : null}
       {data.appsEmpty ? (
@@ -365,7 +396,7 @@ export function StandingOverview({ data, notice }: { data: HomeData; notice?: st
   if (data.firstRun) return <FirstRun data={data} notice={notice} />;
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    <div className="mx-auto max-w-6xl pb-8">
       <PageHeading data={data} notice={notice} />
       <div className="grid gap-10 min-[860px]:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="min-w-0">

@@ -575,14 +575,87 @@ test("needs-you rows contain their source or request details and follow the requ
   );
   // DIRECTION.md, Home § Needs you: the title count equals the rendered box row count.
   assert.equal(data.title, `${data.needs.length} things need you`);
-  // DIRECTION.md, Home § Needs you: provider-interaction rows use the sync-started detail.
-  assert.match(data.needs[0]?.detail ?? "", /^Sync started /);
-  // DIRECTION.md, Home § Needs you: other sources use lower-first shared status wording.
-  assert.equal(data.needs.find((need) => need.name === "Amazon")?.status?.words, "needs its collector installed");
+  // Lead decision (home-pictures 1): the sync-started time follows the status words, in lower case.
+  assert.match(data.needs[0]?.syncNote ?? "", /^sync started /);
+  // Lead decision (home-pictures 1): status words sit on their own line, capital first, as the wording function gives them.
+  assert.equal(data.needs.find((need) => need.name === "Amazon")?.status?.words, "Needs its collector installed");
   // DIRECTION.md, Home § Needs you: approval rows use the existing review destination.
   assert.equal(data.needs.find((need) => need.kind === "approval")?.actionHref, HREFS.grants);
   // DIRECTION.md, Home § Needs you: source action links land on that source's detail page.
   assert.equal(data.needs.find((need) => need.name === "Amazon")?.actionHref, HREFS.source(oldOther.connection_id));
+});
+
+test("the needs-you box holds exactly the rows whose status says needs you", () => {
+  const sources = [
+    statusSource(2, "Setup shell"),
+    statusSource(4, "Needs install"),
+    statusSource(9, "Setting up"),
+    statusSource(10, "Paused"),
+    statusSource(11, "Syncing"),
+    statusSource(20, "Healthy"),
+  ];
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
+  const expected = sources
+    .filter((source) => sourceStatusWords(source, { now: NOW }).needsYou)
+    .map((source) => source.connection_id);
+
+  // Lead decision (home-pictures 5): only rows where needsYou is true enter the box; setup never completed (row 2) does not.
+  assert.deepEqual(
+    data.needs.map((need) => need.id).sort(),
+    [...expected].sort(),
+  );
+  assert.deepEqual(
+    data.needs.map((need) => need.name).sort(),
+    ["Needs install", "Setting up"],
+  );
+
+  for (const scenario of ["calm", "alarm", "decide"] as const) {
+    const inputs = buildDemoInputs(scenario, HREFS);
+    const demo = buildHomeViewModel(inputs);
+    // Lead decision (home-pictures 5): the seeded samples obey the same rule.
+    assert.deepEqual(
+      demo.needs.filter((need) => need.source).map((need) => need.id).sort(),
+      inputs.sourcePage.sources
+        .filter((source) => sourceStatusWords(source, { now: inputs.now }).needsYou)
+        .map((source) => source.connection_id)
+        .sort(),
+    );
+  }
+});
+
+test("a needs-you row says when it last synced only after a successful sync", () => {
+  const synced = statusSource(4, "Amazon");
+  const neverSynced = statusSource(9, "Notion", { connection_health: health({ last_success_at: null }) });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [synced, neverSynced] } }));
+
+  // Lead decision (home-pictures 2): "last synced" appears only when the data source has a successful sync.
+  assert.match(data.needs.find((need) => need.name === "Amazon")?.syncNote ?? "", /^last synced /);
+  assert.equal(data.needs.find((need) => need.name === "Notion")?.syncNote, null);
+  // Lead decision (home-pictures 1): the status words stay on the second line, capital first.
+  assert.equal(data.needs.find((need) => need.name === "Notion")?.status?.words, "Setup in progress");
+});
+
+test("each seeded sample's counts agree with its own rows", () => {
+  for (const scenario of ["calm", "alarm", "decide"] as const) {
+    const inputs = buildDemoInputs(scenario, HREFS);
+    const rows = inputs.sourcePage.sources;
+    const records = rows.reduce((sum, source) => sum + (source.total_records ?? 0), 0);
+    // Lead decision (home-pictures 6): "N data sources · N records" is made from the rows the sample shows.
+    assert.equal(
+      buildHomeViewModel(inputs).subtitle,
+      `${rows.length} data sources · ${records.toLocaleString("en-US")} records`,
+    );
+  }
+
+  const calm = buildDemoInputs("calm", HREFS).sourcePage.sources;
+  const words = calm.map((source) => sourceStatusWords(source, { now: NOW }));
+  // Lead decision (home-pictures 6): calm lists at least six rows mixing up to date, imported, syncing and one paused.
+  assert.ok(calm.length >= 6);
+  assert.ok(words.some((status) => status.row === 19));
+  assert.ok(words.some((status) => status.row === 18));
+  assert.ok(words.some((status) => status.row === 11));
+  assert.equal(words.filter((status) => status.row === 10).length, 1);
+  assert.ok(words.every((status) => !status.needsYou));
 });
 
 test("archived, disconnected, setup-failed and needs-you rows stay out of the data-source list", () => {

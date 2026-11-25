@@ -93,7 +93,7 @@ const OBSERVED = {
 function source(row: number, name: string, overrides: Partial<RefConnectorSummary> = {}): RefConnectorSummary {
   const base: RefConnectorSummary = {
     connection_health: health(),
-    connection_id: `demo-${row}`,
+    connection_id: `demo-${row}-${name.toLowerCase().replaceAll(" ", "-")}`,
     connector_id: name.toLowerCase().replaceAll(" ", "-"),
     display_name: name,
     freshness: {},
@@ -395,34 +395,79 @@ const SUMMARY: DatasetSummary = {
   total_retained_bytes: 0,
 };
 
+/** A data source that has never had a successful sync: no "last synced" anywhere. */
+function neverSynced(records = 0): Partial<RefConnectorSummary> {
+  return { connection_health: health({ last_success_at: null }), total_records: records };
+}
+
+/** A data source whose last successful sync was `hours` ago. */
+function syncedAgo(hours: number, records: number): Partial<RefConnectorSummary> {
+  return { connection_health: health({ last_success_at: ago(hours) }), total_records: records };
+}
+
+function demoRows(scenario: DemoScenario): RefConnectorSummary[] {
+  // Lead decision (home-pictures 6): each sample is believable; its counts are
+  // made from its own rows, and the calm sample mixes the quiet states.
+  if (scenario === "calm") {
+    return [
+      source(19, "Chase", { connection_health: health({ last_success_at: ago(1), lateness: { state: "on_time" } }), total_records: 3_412 }),
+      source(19, "Gmail", { connection_health: health({ last_success_at: ago(0.3), lateness: { state: "on_time" } }), total_records: 21_870 }),
+      source(19, "Google Calendar", { connection_health: health({ last_success_at: ago(0.8), lateness: { state: "on_time" } }), total_records: 1_964 }),
+      source(18, "Pocket", { total_records: 846 }),
+      source(10, "Reddit", { total_records: 2_310 }),
+      source(11, "Slack", { total_records: 9_528 }),
+      source(19, "Spotify", { connection_health: health({ last_success_at: ago(2), lateness: { state: "on_time" } }), total_records: 7_205 }),
+      source(19, "Strava", { connection_health: health({ last_success_at: ago(5), lateness: { state: "on_time" } }), total_records: 418 }),
+    ];
+  }
+  if (scenario === "alarm") {
+    // Rows 4, 5, 6, 8 and 9 need the person. Row 9 (setup in progress) has
+    // never synced, so it shows no "last synced" (home-pictures 2, 5).
+    return [
+      source(4, "Amazon", syncedAgo(140, 2_187)),
+      source(5, "Facebook", syncedAgo(1, 0)),
+      source(6, "Gmail", neverSynced()),
+      source(8, "Google Calendar", {
+        ...syncedAgo(72, 1_640),
+        last_run: {
+          event_count: 0,
+          failure_reason: null,
+          finished_at: null,
+          first_at: ago(0.4),
+          last_at: ago(0.4),
+          run_id: "run-demo-calendar",
+          started_at: ago(0.4),
+          status: "started",
+        },
+      }),
+      source(9, "Notion", neverSynced()),
+      source(10, "Reddit", { total_records: 2_310 }),
+      source(11, "Slack", { total_records: 9_528 }),
+      source(12, "TikTok", { total_records: 5_902 }),
+      source(13, "Uber", { total_records: 388 }),
+      source(14, "Venmo", { total_records: 1_215 }),
+      source(15, "WhatsApp", { total_records: 14_760 }),
+      source(16, "YouTube", { total_records: 6_044 }),
+      source(17, "YNAB", { total_records: 3_877 }),
+    ];
+  }
+  return [
+    source(7, "Jellyfin", neverSynced()),
+    source(20, "Oura", { total_records: 1_096 }),
+    source(21, "GitHub", { total_records: 4_533 }),
+    source(22, "Fitbit", neverSynced()),
+    source(23, "Apple Photos", { total_records: 12_480 }),
+    source(24, "Doordash", { total_records: 214 }),
+  ];
+}
+
 export function buildDemoInputs(scenario: DemoScenario, hrefs: HomeHrefs): HomeInputs {
-  const rows =
-    scenario === "calm"
-      ? [source(18, "Pocket"), source(19, "Spotify")]
-      : scenario === "alarm"
-        ? [
-            source(4, "Amazon"),
-            source(5, "Facebook"),
-            source(6, "Gmail"),
-            source(8, "Google Calendar"),
-            source(9, "Notion"),
-            source(10, "Reddit"),
-            source(11, "Slack"),
-            source(12, "TikTok"),
-            source(13, "Uber"),
-            source(14, "Venmo"),
-            source(15, "WhatsApp"),
-            source(16, "YouTube"),
-            source(17, "YNAB"),
-          ]
-        : [
-            source(7, "Jellyfin"),
-            source(20, "Oura"),
-            source(21, "GitHub"),
-            source(22, "Fitbit"),
-            source(23, "Apple Photos"),
-            source(24, "Doordash"),
-          ];
+  const rows = demoRows(scenario);
+  const summary: DatasetSummary = {
+    ...SUMMARY,
+    connector_count: rows.length,
+    record_count: rows.reduce((sum, row) => sum + (row.total_records ?? 0), 0),
+  };
 
   const inputs: HomeInputs = {
     approvals: scenario === "decide" ? PENDING : [],
@@ -438,7 +483,7 @@ export function buildDemoInputs(scenario: DemoScenario, hrefs: HomeHrefs): HomeI
     ownerClientsHaveMore: false,
     reloadHref: `/?demo=${scenario}`,
     sourcePage: { hasMore: false, kind: "ok", sources: rows },
-    summary: SUMMARY,
+    summary,
     summaryFailed: false,
     traces: TRACES,
     tracesFailed: false,

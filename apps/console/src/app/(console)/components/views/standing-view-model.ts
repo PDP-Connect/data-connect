@@ -107,6 +107,8 @@ export interface HomeNeedRow {
   name: string;
   source?: RefConnectorSummary;
   status?: SourceStatusWords;
+  /** "last synced <when>" or "sync started <when>"; null when the data source has neither. */
+  syncNote: string | null;
 }
 
 export interface HomeAppRow {
@@ -302,10 +304,6 @@ function oldestFirst<T>(items: T[], at: (item: T) => string | null): T[] {
   });
 }
 
-function lowerFirst(value: string): string {
-  return value.length === 0 ? value : `${value[0]?.toLowerCase()}${value.slice(1)}`;
-}
-
 function sourceActionSurface(source: RefConnectorSummary): string | null {
   return source.rendered_verdict?.required_actions.find((action) => action.audience === "owner")?.surface?.kind ?? null;
 }
@@ -343,6 +341,7 @@ function approvalRow(approval: PendingApproval, now: Date, hrefs: HomeHrefs): Ho
     id: `approval:${approval.approval_id}`,
     kind: "approval",
     name,
+    syncNote: null,
   };
 }
 
@@ -350,19 +349,22 @@ function sourceNeedRow(source: PreparedSource, now: Date, waitingSync: boolean):
   const lastSynced = relativeWhen(lastSuccessfulSync(source.source), now);
   const syncStarted =
     source.source.last_run?.status === "started" ? relativeWhen(source.source.last_run.started_at, now) : null;
-  const detail =
-    waitingSync && syncStarted ? `Sync started ${syncStarted}` : lastSynced ? `Last synced ${lastSynced}` : null;
+  // Lead decision (home-pictures 1, 2): the second line carries the status words,
+  // then a sync time only when a sync succeeded or started.
+  const syncNote =
+    waitingSync && syncStarted ? `sync started ${syncStarted}` : lastSynced ? `last synced ${lastSynced}` : null;
   return {
     actionHref: source.href,
     actionLabel: source.status.action?.label ?? null,
-    detail,
+    detail: null,
     href: source.href,
     iconId: source.source.connector_id,
     id: source.id,
     kind: waitingSync ? "waiting_sync" : "source",
     name: source.name,
     source: source.source,
-    status: { ...source.status, words: lowerFirst(source.status.words) },
+    status: source.status,
+    syncNote,
   };
 }
 
