@@ -385,6 +385,35 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
   }
 });
 
+test("n.eko startup forwards explicit portrait and landscape profiles to the launcher", async (t) => {
+  const source = await readFile(REPO_ROOT + "docker/neko/start-neko.sh", "utf8");
+  const launcher = "exec /usr/bin/neko serve";
+  assert.ok(source.includes(launcher));
+  const fixtures = [
+    { name: "portrait", screen: "390x844@30", desktop: ":14", display: ":7" },
+    { name: "landscape", screen: "844x390@30", desktop: "", display: ":31" },
+  ];
+  for (const { name, screen, desktop, display } of fixtures) {
+    await t.test(name, () => {
+      const result = spawnSync(
+        "/bin/sh", ["-eu", "-c", source.replace(launcher, "exec /usr/bin/printf '%s\\n' serve")],
+        { env: { NEKO_DESKTOP_SCREEN: screen, NEKO_DESKTOP_DISPLAY: desktop, DISPLAY: display }, encoding: "utf8" },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      const args = result.stdout.trim().split("\n");
+      const valueOf = (flag: string) => {
+        const index = args.indexOf(flag);
+        assert.notEqual(index, -1, flag);
+        return args[index + 1];
+      };
+      assert.equal(valueOf("--desktop.screen"), screen);
+      assert.equal(valueOf("--desktop.display"), desktop || display);
+      assert.equal(valueOf("--capture.video.display"), desktop || display);
+    });
+  }
+});
+
 async function startupDisplay(env: NodeJS.ProcessEnv): Promise<string> {
   const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
   const assignment = source.split("\n").find((line) => line.startsWith("DISPLAY_NAME="));
