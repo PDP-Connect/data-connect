@@ -1639,6 +1639,13 @@ export function canUseConnectorWideRunSummaryFallback(input: {
   if (input.summary.browser_surface_profile_key) {
     return false;
   }
+  // A summary that names a connection (connection_id or connector_instance_id)
+  // and did not match above belongs to a different connection; only untagged
+  // legacy summaries may use the singleton fallback.
+  const binding = input.summary as SpineSummary & { connector_instance_id?: unknown; connection_id?: unknown };
+  if (binding.connector_instance_id != null || binding.connection_id != null) {
+    return false;
+  }
   // Legacy API/static/manual connectors often emitted connector-wide run events
   // before connection_id existed on the spine. When there is exactly one active
   // visible connection for that connector type, the connector-wide run is the

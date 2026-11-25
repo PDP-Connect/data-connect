@@ -161,3 +161,28 @@ test("the singleton gate precedes any binding match (a perfect match with count 
     "more than one active visible connection short-circuits before the match check"
   );
 });
+
+test("a summary explicitly bound to another connection is not borrowed by the singleton fallback", () => {
+  for (const binding of [{ connector_instance_id: "cin_other" }, { connection_id: "cin_other" }]) {
+    assert.equal(
+      canUseConnectorWideRunSummaryFallback({
+        ...SINGLETON,
+        browserSurfaceProfileKey: null,
+        connectorInstanceId: "cin_target",
+        summary: baseSummary({ ...binding, id: "r", run_id: "r" }),
+      }),
+      false,
+      "a run tagged to a different connection must not hydrate this row"
+    );
+  }
+  // Untagged legacy summaries keep the singleton fallback.
+  assert.equal(
+    canUseConnectorWideRunSummaryFallback({
+      ...SINGLETON,
+      browserSurfaceProfileKey: null,
+      connectorInstanceId: "cin_target",
+      summary: baseSummary({ id: "r", run_id: "r" }),
+    }),
+    true
+  );
+});
