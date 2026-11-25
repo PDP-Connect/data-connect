@@ -53,29 +53,26 @@ export default async function BrowserSessionLaunchPage({
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
+          <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href="/sources">
+            Back to Data sources
           </Link>
         }
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          {
-            href: `/connect/browser-session/${encodeURIComponent(connectorId)}`,
-            label: `Connect ${displayName}`,
-          },
-          { label: "Starting browser" },
-        ]}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            <span>DataConnect is starting a secure browser session for {displayName}.</span>
+            <span>Sign in to {displayName} in the browser below.</span>
           </span>
         }
-        title="Starting secure browser"
+        title={`Connect ${displayName}`}
       />
 
       <div className="mx-auto max-w-lg px-4 py-8">
-        <BrowserSessionLaunchPanel connectionId={connectionId} connectorId={connectorId} draft={draft} />
+        <BrowserSessionLaunchPanel
+          connectionId={connectionId}
+          connectorId={connectorId}
+          displayName={displayName}
+          draft={draft}
+        />
       </div>
     </RecordroomShellWithPalette>
   );

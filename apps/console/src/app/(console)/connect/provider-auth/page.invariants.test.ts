@@ -11,7 +11,10 @@ const PAGE_FILE = `${HERE}[connectorId]/page.tsx`;
 const START_ROUTE_FILE = `${HERE}[connectorId]/start/route.ts`;
 const OWNER_POST_FORM_RE =
   /<form action=\{`\/connect\/provider-auth\/\$\{encodeURIComponent\(connectorId\)\}\/start`\} method="post">/;
-const AUTHORIZE_ACCOUNT_RE = /Authorize account/;
+const AUTHORIZE_ACCOUNT_RE = /Continue to \{displayName\}/;
+// The predicate itself is behavior-tested in provider-auth-support.test.ts.
+const PROVIDER_SUPPORT_CHECK_RE = /if \(!supportsProviderAuth\(buildOwnerConnectorCatalog\(manifests, templates\), connectorId\)\) \{\s*notFound\(\);/;
+const NOT_FOUND_RE = /notFound\(\)/;
 const DASHBOARD_ACCESS_RE = /requireDashboardAccess\(path\)/;
 const SAME_ORIGIN_RE = /originMatchesHost\(request\)/;
 const INITIATE_PROVIDER_AUTH_RE = /initiateProviderAuthorization\(connectorId\)/;
@@ -22,6 +25,8 @@ test("provider authorization uses a same-origin owner POST action", async () => 
 
   assert.match(page, OWNER_POST_FORM_RE);
   assert.match(page, AUTHORIZE_ACCOUNT_RE);
+  assert.match(page, PROVIDER_SUPPORT_CHECK_RE);
+  assert.match(page, NOT_FOUND_RE);
   assert.match(route, DASHBOARD_ACCESS_RE);
   assert.match(route, SAME_ORIGIN_RE);
   assert.match(route, INITIATE_PROVIDER_AUTH_RE);

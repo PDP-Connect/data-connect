@@ -31,8 +31,12 @@ interface PageSearchParams {
 
 function InlineNotice({ message }: { message: string }) {
   return (
-    <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive">
-      {message}
+    <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" role="alert">
+      <p>Could not save the key. Try again.</p>
+      <details className="mt-2">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-1">{message.replaceAll(/PDPP/giu, "DataConnect")}</p>
+      </details>
     </div>
   );
 }
@@ -46,24 +50,15 @@ function inputType(field: StaticSecretSetupField): "email" | "password" | "text"
 }
 
 function pageCopy(displayName: string, isDraftRetryMode: boolean, isReplaceMode: boolean) {
-  if (isDraftRetryMode) {
+  if (isDraftRetryMode || isReplaceMode) {
     return {
-      description:
-        "Correct the provider details and submit again. This keeps the same pending connection and never reuses the rejected secret.",
-      title: `Retry ${displayName}`,
-    };
-  }
-  if (isReplaceMode) {
-    return {
-      description:
-        "Enter the credential this connection should use. Records, history, and schedule stay attached to the same connection.",
+      description: `Paste your ${displayName} API key.`,
       title: `Reconnect ${displayName}`,
     };
   }
   return {
-    description:
-      "Enter the provider credential to create this connection and start its first sync. The account keeps its own connection identity and credentials.",
-    title: `Add ${displayName}`,
+    description: `Paste your ${displayName} API key.`,
+    title: `Connect ${displayName}`,
   };
 }
 
@@ -132,6 +127,7 @@ export default async function StaticSecretConnectPage({
   const hasExistingTarget = Boolean(pageParams.connectionId);
   const readinessBlocked = setup.deployment_readiness.state !== "ready";
   const formContract = staticSecretFormContract(setup, hasExistingTarget);
+  const primaryActionLabel = hasExistingTarget ? "Reconnect and sync" : formContract.primaryActionLabel;
 
   // After a validation failure the action redirects back here with the owner's
   // non-secret field values as `field_<name>` query params so the form context
@@ -156,11 +152,10 @@ export default async function StaticSecretConnectPage({
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={backHref}>
-            Back to Sources
+          <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href={backHref}>
+            Back to Data sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
@@ -177,28 +172,31 @@ export default async function StaticSecretConnectPage({
 
       <div className="mb-5 grid gap-2">{pageParams.error ? <InlineNotice message={pageParams.error} /> : null}</div>
 
-      <Section description={formContract.credentialSectionDescription} title={setup.credential_capture.label}>
+      <Section description="Your key is stored on your server. Apps and assistants can't see it." title={setup.credential_capture.label}>
         {readinessBlocked ? (
           <Callout
-            description={
-              setup.deployment_readiness.guidance ??
-              "Configure the instance-level credential key provider before entering a provider credential."
-            }
+            description="Set up key storage before you connect this data source."
             title="Credential storage is not ready"
             tone="warning"
           >
-            <ul className="pdpp-caption mt-3 grid gap-1 text-muted-foreground">
-              {setup.deployment_readiness.blockers.map((blocker) => (
-                <li key={blocker.key}>
-                  Set <code>{blocker.key}</code>
-                </li>
-              ))}
-            </ul>
+            <details className="pdpp-caption mt-3 text-muted-foreground">
+              <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+              {setup.deployment_readiness.guidance ? (
+                <p className="mt-2">{setup.deployment_readiness.guidance.replaceAll(/PDPP/giu, "DataConnect")}</p>
+              ) : null}
+              <ul className="mt-2 grid gap-1">
+                {setup.deployment_readiness.blockers.map((blocker) => (
+                  <li key={blocker.key}>
+                    Set <code>{blocker.key}</code>
+                  </li>
+                ))}
+              </ul>
+            </details>
           </Callout>
         ) : (
           <form
             action={hasExistingTarget ? replaceStaticSecretCredentialAction : createStaticSecretConnectionAction}
-            className="grid max-w-2xl gap-4 rounded-sm border border-border/80 bg-muted/20 p-4"
+            className="grid max-w-2xl gap-4"
           >
             <input name="connector_id" type="hidden" value={setup.connector_id} />
             {hasExistingTarget && pageParams.connectionId ? (
@@ -208,6 +206,7 @@ export default async function StaticSecretConnectPage({
               <label className="grid gap-1" htmlFor="static-secret-display-name">
                 <span className="pdpp-eyebrow">{formContract.connectionName.label}</span>
                 <IcInput
+                  className="min-h-11"
                   defaultValue={pageParams.displayName}
                   id="static-secret-display-name"
                   maxLength={formContract.connectionName.maxLength}
@@ -215,7 +214,9 @@ export default async function StaticSecretConnectPage({
                   placeholder={formContract.connectionName.placeholder}
                   type="text"
                 />
-                <span className="pdpp-caption text-muted-foreground">{formContract.connectionName.helpText}</span>
+                <span className="pdpp-caption text-muted-foreground">
+                  {formContract.connectionName.helpText.replace("new source", "new data source")}
+                </span>
               </label>
             )}
             {formContract.credentialFields.map((field) => (
@@ -223,6 +224,7 @@ export default async function StaticSecretConnectPage({
                 <span className="pdpp-eyebrow">{field.label}</span>
                 <IcInput
                   autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
+                  className="min-h-11"
                   defaultValue={preservedValue(field)}
                   id={`static-secret-${field.name}`}
                   name={field.name}
@@ -242,13 +244,15 @@ export default async function StaticSecretConnectPage({
                 />
                 {field.description || field.help_text || field.help_url ? (
                   <span className="pdpp-caption text-muted-foreground">
-                    {field.description ?? field.help_text}
+                    {(field.description ?? field.help_text)?.replaceAll(/PDPP/giu, "DataConnect")}
                     {field.help_url ? (
                       <>
                         {" "}
                         <OpenExternalLink
-                          className="underline decoration-dotted underline-offset-4"
+                          className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
                           href={field.help_url}
+                          rel="noopener noreferrer"
+                          target="_blank"
                         >
                           Open provider setup page in a new tab
                         </OpenExternalLink>
@@ -258,22 +262,26 @@ export default async function StaticSecretConnectPage({
                 ) : null}
               </label>
             ))}
-            {setup.validation === "synchronous" ? (
-              <p className="pdpp-caption text-muted-foreground">
-                The credential is checked with the provider when you submit. A valid one confirms the account and starts
-                the first sync; otherwise you stay on this form with your details preserved.
-              </p>
-            ) : null}
             <div>
-              <IcButton type="submit" variant="human">
-                {formContract.primaryActionLabel}
+              <IcButton className="min-h-11" type="submit" variant="default">
+                {primaryActionLabel}
               </IcButton>
             </div>
           </form>
         )}
       </Section>
 
-      <ModeCallout isDraftRetryMode={isDraftRetryMode} isReplaceMode={isReplaceMode} />
+      <details className="mt-5 pdpp-caption text-muted-foreground">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-2">{formContract.credentialSectionDescription.replaceAll(/PDPP/giu, "DataConnect")}</p>
+        {readinessBlocked ? <p className="mt-2">Credential storage is not ready.</p> : null}
+        {setup.validation === "synchronous" ? (
+          <p className="mt-2">
+            The credential is checked when you submit. A valid key confirms the account and starts the first sync.
+          </p>
+        ) : null}
+        <ModeCallout isDraftRetryMode={isDraftRetryMode} isReplaceMode={isReplaceMode} />
+      </details>
     </RecordroomShellWithPalette>
   );
 }

@@ -35,7 +35,8 @@ const PAGE_FORM_CONTRACT_RE = /browserSessionFormContract\(storedCredentialSetup
 const PAGE_PRIMARY_ACTION_LABEL_RE =
   /const primaryActionLabel = repairMode \? `Reconnect \$\{displayName\}` : "Connect account";/;
 const PAGE_HOW_IT_WORKS_ACTION_RE = /Select <strong className="text-foreground">\{primaryActionLabel\}<\/strong> below/;
-const PAGE_EXISTING_SOURCE_LINK_RE = /Choose an existing source/;
+// RAISE-RULES.md 4: say “data source” when referring to a source alone.
+const PAGE_EXISTING_SOURCE_LINK_RE = /Choose an existing data source/;
 const START_ROUTE_POST_RE = /export async function POST/;
 const START_ROUTE_AUTH_RE = /await requireDashboardAccess\(pagePath\(connectorId\)\)/;
 const START_ROUTE_ORIGIN_RE = /if \(!originMatchesHost\(request\)\)/;
@@ -44,7 +45,8 @@ const START_ROUTE_DISPLAY_NAME_FIELD_RE = /readOptionalDisplayNameField\(formDat
 const START_ROUTE_SUPPORTED_BROWSER_RE = /browserConnect\.canAddAccount/;
 const START_ROUTE_CREATE_SHELL_RE = /createBrowserEnrollmentShell\(connectorId, \{ displayName \}\)/;
 const START_ROUTE_DRAFT_ONE_RE = /draft: draft \? "1" : "0"/;
-const START_ROUTE_UNSUPPORTED_REDIRECT_RE = /This browser-backed source is not available for self-service setup/;
+// DIRECTION.md, “No address changes”: keep the existing handoff to Add when this setup path is unavailable.
+const START_ROUTE_UNSUPPORTED_REDIRECT_RE = /\/sources\/add\?error=not-self-service/;
 const START_ROUTE_LAUNCH_REDIRECT_RE = /\$\{pagePath\(connectorId\)\}\/launch\?\$\{\w+\.toString\(\)\}/;
 const START_ROUTE_FORBIDS_SLOW_RUN_RE = /runConnectionNow/;
 const START_ROUTE_OPTIONAL_CREDENTIAL_RE = /remember_sign_in_details/;
@@ -60,7 +62,8 @@ const LAUNCH_PANEL_FETCH_RE =
 const LAUNCH_PANEL_RECOVER_RE =
   /fetch\(\s*`\/connect\/browser-session\/\$\{encodeURIComponent\(connectorId\)\}\/launch\/recover\?/;
 const LAUNCH_PANEL_LOST_TRANSPORT_RECOVERY_RE = /recoverStartedBrowserRun\(connectorId, connectionId, 6\)/;
-const LAUNCH_PANEL_INLINE_FAILURE_RE = /Browser session did not finish starting/;
+// DIRECTION.md, “Words”: keep the failure copy plain and tell the person to try again.
+const LAUNCH_PANEL_INLINE_FAILURE_RE = /The browser could not open\. Try again\./;
 const LAUNCH_PANEL_RUNS_FALLBACK_RE = /href="\/syncs"/;
 const LAUNCH_START_ROUTE_RUN_RE = /runConnectionNow\(connectionId\)/;
 const LAUNCH_START_ROUTE_ENROLLMENT_ADMISSION_RE = /runAdmission: "browser_enrollment"/;

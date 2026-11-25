@@ -111,7 +111,7 @@ function countRows(preview: ManualUploadPreview) {
     ["Estimated participants", preview.estimatedParticipants],
     ["Estimated attachments", preview.estimatedAttachments],
     ["Media coverage", formatMediaCoverage(preview.mediaCoverage)],
-    ["Source DataConnect will use", preview.sourceDisplayName],
+    ["Data source DataConnect will use", preview.sourceDisplayName],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "");
 }
 
@@ -170,21 +170,25 @@ function PreviewCard({ preview }: { preview: ManualUploadPreview }) {
         </dl>
       ) : null}
       {preview.warnings && preview.warnings.length > 0 ? (
-        <div className="mt-3 rounded-sm border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-          <p className="pdpp-caption font-medium text-foreground">Warnings</p>
+        <div className="mt-3 rounded-sm border border-attention/30 bg-attention/10 px-3 py-2 text-attention">
+          <p className="pdpp-caption font-medium">Warnings</p>
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {preview.warnings.map((warning) => (
               <li className="pdpp-caption text-muted-foreground" key={warning}>
-                {warning}
+                {warning.replaceAll(/PDPP/giu, "DataConnect")}
               </li>
             ))}
           </ul>
         </div>
       ) : null}
-      {preview.remediation ? <p className="pdpp-caption mt-3 text-muted-foreground">{preview.remediation}</p> : null}
+      {preview.remediation ? (
+        <p className="pdpp-caption mt-3 text-muted-foreground">
+          {preview.remediation.replaceAll(/PDPP/giu, "DataConnect")}
+        </p>
+      ) : null}
       {duplicate && preview.duplicateConnectionId ? (
         <a
-          className="pdpp-caption mt-3 inline-flex underline decoration-dotted underline-offset-4"
+          className="pdpp-caption mt-3 inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
           href={`/connect/status/${encodeURIComponent(preview.duplicateConnectionId)}`}
         >
           Open existing receipt
@@ -214,7 +218,7 @@ function progressPhaseLabel(phase: NonNullable<UploadState["progress"]>["phase"]
 function ProgressCard({ progress }: { progress: NonNullable<UploadState["progress"]> }) {
   const phase = progressPhaseLabel(progress.phase);
   return (
-    <div className="rounded-md border border-border/80 bg-background px-3 py-2" data-testid="manual-upload-progress">
+    <div className="border-b border-border py-3" data-testid="manual-upload-progress">
       <p className="pdpp-caption font-medium text-foreground">
         {phase} {progress.currentFile} of {progress.totalFiles}
       </p>
@@ -685,36 +689,36 @@ export function ManualUploadForm({
   }
 
   return (
-    <form className="grid max-w-2xl gap-4 rounded-md border border-border/80 bg-muted/20 p-4" onSubmit={handleSubmit}>
+    <form className="grid max-w-2xl gap-4" onSubmit={handleSubmit}>
       <input name="connector_id" type="hidden" value={setup.connector_id} />
       {targetConnectionId ? <input name="connection_id" type="hidden" value={targetConnectionId} /> : null}
       {targetConnectionId ? (
-        <div className="pdpp-caption rounded-md border border-border/80 bg-background px-3 py-2 text-muted-foreground">
-          This import will be added to the existing source you came from. To keep it separate, return to Add source and
-          create a new source instead.
-        </div>
+        <p className="pdpp-caption text-muted-foreground">
+          These files will be added to the data source you came from. To keep them separate, return to Add a data source
+          and start a new one.
+        </p>
       ) : (
-        <div className="pdpp-caption rounded-md border border-border/80 bg-background px-3 py-2 text-muted-foreground">
-          Choose whether this file starts a new source or belongs with one you already created.
-        </div>
+        <p className="pdpp-caption text-muted-foreground">
+          Choose whether to make a new data source or add these files to one you already have.
+        </p>
       )}
       {targetConnectionId ? null : (
-        <fieldset className="grid gap-2 rounded-md border border-border/80 bg-background px-3 py-2">
+        <fieldset className="grid gap-2 border-b border-border py-3">
           <legend className="pdpp-eyebrow px-1">Import target</legend>
-          <label className="flex gap-2 text-sm">
+          <label className="flex min-h-11 items-center gap-2 text-sm">
             <input defaultChecked name="source_target" type="radio" value="new" />
-            <span>Create a new source for these files</span>
+            <span>Create a new data source for these files</span>
           </label>
           {existingSources.length > 0 ? (
             <>
-              <label className="flex gap-2 text-sm">
+              <label className="flex min-h-11 items-center gap-2 text-sm">
                 <input name="source_target" type="radio" value="existing" />
-                <span>Add these files to an existing source</span>
+                <span>Add these files to an existing data source</span>
               </label>
               <label className="grid gap-1" htmlFor="manual-upload-existing-source">
-                <span className="pdpp-caption text-muted-foreground">Existing source</span>
+                <span className="pdpp-caption text-muted-foreground">Existing data source</span>
                 <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+                  className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
                   id="manual-upload-existing-source"
                   name="existing_connection_id"
                 >
@@ -725,7 +729,7 @@ export function ManualUploadForm({
                   ))}
                 </select>
                 <span className="pdpp-caption text-muted-foreground">
-                  Select this only when the export belongs with that existing source.
+                  Select this only when the export belongs with that existing data source.
                 </span>
               </label>
             </>
@@ -736,21 +740,23 @@ export function ManualUploadForm({
         <label className="grid gap-1" htmlFor="manual-upload-display-name">
           <span className="pdpp-eyebrow">{connectionName.label}</span>
           <input
-            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             id="manual-upload-display-name"
             maxLength={connectionName.maxLength}
             name={connectionName.name}
             placeholder={connectionName.placeholder}
             type="text"
           />
-          <span className="pdpp-caption text-muted-foreground">{connectionName.helpText}</span>
+          <span className="pdpp-caption text-muted-foreground">
+            {connectionName.helpText.replace("new source", "new data source")}
+          </span>
         </label>
       )}
       <label className="grid gap-1" htmlFor="manual-upload-file">
         <span className="pdpp-eyebrow">Export files</span>
         <input
           accept={acceptAttribute || undefined}
-          className="flex min-h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:font-medium file:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:font-medium file:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           id="manual-upload-file"
           multiple
           name="import_file"
@@ -764,40 +770,62 @@ export function ManualUploadForm({
             <>
               {". "}
               <OpenExternalLink
-                className="underline decoration-dotted underline-offset-4"
+                className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
                 href={setup.help_url}
+                rel="noopener noreferrer"
+                target="_blank"
               >
                 Export instructions in a new tab
               </OpenExternalLink>
             </>
           ) : null}
         </span>
-        {setup.help_text ? <span className="pdpp-caption text-muted-foreground">{setup.help_text}</span> : null}
+        {setup.help_text ? (
+          <details className="pdpp-caption text-muted-foreground">
+            <summary className="inline-flex min-h-11 cursor-pointer items-center">Export details</summary>
+            <span className="mt-1 block">{setup.help_text.replaceAll(/PDPP/giu, "DataConnect")}</span>
+          </details>
+        ) : null}
       </label>
       {hasValidator ? (
-        <div className="pdpp-caption rounded-md border border-border/80 bg-background px-3 py-2 text-muted-foreground">
-          DataConnect validates before committing anything: {setup.validation_expectations.join(", ")}. Only files that pass
-          are imported.
-        </div>
+        <details className="pdpp-caption text-muted-foreground">
+          <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+          <p className="mt-1">
+            DataConnect checks the file before importing it: {setup.validation_expectations.join(", ")}. Only files that
+            pass are imported.
+          </p>
+        </details>
       ) : null}
       {state.ok === false && state.message ? (
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive">
-          {state.message}
+        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive" role="alert">
+          <p>The file could not be processed. Try again.</p>
+          <details className="mt-2">
+            <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+            <p className="mt-1">{state.message.replaceAll(/PDPP/giu, "DataConnect")}</p>
+          </details>
         </div>
       ) : null}
       {state.progress ? <ProgressCard progress={state.progress} /> : null}
-      {state.preview ? <PreviewCard preview={state.preview} /> : null}
+      {state.preview ? (
+        <details className="max-w-2xl" open>
+          <summary className="pdpp-caption inline-flex min-h-11 cursor-pointer items-center text-muted-foreground underline decoration-dotted underline-offset-4">
+            Details
+          </summary>
+          <PreviewCard preview={state.preview} />
+        </details>
+      ) : null}
       <div className="flex flex-wrap gap-2">
-        <IcButton disabled={pending} name="intent" type="submit" value="import">
+        <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="import">
           {pending ? "Importing..." : "Import file"}
         </IcButton>
-        <IcButton disabled={pending} name="intent" type="submit" value="preview" variant="ghost">
+        <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="preview" variant="ghost">
           {pending ? "Checking..." : "Preview only"}
         </IcButton>
       </div>
-      <p className="pdpp-caption text-muted-foreground">
-        Import can accept multiple files into one source. Preview checks one file without committing it.
-      </p>
+      <details className="pdpp-caption text-muted-foreground">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-1">Import can accept multiple files into one data source. Preview checks one file without committing it.</p>
+      </details>
     </form>
   );
 }

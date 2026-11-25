@@ -38,8 +38,10 @@ const PREVIEW_ONLY_COPY = /Preview only/;
 const IMPORT_FILE_COPY = /Import file/;
 const OPTIONAL_PREVIEW_COPY = /Preview checks one file/;
 const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
-const TARGET_CHOICE_COPY = /Create a new source for these files/;
-const EXISTING_SOURCE_COPY = /Add these files to an existing source/;
+// DIRECTION.md, “Data sources”: label the target as a data source.
+const TARGET_CHOICE_COPY = /Create a new data source for these files/;
+// DIRECTION.md, “Words”: say “data source” when referring to a source alone.
+const EXISTING_SOURCE_COPY = /Add these files to an existing data source/;
 const LABEL_INPUT = /name=\{connectionName\.name\}/;
 const NO_SERVER_ACTION = /useActionState|manualUploadConnectionFormAction|action=\{formAction\}/;
 const NO_SECRET_LOG = /console\.(log|error|warn)\([\s\S]*secret/;

@@ -61,8 +61,12 @@ function firstValue(value: string | string[] | undefined): string | undefined {
 
 function InlineError({ message }: { message: string }) {
   return (
-    <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive">
-      {message}
+    <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" role="alert">
+      <p>Could not start browser setup. Try again.</p>
+      <details className="mt-2">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-1">{message.replaceAll(/PDPP/giu, "DataConnect")}</p>
+      </details>
     </div>
   );
 }
@@ -83,12 +87,12 @@ function StoredCredentialFields({
       className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-4"
       data-testid="browser-credential-capture"
     >
-      <legend className="pdpp-eyebrow px-1 text-foreground">{credentials.title}</legend>
-      <p className="pdpp-caption text-muted-foreground">{credentials.description}</p>
+      <legend className="pdpp-eyebrow px-1 text-foreground">{credentials.title.replaceAll(/PDPP/giu, "DataConnect")}</legend>
+      <p className="pdpp-caption text-muted-foreground">{credentials.description.replaceAll(/PDPP/giu, "DataConnect")}</p>
       {credentials.required ? (
         <input name="credential_capture_required" type="hidden" value="1" />
       ) : (
-        <label className="flex items-start gap-2" htmlFor="browser-remember-sign-in">
+        <label className="flex min-h-11 items-center gap-2" htmlFor="browser-remember-sign-in">
           <input
             className="mt-0.5 size-4 rounded border-border accent-primary"
             id="browser-remember-sign-in"
@@ -96,7 +100,7 @@ function StoredCredentialFields({
             type="checkbox"
             value="1"
           />
-          <span className="pdpp-caption text-foreground">{credentials.checkboxLabel}</span>
+          <span className="pdpp-caption text-foreground">{credentials.checkboxLabel.replaceAll(/PDPP/giu, "DataConnect")}</span>
         </label>
       )}
       <div className="grid gap-3 border-border/60 border-t pt-3" data-testid="browser-credential-fields">
@@ -105,6 +109,7 @@ function StoredCredentialFields({
             <span className="pdpp-eyebrow">{browserCredentialFieldLabel(field, credentials.required)}</span>
             <IcInput
               autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
+              className="min-h-11"
               defaultValue={field.secret ? undefined : firstValue(searchParams[`field_${field.name}`])}
               id={`browser-credential-${field.name}`}
               name={field.name}
@@ -114,11 +119,16 @@ function StoredCredentialFields({
             />
             {field.description || field.help_text || field.help_url ? (
               <span className="pdpp-caption text-muted-foreground">
-                {field.description ?? field.help_text}
+                {(field.description ?? field.help_text)?.replaceAll(/PDPP/giu, "DataConnect")}
                 {field.help_url ? (
                   <>
                     {" "}
-                    <OpenExternalLink className="underline decoration-dotted underline-offset-4" href={field.help_url}>
+                    <OpenExternalLink
+                      className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
+                      href={field.help_url}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
                       Open provider setup page in a new tab
                     </OpenExternalLink>
                   </>
@@ -132,22 +142,16 @@ function StoredCredentialFields({
   );
 }
 
-function UnavailableSetupCard({ displayName }: { displayName: string }) {
+function UnavailableSetupCard() {
   return (
-    <div className="rounded-xl border border-border/70 bg-card/60 p-5 shadow-sm">
-      <h2 className="pdpp-title text-foreground">Adding a new {displayName} source is not available here</h2>
-      <p className="pdpp-body mt-3 text-muted-foreground">
-        This dashboard can reconnect an existing source, but it cannot add a new one yet. Return to Sources to choose an
-        available setup path.
-      </p>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources">
-          Open Sources
-        </Link>
-        <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">
-          Add source
-        </Link>
-      </div>
+    <div className="grid gap-3">
+      <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">
+        Add a data source
+      </Link>
+      <details className="pdpp-caption text-muted-foreground">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-2">An existing data source may still be reconnected from Data sources.</p>
+      </details>
     </div>
   );
 }
@@ -185,17 +189,13 @@ export default async function BrowserSessionConnectPage({
   const connectionName = connectionNameFieldContract(displayName);
   const pageTitle = repairMode ? `Reconnect ${displayName}` : `Connect ${displayName}`;
   const primaryActionLabel = repairMode ? `Reconnect ${displayName}` : "Connect account";
-  const setupDescription = supportedBrowserCollector
-    ? browserFormContract.setupDescription
-    : `This dashboard can repair an existing ${displayName} source, but it cannot create a new source from this page.`;
+  // Repair works even where adding a new account is unavailable, so repair mode keeps the sign-in line.
+  const setupDescription = repairMode || supportedBrowserCollector
+    ? `Sign in to ${displayName} in the browser below.`
+    : "This data source cannot be connected here yet.";
   const setupPanel = supportedBrowserCollector ? (
     <div className="space-y-4">
-      <div className="rounded-xl border border-border/70 bg-card/60 p-5 shadow-sm">
-        <h2 className="pdpp-title text-foreground">Create a new account</h2>
-        <p className="pdpp-body mt-3 text-muted-foreground">
-          Use this when you are connecting a fresh account. The label is optional and only helps you distinguish the
-          source later.
-        </p>
+      <div className="grid gap-4">
         <form action={`/connect/browser-session/${encodeURIComponent(connectorId)}/start`} method="post">
           <div className="mt-4 grid gap-3">
             <label className="grid gap-1" htmlFor="browser-session-display-name">
@@ -206,7 +206,9 @@ export default async function BrowserSessionConnectPage({
                 name={connectionName.name}
                 placeholder={connectionName.placeholder}
               />
-              <span className="pdpp-caption text-muted-foreground">{connectionName.helpText}</span>
+              <span className="pdpp-caption text-muted-foreground">
+                {connectionName.helpText.replace("new source", "new data source")}
+              </span>
             </label>
             {browserFormContract.credentialCapture ? (
               <StoredCredentialFields
@@ -216,7 +218,7 @@ export default async function BrowserSessionConnectPage({
             ) : null}
             <button
               className={buttonVariants({
-                className: "w-full justify-center",
+                className: "min-h-11 w-full justify-center",
                 size: "lg",
                 variant: "default",
               })}
@@ -228,38 +230,33 @@ export default async function BrowserSessionConnectPage({
         </form>
       </div>
 
-      <div className="rounded-md border border-border/70 bg-muted/20 p-4">
-        <p className="pdpp-caption text-muted-foreground">
-          Need to reconnect an existing source instead? Go back to Sources and open that source from the list.
-        </p>
-        <div className="mt-3">
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Choose an existing source
-          </Link>
-        </div>
-      </div>
+      <details className="pdpp-caption text-muted-foreground">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+        <p className="mt-2">{browserFormContract.setupDescription.replaceAll(/PDPP/giu, "DataConnect")}</p>
+        <p className="mt-2">Create a new account in a secure browser.</p>
+        <p className="mt-2">Choose an existing data source to reconnect.</p>
+        <Link className="mt-2 inline-flex min-h-11 items-center underline underline-offset-2" href="/sources">
+          Choose an existing data source
+        </Link>
+        <p className="mt-2">If the browser does not open, return to Data sources and retry from this data source.</p>
+      </details>
     </div>
   ) : (
-    <UnavailableSetupCard displayName={displayName} />
+    <UnavailableSetupCard />
   );
 
   return (
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
+          <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href="/sources">
+            Back to Data sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            <span>
-              {repairMode
-                ? `Log in to ${displayName} in the secure browser to restore collection. Your existing records and history are preserved.`
-                : setupDescription}
-            </span>
+            <span>{setupDescription}</span>
           </span>
         }
         title={
@@ -275,30 +272,18 @@ export default async function BrowserSessionConnectPage({
 
         {repairMode ? null : setupPanel}
 
-        {/* How it works */}
         {repairMode ? (
-          <div className="rounded-xl border border-border/70 bg-card/60 p-5 shadow-sm">
-            <h2 className="pdpp-title text-foreground">How this works</h2>
-            <ol className="pdpp-body mt-3 list-inside list-decimal space-y-2 text-muted-foreground">
-              <li>
-                Select <strong className="text-foreground">{primaryActionLabel}</strong> below. PDPP opens a secure
-                browser panel.
-              </li>
-              <li>
-                Sign in to <strong className="text-foreground">{displayName}</strong> in that browser. PDPP stores the
-                browser session state needed for this source. {browserFormContract.repairLoginDescription}
-              </li>
-              <li>Once login is detected, the browser closes and collection resumes automatically.</li>
+          <details className="pdpp-caption text-muted-foreground">
+            <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+            <ol className="mt-2 list-inside list-decimal space-y-2">
+              <li>Select <strong className="text-foreground">{primaryActionLabel}</strong> below to open the browser.</li>
+              <li>Sign in to {displayName} in the browser.</li>
+              <li>{browserFormContract.repairLoginDescription.replaceAll(/PDPP/giu, "DataConnect")}</li>
+              <li>If the browser does not open, choose Try again.</li>
+              <li>Your existing records and history stay in place.</li>
+              {pageParams.connectionId ? <li>Connection ID: {pageParams.connectionId}</li> : null}
             </ol>
-
-            {pageParams.connectionId ? (
-              <p className="pdpp-caption mt-4 text-muted-foreground">
-                Re-authenticating connection{" "}
-                <code className="font-mono text-foreground/80">{pageParams.connectionId}</code>. Your existing records
-                and history are unchanged.
-              </p>
-            ) : null}
-          </div>
+          </details>
         ) : null}
 
         {/* Primary CTA */}
@@ -315,7 +300,7 @@ export default async function BrowserSessionConnectPage({
             ) : null}
             <button
               className={buttonVariants({
-                className: "w-full justify-center",
+                className: "min-h-11 w-full justify-center",
                 size: "lg",
                 variant: "default",
               })}
@@ -326,14 +311,6 @@ export default async function BrowserSessionConnectPage({
           </form>
         ) : null}
 
-        {/* Fallback guidance for when the browser panel cannot start. */}
-        <div className="rounded-md border border-border/50 bg-muted/20 px-4 py-3">
-          <p className="pdpp-caption text-muted-foreground">
-            <strong className="text-foreground">Browser did not open?</strong> Try again, or return to Sources and retry
-            from this source. If DataConnect cannot start the secure browser, it will show the reason before any data is
-            changed.
-          </p>
-        </div>
       </div>
     </RecordroomShellWithPalette>
   );

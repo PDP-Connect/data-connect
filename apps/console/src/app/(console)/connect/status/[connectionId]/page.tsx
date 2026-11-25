@@ -399,7 +399,7 @@ function formatDateRange(range: NonNullable<ConnectionSetupStatus["import_receip
 }
 
 function formatWarnings(warnings: readonly string[]): string | null {
-  return warnings.length > 0 ? warnings.join(" ") : null;
+  return warnings.length > 0 ? warnings.map((warning) => warning.replaceAll(/PDPP/giu, "DataConnect")).join(" ") : null;
 }
 
 function formatMediaCoverage(value: unknown): string {
@@ -487,9 +487,9 @@ function receiptRows(receipt: ImportReceipt): readonly ReceiptRow[] {
 function phaseTone(state: ImportPhaseState): string {
   switch (state) {
     case "done":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700";
+      return "border-border bg-muted text-muted-foreground";
     case "current":
-      return "border-blue-500/30 bg-blue-500/10 text-blue-700";
+      return "border-primary/30 bg-primary/10 text-primary";
     case "failed":
       return "border-destructive/30 bg-destructive/5 text-destructive";
     default:
@@ -670,7 +670,11 @@ function CoverageReceiptCard({ receipt }: { receipt: ImportReceipt }) {
           </div>
         ))}
       </dl>
-      {receipt.remediation ? <p className="pdpp-caption mt-3 text-muted-foreground">{receipt.remediation}</p> : null}
+      {receipt.remediation ? (
+        <p className="pdpp-caption mt-3 text-muted-foreground">
+          {receipt.remediation.replaceAll(/PDPP/giu, "DataConnect")}
+        </p>
+      ) : null}
       {warning ? <p className="pdpp-caption mt-3 text-muted-foreground">{warning}</p> : null}
     </div>
   );
@@ -703,32 +707,58 @@ export default async function ConnectionSetupStatusPage({
   const importPhases = importPhaseProgress(status);
   const displayName = deriveSetupStatusDisplayName(status);
   const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id)?.icon;
-  const title = accountIdentity ? `${displayName} · ${accountIdentity}` : displayName;
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={status.pending} />
       <PageHeader
         actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
+          <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href="/sources">
+            Back to Data sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: "Setup status" }]}
-        description={
-          <span className="inline-flex items-center gap-2">
-            <ConnectorMark connectorId={status.connector_id} icon={connectorIcon} name={displayName} />
-            <span>Durable status for the account or import you just submitted. Bookmark it and come back any time.</span>
-          </span>
-        }
+        description={`${described.headline}.`}
         title={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={status.connector_id} icon={connectorIcon} name={displayName} />
-            {title}
+            {displayName}
           </span>
         }
       />
 
-      <Section description={described.detail} title={described.headline}>
+      <div className="mt-5 flex flex-wrap gap-2">
+        {described.tone === "active" ? (
+          <Link
+            className={buttonVariants({ className: "min-h-11", size: "sm", variant: "default" })}
+            href={sourceRecordsHref(status)}
+          >
+            Open {displayName}
+          </Link>
+        ) : null}
+        {described.tone === "failed" ||
+        status.setup_state === "awaiting_credential" ||
+        status.setup_state === "awaiting_browser_login" ||
+        status.setup_state === "first_sync_zero_yield" ||
+        status.setup_state === "first_sync_verified_empty" ||
+        status.setup_state === "first_sync_unverified_zero" ||
+        status.setup_state === "first_sync_unverified_missing_counts" ? (
+          <Link
+            className={buttonVariants({ className: "min-h-11", size: "sm", variant: "default" })}
+            href={setupHref(status)}
+          >
+            {retryLabel(status)}
+          </Link>
+        ) : null}
+      </div>
+
+      <details className="mt-5 max-w-2xl">
+        <summary className="pdpp-caption inline-flex min-h-11 cursor-pointer items-center text-muted-foreground underline decoration-dotted underline-offset-4">
+          Details
+        </summary>
+        <Section
+          className="mt-3"
+          description={described.detail.replaceAll(/PDPP/giu, "DataConnect")}
+          title={described.headline}
+        >
         <dl className="grid max-w-2xl gap-2 rounded-md border border-border/80 bg-muted/20 p-4">
           {accountIdentity ? (
             <div className="flex justify-between gap-4">
@@ -753,7 +783,7 @@ export default async function ConnectionSetupStatusPage({
               <dt className="pdpp-caption text-muted-foreground">Run</dt>
               <dd className="pdpp-caption">
                 <Link
-                  className="font-mono underline underline-offset-2 hover:text-foreground"
+                  className="inline-flex min-h-11 items-center font-mono underline underline-offset-2 hover:text-foreground"
                   href={`/syncs/${encodeURIComponent(status.run.run_id)}`}
                 >
                   {status.run.run_id}
@@ -771,38 +801,38 @@ export default async function ConnectionSetupStatusPage({
         <div className="mt-4 flex flex-wrap gap-2">
           {described.tone === "active" ? (
             <>
-              <Link className={buttonVariants({ size: "sm", variant: "default" })} href={sourceRecordsHref(status)}>
-                Open in Explore
-              </Link>
-              <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={sourceDetailHref(status)}>
-                Source details
+              <Link
+                className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })}
+                href={sourceDetailHref(status)}
+              >
+                Data source details
               </Link>
               {status.setup_kind === "manual_upload" ? (
-                <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={setupHref(status)}>
+                <Link
+                  className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })}
+                  href={setupHref(status)}
+                >
                   Import another file
                 </Link>
               ) : null}
             </>
           ) : null}
-          {described.tone === "failed" ||
-          status.setup_state === "awaiting_credential" ||
-          status.setup_state === "awaiting_browser_login" ||
-          status.setup_state === "first_sync_zero_yield" ||
-          status.setup_state === "first_sync_verified_empty" ||
-          status.setup_state === "first_sync_unverified_zero" ||
-          status.setup_state === "first_sync_unverified_missing_counts" ? (
-            <Link className={buttonVariants({ size: "sm", variant: "default" })} href={setupHref(status)}>
-              {retryLabel(status)}
-            </Link>
-          ) : null}
         </div>
       </Section>
 
       {status.last_error ? (
-        <Callout className="mt-5" description={status.last_error.remediation} title={described.headline} tone="warning">
-          <p className="pdpp-caption text-callout-warning-fg/80">Reason: {status.last_error.reason}</p>
+        <Callout
+          className="mt-5"
+          description={status.last_error.remediation.replaceAll(/PDPP/giu, "DataConnect")}
+          title={described.headline}
+          tone="warning"
+        >
+          <p className="pdpp-caption text-callout-warning-fg/80">
+            Reason: {status.last_error.reason.replaceAll(/PDPP/giu, "DataConnect")}
+          </p>
         </Callout>
       ) : null}
+      </details>
     </RecordroomShellWithPalette>
   );
 }

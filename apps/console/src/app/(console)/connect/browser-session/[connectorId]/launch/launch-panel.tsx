@@ -106,10 +106,12 @@ function launchErrorMessage(err: unknown): string {
 export function BrowserSessionLaunchPanel({
   connectionId,
   connectorId,
+  displayName,
   draft,
 }: {
   connectionId: string;
   connectorId: string;
+  displayName: string;
   draft: boolean;
 }) {
   const [state, setState] = useState<LaunchState>({ error: null, starting: true });
@@ -142,31 +144,36 @@ export function BrowserSessionLaunchPanel({
   }, [connectionId, connectorId, draft]);
 
   return (
-    <section className="grid gap-4 rounded-xl border border-border/70 bg-card/60 p-5 shadow-sm">
-      <div className="grid gap-2">
-        <p className="pdpp-eyebrow text-muted-foreground">secure browser</p>
-        <h2 className="pdpp-title text-foreground">
-          {state.starting ? "Starting the browser session..." : "Browser session did not finish starting"}
-        </h2>
-        <p className="pdpp-body text-muted-foreground">
-          {state.starting
-            ? "Keep this page open. DataConnect is preparing the run and will open the secure browser when it is ready."
-            : state.error}
-        </p>
-      </div>
+    <section className="grid gap-4">
+      <p className="pdpp-body text-muted-foreground">
+        {state.starting ? `DataConnect is opening the browser for ${displayName}. Keep this page open.` : "The browser could not open. Try again."}
+      </p>
 
       {state.error ? (
         <div className="flex flex-wrap gap-2">
-          <button className={buttonVariants({ size: "sm", variant: "default" })} onClick={start} type="button">
+          <button
+            className={buttonVariants({ className: "min-h-11", size: "sm", variant: "default" })}
+            onClick={start}
+            type="button"
+          >
             Try again
           </button>
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/syncs">
-            Open Syncs
-          </Link>
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
-          </Link>
         </div>
+      ) : null}
+      {state.error ? (
+        <details className="pdpp-caption text-muted-foreground">
+          <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
+          <p className="mt-2">{state.error.replaceAll(/PDPP/giu, "DataConnect")}</p>
+          <Link className="mt-2 inline-flex min-h-11 items-center underline underline-offset-2" href="/syncs">
+            Open sync history
+          </Link>
+          <Link
+            className="mt-2 inline-flex min-h-11 items-center underline underline-offset-2"
+            href={`/connect/browser-session/${encodeURIComponent(connectorId)}`}
+          >
+            Connect {displayName}
+          </Link>
+        </details>
       ) : null}
     </section>
   );

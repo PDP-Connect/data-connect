@@ -58,12 +58,16 @@ const STATUS_SOURCE_DETAIL_HELPER = /export function sourceDetailHref[\s\S]*new 
 const CATALOG_EXPLORE_LINK = /href=\{sourceRecordsHref\(source\.connectionId\)\}[\s\S]*Open in Explore/;
 const CATALOG_SOURCE_DETAILS_LINK =
   /href=\{sourceDetailHref\(connectorKey, source\.connectionId\)\}[\s\S]*Source details/;
-const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open in Explore/;
-const STATUS_SOURCE_DETAILS_LINK = /href=\{sourceDetailHref\(status\)\}[\s\S]*Source details/;
+// RAISE-RULES.md 2 / setup-pages brief 4: the filled action after success is "Open <Source>".
+const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open \{displayName\}/;
+// RAISE-RULES.md 4: "source" alone becomes "data source".
+const STATUS_SOURCE_DETAILS_LINK = /href=\{sourceDetailHref\(status\)\}[\s\S]*Data source details/;
 const CONNECTOR_LEVEL_STATUS_RECORDS_LINK = /href=\{`\/sources\/\$\{encodeURIComponent\(status\.connector_id\)\}`\}/;
 const OWNER_SAFE_STORAGE_COPY = /stored for this source and is not exposed to connected apps or clients/;
-const VALIDATES_BEFORE_COMMIT_COPY = /validates before committing/i;
-const COVERAGE_RECEIPT_COPY = /coverage receipt|coverage provenance/i;
+// RAISE-RULES.md 4: plain words ("checks the file before importing it").
+const VALIDATES_BEFORE_COMMIT_COPY = /checks the file before importing it/i;
+// RAISE-RULES.md 4 bans "coverage" on screen; the receipt stays revisitable through the status page link.
+const COVERAGE_RECEIPT_COPY = /\/connect\/status\/\$\{encodeURIComponent\(connectionId\)\}/;
 const PRIMARY_METHODS_IDENTIFIER = /primaryMethods/;
 const ADVANCED_METHODS_IDENTIFIER = /advancedMethods/;
 const OTHER_EXPORT_PATHS_DISCLOSURE = /<details[\s\S]*?Other ways to export this data/;
@@ -149,7 +153,7 @@ test("manual upload page has owner-safe storage and validate-before-commit langu
   // Validates before durable commit when a validator exists.
   assert.match(formSrc, VALIDATES_BEFORE_COMMIT_COPY);
   // It speaks of a durable receipt the owner can revisit.
-  assert.match(pageSrc, COVERAGE_RECEIPT_COPY);
+  assert.match(formSrc, COVERAGE_RECEIPT_COPY);
 });
 
 test("manual upload page leads with primary methods and hides advanced behind one disclosure", async () => {
