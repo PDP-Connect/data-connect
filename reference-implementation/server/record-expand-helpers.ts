@@ -324,8 +324,12 @@ export function normalizeExpandRequest(
       );
     }
 
-    const defaultLimit = parseIntegerValue(capability.default_limit) ?? 10;
-    const maxLimit = parseIntegerValue(capability.max_limit) ?? 50;
+    const defaultLimit = capability.default_limit === undefined ? 10 : parseIntegerValue(capability.default_limit);
+    const maxLimit = capability.max_limit === undefined ? 50 : parseIntegerValue(capability.max_limit);
+    if (defaultLimit === null || maxLimit === null || !Number.isSafeInteger(defaultLimit) ||
+        !Number.isSafeInteger(maxLimit) || defaultLimit <= 0 || maxLimit <= 0 || defaultLimit > maxLimit) {
+      throw invalidQueryError(`Expand relation '${relationName}' has invalid configured limits`, "invalid_expand");
+    }
     let appliedLimit = defaultLimit;
 
     if (requestedLimits && Object.hasOwn(requestedLimits, relationName)) {

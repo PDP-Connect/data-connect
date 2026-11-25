@@ -21,6 +21,7 @@ import {
   invalidQueryError,
   normalizePrimaryKey,
   parseIntegerValue,
+  normalizeExpandRequest,
 } from "../server/record-expand-helpers.ts";
 
 interface QueryError extends Error {
@@ -122,4 +123,38 @@ test("assertNonEmptyJsonField accepts literal top-level JSON keys", () => {
 test("assertNonEmptyJsonField rejects absent field names", () => {
   assert.throws(() => assertNonEmptyJsonField("", "field"));
   assert.throws(() => assertNonEmptyJsonField(null, "field"));
+});
+
+test("configured expansion limits preserve valid defaults and explicit bounds", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  const manifest: Manifest = {
+    relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+    query: { expand: [{ name: "fixture", default_limit: 2, max_limit: 4 }] },
+  };
+  assert.equal(normalizeExpandRequest({ expand: "fixture" }, "parent", grant, manifest, null)[0]?.limit, 2);
+  for (const limit of [1, 4]) {
+    assert.equal(normalizeExpandRequest({
+      expand: "fixture", expand_limit: { fixture: limit },
+    }, "parent", grant, manifest, null)[0]?.limit, limit);
+  }
+});
+
+test("configured expansion limits that are invalid reject the request", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  for (const limits of [
+    { default_limit: 5, max_limit: 4 },
+    { default_limit: 0 },
+    { max_limit: "many" },
+    { default_limit: 1.5 },
+  ]) {
+    const manifest = {
+      relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+      query: { expand: [{ name: "fixture", ...limits }] },
+    } as unknown as Manifest;
+    assert.throws(() => normalizeExpandRequest({ expand: "fixture" }, "parent", grant, manifest, null), {
+      code: "invalid_expand",
+    });
+  }
 });
