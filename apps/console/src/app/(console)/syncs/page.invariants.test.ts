@@ -46,7 +46,7 @@ const FAILURE_CARD_SOURCE_WORK_RE = /card\.work\?\.group \?\? "other"[\s\S]{0,80
 // so the invariant is "the bounded per-page limit constant is used", not the old
 // literal `listRuns({ limit: SYNCS_OVERVIEW_RUN_LIMIT })` call shape.
 const SYNCS_OVERVIEW_LIST_RUNS_RE = /limit:\s*SYNCS_OVERVIEW_RUN_LIMIT/;
-const RECENT_LIST_RENDER_RE = /<RecentSyncsSection connectorIcons=\{connectorIcons\} entries=\{model\.recentSyncs\} paging=\{recentSyncsPaging\} \/>/;
+const RECENT_LIST_RENDER_RE = /<RecentSyncsSection[\s\S]*?entries=\{model\.recentSyncs\}[\s\S]*?paging=\{recentSyncsPaging\}[\s\S]*?sourceSummaries=\{sourceSummaries\}[\s\S]*?\/>/;
 const RECENT_ROW_HREF_RE = /href=\{entry\.href\}/;
 const RECENT_ROW_PREFETCH_FALSE_RE = /href=\{entry\.href\}\s+prefetch=\{false\}/;
 
@@ -120,6 +120,7 @@ test("pending-setup cards fold into the one needs-you section, never a second on
 test("recent syncs list drills into the run detail route", async () => {
   const src = await readFile(VIEW_FILE, "utf8");
 
+  // DIRECTION.md, /syncs: each history row opens its existing detail address.
   assert.match(src, RECENT_LIST_RENDER_RE, "syncs must render the recent-runs list");
   assert.match(src, RECENT_ROW_HREF_RE, "each recent sync row must link to its run detail route");
   assert.match(src, RECENT_ROW_PREFETCH_FALSE_RE, "recent sync rows must not prefetch dynamic run routes");
@@ -137,7 +138,9 @@ test("syncs first-paint run feed is bounded to the overview budget", async () =>
 const RUN_CURSOR_QUERY_RE = /cursor:\s*params\.run_cursor \|\| undefined/;
 const RUN_STATUS_QUERY_RE = /status:\s*params\.status \|\| undefined/;
 const NO_UNBOUNDED_LIST_RUNS_RE = /\blistRuns\(\s*\)/;
-const RECENT_FILTER_FORM_RE = /<form\s+action=\{RECENT_SYNCS_PATH\}[\s\S]{0,120}method="get"/;
+// PAGE-RULES 7 (keyboard-usable popover): the options live in a portaled popup,
+// which is outside any <form>, so each option is a plain GET link instead.
+const RECENT_FILTER_LINK_RE = /<a[\s\S]{0,400}href=\{recentSyncsFilterHref\(params, name, option\.value\)\}/;
 const RECENT_FILTER_STATUS_SELECT_RE = /name="status"[\s\S]{0,80}options=\{paging\.statusOptions\}/;
 const RECENT_PAGER_NEXT_HREF_RE = /run_cursor:\s*paging\.nextCursor/;
 
@@ -149,10 +152,10 @@ test("recent syncs run feed pages by cursor and filters by a real server-side st
   assert.doesNotMatch(src, NO_UNBOUNDED_LIST_RUNS_RE, "listRuns must never be called with no bound at all");
 });
 
-test("recent syncs filter form is a plain GET form with no client hydration on the view", async () => {
+test("recent syncs filters are plain GET links with no client hydration on the view", async () => {
   const src = await readFile(VIEW_FILE, "utf8");
 
-  assert.match(src, RECENT_FILTER_FORM_RE, "the status filter must be a server-rendered GET form");
+  assert.match(src, RECENT_FILTER_LINK_RE, "each filter option must be a server-rendered GET link");
   assert.match(
     src,
     RECENT_FILTER_STATUS_SELECT_RE,
@@ -167,7 +170,7 @@ const RECENT_FILTER_CONNECTOR_HIDDEN_INPUT_RE = /<input\s+name="connector_id"\s+
 const CONNECTOR_QUERY_RE = /connector_id:\s*params\.connector_id \|\| undefined/;
 const CONNECTOR_OPTIONS_FROM_FLEET_PAGE_RE =
   /connectorOptions:\s*connectorFilterOptions\(connectorsPage\.items,\s*params\.connector_id\)/;
-const CONNECTOR_OPTIONS_ANY_SOURCE_RE = /\{ label: "any source", value: "" \}/;
+const CONNECTOR_OPTIONS_ANY_SOURCE_RE = /\{ label: "All data sources", value: "" \}/;
 // The picker must be built from identity fields the reference already returned.
 // Any literal connector key here would mean the console had grown its own
 // roster, which is exactly what this filter must never do.
@@ -198,6 +201,7 @@ test("connector filter options come from the fleet page the route already fetche
     CONNECTOR_OPTIONS_FROM_FLEET_PAGE_RE,
     "connector options must be projected from the connector-summary page, not fetched or invented separately"
   );
+  // DIRECTION.md, /syncs: the outlined filter shows its current value in plain words.
   assert.match(src, CONNECTOR_OPTIONS_ANY_SOURCE_RE, "the picker must offer an explicit option that clears the filter");
   assert.match(
     src,
@@ -219,7 +223,25 @@ test("recent syncs still refuses to offer a sort control the runs feed cannot ho
 test("recent syncs pager links to the next cursor the server returned, never a fabricated offset", async () => {
   const src = await readFile(VIEW_FILE, "utf8");
 
-  assert.match(src, RECENT_PAGER_NEXT_HREF_RE, "the older-syncs link must carry the real next_cursor from the server");
+  // DIRECTION.md, /syncs: keep server paging behind one Show more control.
+  assert.match(src, RECENT_PAGER_NEXT_HREF_RE, "Show more must carry the real next_cursor from the server");
+  assert.match(src, />\s*Show more\s*</);
+});
+
+test("History keeps both independent reads and folds the source summary pager into Details", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  const view = await readFile(VIEW_FILE, "utf8");
+  // The run cursor and source-summary cursor page different server reads.
+  assert.match(page, /listRuns\(runListQuery\(params\)\)/);
+  assert.match(page, /fetchSyncsConnectorsPage\(pageState\)/);
+  assert.match(page, /sourcePager=\{/);
+  assert.match(page, /<ConnectorSummaryPager/);
+  assert.match(view, /<details className="mt-6 border-t border-border\/70">[\s\S]*?\{sourcePager\}/);
+});
+
+test("unread q is no longer declared on the History route", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.doesNotMatch(page, /\bq\??:\s*string/);
 });
 
 // The shared humanizer moved from the console-local `connection-evidence.ts`

@@ -15,7 +15,6 @@ import { fileURLToPath } from "node:url";
 import { NAV_GROUPS, type NavItem } from "@pdpp/brand-react";
 
 const CONSOLE = fileURLToPath(new URL("..", import.meta.url));
-const OPERATOR_UI = fileURLToPath(new URL("../../../../../../reference-implementation/vendor/operator-ui/src/", import.meta.url));
 
 const SKIPPED = new Set(["/", "/sources"]);
 
@@ -28,7 +27,7 @@ const HEADING_FILE: Record<string, string> = {
   "/explore": `${CONSOLE}explore/explore-canvas.tsx`,
   "/grants": `${CONSOLE}grants/page.tsx`,
   "/notifications": `${CONSOLE}notifications/page.tsx`,
-  "/schedules": `${OPERATOR_UI}components/views/schedules-view.tsx`,
+  "/schedules": `${CONSOLE}schedules/page.tsx`,
   "/settings": `${CONSOLE}settings/page.tsx`,
   "/syncs": `${CONSOLE}syncs/syncs-view.tsx`,
 };

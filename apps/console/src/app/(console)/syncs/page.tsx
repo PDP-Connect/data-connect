@@ -27,6 +27,8 @@
  */
 
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import {
@@ -55,7 +57,6 @@ interface Params {
   demo?: string;
   page_cursor?: string;
   peek?: string;
-  q?: string;
   run_cursor?: string;
   status?: string;
   [key: string]: string | undefined;
@@ -67,12 +68,12 @@ function fetchSyncsConnectorsPage(pageState: ReturnType<typeof parseConnectorSum
 
 /** Real, honest run-status filter options — every value `_ref/runs` actually recognises. */
 const RUN_STATUS_FILTER_OPTIONS = [
-  { label: "any outcome", value: "" },
-  { label: "succeeded", value: "succeeded" },
-  { label: "succeeded with gaps", value: "succeeded_with_gaps" },
-  { label: "failed", value: "failed" },
-  { label: "cancelled", value: "cancelled" },
-  { label: "in progress", value: "in_progress" },
+  { label: "Any result", value: "" },
+  { label: "Succeeded", value: "succeeded" },
+  { label: "Succeeded with gaps", value: "succeeded_with_gaps" },
+  { label: "Failed", value: "failed" },
+  { label: "Cancelled", value: "cancelled" },
+  { label: "In progress", value: "in_progress" },
 ] as const;
 
 /**
@@ -104,7 +105,7 @@ function connectorFilterOptions(
   const options = [...byConnectorId.entries()]
     .map(([value, label]) => ({ label, value }))
     .sort((a, b) => a.label.localeCompare(b.label));
-  return options.length > 0 ? [{ label: "any source", value: "" }, ...options] : [];
+  return options.length > 0 ? [{ label: "All data sources", value: "" }, ...options] : [];
 }
 
 function runListQuery(params: Params) {
@@ -152,7 +153,16 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <ServerUnreachable />
+          <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+            <PageHeader title="Sync history" />
+            <p className="text-[15px] text-muted-foreground">
+              This could not be loaded. <Link className="text-primary underline" href="/syncs">Try again</Link>.
+            </p>
+            <details className="mt-4">
+              <summary className="min-h-11 cursor-pointer py-2 text-[13px] text-muted-foreground">Details</summary>
+              <ServerUnreachable />
+            </details>
+          </main>
         </RecordroomShellWithPalette>
       );
     }
@@ -162,7 +172,16 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   if (connectorsPage.kind === "error") {
     return (
       <RecordroomShellWithPalette>
-        <ConnectorSummaryPageError basePath={SYNCS_PATH} currentParams={params} message={connectorsPage.message} />
+        <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+          <PageHeader title="Sync history" />
+          <p className="text-[15px] text-muted-foreground">
+            This could not be loaded. <Link className="text-primary underline" href={SYNCS_PATH}>Try again</Link>.
+          </p>
+          <details className="mt-4">
+            <summary className="min-h-11 cursor-pointer py-2 text-[13px] text-muted-foreground">Details</summary>
+            <ConnectorSummaryPageError basePath={SYNCS_PATH} currentParams={params} message={connectorsPage.message} />
+          </details>
+        </main>
       </RecordroomShellWithPalette>
     );
   }
@@ -179,6 +198,16 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
       <SyncsView
         connectorIcons={connectorIcons}
         model={model}
+        sourceSummaries={connectorsPage.items}
+        sourcePager={
+          <ConnectorSummaryPager
+            basePath={SYNCS_PATH}
+            currentParams={params}
+            hasMore={connectorsPage.hasMore}
+            isPaged={isPagedRequest(pageState)}
+            nextCursor={connectorsPage.nextCursor}
+          />
+        }
         recentSyncsPaging={{
           connectorOptions: connectorFilterOptions(connectorsPage.items, params.connector_id),
           hasMore: runsResult.has_more,
@@ -187,13 +216,6 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
           params,
           statusOptions: RUN_STATUS_FILTER_OPTIONS,
         }}
-      />
-      <ConnectorSummaryPager
-        basePath={SYNCS_PATH}
-        currentParams={params}
-        hasMore={connectorsPage.hasMore}
-        isPaged={isPagedRequest(pageState)}
-        nextCursor={connectorsPage.nextCursor}
       />
     </RecordroomShellWithPalette>
   );

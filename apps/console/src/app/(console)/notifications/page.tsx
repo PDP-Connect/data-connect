@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { WebPushSettings } from "@/app/(console)/components/web-push-settings.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
@@ -37,38 +37,46 @@ export default async function NotificationsPage() {
   if (unreachable || !state) {
     return (
       <RecordroomShellWithPalette>
-        <ServerUnreachable />
+        <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+          <PageHeading />
+          <p className="text-[15px] text-muted-foreground">
+            This could not be loaded. <Link className="text-primary underline" href="/notifications">Try again</Link>.
+          </p>
+          <details className="mt-4">
+            <summary className="min-h-11 cursor-pointer py-2 text-[13px] text-muted-foreground">Details</summary>
+            <ServerUnreachable />
+          </details>
+        </main>
       </RecordroomShellWithPalette>
     );
   }
 
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <PageHeader
-          description="Enable owner-action alerts for the browser profile or installed app you are using right now. Each device is configured separately."
-          title="Notifications"
-        />
-
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6 lg:px-8">
+        <PageHeading />
         <WebPushSettings config={state.config} subscriptions={state.subscriptions} />
 
-        <Section title="What DataConnect sends">
-          <div className="grid gap-3 text-muted-foreground text-sm md:grid-cols-3">
-            <p>
-              <strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for source
-              reconnects, syncs waiting on you, and other events where this instance needs your attention.
-            </p>
-            <p>
-              <strong className="text-foreground">Headline only.</strong> Payloads stay non-secret and route you back to
-              the owner-authenticated console for the details.
-            </p>
-            <p>
-              <strong className="text-foreground">Per device.</strong> Installing the PWA adds an app icon; this browser
-              starts receiving alerts once you enable it here.
-            </p>
+        <details className="border-t border-border/70 text-[13px] text-muted-foreground">
+          <summary className="min-h-11 cursor-pointer py-3">Details</summary>
+          <div className="grid gap-3 pb-3 md:grid-cols-3">
+            <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
+            <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>
+            <p><strong className="text-foreground">Per device.</strong> Each phone, computer, and app must be enabled separately.</p>
           </div>
-        </Section>
+        </details>
       </main>
     </RecordroomShellWithPalette>
+  );
+}
+
+function PageHeading() {
+  return (
+    <header className="mb-2">
+      <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]">
+        Notifications
+      </h1>
+      <p className="mt-2 text-[15px] text-muted-foreground">A message when a sync needs you.</p>
+    </header>
   );
 }

@@ -9,9 +9,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import { ConnectorMark } from "../components/connector-mark.tsx";
+import { SourceStatusText } from "../components/source-status-text.tsx";
 import type { RefConnectorSummary, RefSchedule } from "../lib/ref-client.ts";
+import { sourceStatusWords } from "../lib/source-status-words.ts";
 import { activeScheduleRunId, scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
+import { formatIntervalWords } from "./schedule-cadence-words.ts";
 import { deleteScheduleAction, pauseScheduleAction, resumeScheduleAction, upsertScheduleAction } from "./actions.ts";
 
 interface ScheduleRowProps {
@@ -71,7 +74,6 @@ function recordsHrefForSummary(summary: RefConnectorSummary): string {
   // connection_id is non-optional in the current RefConnectorSummary contract,
   // but connector_instance_id/connector_id are a real legacy-server fallback
   // (single-instance rows predating connection_id).
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
   const routeId = summary.connection_id ?? summary.connector_instance_id ?? summary.connector_id;
   return `/sources/${encodeURIComponent(routeId)}`;
 }
@@ -116,6 +118,7 @@ function ScheduleEditButton({
 }) {
   return (
     <IcButton
+      className="min-h-11"
       disabled={isPending || intervalSeconds === null}
       onClick={() => onEdit(formatIntervalForInput(intervalSeconds), formatIntervalForInput(jitterSeconds))}
       size="sm"
@@ -130,6 +133,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [editState, setEditState] = useState<EditState>("idle");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const initialIntervalSeconds = scheduleIntervalSeconds(summary.schedule?.interval_seconds);
   const initialJitterSeconds = scheduleIntervalSeconds(summary.schedule?.jitter_seconds);
   const [every, setEvery] = useState(() => formatIntervalForInput(initialIntervalSeconds));
@@ -146,7 +150,6 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
       const res = await upsertScheduleAction(summary.connector_id, {
         // connection_id is non-optional in the current contract; connector_instance_id
         // is a real legacy-server fallback (see recordsHrefForSummary above).
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
         connectionId: summary.connection_id ?? summary.connector_instance_id ?? null,
         enabled: true,
         every,
@@ -170,7 +173,6 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
         summary.connector_id,
         // connection_id is non-optional in the current contract; connector_instance_id
         // is a real legacy-server fallback (see recordsHrefForSummary above).
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
         summary.connection_id ?? summary.connector_instance_id ?? null
       );
       if (!res.ok) {
@@ -186,7 +188,6 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
         summary.connector_id,
         // connection_id is non-optional in the current contract; connector_instance_id
         // is a real legacy-server fallback (see recordsHrefForSummary above).
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
         summary.connection_id ?? summary.connector_instance_id ?? null
       );
       if (!res.ok) {
@@ -202,7 +203,6 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
         summary.connector_id,
         // connection_id is non-optional in the current contract; connector_instance_id
         // is a real legacy-server fallback (see recordsHrefForSummary above).
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
         summary.connection_id ?? summary.connector_instance_id ?? null
       );
       if (!res.ok) {
@@ -232,7 +232,6 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
   // schedule is RefSchedule | null (remoteScheduleFor can return null); tsc
   // confirms schedule.human_attention_needed errors without the guard when
   // the fallback is removed. Biome's type-aware pass mis-resolves this one.
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: see comment above.
   const needsHuman = schedule?.human_attention_needed ?? false;
   const recInterval = recommendedIntervalLabel(policy);
   const recMode = policy?.recommended_mode;
@@ -242,10 +241,25 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
   // ineligible, so the scheduler skips it. Surface the reason instead of
   // implying the row is running.
   const ineligibilityReason = schedule?.ineligibility_reason ?? null;
+  const sourceStatus = sourceStatusWords(summary, { now: new Date() });
+  const frequency = localDevice
+    ? "On this device"
+    : schedule
+      ? formatIntervalWords(schedule.interval_seconds)
+      : "Manual";
+  const nextSync = localDevice
+    ? "Next sync not known"
+    : schedule?.enabled && schedule.ineligibility_reason
+      ? "Next sync not scheduled"
+      : schedule?.enabled
+        ? "Next sync not known"
+        : schedule
+          ? "Next sync paused"
+          : "Only when you ask";
 
   return (
-    <li>
-      <div className="flex flex-col gap-2 px-3 py-3 hover:bg-muted/40">
+    <li className="border-b border-border/70 py-3" data-source-id={summary.connection_id} data-status-row={sourceStatus.row}>
+      <div className="flex flex-col gap-2">
         {/* Top area: identity on its own line, then actions on a separate row on mobile */}
         {/* P0-1: at ≤640px these two sections stack vertically (flex-col) so
             the long source/account name never shares a line with the action buttons. */}
@@ -258,46 +272,33 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
                 44px floor via an invisible inset ::before, same technique as
                 .rr-s-link / .rr-x-facet-not. */}
             <Link
-              className="pdpp-body relative font-medium text-foreground before:absolute before:-inset-3 before:content-[''] hover:underline"
+              className="pdpp-body relative min-h-11 font-medium text-foreground before:absolute before:-inset-3 before:content-[''] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               href={recordsHref}
             >
               <ConnectorMark spacing="after" connectorId={connectorKey} icon={connectorIcon} name={displayName} />
               {displayName}
             </Link>
-            <div className="pdpp-caption mt-0.5 truncate font-mono text-muted-foreground">{connectorKey}</div>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[13px]">
+              <SourceStatusText status={sourceStatus} />
+              <span className="text-muted-foreground">{frequency}</span>
+              <span className="text-muted-foreground">
+                {schedule?.enabled && schedule.next_due_at ? (
+                  <>Next sync <IcTimestamp mode="relative" value={schedule.next_due_at} /></>
+                ) : nextSync}
+              </span>
+            </div>
           </div>
 
           {/* Status + action buttons — full-width row on mobile, right-pinned on sm+ */}
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {ineligibilityReason && (
-              <span
-                className="pdpp-caption rounded-full bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
-                title={ineligibilityReason}
-              >
-                not runnable
-              </span>
-            )}
-            {needsHuman && (
-              <span className="pdpp-caption rounded-full bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">
-                needs human input
-              </span>
-            )}
-            {activeRunId && (
-              <Link
-                className="pdpp-caption text-blue-600 underline-offset-2 hover:underline"
-                href={`${runsHref}/${encodeURIComponent(activeRunId)}`}
-              >
-                running →
-              </Link>
-            )}
             {schedule && enabled !== null && (
               <>
                 {enabled ? (
-                  <IcButton disabled={isPending} onClick={handlePause} size="sm" variant="ghost">
+                  <IcButton className="min-h-11" disabled={isPending} onClick={handlePause} size="sm" variant="ghost">
                     Pause
                   </IcButton>
                 ) : (
-                  <IcButton disabled={isPending} onClick={handleResume} size="sm" variant="ghost">
+                  <IcButton className="min-h-11" disabled={isPending} onClick={handleResume} size="sm" variant="ghost">
                     Resume
                   </IcButton>
                 )}
@@ -311,19 +312,49 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
                     setEditState(editState === "editing" ? "idle" : "editing");
                   }}
                 />
-                <IcButton disabled={isPending} onClick={handleDelete} size="sm" variant="ghost">
-                  Delete
-                </IcButton>
               </>
             )}
             {showScheduleSetup && (
-              <IcButton disabled={isPending} onClick={() => setEditState("editing")} size="sm" variant="ghost">
+              <IcButton className="min-h-11" disabled={isPending} onClick={() => setEditState("editing")} size="sm" variant="ghost">
                 Set schedule
               </IcButton>
             )}
           </div>
         </div>
 
+        {editState === "editing" && (
+          <ScheduleEditor
+            every={every}
+            isPending={isPending}
+            jitter={jitter}
+            onCancel={() => setEditState("idle")}
+            onEveryChange={setEvery}
+            onJitterChange={setJitter}
+            onSave={handleSave}
+            policy={policy}
+            rationale={rationale}
+            recInterval={recInterval}
+          />
+        )}
+
+        {toast && (
+          <p
+            aria-live="polite"
+            className={toast.kind === "error" ? "pdpp-caption text-destructive" : "pdpp-caption text-attention"}
+            role="status"
+          >
+            {toast.message}
+          </p>
+        )}
+
+        <details className="text-[13px] text-muted-foreground">
+        <summary className="min-h-11 cursor-pointer py-2">Details</summary>
+        <div className="grid gap-2 pb-2">
+        <p className="font-mono">{connectorKey}</p>
+        {activeRunId ? (
+          <Link className="text-primary underline" href={`${runsHref}/${encodeURIComponent(activeRunId)}`}>Active sync →</Link>
+        ) : null}
+        {needsHuman ? <p>Needs human input</p> : null}
         {/* Stats row */}
         <div className="pdpp-caption flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
           {schedule ? (
@@ -368,8 +399,8 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
 
         {/* Ineligibility reason: stale enabled row + manifest policy changed */}
         {ineligibilityReason && (
-          <p className="pdpp-caption text-amber-700 dark:text-amber-400">
-            <strong>Manual runs only.</strong> {ineligibilityReason} You can still sync this source by hand; pause or
+          <p className="pdpp-caption text-attention">
+            <strong>Manual runs only.</strong> {ineligibilityReason} You can still sync this data source by hand; pause or
             delete the schedule to match.
           </p>
         )}
@@ -379,39 +410,25 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
 
         {/* Minimum-interval warning from last save */}
         {schedule?.minimum_interval_warning && (
-          <p className="pdpp-caption text-amber-700 dark:text-amber-400">{schedule.minimum_interval_warning}</p>
+          <p className="pdpp-caption text-attention">{schedule.minimum_interval_warning}</p>
         )}
 
-        {/* Inline editor */}
-        {editState === "editing" && (
-          <ScheduleEditor
-            every={every}
-            isPending={isPending}
-            jitter={jitter}
-            onCancel={() => setEditState("idle")}
-            onEveryChange={setEvery}
-            onJitterChange={setJitter}
-            onSave={handleSave}
-            policy={policy}
-            rationale={rationale}
-            recInterval={recInterval}
-          />
-        )}
-
-        {/* Inline toast */}
-        {toast && (
-          <p
-            aria-live="polite"
-            className={
-              toast.kind === "error"
-                ? "pdpp-caption text-destructive"
-                : "pdpp-caption text-amber-700 dark:text-amber-400"
-            }
-            role="status"
-          >
-            {toast.message}
-          </p>
-        )}
+        {schedule ? (
+          <div className="grid gap-2">
+            <IcButton className="min-h-11 text-destructive" disabled={isPending} onClick={() => setConfirmingDelete(true)} size="sm" variant="ghost" type="button">Delete</IcButton>
+            {confirmingDelete ? (
+              <div aria-labelledby={`delete-schedule-${summary.connection_id}`} className="grid gap-2 rounded-[6px] border border-border-strong p-3" role="alertdialog">
+                <p id={`delete-schedule-${summary.connection_id}`}>Delete the schedule for {displayName}? Automatic syncs will stop; your records will stay.</p>
+                <div className="flex flex-wrap gap-2">
+                  <IcButton className="min-h-11" disabled={isPending} onClick={handleDelete} size="sm" type="button" variant="destructive">Delete schedule</IcButton>
+                  <IcButton className="min-h-11" disabled={isPending} onClick={() => setConfirmingDelete(false)} size="sm" type="button" variant="ghost">Cancel</IcButton>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        </div>
+        </details>
       </div>
     </li>
   );
@@ -423,12 +440,12 @@ function frictionWarning(policy: RefConnectorSummary["refresh_policy"]): string 
   }
   if (policy.background_safe === false || (policy.interaction_posture && policy.interaction_posture !== "none")) {
     if (policy.interaction_posture === "otp_likely") {
-      return "This connector typically requires an OTP or manual login. Frequent automatic runs will keep prompting for it.";
+      return "This data source often needs a one-time code or manual sign-in. Frequent automatic syncs may ask for it again.";
     }
     if (policy.interaction_posture === "manual_action_likely") {
-      return "This connector typically requires manual browser steps. Automatic background runs will pause until you provide input.";
+      return "This data source often needs you to use a browser. Automatic syncs will pause until you finish.";
     }
-    return "This connector requires credentials. Consider a longer interval to avoid re-authentication prompts.";
+    return "This data source needs sign-in details. A longer interval can reduce sign-in prompts.";
   }
   return null;
 }
@@ -460,8 +477,8 @@ function ScheduleEditor({
   return (
     <div className="mt-1 flex flex-col gap-3 rounded-md border border-border/80 bg-muted/30 px-3 py-3">
       {warning && (
-        <div className="pdpp-caption rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-          <strong>High friction connector.</strong> {warning}
+        <div className="pdpp-caption rounded-[6px] border border-border bg-muted px-3 py-2 text-attention">
+          {warning}
           {rationale ? ` ${rationale}` : ""}
         </div>
       )}

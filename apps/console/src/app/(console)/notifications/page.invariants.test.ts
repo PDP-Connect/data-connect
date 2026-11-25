@@ -12,7 +12,7 @@ const PAGE_FILE = `${HERE}page.tsx`;
 const WEB_PUSH_SETTINGS_RE = /<WebPushSettings config=\{state\.config\} subscriptions=\{state\.subscriptions\} \/>/;
 const WEB_PUSH_CONFIG_RE = /getWebPushConfig\(\)/;
 const WEB_PUSH_SUBSCRIPTIONS_RE = /listWebPushSubscriptions\(\)/;
-const DEVICE_SCOPED_COPY_RE = /Each device is configured separately/;
+const DEVICE_SCOPED_COPY_RE = /A message when a sync needs you\./;
 
 test("notifications page renders the Web Push setup surface from live owner state", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -20,5 +20,7 @@ test("notifications page renders the Web Push setup surface from live owner stat
   assert.match(src, WEB_PUSH_CONFIG_RE);
   assert.match(src, WEB_PUSH_SUBSCRIPTIONS_RE);
   assert.match(src, WEB_PUSH_SETTINGS_RE);
+  // DIRECTION.md, Notifications: the page says in one short sentence what the person gets.
   assert.match(src, DEVICE_SCOPED_COPY_RE);
+  assert.doesNotMatch(src, /Enable owner-action alerts|What DataConnect sends/);
 });

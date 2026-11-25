@@ -1,10 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatConnectorKeyForDisplay, formatConnectorNameForDisplay } from "@pdpp/display";
 import type { ReactNode } from "react";
 import type { RefConnectorSummary } from "../../lib/ref-client.ts";
-import { Timestamp } from "../../ui/timestamp.tsx";
 import { EmptyState } from "../empty-state.tsx";
 import { DataList, PageHeader, Section } from "../primitives.tsx";
 
@@ -63,54 +61,4 @@ export function SchedulesView({
       )}
     </>
   );
-}
-
-export function ScheduleReadRow({ summary }: { summary: RefConnectorSummary }) {
-  const { connector_id, connector_display_name, display_name, schedule, last_successful_run } = summary;
-  const displayName = formatConnectorNameForDisplay({
-    connectorId: connector_id,
-    displayName: display_name,
-    // ConnectorDisplayInput.name is `string | null` (no `undefined`) by that
-    // package's own deliberate contract; connector_display_name is a
-    // genuinely optional wire field (RefConnectorSummary), so normalize to
-    // `null` rather than widen a sibling package's public type.
-    name: connector_display_name ?? null,
-  });
-  const connectorKey = formatConnectorKeyForDisplay(connector_id);
-  return (
-    <li>
-      <div className="flex flex-col gap-1 px-3 py-3">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-          <div className="min-w-0 flex-1">
-            <span className="pdpp-body font-medium text-foreground">{displayName}</span>
-            <div className="pdpp-caption mt-0.5 truncate text-muted-foreground">{connectorKey}</div>
-          </div>
-          {schedule && (
-            <div className="pdpp-caption shrink-0 text-muted-foreground">
-              every {formatInterval(schedule.interval_seconds)}
-              {schedule.enabled ? "" : " · paused"}
-            </div>
-          )}
-        </div>
-        {last_successful_run && (
-          <div className="pdpp-caption text-muted-foreground">
-            Last success: <Timestamp value={last_successful_run.last_at} />
-          </div>
-        )}
-      </div>
-    </li>
-  );
-}
-
-function formatInterval(seconds: number): string {
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  if (seconds < 3600) {
-    return `${Math.round(seconds / 60)}m`;
-  }
-  if (seconds < 86_400) {
-    return `${Math.round(seconds / 3600)}h`;
-  }
-  return `${Math.round(seconds / 86_400)}d`;
 }

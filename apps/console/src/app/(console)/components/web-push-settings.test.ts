@@ -4,7 +4,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import test from "node:test";
+import { unavailableSentence, WebPushSettings } from "./web-push-settings.tsx";
+import type { WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
 const HERE = new URL(".", import.meta.url).pathname;
 const APP_ROOT = join(HERE, "..", "..", "..", "..");
@@ -50,8 +55,10 @@ const DIAGNOSTICS_INSTALL_DISTINCT_FROM_SUBSCRIBE_PATTERN = /A PWA install is no
 const DIAGNOSTICS_DEVICE_SUBSCRIBED_PATTERN = /This device is subscribed/;
 const DIAGNOSTICS_SERVER_UNRECOGNIZED_PATTERN = /server does not recognize it/;
 const DIAGNOSTICS_DEVICE_DISPLAY_CONFIRMATION_PATTERN = /Only the device can confirm whether it displayed/;
-const DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN = />\s*Enable this device\s*</;
-const DIAGNOSTICS_DISABLE_DEVICE_BUTTON_PATTERN = />\s*Disable this device\s*</;
+// history-pages brief, decision 4: the one enable control reads "Turn on notifications".
+const DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN = />\s*Turn on notifications\s*</;
+const DIAGNOSTICS_TURN_OFF_BUTTON_PATTERN = />Turn off</;
+const TURN_OFF_CONFIRMATION_PATTERN = /Turn off notifications for \{label\}\? This device will stop receiving them\./;
 const DIAGNOSTICS_TEST_PUSH_PATTERN = /fetch\("\/_ref\/web-push\/test"/;
 const DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN = /method:\s*"POST"/;
 const DIAGNOSTICS_SEND_TEST_BUTTON_PATTERN = />\s*Send test notification\s*</;
@@ -79,11 +86,19 @@ const DATACONNECT_ICON_GRADIENT_PATTERN = /stop-color="#304DC0"/;
 const DATACONNECT_ICON_WORDMARK_PATTERN = /aria-label="DataConnect"/;
 const ENABLE_CLEARS_TEST_STATUS_PATTERN = /async function enable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
 const DISABLE_CLEARS_TEST_STATUS_PATTERN =
-  /async function disable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
+  /async function disable\(targetEndpoint: string\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
 const WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN =
-  /<p aria-atomic="true" aria-live="polite" className="pdpp-body[^"]+" role="status">/;
+  /<p aria-live="polite"[^>]+role="status">Checking this device…/;
 const WEB_PUSH_DETAIL_LIVE_REGION_PATTERN =
   /<div aria-atomic="true" aria-live="polite" role="status">[\s\S]*?Last check: \{status\}[\s\S]*?\{testStatus \? <p/;
+const BANNED_VISIBLE_WORDS = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server|vapid|push api)\b/i;
+
+function visibleNotificationText(config: { enabled: boolean; object: "web_push_config"; public_key: string | null; unavailable_reason: string | null }, subscriptions: WebPushSubscriptionSummary[]) {
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions }));
+  const document = new JSDOM(markup).window.document;
+  for (const details of document.querySelectorAll("details")) details.remove();
+  return document.body.textContent ?? "";
+}
 
 test("WebPushSettings renders unsupported, denied-permission, insecure-context, VAPID, and iOS/PWA caveat states", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
@@ -149,7 +164,10 @@ test("dashboard test notification button posts to /_ref/web-push/test and gates 
   assert.match(src, DIAGNOSTICS_TEST_PUSH_PATTERN);
   assert.match(src, DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN);
   assert.match(src, DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN);
-  assert.match(src, DIAGNOSTICS_DISABLE_DEVICE_BUTTON_PATTERN);
+  assert.equal(src.match(/>\s*Turn on notifications\s*</g)?.length, 1);
+  assert.doesNotMatch(src, /Enable this device/);
+  assert.match(src, DIAGNOSTICS_TURN_OFF_BUTTON_PATTERN);
+  assert.match(src, TURN_OFF_CONFIRMATION_PATTERN);
   assert.match(src, DIAGNOSTICS_SEND_TEST_BUTTON_PATTERN);
   assert.match(src, DIAGNOSTICS_SEND_DISABLED_PATTERN);
   assert.match(src, DIAGNOSTICS_NO_SUBSCRIPTIONS_PATTERN);
@@ -169,6 +187,53 @@ test("dashboard Web Push status changes are announced as live status regions", a
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
   assert.match(src, WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN);
   assert.match(src, WEB_PUSH_DETAIL_LIVE_REGION_PATTERN);
+});
+
+test("notification availability uses plain words and explains the next step", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  assert.match(src, /export function unavailableSentence/);
+  assert.match(src, /This browser can't receive notifications\. Install DataConnect as an app on your phone or computer to get them\./);
+  assert.match(src, /notifications are blocked in your browser or device settings; allow them there, then return here/i);
+  assert.match(src, /Notifications are not set up on this DataConnect server yet; ask its administrator to set them up\./);
+  // DIRECTION.md, Notifications: browser support details are folded under Details.
+  assert.match(src, /<summary className="min-h-11 cursor-pointer py-3 text-\[13px\] text-muted-foreground">Details<\/summary>/);
+});
+
+test("notification list states keep visible words plain and show only receiving devices", () => {
+  const config = { enabled: true, object: "web_push_config" as const, public_key: "key", unavailable_reason: null };
+  const emptyText = visibleNotificationText(config, []);
+  assert.match(emptyText, /Checking this device/);
+  assert.doesNotMatch(emptyText, BANNED_VISIBLE_WORDS);
+
+  const subscription: WebPushSubscriptionSummary = {
+    created_at: "2026-01-01T00:00:00Z",
+    device_label: "Desk computer",
+    endpoint: "https://push.example/one",
+    endpoint_redacted: null,
+    id: "one",
+    last_failure_at: null,
+    last_failure_reason: null,
+    last_success_at: null,
+    last_used_at: null,
+    owner_subject_id: "owner",
+    platform: null,
+    revoked_at: null,
+    updated_at: "2026-01-01T00:00:00Z",
+    user_agent: null,
+  };
+  const revoked = { ...subscription, endpoint: "https://push.example/revoked", id: "revoked", revoked_at: "2026-01-02T00:00:00Z" };
+  const rowsMarkup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions: [subscription, revoked] }));
+  const rowsDocument = new JSDOM(rowsMarkup).window.document;
+  for (const details of rowsDocument.querySelectorAll("details")) details.remove();
+  const rowsText = rowsDocument.body.textContent ?? "";
+  assert.match(rowsText, /Desk computer/);
+  assert.doesNotMatch(rowsText, /revoked/i);
+  assert.doesNotMatch(rowsText, BANNED_VISIBLE_WORDS);
+
+  // DIRECTION.md, Notifications: unavailable browsers get one plain explanation with a next step.
+  const failedText = unavailableSentence("This browser does not support service workers.");
+  assert.match(failedText, /This browser can't receive notifications/);
+  assert.doesNotMatch(failedText, BANNED_VISIBLE_WORDS);
 });
 
 test("dashboard Web Push actions surface structured endpoint error details", async () => {
