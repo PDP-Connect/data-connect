@@ -316,6 +316,28 @@ test("an underscore-named queue beside the hyphen-named queue is left in place, 
   });
 });
 
+test("an unreadable underscore-named queue beside the hyphen-named queue does not stop the hyphen one resolving", () => {
+  withTempRoot("pdpp-durable-state-underscore-unreadable-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A, "canonical-row");
+    writeFileSync(underscorePath, "this is not a SQLite database, but it is long enough to have a header\n");
+
+    const resolved = captureStderr(() =>
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
+    );
+    assert.equal(resolved.result, hyphenPath);
+    assert.match(resolved.stderr, /could not be read .* may still hold pending rows/);
+    assert.ok(resolved.stderr.includes(`--queue ${underscorePath}`));
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1);
+  });
+});
+
 function enqueueRow(outbox: LocalDeviceOutbox, id: string): void {
   outbox.enqueue({ id, kind: "record_batch", payload: { id }, sourceInstanceId: SOURCE_A });
 }

@@ -519,7 +519,8 @@ function abandonMigrationForExistingCanonical(
 /**
  * The canonical queue is authoritative, so a legacy queue beside it is never
  * drained by the resolver. Its pending rows are not lost, but only the
- * operator can deliver them; say where they are.
+ * operator can deliver them; say where they are. This is a diagnostic: a
+ * legacy file that cannot be read must not stop the canonical queue resolving.
  */
 function warnLegacyQueuePending(input: {
   canonicalPath: string;
@@ -527,13 +528,22 @@ function warnLegacyQueuePending(input: {
   situation: string;
   sourceInstanceId: string;
 }): void {
-  const pending = countPendingSourceRows(input.legacyPath, input.sourceInstanceId);
+  const prefix = `warning: ${input.situation} for source '${input.sourceInstanceId}'. The legacy queue was left writable and was not merged or deleted.`;
+  const deliver = `run with --queue ${input.legacyPath} to deliver them`;
+  let pending: number;
+  try {
+    pending = countPendingSourceRows(input.legacyPath, input.sourceInstanceId);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `${prefix} It could not be read (${reason}), so it may still hold pending rows for this source; ${deliver}.\n`
+    );
+    return;
+  }
   if (pending === 0) {
     return;
   }
-  process.stderr.write(
-    `warning: ${input.situation} for source '${input.sourceInstanceId}'. The legacy queue was left writable and was not merged or deleted. It holds ${pending} pending row(s) for this source; run with --queue ${input.legacyPath} to deliver them.\n`
-  );
+  process.stderr.write(`${prefix} It holds ${pending} pending row(s) for this source; ${deliver}.\n`);
 }
 
 function countPendingSourceRows(path: string, sourceInstanceId: string): number {
