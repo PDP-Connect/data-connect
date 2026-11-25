@@ -242,6 +242,28 @@ test("Chromium defaults its launch size to the active n.eko screen", async () =>
   assert.match(startScript, TOP_LEVEL_REGEX_18);
 });
 
+test("Chromium falls back to a usable window size for malformed n.eko screen dimensions", async () => {
+  const source = await readFile(NEKO_CHROMIUM_START, "utf8");
+  const start = source.indexOf("SCREEN=");
+  const end = source.indexOf("# Binary selection", start);
+  assert.ok(start >= 0 && end > start, "startup script has a window sizing block");
+  const sizing = source.slice(start, end);
+  const run = (screen: string) => {
+    const result = spawnSync("/bin/sh", ["-eu", "-c", sizing + 'printf "%s,%s\\n" "$WIDTH" "$HEIGHT"'], {
+      encoding: "utf8",
+      env: { NEKO_DESKTOP_SCREEN: screen },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+
+  assert.equal(run("390x844@30"), "390,844");
+  assert.equal(run("1280x720"), "1280,720");
+  for (const malformed of ["1600", "1440x", "x900", "1440x0", "14:40x900"]) {
+    assert.equal(run(malformed), "1440,900", malformed);
+  }
+});
+
 test("Chromium resize watcher only grows undersized visible windows", async (t) => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
   const lines = startScript.split("\n");
