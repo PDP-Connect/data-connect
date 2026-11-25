@@ -351,6 +351,16 @@ function buildExpandCapabilityEntry(
   return entry;
 }
 
+// Emit one `expand_capabilities` entry per enabled parent-stream relation (a
+// `query.expand[]` capability backed by a `relationships[]` declaration),
+// including relations whose target stream is unreadable under the current
+// request. Declared-but-unreadable relations stay visible with `usable: false`
+// and a `reason` enum value so a console can tell "no relation declared" apart
+// from "relation declared but not readable here".
+//
+// `manifestStreamNames`, when provided, is the set of streams the loaded
+// manifest declares; a relation pointing at a stream outside that set is
+// surfaced as `related_stream_unknown` rather than silently dropped.
 export function buildExpandCapabilities(
   manifestStream: ManifestStream,
   streamGrant: StreamGrant | null = null,

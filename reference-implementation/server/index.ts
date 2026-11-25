@@ -104,6 +104,11 @@ import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
+import {
+  buildExpandCapabilities,
+  buildFieldCapabilities,
+  buildStreamDiscoveryCapabilities,
+} from "./schema-capabilities.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
@@ -3824,174 +3829,11 @@ function buildConnectorAwareFreshness(
   });
 }
 
-function hasObjectEntries(value: unknown): boolean {
-  return !!(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0);
-}
-
-function getNonNullSchemaTypes(schema: Record<string, unknown> | null | undefined): Set<string> {
-  const rawType = schema?.type;
-  if (!rawType) {
-    return new Set();
-  }
-  const types = Array.isArray(rawType) ? rawType : [rawType];
-  return new Set((types as string[]).filter((type) => type !== "null"));
-}
-
-function isExactFilterableSchema(schema: Record<string, unknown> | null | undefined): boolean {
-  const types = getNonNullSchemaTypes(schema);
-  if (types.size !== 1) {
-    return false;
-  }
-  const [type] = types;
-  return ["boolean", "integer", "number", "string"].includes(type as string);
-}
-
-function buildFieldCapabilityFlag({
-  declared,
-  granted,
-  operators = null,
-}: {
-  declared: boolean;
-  granted: boolean;
-  operators?: unknown;
-}): Record<string, unknown> {
-  const flag: Record<string, unknown> = {
-    declared,
-    usable: declared && granted,
-  };
-  if (operators) {
-    flag.operators = operators;
-  }
-  if (declared && !granted) {
-    flag.reason = "field_not_granted";
-  }
-  return flag;
-}
-
-function buildFieldAggregationCapabilities(
-  aggregations: Record<string, unknown> | null | undefined,
-  field: string,
-  granted: boolean
-) {
-  return {
-    count_distinct: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.count_distinct) && aggregations.count_distinct.includes(field),
-      granted,
-    }),
-    group_by: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by) && aggregations.group_by.includes(field),
-      granted,
-    }),
-    group_by_time: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by_time) && aggregations.group_by_time.includes(field),
-      granted,
-    }),
-    max: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.max) && aggregations.max.includes(field),
-      granted,
-    }),
-    min: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.min) && aggregations.min.includes(field),
-      granted,
-    }),
-    sum: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.sum) && aggregations.sum.includes(field),
-      granted,
-    }),
-  };
-}
-
-function buildFieldCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null
-) {
-  const schema = (manifestStream?.schema || {}) as Record<string, unknown>;
-  const properties = (schema.properties || {}) as Record<string, unknown>;
-  const fieldDeclarations = new Map<string, string>();
-  for (const declarations of [manifestStream?.fields, schema.fields]) {
-    if (!Array.isArray(declarations)) {
-      continue;
-    }
-    for (const declaration of declarations) {
-      if (
-        declaration &&
-        typeof declaration === "object" &&
-        typeof (declaration as Record<string, unknown>).name === "string" &&
-        ((declaration as Record<string, unknown>).name as string).trim().length > 0 &&
-        typeof (declaration as Record<string, unknown>).type === "string" &&
-        ((declaration as Record<string, unknown>).type as string).trim().length > 0
-      ) {
-        fieldDeclarations.set(
-          (declaration as Record<string, unknown>).name as string,
-          ((declaration as Record<string, unknown>).type as string).trim()
-        );
-      }
-    }
-  }
-  const grantedFields =
-    // biome-ignore lint/correctness/noUnsafeOptionalChaining: The preceding guard establishes this optional value before access.
-    Array.isArray(streamGrant?.fields) && (streamGrant?.fields as unknown[]).length > 0
-      ? new Set(streamGrant?.fields as unknown[])
-      : null;
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const rangeFilters = (query.range_filters || {}) as Record<string, unknown>;
-  const search = (query.search || {}) as Record<string, unknown>;
-  const lexicalFields = new Set(Array.isArray(search.lexical_fields) ? (search.lexical_fields as unknown[]) : []);
-  const semanticFields = new Set(Array.isArray(search.semantic_fields) ? (search.semantic_fields as unknown[]) : []);
-  const aggregations = (query.aggregations || {}) as Record<string, unknown>;
-
-  return Object.fromEntries(
-    Object.entries(properties).map(([field, fieldSchema]) => {
-      const schemaObj = (fieldSchema && typeof fieldSchema === "object" ? fieldSchema : {}) as Record<string, unknown>;
-      const granted = !grantedFields || grantedFields.has(field);
-      const rangeOperators = Array.isArray(rangeFilters[field]) ? (rangeFilters[field] as unknown[]) : null;
-      // Optional declared presentation type, sourced either from the JSON
-      // Schema extension (`schema.properties[field].x_pdpp_type`) or from a
-      // sandbox-shaped field declaration (`fields[]` or `schema.fields[]`,
-      // with `{ name, type, semantic_class }`). Surfaced as an additive `type`
-      // on the field_capabilities entry only; it does not influence any filter,
-      // search, aggregation, grant, or retrieval decision below.
-      const declaredType =
-        typeof schemaObj.x_pdpp_type === "string" && (schemaObj.x_pdpp_type as string).trim().length > 0
-          ? (schemaObj.x_pdpp_type as string).trim()
-          : fieldDeclarations.get(field) || null;
-      const declaredRole =
-        typeof schemaObj.x_pdpp_role === "string" && (schemaObj.x_pdpp_role as string).trim().length > 0
-          ? (schemaObj.x_pdpp_role as string).trim()
-          : null;
-      return [
-        field,
-        {
-          ...(declaredType ? { type: declaredType } : {}),
-          ...(declaredRole ? { role: declaredRole } : {}),
-          aggregation: buildFieldAggregationCapabilities(aggregations, field, granted),
-          granted,
-          lexical_search: buildFieldCapabilityFlag({
-            declared: lexicalFields.has(field),
-            granted,
-          }),
-          schema: fieldSchema,
-          semantic_search: buildFieldCapabilityFlag({
-            declared: semanticFields.has(field),
-            granted,
-          }),
-          ...(streamGrant === null
-            ? {
-                exact_filter: buildFieldCapabilityFlag({
-                  declared: isExactFilterableSchema(schemaObj),
-                  granted,
-                }),
-                range_filter: buildFieldCapabilityFlag({
-                  declared: Boolean(rangeOperators),
-                  granted,
-                  operators: rangeOperators || undefined,
-                }),
-              }
-            : {}),
-        },
-      ];
-    })
-  );
+type CapabilityManifestStream = Parameters<typeof buildFieldCapabilities>[0];
+type CapabilityStreamGrant = Parameters<typeof buildFieldCapabilities>[1];
+// Manifest streams reach these routes as validated but untyped JSON.
+function asCapabilityStream(stream: Record<string, unknown>): CapabilityManifestStream {
+  return stream as unknown as CapabilityManifestStream;
 }
 
 function buildStreamMetadataEntry({
@@ -4014,8 +3856,15 @@ function buildStreamMetadataEntry({
   const entry: Record<string, unknown> = {
     consent_time_field: projectedManifestStream.consent_time_field,
     cursor_field: projectedManifestStream.cursor_field,
-    expand_capabilities: buildExpandCapabilities(projectedManifestStream, expandStreamGrant, manifestStreamNames),
-    field_capabilities: buildFieldCapabilities(projectedManifestStream, streamGrant),
+    expand_capabilities: buildExpandCapabilities(
+      asCapabilityStream(projectedManifestStream),
+      expandStreamGrant as CapabilityStreamGrant,
+      manifestStreamNames
+    ),
+    field_capabilities: buildFieldCapabilities(
+      asCapabilityStream(projectedManifestStream),
+      streamGrant as CapabilityStreamGrant
+    ),
     freshness: freshness ?? buildFreshness(null),
     name: projectedManifestStream.name,
     object: "stream_metadata",
@@ -4068,110 +3917,6 @@ function projectManifestStreamForGrant(streamGrant: Record<string, unknown>): Re
     ...(frozenTimeField ? { consent_time_field: frozenTimeField } : {}),
   };
 }
-// Emit one `expand_capabilities` entry per enabled parent-stream relation (a
-// `query.expand[]` capability backed by a `relationships[]` declaration),
-// including relations whose target stream is unreadable under the current
-// request. Declared-but-unreadable relations stay visible with `usable: false`
-// and a `reason` enum value so a console can tell "no relation declared" apart
-// from "relation declared but not readable here".
-//
-// `manifestStreamNames`, when provided, is the set of streams the loaded
-// manifest declares; a relation pointing at a stream outside that set is
-// surfaced as `related_stream_unknown` rather than silently dropped.
-function buildExpandCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null,
-  manifestStreamNames: Set<string> | null = null
-) {
-  const rawRelationships = Array.isArray(manifestStream?.relationships)
-    ? (manifestStream?.relationships as Record<string, unknown>[])
-    : [];
-  const relationships = new Map(rawRelationships.map((relationship) => [relationship.name as string, relationship]));
-  const rawGrantStreams = streamGrant?.grantStreams as Record<string, unknown>[] | undefined;
-  const grantedStreams = Array.isArray(rawGrantStreams)
-    ? new Set(rawGrantStreams.map((stream) => stream.name as string))
-    : null;
-
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const expandList = Array.isArray(query.expand) ? (query.expand as Record<string, unknown>[]) : [];
-
-  return expandList
-    .map((capability) => {
-      const relationship = relationships.get(capability.name as string);
-      if (!relationship) {
-        return null;
-      }
-      const targetStream = relationship.stream as string;
-      const known = !manifestStreamNames || manifestStreamNames.has(targetStream);
-      const granted = known && (!grantedStreams || grantedStreams.has(targetStream));
-      const usable = known && granted;
-      const entry: Record<string, unknown> = {
-        cardinality: relationship.cardinality,
-        granted,
-        name: capability.name,
-        // `stream` (back-compat) and `target_stream` both name the related child
-        // stream; the canonical, self-describing name is `target_stream`.
-        stream: targetStream,
-        target_stream: targetStream,
-        usable,
-      };
-      if (relationship.foreign_key) {
-        // The field on the child carrying the parent's key. `child_parent_key_field`
-        // is the canonical name; `foreign_key` stays as a back-compat alias with
-        // the identical value.
-        entry.child_parent_key_field = relationship.foreign_key;
-        entry.foreign_key = relationship.foreign_key;
-      }
-      if (capability.default_limit !== undefined) {
-        entry.default_limit = capability.default_limit;
-      }
-      if (capability.max_limit !== undefined) {
-        entry.max_limit = capability.max_limit;
-      }
-      if (!usable) {
-        entry.reason = known ? "related_stream_not_granted" : "related_stream_unknown";
-      }
-      return entry;
-    })
-    .filter(Boolean);
-}
-
-// biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
-function buildDiscoveryUrl(path: string, connectorId: string | null = null) {
-  const connectorQuery = connectorId ? `?connector_id=${encodeURIComponent(connectorId)}` : "";
-  return `${path}${connectorQuery}`;
-}
-
-function buildStreamDiscoveryCapabilities({
-  connectorId = null as string | null,
-  stream,
-}: {
-  connectorId?: string | null;
-  stream: Record<string, unknown>;
-}) {
-  const encodedStream = encodeURIComponent(stream.name as string);
-  const query = (stream.query || {}) as Record<string, unknown>;
-  const rangeFilters = query.range_filters;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const expand = query.expand;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const aggregations = query.aggregations;
-  const hasAggregations = hasObjectEntries(aggregations);
-
-  return {
-    aggregate: hasAggregations,
-    aggregate_url: hasAggregations ? buildDiscoveryUrl(`/v1/streams/${encodedStream}/aggregate`, connectorId) : null,
-    changes_since: true,
-    exact_filters: true,
-    expand: Array.isArray(expand) && expand.length > 0,
-    metadata_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}`, connectorId),
-    range_filters: hasObjectEntries(rangeFilters),
-    records: true,
-    records_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}/records`, connectorId),
-    stream_metadata: true,
-  };
-}
-
 function buildStreamDiscoverySummary({
   connectorId = null as string | null,
   stream,
@@ -4185,7 +3930,7 @@ function buildStreamDiscoverySummary({
 }) {
   const lastUpdated = (summary?.last_updated as string | null | undefined) || null;
   return {
-    capabilities: buildStreamDiscoveryCapabilities({ connectorId, stream }),
+    capabilities: buildStreamDiscoveryCapabilities({ connectorId, stream: asCapabilityStream(stream) }),
     freshness: buildConnectorAwareFreshness(freshnessEvidence, lastUpdated),
     last_updated: lastUpdated,
     name: stream.name,
