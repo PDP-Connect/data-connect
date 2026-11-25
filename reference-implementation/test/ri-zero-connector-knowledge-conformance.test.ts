@@ -676,6 +676,28 @@ test("falsifiability (P1 fix): parameter-indirection through a same-file helper 
   );
 });
 
+test("a Buffer read decoded before JSON.parse is a data load", () => {
+  withSyntheticProductionFile(
+    "synthetic-decoded-buffer-read.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      "function readProfile(entry: { path: string }) {",
+      "  const bytes = readFileSync(entry.path);",
+      '  return JSON.parse(bytes.toString("utf8"));',
+      "}",
+      "export { readProfile };",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        "decoding the bytes before parsing must not hide the load from the scan"
+      );
+    }
+  );
+});
+
 test("falsifiability: parameter-indirection does NOT cross-resolve two unrelated same-named parameters in different functions", () => {
   withSyntheticProductionFile(
     "synthetic-helper-indirection-ambiguity-load.ts",

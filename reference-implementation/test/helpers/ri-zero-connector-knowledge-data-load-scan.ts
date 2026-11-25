@@ -255,6 +255,17 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // OS reauth handoff state, never connector/provider policy.
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
+  // readManifest(root) in local-source.ts: readFileSync(manifestPath)
+  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
+  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
+  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
+  // developer-supplied absolute directory path given to the public
+  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
+  // already allowlisted above (cache.ts:125, common.ts:35): the path is
+  // caller-supplied, the filename component is an RI-owned generic literal,
+  // and this feature is explicitly unsigned/unregistered developer tooling
+  // (see this file's own module doc comment), not connector catalog data.
+  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath)',
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-dir>, entryName), where the dir is
   // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
@@ -1429,6 +1440,16 @@ export function scanFileDataLoads(
       declaratorNameByInit.set(n.init as Node, nId.name as string);
     }
   });
+  // `JSON.parse(bytes.toString(...))`: a Buffer read decoded before parsing.
+  function isDecodedBinding(node: Node, boundName: string): boolean {
+    const callee = node.callee as Node | undefined;
+    return (
+      node.type === "CallExpression" &&
+      callee?.type === "MemberExpression" &&
+      isIdentifier(callee.object as Node, boundName) &&
+      isIdentifier(callee.property as Node, "toString")
+    );
+  }
   function flowsIntoJsonParse(callNode: Node, parent: Node | null): boolean {
     if (
       parent?.type === "CallExpression" &&
@@ -1457,7 +1478,7 @@ export function scanFileDataLoads(
         isIdentifier((n.callee as Node).property as Node, "parse")
       ) {
         const [arg] = nodeArrayField(n, "arguments");
-        if (arg && isIdentifier(arg, boundName)) {
+        if (arg && (isIdentifier(arg, boundName) || isDecodedBinding(arg, boundName))) {
           found = true;
         }
       }
