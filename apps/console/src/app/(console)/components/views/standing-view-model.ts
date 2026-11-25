@@ -29,6 +29,7 @@ import {
   SOURCE_WORK_GROUP_COPY,
   type SourceWorkGroups,
   type SourceWorkItem,
+  projectSourceActionability,
   sourceWorkFromConnectors,
 } from "../../lib/source-actionability.ts";
 
@@ -231,7 +232,7 @@ export interface StandingData {
   /** Aggregate server verdict; source rows retain their existing detail contract. */
   fleetHealth: RefFleetHealthVerdict | null;
   grantPackages: GrantPackagesView | null;
-  /** Exact healthy-source count when the overview loaded the complete source fleet. */
+  /** Exact healthy-source count from shared classification for the complete source fleet. */
   healthySourceCount: number | null;
   hero: StandingHero;
   lately: LatelyView[];
@@ -288,6 +289,8 @@ export interface StandingInputs {
   pendingApprovals: PendingApproval[];
   /** Exact number of operational, assessed sources in the complete overview page. */
   sourceCount?: number;
+  /** Exact healthy count computed from each source's shared actionability projection. */
+  classifiedHealthySourceCount?: number | null;
   /**
    * Connections with material source issues that do NOT ask the owner to do
    * anything. These must still suppress "everything is syncing" all-clears.
@@ -842,13 +845,27 @@ export function attentionConnectionsFromConnectors(connectors: readonly RefConne
 export function sourceIssueConnectionsFromConnectors(
   connectors: readonly RefConnectorSummary[]
 ): SourceIssueConnection[] {
-  return sourceWorkFromConnectors(connectors).systemIssues.map((item) => ({
-    connectorKey: item.connectorKey,
-    label: item.label,
-    routeId: item.routeId,
-    status: item.statusLabel === "can't collect" ? "can't collect" : "is degraded",
-    what: item.what,
-  }));
+  const seen = new Set<string>();
+  return connectors.flatMap((connector) => {
+    const projection = projectSourceActionability(connector);
+    const item = projection.work;
+    if (!item || seen.has(item.routeId)) {
+      return [];
+    }
+    seen.add(item.routeId);
+    if (item.group !== "systemIssue") {
+      return [];
+    }
+    return [
+      {
+        connectorKey: item.connectorKey,
+        label: item.label,
+        routeId: item.routeId,
+        status: projection.renderedStatus.kind === "blocked" ? "can't collect" : "is degraded",
+        what: item.what,
+      },
+    ];
+  });
 }
 
 export function advisoryOwnerActionsFromConnectors(
@@ -1155,10 +1172,12 @@ export function buildStandingData(input: StandingInputs): StandingData {
   const sourceWork = activeSourceWork(input);
   const allBearers = toBearers(input.bearerClients, input.hrefs);
   const bearers = allBearers.slice(0, BEARER_PREVIEW_LIMIT);
-  const sourceWorkCount = Object.values(sourceWork).reduce((sum, rows) => sum + rows.length, 0);
   const healthySourceCount =
-    input.overviewLoadIssues.length === 0 && input.sourceCount !== undefined
-      ? Math.max(0, input.sourceCount - sourceWorkCount)
+    input.overviewLoadIssues.length === 0 &&
+    input.sourceCount !== undefined &&
+    !input.sourcePage?.hasMore &&
+    input.sourcePage?.kind !== "error"
+      ? (input.classifiedHealthySourceCount ?? null)
       : null;
   return {
     advisoryOwnerActions: toAdvisoryOwnerActions(input.advisoryOwnerActions, input.hrefs),

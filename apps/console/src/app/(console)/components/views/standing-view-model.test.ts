@@ -13,6 +13,7 @@ import type {
 } from "../../lib/ref-client.ts";
 import {
   EMPTY_SOURCE_WORK_GROUPS,
+  projectSourceActionability,
   sourceAttentionHeadline,
   sourceWorkFromConnectors,
 } from "../../lib/source-actionability.ts";
@@ -467,15 +468,34 @@ test("source issues show non-owner material verdicts without alarming as owner a
   const sourceIssues = sourceIssueConnectionsFromConnectors(connectors);
   assert.equal(sourceIssues.length, 1);
   assert.equal(sourceIssues[0]?.label, "Chase");
-  assert.equal(sourceIssues[0]?.status, "is degraded");
+  // The shared red-pill classification says this source cannot collect.
+  assert.equal(sourceIssues[0]?.status, "can't collect");
   assert.equal(sourceIssues[0]?.routeId, "cin_chase");
 
   const data = buildStandingData(baseInputs({ sourceIssues }));
   assert.equal(data.attention.length, 0);
   assert.equal(data.sourceIssues.length, 1);
-  assert.equal(data.sourceIssues[0]?.what, "Chase is degraded");
+  // Render the status from the same shared classification.
+  assert.equal(data.sourceIssues[0]?.what, "Chase can't collect");
   // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
   assert.match(data.sourceIssues[0]?.why ?? "", CODE_FIX_RE);
+});
+
+test("source issue status uses the shared blocked classification for a source that cannot collect", () => {
+  const connectors: RefConnectorSummary[] = [
+    connector({
+      connection_id: "cin_blocked",
+      connector_id: "blocked",
+      source_work: "system_issue",
+      rendered_verdict: verdict({
+        channel: "advisory",
+        forward_statement: "This source cannot collect until its connector is fixed.",
+        pill: { label: "Can't collect", tone: "red" },
+      }),
+    }),
+  ];
+
+  assert.equal(sourceIssueConnectionsFromConnectors(connectors)[0]?.status, "can't collect");
 });
 
 test("advisory owner actions surface non-urgent Amazon retry work without calm all-clear copy", () => {
@@ -858,7 +878,17 @@ test("dashboard keeps unavailable source-work rows connector-keyed and navigable
     connector({ connection_id: "cin_review", display_name: "Review source", source_work: "review" }),
   ];
 
-  const data = buildStandingData(baseInputs({ sourceCount: 9, sourceWork: sourceWorkFromConnectors(connectors) }));
+  const classifiedHealthySourceCount = connectors.filter((source) => {
+    const projection = projectSourceActionability(source);
+    return projection.renderedStatus.kind === "healthy" && projection.work === null;
+  }).length;
+  const data = buildStandingData(
+    baseInputs({
+      classifiedHealthySourceCount,
+      sourceCount: 9,
+      sourceWork: sourceWorkFromConnectors(connectors),
+    })
+  );
   const unavailable = data.sourceWorkSections.find((section) => section.id === "unavailable");
 
   assert.ok(unavailable);
@@ -896,7 +926,8 @@ test("dashboard keeps unavailable source-work rows connector-keyed and navigable
     data.sourceWorkSections.find((section) => section.id === "needsOwner"),
     undefined
   );
-  assert.equal(data.healthySourceCount, 1);
+  // No healthy verdict was supplied for the unclassified source.
+  assert.equal(data.healthySourceCount, 0);
 });
 
 test("dashboard cross-surface: an inactive queued recovery row is passive progress, never a Checking or degraded row", () => {
@@ -1343,7 +1374,7 @@ test("a locally alarming source row cannot override a healthy server fleet verdi
   assert.equal(hero.kicker, "Where you stand");
 });
 
-test("overview counts healthy sources without adding them to the attention groups", () => {
+test("overview does not infer healthy sources from the count of work groups", () => {
   const data = buildStandingData(
     baseInputs({
       sourceCount: 3,
@@ -1369,14 +1400,56 @@ test("overview counts healthy sources without adding them to the attention group
       },
     })
   );
-  assert.equal(data.healthySourceCount, 2);
+  // A total minus work rows cannot prove that the remaining sources are healthy.
+  assert.equal(data.healthySourceCount, null);
   assert.equal(data.sourceWorkSections.flatMap((section) => section.rows).length, 1);
+});
+
+test("overview counts only sources the shared classification says are healthy", () => {
+  const connectors = [
+    connector({
+      connection_id: "cin_healthy",
+      connector_id: "healthy",
+      rendered_verdict: verdict({ channel: "calm", pill: { label: "Healthy", tone: "green" } }),
+      source_work: "none",
+    }),
+    connector({
+      connection_id: "cin_review",
+      connector_id: "review",
+      rendered_verdict: verdict({ channel: "advisory", pill: { label: "Healthy", tone: "green" } }),
+      source_work: "review",
+    }),
+  ];
+  const classifiedHealthySourceCount = connectors.filter((source) => {
+    const projection = projectSourceActionability(source);
+    return projection.renderedStatus.kind === "healthy" && projection.work === null;
+  }).length;
+  const data = buildStandingData(
+    baseInputs({
+      classifiedHealthySourceCount,
+      sourceCount: connectors.length,
+      sourceWork: sourceWorkFromConnectors(connectors),
+    })
+  );
+
+  assert.equal(data.healthySourceCount, 1);
 });
 
 test("overview with partial source data does not claim an exact healthy-source count", () => {
   const data = buildStandingData(
     baseInputs({ overviewLoadIssues: ["source_status_page_unavailable"], sourceCount: 3 })
   );
+  assert.equal(data.healthySourceCount, null);
+});
+
+test("overview does not count unloaded sources as healthy on a paged source list", () => {
+  const data = buildStandingData(
+    baseInputs({
+      sourceCount: 3,
+      sourcePage: { kind: "ok", hasMore: true, isPaged: true },
+    })
+  );
+
   assert.equal(data.healthySourceCount, null);
 });
 
