@@ -262,6 +262,14 @@ function summary(
   };
 }
 
+/** A data source the person renamed: its row still says what it is ("Signal"). */
+const SIGNAL_RENAMED = summary({
+  connection_id: "conn_signal_workstation_01",
+  connector_display_name: "Signal",
+  connector_id: "signal",
+  display_name: "workstation",
+});
+
 const GMAIL = summary({
   connection_health: health("healthy"),
   connection_id: "conn_gmail_personal_01",
@@ -368,6 +376,7 @@ export function buildSourcesDemoSummaries(scenario: SourcesDemoScenario): RefCon
   // The three scenarios seed every status the list can display.
   return [
     GMAIL,
+    SIGNAL_RENAMED,
     SPOTIFY_REVOKED,
     ...([1, 3, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24] as const).map(statusSample),
   ];

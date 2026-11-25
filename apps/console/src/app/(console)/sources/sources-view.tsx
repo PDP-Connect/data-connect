@@ -195,6 +195,7 @@ function SourceRow({
           </span>
           <span className="rr-s-row__identity">
             <Text as="span" className="rr-s-row__name" size="small" weight="medium">{instance.displayName}</Text>
+            {instance.listKind ? <Text as="span" className="rr-s-row__kind" color="muted" size="small">{instance.listKind}</Text> : null}
           </span>
         </span>
         <SourceRowStatus instance={instance} />

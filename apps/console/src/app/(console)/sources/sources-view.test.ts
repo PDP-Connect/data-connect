@@ -55,7 +55,12 @@ test("each rendered source status carries the shared words, status row, and conn
       const markup = renderToStaticMarkup(createElement(SourceRowStatus, { instance }));
       assert.match(markup, new RegExp(`data-status-row="${status.row}"`));
       assert.match(markup, new RegExp(`data-source-id="${summary.connection_id}"`));
-      assert.ok(markup.includes(status.words), `status words missing for row ${status.row}`);
+      // The time may sit in its own item, so compare the words as text, whole and in order; the dot between them is drawn by the style.
+      assert.ok(renderedCopy(markup).replace(/\s+/g, " ").includes(status.words.replace(" · ", " ")), `status words missing for row ${status.row}`);
+      if (status.words.includes(" · ")) {
+        assert.match(markup, /rr-s-row__status-when/, `time not kept whole for row ${status.row}`);
+        assert.doesNotMatch(markup, /rr-s-row__status-when[^>]*>[^<]*·/, `dot inside the time for row ${status.row}`);
+      }
     }
   }
 });
@@ -217,6 +222,19 @@ test("rows show no kind count or kind line under the name", () => {
     assert.doesNotMatch(renderedCopy(html), /\b\d[\d,]* kinds?\b/, scenario);
     assert.doesNotMatch(html, /rr-s-row__account/, scenario);
   }
+});
+
+// Lead decision (list-pictures 2, item 2): a renamed data source still says what it is; an unrenamed one adds nothing.
+test("a renamed row shows the connector's name under it; an unrenamed row shows nothing", () => {
+  const { instances } = seededViews("mixed");
+  const renamed = instances.find((instance) => instance.displayName === "workstation");
+  assert.ok(renamed, "the mixed sample must hold a renamed row");
+  assert.equal(renamed.listKind, "Signal");
+  const html = renderSourcesView([renamed]);
+  assert.match(html, /<span class="[^"]*rr-s-row__kind[^"]*"[^>]*>Signal<\/span>/);
+  const same = instances.find((instance) => instance.displayName === "Gmail (personal)");
+  assert.ok(same);
+  assert.doesNotMatch(renderSourcesView([same]), /rr-s-row__kind/);
 });
 
 // Lead decision (list-pictures 1): the retained-history ("Version churn") notice is not on the list.

@@ -33,7 +33,7 @@
   /* Lead decision (list-pictures 2): one set of column tracks for the header and
      every row. Name takes the free space; status, records, schedule, action and
      menu are fixed so a row with a button does not shift its cells. */
-  --rr-s-tracks: minmax(0, 1fr) 260px 90px 120px 120px 40px;
+  --rr-s-tracks: minmax(0, 1fr) minmax(240px, 1.2fr) 90px 120px 120px 40px;
   container: rr-s-list / inline-size;
   display: grid;
   gap: 20px;
@@ -161,11 +161,52 @@
   white-space: nowrap;
 }
 
+.rr-s-row__kind {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rr-s-row__status,
 .rr-s-row__records,
 .rr-s-row__schedule {
   min-width: 0;
   font-size: 13px;
+}
+
+/* A status with a time: the time is one unbreakable item. When it wraps to its
+   own line its dot sits in the clipped left margin, so no line ends or begins
+   with " ·". */
+.rr-s-row__status {
+  display: block;
+  overflow: hidden;
+}
+
+.rr-s-row__status-parts {
+  display: flex;
+  flex-wrap: wrap;
+  margin-left: -16px;
+}
+
+.rr-s-row__status-part {
+  position: relative;
+  padding-left: 16px;
+}
+
+.rr-s-row__status-when {
+  white-space: nowrap;
+}
+
+.rr-s-row__status-when::before {
+  position: absolute;
+  left: 6px;
+  content: "·";
+}
+
+.rr-s-columns + .rr-s-list {
+  /* Cancel the list's gap so the first row sits under the header line as rows sit under each other. */
+  margin-top: -20px;
 }
 
 .rr-s-row__records {
@@ -402,9 +443,13 @@
    at the right of the name line; status beneath; the action beneath the status,
    aligned with the text. The breakpoint follows the list's own width, so a
    narrow window with the side menu open also gets this layout. */
-@container rr-s-list (max-width: 720px) {
+@container rr-s-list (max-width: 880px) {
   .rr-s-columns {
     display: none;
+  }
+
+  .rr-s-columns + .rr-s-list {
+    margin-top: 0;
   }
 
   .rr-s-row {
@@ -420,7 +465,7 @@
   }
 
   .rr-s-row__status {
-    padding-left: 46px;
+    margin-left: 46px;
   }
 
   .rr-s-row__records,
