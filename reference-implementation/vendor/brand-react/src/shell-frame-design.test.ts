@@ -88,6 +88,8 @@ const EXPECTED_SECTION_BY_ROUTE: Record<string, "data-sources" | "apps" | "setti
   "/grants/packages/[packageId]": "apps",
   "/grants/request": "apps",
   "/notifications": "settings",
+  // Linked from Settings > About only, not from the menu (set5 brief), so no menu section lights up.
+  "/privacy": null,
   "/schedules": "data-sources",
   "/search": null,
   "/settings": "settings",

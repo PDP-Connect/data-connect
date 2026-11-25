@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ProductIdentity } from "@pdpp/brand-react"
-import { KV, KVRow } from "@pdpp/brand-react"
+import { KV, KVRow, Text } from "@pdpp/brand-react"
 import { Section } from "@pdpp/operator-ui/components/primitives"
+import Link from "next/link"
 import { OpenExternalLink } from "../components/open-external-link.tsx"
 
 const PROJECT_URL = "https://github.com/PDP-Connect/data-connect"
@@ -64,6 +65,13 @@ export function AboutSection({ identity }: { identity: ProductIdentity }) {
         >
           Support
         </OpenExternalLink>
+        <Text
+          as={Link}
+          className="pdpp-caption text-foreground underline underline-offset-4"
+          href="/privacy"
+        >
+          Privacy
+        </Text>
       </nav>
     </Section>
   )
