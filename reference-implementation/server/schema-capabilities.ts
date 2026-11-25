@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolveConfiguredExpandLimits } from "./record-expand-helpers.ts";
+
 /**
  * Stream schema capability introspection.
  *
@@ -301,7 +303,8 @@ function resolveExpandRelationReachability(
 // capability and its backing relationship. The closure environment that used to
 // be captured implicitly (the relationship map + the reachability sets) is now
 // passed EXPLICITLY, so this is a pure function of its inputs. Returns null when
-// no relationship backs the capability (the caller filters those out).
+// no relationship backs the capability or its configured limits are
+// invalid (the caller filters those out).
 function buildExpandCapabilityEntry(
   capability: ExpandCapability,
   relationships: Map<string, Relationship>,
@@ -309,7 +312,8 @@ function buildExpandCapabilityEntry(
   manifestStreamNames: Set<string> | null
 ): Record<string, unknown> | null {
   const relationship = relationships.get(capability.name);
-  if (!relationship) {
+  // A relation a read would reject for its configured limits is not offered.
+  if (!relationship || resolveConfiguredExpandLimits(capability) === null) {
     return null;
   }
   const targetStream = relationship.stream;

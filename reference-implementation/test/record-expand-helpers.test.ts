@@ -158,3 +158,17 @@ test("configured expansion limits that are invalid reject the request", () => {
     });
   }
 });
+
+test("an omitted expansion limit follows the declared one", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  const read = (limits: Record<string, number>, request: Record<string, unknown> = {}) =>
+    normalizeExpandRequest({ expand: "fixture", ...request }, "parent", grant, {
+      relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+      query: { expand: [{ name: "fixture", ...limits }] },
+    } as unknown as Manifest, null)[0]?.limit;
+  assert.equal(read({ max_limit: 5 }), 5, "a declared max below the built-in default caps the default");
+  assert.equal(read({ max_limit: 20 }), 10, "a declared max above the built-in default keeps it");
+  assert.equal(read({ default_limit: 60 }), 60, "a declared default above the built-in max raises the max");
+  assert.equal(read({ default_limit: 60 }, { expand_limit: { fixture: 60 } }), 60);
+});

@@ -160,6 +160,35 @@ export function assertRecordIdentity(primaryKeyFields: unknown, key: RecordKey, 
   assertPrimaryKeyIdentity(fields, key, data as JsonObject);
 }
 
+/**
+ * The limits a declared expand capability applies, or null when a declared
+ * limit is not a positive safe integer or the declared default exceeds the
+ * declared maximum. An omitted limit follows the declared one, so a manifest
+ * that declares only `max_limit: 5` defaults to 5 rather than 10. Discovery
+ * and the records read share this, so a relation is advertised only when a
+ * read would accept it.
+ */
+export function resolveConfiguredExpandLimits(capability: {
+  readonly default_limit?: unknown;
+  readonly max_limit?: unknown;
+}): { defaultLimit: number; maxLimit: number } | null {
+  const declaredDefault = capability.default_limit === undefined ? undefined : parseIntegerValue(capability.default_limit);
+  const declaredMax = capability.max_limit === undefined ? undefined : parseIntegerValue(capability.max_limit);
+  if (declaredDefault === null || declaredMax === null) {
+    return null;
+  }
+  const maxLimit = declaredMax ?? Math.max(DEFAULT_EXPAND_MAX_LIMIT, declaredDefault ?? DEFAULT_EXPAND_LIMIT);
+  const defaultLimit = declaredDefault ?? Math.min(DEFAULT_EXPAND_LIMIT, maxLimit);
+  if (!Number.isSafeInteger(defaultLimit) || !Number.isSafeInteger(maxLimit) ||
+      defaultLimit <= 0 || maxLimit <= 0 || defaultLimit > maxLimit) {
+    return null;
+  }
+  return { defaultLimit, maxLimit };
+}
+
+const DEFAULT_EXPAND_LIMIT = 10;
+const DEFAULT_EXPAND_MAX_LIMIT = 50;
+
 export function parseIntegerValue(value: unknown): number | null {
   if (typeof value === "number" && Number.isInteger(value)) {
     return value;
@@ -324,12 +353,11 @@ export function normalizeExpandRequest(
       );
     }
 
-    const defaultLimit = capability.default_limit === undefined ? 10 : parseIntegerValue(capability.default_limit);
-    const maxLimit = capability.max_limit === undefined ? 50 : parseIntegerValue(capability.max_limit);
-    if (defaultLimit === null || maxLimit === null || !Number.isSafeInteger(defaultLimit) ||
-        !Number.isSafeInteger(maxLimit) || defaultLimit <= 0 || maxLimit <= 0 || defaultLimit > maxLimit) {
+    const limits = resolveConfiguredExpandLimits(capability);
+    if (!limits) {
       throw invalidQueryError(`Expand relation '${relationName}' has invalid configured limits`, "invalid_expand");
     }
+    const { defaultLimit, maxLimit } = limits;
     let appliedLimit = defaultLimit;
 
     if (requestedLimits && Object.hasOwn(requestedLimits, relationName)) {

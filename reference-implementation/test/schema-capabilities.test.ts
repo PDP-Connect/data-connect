@@ -251,3 +251,15 @@ test("discovery still advertises supported query features", () => {
     stream: { name: "orders", query: { aggregations: { count: true } } },
   }).aggregate, true);
 });
+
+test("discovery offers an expand relation only when a read would accept its limits", () => {
+  const stream = (limits: Record<string, number>) => ({
+    name: "orders",
+    relationships: [{ name: "items", stream: "line_items", cardinality: "has_many" }],
+    query: { expand: [{ name: "items", ...limits }] },
+  });
+  assert.deepEqual(buildExpandCapabilities(stream({ default_limit: 5, max_limit: 2 })), []);
+  assert.equal(buildStreamDiscoveryCapabilities({ stream: stream({ default_limit: 5, max_limit: 2 }) }).expand, false);
+  assert.equal(buildExpandCapabilities(stream({ max_limit: 5 }))[0]?.usable, true);
+  assert.equal(buildStreamDiscoveryCapabilities({ stream: stream({ max_limit: 5 }) }).expand, true);
+});
