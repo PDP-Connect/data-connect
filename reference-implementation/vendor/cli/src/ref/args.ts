@@ -11,9 +11,9 @@ export interface ParsedArgs {
 }
 
 export interface ParseArgsOptions {
-  // Flags that never take a value: a bare occurrence is `true`, and only a
-  // literal `true`/`false` after it is consumed, so a following positional is
-  // never swallowed.
+  // Switches: a bare occurrence is `true`. An explicit value is accepted only
+  // inline (`--flag=false`), so the next argument is always left alone, even a
+  // positional that reads `true` or `false`.
   booleanFlags?: readonly string[];
 }
 
@@ -42,18 +42,16 @@ export function parseArgs(argv: string[], options: ParseArgsOptions = {}): Parse
       throw new PdppUsageError("Invalid empty flag");
     }
 
+    if (options.booleanFlags?.includes(rawKey)) {
+      flags[rawKey] = parseSwitch(rawKey, inlineValue);
+      continue;
+    }
     if (inlineValue !== undefined) {
       flags[rawKey] = inlineValue;
       continue;
     }
 
     const next = argv[i + 1];
-    if (options.booleanFlags?.includes(rawKey)) {
-      const explicit = next === "true" || next === "false";
-      flags[rawKey] = explicit ? next : true;
-      i += explicit ? 1 : 0;
-      continue;
-    }
     if (next && !next.startsWith("--")) {
       flags[rawKey] = next;
       i += 1;
@@ -64,6 +62,16 @@ export function parseArgs(argv: string[], options: ParseArgsOptions = {}): Parse
   }
 
   return { flags, positionals };
+}
+
+function parseSwitch(name: string, inlineValue: string | undefined): boolean {
+  if (inlineValue === undefined || inlineValue === "true") {
+    return true;
+  }
+  if (inlineValue === "false") {
+    return false;
+  }
+  throw new PdppUsageError(`--${name} accepts only true or false`, { param: name });
 }
 
 export function requirePositional(positionals: string[], index: number, name: string): string {

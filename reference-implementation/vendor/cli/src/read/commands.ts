@@ -89,7 +89,7 @@ export async function runRead(
     const usableCursor = typeof envelope?.next_cursor === "string" && envelope.next_cursor.trim() !== "";
     const partialWarning = extractEnvelopeWarnings(body).some((warning) => warning.code === "partial_results");
     const incomplete = partialWarning || (envelope?.has_more === true && !usableCursor);
-    if (incomplete && flags["allow-partial"] !== true && flags["allow-partial"] !== "true") {
+    if (incomplete && flags["allow-partial"] !== true) {
       throw new PdppCliError("Returned rows are incomplete. Select a connection or use --allow-partial to accept them.", 7,
         { code: "incomplete_results", request_id: requestId, status });
     }
@@ -129,9 +129,6 @@ function validateFlags(command: string, flags: ParsedFlags): void {
     if (!valid.includes(flag)) {
       throw new PdppUsageError(`Unknown flag: --${flag}. Valid flags: ${valid.map((name) => `--${name}`).join(", ")}`,
         { param: flag });
-    }
-    if (BOOLEAN_FLAGS.includes(flag) && ![true, "true", "false"].includes(flags[flag])) {
-      throw new PdppUsageError(`--${flag} accepts only true or false`, { param: flag });
     }
     if (flags[flag] === true && !BOOLEAN_FLAGS.includes(flag)) {
       throw new PdppUsageError(`Missing value for --${flag}`, { param: flag });
@@ -403,7 +400,7 @@ function jsonFilterQuery(flags: ParsedFlags): QueryRecord {
 }
 
 function projectOutput(body: unknown, flags: ParsedFlags): unknown {
-  if (flags.data !== true && flags.data !== "true") {
+  if (flags.data !== true) {
     return body;
   }
   const typed = body as { data?: unknown; records?: unknown };

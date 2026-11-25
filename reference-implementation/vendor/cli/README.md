@@ -133,11 +133,18 @@ errors preserve the server's `available_connections` choices.
 Unknown flags fail before a request and list the valid flags for that command.
 
 Reads write returned rows to stdout even when results are incomplete.
-A `partial_results` warning, or `has_more: true` without `next_cursor`, returns
-`incomplete_results` and exits 7 in JSON, JSONL, and table formats.
+A read is incomplete when the server returns a `partial_results` warning, or
+`has_more: true` without a usable `next_cursor`. An incomplete read returns
+`incomplete_results` and exits 7 in JSON, JSONL, and table formats, even when
+the page also carries a `next_cursor`.
 Use `--allow-partial` to accept those rows with exit 0 and a stderr warning.
-A page with `has_more` and `next_cursor` succeeds; use the cursor for the next
-request. There is no automatic cross-connection paging.
+A complete page with `has_more` and `next_cursor` exits 0; use the cursor for
+the next request. There is no automatic cross-connection paging.
+
+`--allow-partial` and `--data` are switches. A bare switch means true; an
+explicit value must be inline (`--allow-partial=false`). A switch never takes
+the next argument, so `pdpp read search <provider-url> --allow-partial false`
+searches for `false`.
 
 In JSON mode (the default), read failures write a JSON object to stderr with
 `code`, `message`, `status`, `param`, `request_id`, and `retryable`. Unavailable

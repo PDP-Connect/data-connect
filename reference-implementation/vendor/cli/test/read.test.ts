@@ -581,6 +581,50 @@ test("bare --allow-partial before the positionals does not swallow the provider 
   }, 200, ["--allow-partial"]);
 });
 
+test("a switch never consumes the next argument, even a literal false", async () => {
+  const cacheRoot = await makeCredentialCache("fixture-token");
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: URL[] = [];
+  globalThis.fetch = (input) => {
+    requestedUrls.push(new URL(input));
+    return Promise.resolve(
+      jsonResponse(200, { object: "search_result_list", data: [], meta: { warnings: [{ code: "partial_results" }] } })
+    );
+  };
+  try {
+    const captured = captureIo();
+    const code = await runCli(["read", "search", PROVIDER, "--allow-partial", "false", "--cache-root", cacheRoot],
+      captured.io);
+    assert.equal(code, 0);
+    assert.equal(requestedUrls[0]?.searchParams.get("q"), "false");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+for (const [value, expectedCode] of [["true", 0], ["false", 7], ["yes", 2]]) {
+  test(`--allow-partial=${value} exits ${expectedCode} on partial_results`, async () => {
+    await withReadResponse({ data: [{ id: "returned-row" }], meta: { warnings: [{ code: "partial_results" }] } },
+      [`--allow-partial=${value}`], (code, captured) => {
+        assert.equal(code, expectedCode);
+        if (expectedCode === 2) {
+          assert.equal(JSON.parse(captured.stderr()).param, "allow-partial");
+        }
+      });
+  });
+}
+
+test("partial_results stays incomplete when the page also has a usable next_cursor", async () => {
+  await withReadResponse(
+    { data: [{ id: "returned-row" }], has_more: true, next_cursor: "next-page", meta: { warnings: [{ code: "partial_results" }] } },
+    [], (code, captured) => {
+      assert.equal(code, 7);
+      assert.ok(captured.stdout().includes("next-page"));
+      assert.equal(JSON.parse(captured.stderr()).code, "incomplete_results");
+    });
+});
+
 async function withReadResponse(body, flags, check, status = 200, beforePositionals = []) {
   const cacheRoot = await makeCredentialCache("fixture-token");
   const originalFetch = globalThis.fetch;
