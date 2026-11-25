@@ -45,6 +45,8 @@ const RESUME_RECEIVES_CONNECTION =
   /resumeScheduleAction\([\s\S]*?summary\.connector_id,[\s\S]*?summary\.connection_id \?\? summary\.connector_instance_id \?\? null[\s\S]*?\)/;
 const DELETE_RECEIVES_CONNECTION =
   /deleteScheduleAction\([\s\S]*?summary\.connector_id,[\s\S]*?summary\.connection_id \?\? summary\.connector_instance_id \?\? null[\s\S]*?\)/;
+const ONLY_WHEN_YOU_ASK_RE = /Only when you ask/;
+const FINAL_SCHEDULE_ROW_BORDER_RE = /className="border-border\/70 border-b py-3 last:border-b-0"/;
 
 test("schedule-row mutates the concrete connection when one is present", async () => {
   const src = await readFile(ROW_FILE, "utf8");
@@ -145,6 +147,8 @@ test("schedule row empty and populated states use plain visible words", async ()
   const emptyText = emptyDocument.body.textContent ?? "";
   assert.match(emptyText, /Example source/);
   assert.match(emptyText, /Manual/);
+  // history-repair brief P3: Manual already means "Only when you ask" on this row.
+  assert.doesNotMatch(emptyText, ONLY_WHEN_YOU_ASK_RE);
   assert.doesNotMatch(emptyText, BANNED_VISIBLE_WORDS);
 
   const scheduled = makeSummary({ schedule: makeSchedule() });
@@ -157,6 +161,12 @@ test("schedule row empty and populated states use plain visible words", async ()
   assert.match(rowText, /Pause/);
   assert.match(rowText, /Edit/);
   assert.doesNotMatch(rowText, BANNED_VISIBLE_WORDS);
+});
+
+test("the final Schedules row leaves one hairline before page Details", async () => {
+  const src = await readFile(ROW_FILE, "utf8");
+  // history-repair brief P3: the final row border must not double with the page Details border.
+  assert.match(src, FINAL_SCHEDULE_ROW_BORDER_RE);
 });
 
 const BANNED_VISIBLE_WORDS = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|runs?|stream|connector|instance|reference server)\b/i;

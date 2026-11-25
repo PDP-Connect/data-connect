@@ -168,8 +168,12 @@ test("recent syncs filters are plain GET links with no client hydration on the v
 const RECENT_FILTER_CONNECTOR_SELECT_RE = /name="connector_id"[\s\S]{0,80}options=\{paging\.connectorOptions\}/;
 const RECENT_FILTER_CONNECTOR_HIDDEN_INPUT_RE = /<input\s+name="connector_id"\s+type="hidden"/;
 const CONNECTOR_QUERY_RE = /connector_id:\s*params\.connector_id \|\| undefined/;
-const CONNECTOR_OPTIONS_FROM_FLEET_PAGE_RE =
-  /connectorOptions:\s*connectorFilterOptions\(connectorsPage\.items,\s*params\.connector_id\)/;
+const CONNECTOR_OPTIONS_FROM_ALL_PAGES_RE = /connectorOptions:\s*sourceFilter\.options/;
+const FILTER_PAGE_ONE_START_RE = /const filterFirstPagePromise = pageState\.cursor[\s\S]{0,100}fetchSyncsConnectorsPage\(\{ cursor: undefined \}\)/;
+const FILTER_CURSOR_FOLLOW_RE =
+  /cursor === pageState\.cursor \? Promise\.resolve\(connectorsPage\) : fetchSyncsConnectorsPage\(\{ cursor \}\)/;
+const FILTER_PAGE_CAP_RE = /SOURCE_FILTER_MAX_PAGES = 10;/;
+const FILTER_CAP_NOTE_RE = /Only the first \$\{\(SOURCE_FILTER_MAX_PAGES \* CONNECTOR_SUMMARY_PAGE_SIZE\)/;
 const CONNECTOR_OPTIONS_ANY_SOURCE_RE = /\{ label: "All data sources", value: "" \}/;
 // The picker must be built from identity fields the reference already returned.
 // Any literal connector key here would mean the console had grown its own
@@ -192,22 +196,27 @@ test("recent syncs offers a real connector picker, not a hidden input the owner 
   );
 });
 
-test("connector filter options come from the fleet page the route already fetched, never a hardcoded roster", async () => {
+test("connector filter options follow every server page up to the filter cap", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
+  const options = await readFile(new URL("source-filter-options.ts", import.meta.url), "utf8");
 
   assert.match(src, CONNECTOR_QUERY_RE, "the connector filter must forward params.connector_id verbatim to listRuns");
   assert.match(
     src,
-    CONNECTOR_OPTIONS_FROM_FLEET_PAGE_RE,
-    "connector options must be projected from the connector-summary page, not fetched or invented separately"
+    CONNECTOR_OPTIONS_FROM_ALL_PAGES_RE,
+    "the connector picker must use the accumulated server pages"
   );
-  // DIRECTION.md, /syncs: the outlined filter shows its current value in plain words.
-  assert.match(src, CONNECTOR_OPTIONS_ANY_SOURCE_RE, "the picker must offer an explicit option that clears the filter");
+  assert.match(src, FILTER_PAGE_ONE_START_RE);
+  assert.match(src, FILTER_CURSOR_FOLLOW_RE);
+  // history-repair brief P2: all sources are loaded from server pages; the active filter remains available.
+  assert.match(options, CONNECTOR_OPTIONS_ANY_SOURCE_RE, "the picker must offer an explicit option that clears the filter");
   assert.match(
-    src,
+    options,
     CONNECTOR_OPTIONS_PROJECTION_RE,
-    "option labels must come from the reference's own identity fields"
+    "option labels must come from the server's source identity fields"
   );
+  assert.match(options, FILTER_PAGE_CAP_RE);
+  assert.match(options, FILTER_CAP_NOTE_RE);
 });
 
 test("recent syncs still refuses to offer a sort control the runs feed cannot honour", async () => {

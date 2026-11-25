@@ -355,7 +355,7 @@ function deviceStatus({
   if (endpoint) {
     return {
       detail: "Turn on notifications again to repair the server-side subscription.",
-      title: "This browser has a local subscription, but the server does not recognize it.",
+      title: "Notifications are not on for this browser.",
     };
   }
   if (permission === "granted") {
@@ -387,6 +387,13 @@ export function unavailableSentence(reason: string, serverNotReady = false): str
 export function receivingDeviceLabel(subscription: WebPushSubscriptionSummary, currentEndpoint: string | null): string {
   if (subscription.endpoint === currentEndpoint) return "This device";
   return subscription.device_label?.trim() || "Another device";
+}
+
+export function isCurrentBrowserSubscriptionRegistered(
+  endpoint: string | null,
+  subscriptions: WebPushSubscriptionSummary[]
+): boolean {
+  return endpoint ? subscriptions.some((subscription) => subscription.endpoint === endpoint && !subscription.revoked_at) : false;
 }
 
 function buildSetupSteps({
@@ -775,7 +782,7 @@ export function WebPushSettings({
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
   const [lastSubscription] = subscriptions;
-  const matchesThisBrowser = endpoint ? subscriptions.some((s) => s.endpoint === endpoint && !s.revoked_at) : false;
+  const matchesThisBrowser = isCurrentBrowserSubscriptionRegistered(endpoint, subscriptions);
   const currentDeviceStatus = deviceStatus({ endpoint, matchesThisBrowser, permission, swState, unavailable });
   const setupSteps = buildSetupSteps({ endpoint, matchesThisBrowser, permission, testStatus, unavailable });
 
@@ -841,22 +848,6 @@ export function WebPushSettings({
         </ul>
       ) : null}
 
-      {endpoint && !matchesThisBrowser ? (
-        <div className="grid gap-2">
-          <p className="text-[13px] text-muted-foreground">This device is not receiving notifications yet.</p>
-          <button className="min-h-11 w-fit px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => setConfirmingEndpoint(endpoint)} type="button">Turn off this device</button>
-          {confirmingEndpoint === endpoint ? (
-            <div aria-label="Turn off notifications for this device" className="grid gap-2" role="alertdialog">
-              <p className="text-[13px] text-muted-foreground">Turn off notifications for this device? It will stop receiving them.</p>
-              <div className="flex gap-2">
-                <button className="min-h-11 px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => void disable(endpoint)} type="button">Turn off</button>
-                <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setConfirmingEndpoint(null)} type="button">Cancel</button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
       <details
         className="border-t border-border/70"
         onToggle={(event) => {
@@ -870,7 +861,12 @@ export function WebPushSettings({
           detail={currentDeviceStatus.detail}
           diagnostics={diagnostics}
           endpoint={endpoint}
+          confirmingEndpoint={confirmingEndpoint}
           lastSubscription={lastSubscription}
+          onCancelRemoval={() => setConfirmingEndpoint(null)}
+          onDisable={disable}
+          onRemoveOldSubscription={() => endpoint && setConfirmingEndpoint(endpoint)}
+          matchesThisBrowser={matchesThisBrowser}
           onTest={sendTest}
           onToggleDetails={async () => {
             const next = !showDetails;
@@ -900,6 +896,11 @@ function WebPushSetupDetails({
   busy,
   unavailable,
   endpoint,
+  matchesThisBrowser,
+  confirmingEndpoint,
+  onCancelRemoval,
+  onDisable,
+  onRemoveOldSubscription,
   onTest,
   setupSteps,
   status,
@@ -915,6 +916,11 @@ function WebPushSetupDetails({
   busy: boolean;
   unavailable: string | null;
   endpoint: string | null;
+  matchesThisBrowser: boolean;
+  confirmingEndpoint: string | null;
+  onCancelRemoval: () => void;
+  onDisable: (endpoint: string) => void;
+  onRemoveOldSubscription: () => void;
   onTest: () => void;
   setupSteps: SetupStep[];
   status: string;
@@ -929,6 +935,28 @@ function WebPushSetupDetails({
     <div className="mt-4 border-border/60 border-t pt-4" id="web-push-setup">
       <p className="pdpp-caption max-w-3xl text-muted-foreground">{detail}</p>
       <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">{caveat}</p>
+      <div className="mt-4 grid gap-3 text-[13px] text-muted-foreground md:grid-cols-3">
+        <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
+        <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>
+        <p><strong className="text-foreground">Per device.</strong> Each phone, computer, and app must be enabled separately.</p>
+      </div>
+      {endpoint && !matchesThisBrowser ? (
+        <div className="mt-4 grid gap-2 border-border/60 border-t pt-3">
+          {confirmingEndpoint === endpoint ? (
+            <div aria-label="Remove this browser's old subscription" className="grid gap-2" role="alertdialog">
+              <p className="text-[13px] text-muted-foreground">Remove this browser&apos;s old subscription?</p>
+              <div className="flex gap-2">
+                <button className="min-h-11 px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => onDisable(endpoint)} type="button">Remove subscription</button>
+                <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onCancelRemoval} type="button">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button className="min-h-11 w-fit px-1 text-[13px] text-muted-foreground underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={onRemoveOldSubscription} type="button">
+              Remove this browser&apos;s old subscription
+            </button>
+          )}
+        </div>
+      ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

@@ -73,6 +73,7 @@ export interface RecentSyncsPaging {
    * that can only ever return nothing.
    */
   connectorOptions: readonly RecentSyncsFilterOption[];
+  sourceFilterNote?: string | null;
   hasMore: boolean;
   isPaged: boolean;
   nextCursor: string | undefined;
@@ -364,7 +365,7 @@ function RecentSyncRow({
   const visiblePhrase = sourceStatus?.needsYou ? <SourceStatusText status={sourceStatus} /> : phrase;
   return (
     <li
-      className="border-b border-border/70"
+      className="border-border/70 border-b last:border-b-0"
       data-source-id={entry.connectionId ?? undefined}
       data-status-row={sourceStatus?.row}
     >
@@ -455,6 +456,9 @@ function RecentSyncsFilters({ paging }: { paging: RecentSyncsPaging }) {
         >
           Clear filters
         </a>
+      ) : null}
+      {paging.sourceFilterNote ? (
+        <p className="basis-full text-[13px] text-muted-foreground">{paging.sourceFilterNote}</p>
       ) : null}
     </div>
   );

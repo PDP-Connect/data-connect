@@ -247,18 +247,19 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
     : schedule
       ? formatIntervalWords(schedule.interval_seconds)
       : "Manual";
-  const nextSync = localDevice
-    ? "Next sync not known"
-    : schedule?.enabled && schedule.ineligibility_reason
-      ? "Next sync not scheduled"
-      : schedule?.enabled
-        ? "Next sync not known"
-        : schedule
-          ? "Next sync paused"
-          : "Only when you ask";
+  let nextSync: string | null = null;
+  if (localDevice) {
+    nextSync = "Next sync not known";
+  } else if (schedule?.enabled && schedule.ineligibility_reason) {
+    nextSync = "Next sync not scheduled";
+  } else if (schedule?.enabled) {
+    nextSync = "Next sync not known";
+  } else if (schedule) {
+    nextSync = "Next sync paused";
+  }
 
   return (
-    <li className="border-b border-border/70 py-3" data-source-id={summary.connection_id} data-status-row={sourceStatus.row}>
+    <li className="border-border/70 border-b py-3 last:border-b-0" data-source-id={summary.connection_id} data-status-row={sourceStatus.row}>
       <div className="flex flex-col gap-2">
         {/* Top area: identity on its own line, then actions on a separate row on mobile */}
         {/* P0-1: at ≤640px these two sections stack vertically (flex-col) so

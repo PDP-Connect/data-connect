@@ -56,15 +56,6 @@ export default async function NotificationsPage() {
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6 lg:px-8">
         <PageHeading />
         <WebPushSettings config={state.config} subscriptions={state.subscriptions} />
-
-        <details className="border-t border-border/70 text-[13px] text-muted-foreground">
-          <summary className="min-h-11 cursor-pointer py-3">Details</summary>
-          <div className="grid gap-3 pb-3 md:grid-cols-3">
-            <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
-            <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>
-            <p><strong className="text-foreground">Per device.</strong> Each phone, computer, and app must be enabled separately.</p>
-          </div>
-        </details>
       </main>
     </RecordroomShellWithPalette>
   );
@@ -73,7 +64,7 @@ export default async function NotificationsPage() {
 function PageHeading() {
   return (
     <header className="mb-2">
-      <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]">
+      <h1 className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]">
         Notifications
       </h1>
       <p className="mt-2 text-[15px] text-muted-foreground">A message when a sync needs you.</p>

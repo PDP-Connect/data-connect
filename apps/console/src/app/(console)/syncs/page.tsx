@@ -45,6 +45,7 @@ import { type ListResponse, listConnectorSummaries, listRuns, type RunSummary } 
 import { listConnectorManifests } from "../lib/rs-client.ts";
 import { DEMO_SYNCS_MODEL } from "./syncs-demo.ts";
 import { buildSyncsViewModel } from "./syncs-model.ts";
+import { loadSourceFilterOptions } from "./source-filter-options.ts";
 import { SyncsView } from "./syncs-view.tsx";
 
 const SYNCS_PATH = "/syncs";
@@ -75,38 +76,6 @@ const RUN_STATUS_FILTER_OPTIONS = [
   { label: "Cancelled", value: "cancelled" },
   { label: "In progress", value: "in_progress" },
 ] as const;
-
-/**
- * Source filter options, derived from the SAME bounded connector-summary page
- * the view already renders — not a hardcoded roster, and not connector-specific
- * knowledge held in the console. The reference stays the only authority on
- * which connectors exist; this just projects the identity fields
- * (`connector_id` + `connector_display_name`) it already returned.
- *
- * One option per distinct `connector_id` (a connector with several connections
- * is still one source to filter by), sorted by the label the owner sees. A
- * connector whose current filter value is active but absent from this bounded
- * page is appended, so an in-effect filter is never silently missing from the
- * control that owns it.
- */
-function connectorFilterOptions(
-  connectors: readonly { connector_display_name?: string; connector_id: string }[],
-  activeConnectorId: string | undefined
-) {
-  const byConnectorId = new Map<string, string>();
-  for (const connector of connectors) {
-    if (!byConnectorId.has(connector.connector_id)) {
-      byConnectorId.set(connector.connector_id, connector.connector_display_name || connector.connector_id);
-    }
-  }
-  if (activeConnectorId && !byConnectorId.has(activeConnectorId)) {
-    byConnectorId.set(activeConnectorId, activeConnectorId);
-  }
-  const options = [...byConnectorId.entries()]
-    .map(([value, label]) => ({ label, value }))
-    .sort((a, b) => a.label.localeCompare(b.label));
-  return options.length > 0 ? [{ label: "All data sources", value: "" }, ...options] : [];
-}
 
 function runListQuery(params: Params) {
   return {
@@ -140,14 +109,19 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   }
 
   const pageState = parseConnectorSummaryPageState(params);
+  const filterFirstPagePromise = pageState.cursor
+    ? fetchSyncsConnectorsPage({ cursor: undefined })
+    : Promise.resolve(undefined);
   let runsResult: ListResponse<RunSummary>;
   let connectorsPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>>;
   let connectorIcons: Awaited<ReturnType<typeof buildConnectorIconMap>>;
+  let filterFirstPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>> | undefined;
   try {
-    [runsResult, connectorsPage, connectorIcons] = await Promise.all([
+    [runsResult, connectorsPage, connectorIcons, filterFirstPage] = await Promise.all([
       listRuns(runListQuery(params)),
       fetchSyncsConnectorsPage(pageState),
       listConnectorManifests().catch(() => []).then((manifests) => buildConnectorIconMap(manifests, [])),
+      filterFirstPagePromise,
     ]);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
@@ -186,6 +160,16 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
     );
   }
 
+  // The visible summary still follows the requested page cursor, but the
+  // source filter starts at page 1 and follows server cursors up to its cap.
+  const firstFilterPage = filterFirstPage ?? connectorsPage;
+  const sourceFilter = await loadSourceFilterOptions(
+    firstFilterPage,
+    (cursor) =>
+      cursor === pageState.cursor ? Promise.resolve(connectorsPage) : fetchSyncsConnectorsPage({ cursor }),
+    params.connector_id
+  );
+
   const model = buildSyncsViewModel({
     connectors: connectorsPage.items,
     runs: runsResult.data,
@@ -209,11 +193,12 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
           />
         }
         recentSyncsPaging={{
-          connectorOptions: connectorFilterOptions(connectorsPage.items, params.connector_id),
+          connectorOptions: sourceFilter.options,
           hasMore: runsResult.has_more,
           isPaged: Boolean(params.run_cursor),
           nextCursor: runsResult.next_cursor,
           params,
+          sourceFilterNote: sourceFilter.note,
           statusOptions: RUN_STATUS_FILTER_OPTIONS,
         }}
       />

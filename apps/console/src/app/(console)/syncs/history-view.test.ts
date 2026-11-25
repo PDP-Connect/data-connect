@@ -16,6 +16,8 @@ import type { RecentSyncEntry } from "./syncs-model.ts";
 (globalThis as typeof globalThis & { React?: typeof React }).React = React;
 
 const BANNED_VISIBLE_WORDS = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
+const FINAL_ROW_BORDER_CLASS_RE = /last:border-b-0/;
+const FILTER_CAP_NOTE_RE = /Only the first 1,000 data sources are listed here\./;
 const paging: RecentSyncsPaging = {
   connectorOptions: [
     { label: "All data sources", value: "" },
@@ -71,6 +73,10 @@ test("history empty, row, and filtered states show their values without banned w
 
   const rows = visibleHistoryText(DEMO_SYNCS_MODEL, paging);
   assert.ok(DEMO_SYNCS_MODEL.recentSyncs.length > 0, "demo data must include at least one sync row");
+  // history-repair brief P3: one line separates the final row from page Details.
+  const finalRow = rows.document.querySelector('[data-testid="syncs-recent-list"] ul li:last-child');
+  assert.ok(finalRow);
+  assert.match(finalRow.className, FINAL_ROW_BORDER_CLASS_RE);
   assert.match(rows.text, /Show more/);
   assert.doesNotMatch(rows.document.querySelector("a > span:nth-child(2) > span:first-child")?.className ?? "", /\btruncate\b/);
   assert.doesNotMatch(rows.text, BANNED_VISIBLE_WORDS);
@@ -93,6 +99,13 @@ test("history filters show the applied values on compact keyboard popovers", asy
   assert.match(sourceTrigger.className, /h-11/);
   const view = await readFile(new URL("syncs-view.tsx", import.meta.url), "utf8");
   assert.match(view, /IcPopoverPopup[\s\S]{0,120}className="max-h-\[min\(24rem,calc\(100vh-2rem\)\)\] w-\[min\(20rem,calc\(100vw-2rem\)\)\]/);
+});
+
+test("History shows the source-filter cap note when the server page walk is bounded", () => {
+  const note = "Only the first 1,000 data sources are listed here.";
+  const result = visibleHistoryText(DEMO_SYNCS_MODEL, { ...paging, sourceFilterNote: note });
+  // history-repair brief P2: a bounded source-filter walk says when it hits its cap.
+  assert.match(result.text, FILTER_CAP_NOTE_RE);
 });
 
 test("filter options are links that apply at once, so a portaled popup cannot drop the choice", async () => {
