@@ -328,6 +328,19 @@ for (const backend of ["sqlite", "postgres"] as const) {
         // biome-ignore lint/performance/noAwaitInLoops: Fixture writes are sequential.
         await write(id, index === 150 || index === 550 ? "rare" : "bulk");
       }
+      // Give every bulk row one sort value, so the order inside the tie, and the
+      // seek past a batch boundary inside it, rest on the primary key alone.
+      const tiedAt = "2026-03-01T00:00:00.000Z";
+      if (backend === "sqlite") {
+        getDb()
+          .prepare("UPDATE records SET emitted_at = ? WHERE connector_instance_id = ? AND record_key LIKE 'm%'")
+          .run(tiedAt, instance);
+      } else {
+        await postgresQuery(
+          "UPDATE records SET emitted_at = $1 WHERE connector_instance_id = $2 AND record_key LIKE 'm%'",
+          [tiedAt, instance]
+        );
+      }
       const selective = await request(
         `${base}/records?fields=id&limit=1&order=asc&count=exact&filter[status]=rare`,
         modern.token
@@ -349,6 +362,28 @@ for (const backend of ["sqlite", "postgres"] as const) {
         ["m550"]
       );
       assert.equal(selectiveNext.body.has_more, false);
+      // Descending order walks the same tie from the other end.
+      const descending = await request(
+        `${base}/records?fields=id&limit=1&order=desc&count=exact&filter[status]=rare`,
+        modern.token
+      );
+      assert.equal(descending.status, 200, JSON.stringify(descending.body));
+      assert.deepEqual(
+        descending.body.data.map((record) => record.id),
+        ["m550"]
+      );
+      assert.equal(descending.body.has_more, true);
+      assert.deepEqual(descending.body.meta?.count, { kind: "exact", value: 2 });
+      const descendingNext = await request(
+        `${base}/records?fields=id&limit=1&order=desc&count=exact&filter[status]=rare&cursor=${encodeURIComponent(descending.body.next_cursor)}`,
+        modern.token
+      );
+      assert.equal(descendingNext.status, 200, JSON.stringify(descendingNext.body));
+      assert.deepEqual(
+        descendingNext.body.data.map((record) => record.id),
+        ["m150"]
+      );
+      assert.equal(descendingNext.body.has_more, false);
       // A deletion in a filtered feed is the same bare tombstone as a filter
       // exit, and deleting a record the filter never matched reports nothing.
       const beforeDeletes = await request(`${base}/records?fields=id&${filters}&changes_since=beginning`, modern.token);
