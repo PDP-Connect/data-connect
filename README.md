@@ -5,8 +5,9 @@ lets the apps and assistants you pick read it on your terms.
 
 You can connect supported data sources, browse the records DataConnect has
 collected, see when they last synced, and choose which apps can read them.
-Connecting an assistant may still need an account, token, domain, or public
-address.
+An assistant that runs on the web, such as ChatGPT, needs an address it can
+reach. Settings offers several ways to get one, including a free way that
+needs no account.
 
 ## Try sample data
 
