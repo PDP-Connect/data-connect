@@ -1688,7 +1688,7 @@ function retainedBytesFromConnectionRow(
   };
 }
 
-function buildRecordProjectionFromRetainedRows(input: {
+export function buildRecordProjectionFromRetainedRows(input: {
   readonly retainedBytes: RetainedBytesBreakdown | null;
   readonly retainedSizeReliable: boolean;
   readonly rows: readonly RecordProjectionRow[];
@@ -1697,11 +1697,17 @@ function buildRecordProjectionFromRetainedRows(input: {
   let latest: string | null = null;
   for (const row of input.rows) {
     const recordCount = Number(row.record_count || 0);
-    const lastUpdated = row.last_updated || null;
+    // A connector-wide read returns one row per (connection, stream), so the
+    // same stream can appear more than once: sum its counts and keep the latest
+    // timestamp instead of letting the last row overwrite the others.
+    const previous = byStream.get(row.stream);
+    const rowUpdated = row.last_updated || null;
+    const previousUpdated = previous?.last_updated ?? null;
+    const lastUpdated = rowUpdated && (!previousUpdated || rowUpdated > previousUpdated) ? rowUpdated : previousUpdated;
     byStream.set(row.stream, {
       freshness: buildFreshness(lastUpdated),
       last_updated: lastUpdated,
-      record_count: recordCount,
+      record_count: (previous?.record_count ?? 0) + recordCount,
     });
     if (lastUpdated && (!latest || lastUpdated > latest)) {
       latest = lastUpdated;
