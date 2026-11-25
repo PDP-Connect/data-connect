@@ -6,37 +6,30 @@
     {
       "id": "sources-list",
       "open": "/sources",
-      "readyText": "Sources",
-      "desktopReadyHeading": "Sources",
-      "phoneReadyHeading": "Sources",
+      "readyText": "Data sources",
+      "desktopReadyHeading": "Data sources",
+      "phoneReadyHeading": "Data sources",
       "assertText": "Spotify"
     },
     {
       "id": "spotify-source-detail",
       "open": "/sources",
-      "desktopActions": [
-        {
-          "type": "click",
-          "role": "button",
-          "name": "Spotify"
-        },
-        {
-          "type": "click",
-          "role": "link",
-          "name": "Source details \u2192"
-        }
-      ],
+      "desktopAction": {
+        "type": "click",
+        "role": "link",
+        "name": "Open Spotify"
+      },
       "phoneAction": {
         "type": "click",
         "role": "link",
-        "name": "Spotify"
+        "name": "Open Spotify"
       },
-      "readyText": "Streams (3)",
+      "readyText": "What is here",
       "readyPathIncludes": "/sources/cin_",
       "phonePathIncludes": "/sources/cin_",
       "assertText": "Spotify",
-      "desktopReadyHeading": "Streams (3)",
-      "phoneReadyHeading": "Streams (3)"
+      "desktopReadyHeading": "What is here",
+      "phoneReadyHeading": "What is here"
     }
   ]
 }

@@ -9,20 +9,20 @@
       "desktopAction": {
         "type": "click",
         "role": "button",
-        "name": "Pause collecting"
+        "name": "Pause syncing"
       },
-      "readyText": "This source is paused",
-      "assertText": "This source is paused"
+      "readyText": "Collection paused.",
+      "assertText": "Collection paused. Your records, schedule, and sign-in are kept — resume whenever you're ready."
     },
     {
       "id": "resume-source",
       "desktopAction": {
         "type": "click",
         "role": "button",
-        "name": "Resume collecting"
+        "name": "Resume"
       },
-      "readyText": "Collection resumed",
-      "assertText": "Collection resumed"
+      "readyText": "Collection resumed.",
+      "assertText": "Collection resumed. This source will collect again on its next run."
     }
   ]
 }

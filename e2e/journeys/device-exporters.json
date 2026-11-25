@@ -6,10 +6,10 @@
     {
       "id": "route",
       "open": "/device-exporters",
-      "readyText": "Local device exporters",
-      "desktopReadyHeading": "Local device exporters",
-      "phoneReadyHeading": "Local device exporters",
-      "assertText": "Local device exporters"
+      "readyText": "Collectors on your devices",
+      "desktopReadyHeading": "ExperimentalCollectors on your devices",
+      "phoneReadyHeading": "ExperimentalCollectors on your devices",
+      "assertText": "Collectors on your devices"
     }
   ]
 }

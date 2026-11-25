@@ -7,6 +7,7 @@
       "id": "setup-result",
       "open": "/connect/status/[seed-connection:spotify]",
       "readyText": "Connection active",
+      "openDetails": true,
       "assertText": "Records are available for this account."
     }
   ]

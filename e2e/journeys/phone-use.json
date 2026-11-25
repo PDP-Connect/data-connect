@@ -6,10 +6,10 @@
     {
       "id": "route",
       "open": "/sources",
-      "readyText": "Sources",
-      "desktopReadyHeading": "Sources",
-      "phoneReadyHeading": "Sources",
-      "assertText": "Sources"
+      "readyText": "Data sources",
+      "desktopReadyHeading": "Data sources",
+      "phoneReadyHeading": "Data sources",
+      "assertText": "Data sources"
     }
   ]
 }

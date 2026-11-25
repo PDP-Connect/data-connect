@@ -5,10 +5,10 @@
     {
       "id": "grants-list",
       "open": "/grants",
-      "readyText": "Grants",
-      "desktopReadyHeading": "Grants",
-      "phoneReadyHeading": "Grants",
-      "assertText": "No grants yet"
+      "readyText": "Apps",
+      "desktopReadyHeading": "Apps",
+      "phoneReadyHeading": "Apps",
+      "assertText": "No app can read your data yet."
     }
   ]
 }

@@ -6,10 +6,10 @@
     {
       "id": "route",
       "open": "/syncs",
-      "readyText": "Syncs",
-      "desktopReadyHeading": "Syncs",
-      "phoneReadyHeading": "Syncs",
-      "assertText": "Syncs"
+      "readyText": "Sync history",
+      "desktopReadyHeading": "Sync history",
+      "phoneReadyHeading": "Sync history",
+      "assertText": "Sync history"
     }
   ]
 }

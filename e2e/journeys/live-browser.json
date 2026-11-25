@@ -6,8 +6,8 @@
     {
       "id": "browser-companion",
       "open": "/syncs/[seed-run:spotify]/stream",
-      "readyText": "spotify is back on it",
-      "assertText": "spotify is back on it"
+      "readyText": "Spotify is ready.",
+      "assertText": "Spotify is ready."
     }
   ]
 }

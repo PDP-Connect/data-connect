@@ -6,10 +6,10 @@
     {
       "id": "route",
       "open": "/audit",
-      "readyText": "Audit",
-      "desktopReadyHeading": "Audit",
-      "phoneReadyHeading": "Audit",
-      "assertText": "Audit"
+      "readyText": "Activity",
+      "desktopReadyHeading": "Activity",
+      "phoneReadyHeading": "Activity",
+      "assertText": "Activity"
     }
   ]
 }

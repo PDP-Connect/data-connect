@@ -6,10 +6,10 @@
     {
       "id": "route",
       "open": "/search",
-      "readyText": "Jump to artifact",
-      "desktopReadyHeading": "Jump to artifact",
-      "phoneReadyHeading": "Jump to artifact",
-      "assertText": "Jump to artifact"
+      "readyText": "Search",
+      "desktopReadyHeading": "Search",
+      "phoneReadyHeading": "Search",
+      "assertText": "Search"
     }
   ]
 }

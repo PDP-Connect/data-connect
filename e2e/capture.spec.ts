@@ -30,6 +30,7 @@ interface JourneyStep {
   phoneReadyHeading?: string
   readyPathIncludes?: string
   phonePathIncludes?: string
+  openDetails?: boolean
   assertText?: string
   minMainListItems?: number
 }
@@ -137,6 +138,8 @@ async function captureJourney(page: Page, journey: Journey): Promise<void> {
     await applyAction(page, step.desktopAction)
     for (const action of step.desktopActions ?? [])
       await applyAction(page, action)
+    if (step.openDetails)
+      await page.locator("details > summary").first().click()
     await waitUntilReady(page, step.readyText, step.desktopReadyHeading)
     if (step.readyPathIncludes)
       expect(page.url(), `${step.id} must reach its setup route`).toContain(
@@ -159,6 +162,8 @@ async function captureJourney(page: Page, journey: Journey): Promise<void> {
         }
       )
     await applyAction(page, step.phoneAction)
+    if (step.openDetails)
+      await page.locator("details > summary").first().click()
     await waitUntilReady(page, step.readyText, step.phoneReadyHeading)
     if (step.phonePathIncludes)
       expect(
