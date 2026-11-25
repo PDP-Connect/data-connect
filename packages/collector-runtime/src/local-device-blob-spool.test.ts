@@ -182,7 +182,9 @@ describe("LocalDeviceBlobSpool", () => {
     // Observe stream open without wall-clock polling; hold the synthetic
     // source open so the writer cannot commit while the sweep runs.
     let opened!: (path: string) => void;
-    const activePath = new Promise<string>((resolve) => { opened = resolve; });
+    const activePath = new Promise<string>((resolve) => {
+      opened = resolve;
+    });
     const realOpen = fs.open;
     t.mock.method(
       fs,
@@ -190,16 +192,22 @@ describe("LocalDeviceBlobSpool", () => {
       (path: string, flags: string, mode: number, callback: (error: Error | null, fd: number) => void) =>
         realOpen(path, flags, mode, (error, fd) => {
           callback(error, fd);
-          if (!error) opened(path);
+          if (!error) {
+            opened(path);
+          }
         })
     );
     let resume!: () => void;
-    const paused = new Promise<void>((resolve) => { resume = resolve; });
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
     const bytes = Buffer.from("slow synthetic capture");
-    const pending = writer.put((async function* () {
-      await paused;
-      yield bytes;
-    })());
+    const pending = writer.put(
+      (async function* () {
+        await paused;
+        yield bytes;
+      })()
+    );
     const settled = Promise.allSettled([pending]);
     try {
       const active = await Promise.race([

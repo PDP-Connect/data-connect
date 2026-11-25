@@ -154,9 +154,14 @@ test("terminal fixture requires a source identity before canonicalization", () =
     version: 1,
   } as const;
   for (const invalid of ["", 7]) {
-    assert.throws(() => canonicalTerminalRunCommitEnvelope({
-      ...input, source_instance_id: invalid as string,
-    }), /sourceInstanceId must be a non-blank string/);
+    assert.throws(
+      () =>
+        canonicalTerminalRunCommitEnvelope({
+          ...input,
+          source_instance_id: invalid as string,
+        }),
+      /sourceInstanceId must be a non-blank string/
+    );
   }
 });
 
@@ -206,8 +211,10 @@ test("local-device batch identity agrees with every envelope", () => {
   assert.equal(valid.connector_id, envelopeFixture.connectorId);
   assert.equal(valid.device_id, envelopeFixture.deviceId);
   for (const mismatch of [{ batchId: "different-batch" }, { batchSeq: 2 }]) {
-    assert.throws(() => buildLocalDeviceIngestBatchRequest({ ...batch, ...mismatch }),
-      /batch (batchId|batchSeq) must match every record envelope/);
+    assert.throws(
+      () => buildLocalDeviceIngestBatchRequest({ ...batch, ...mismatch }),
+      /batch (batchId|batchSeq) must match every record envelope/
+    );
   }
   assert.equal(valid.body_hash, hashCanonicalJson([first]));
   assert.throws(

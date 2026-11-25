@@ -14,7 +14,7 @@ import {
   statSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -289,7 +289,7 @@ export class LocalDeviceBlobSpool {
    */
   async put(content: LocalDeviceBlobSpoolContent): Promise<LocalDeviceBlobSpoolEntry> {
     const tempPath = join(this.#tempDir(), `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const activePath = resolve(tempPath);
+    const activePath = resolvePath(tempPath);
     activeTempPaths.add(activePath);
     try {
       return await this.#putAtTempPath(content, tempPath);
@@ -298,10 +298,7 @@ export class LocalDeviceBlobSpool {
     }
   }
 
-  async #putAtTempPath(
-    content: LocalDeviceBlobSpoolContent,
-    tempPath: string
-  ): Promise<LocalDeviceBlobSpoolEntry> {
+  async #putAtTempPath(content: LocalDeviceBlobSpoolContent, tempPath: string): Promise<LocalDeviceBlobSpoolEntry> {
     const hash = createHash("sha256");
     let sizeBytes = 0;
     // flush: true fsyncs the file content before close resolves. Without
@@ -562,7 +559,7 @@ export class LocalDeviceBlobSpool {
       const path = join(this.#tempDir(), name);
       try {
         const { mtimeMs } = await stat(path);
-        if (!activeTempPaths.has(resolve(path)) && isOlderThan(mtimeMs, olderThanMs, now)) {
+        if (!activeTempPaths.has(resolvePath(path)) && isOlderThan(mtimeMs, olderThanMs, now)) {
           rmSync(path, { force: true });
           swept += 1;
         }
