@@ -5210,6 +5210,13 @@ function validateChangesSinceVersions(
   if (belowFloor || sessionSnapshotPruned) {
     throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }
+  // The counter only grows within a generation, so a token or page cursor past
+  // the head names versions this database never issued, as after restoring an
+  // older backup. Answering it would return an empty page and a token at the
+  // older head, which cannot tell the client to drop what it learned after it.
+  if (Math.max(sinceVersion, afterVersion, effectiveSessionMaxVersion) > currentMaxVersion) {
+    throw codedError("changes_since cursor is ahead of the stream's history; full re-sync required", "cursor_expired");
+  }
 
   return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }

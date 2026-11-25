@@ -65,6 +65,8 @@ interface Backend {
   put(key: string, popularity?: number, name?: string): Promise<void>;
   remove(key: string): Promise<void>;
   reset(stream?: string): Promise<void>;
+  /** Roll the stream back to `version` without a new reset generation, as restoring an older backup does. */
+  restoreTo(version: number): Promise<void>;
   teardown(): Promise<void>;
 }
 
@@ -106,6 +108,26 @@ function makeBackend(instanceId: string, kind: "sqlite" | "postgres", teardown: 
       }) as unknown as Promise<void>,
     reset: async (stream = STREAM) => {
       await deleteAllRecords(target, stream);
+    },
+    restoreTo: async (version) => {
+      const args = [instanceId, STREAM, version];
+      if (kind === "sqlite") {
+        getDb()
+          .prepare("DELETE FROM record_changes WHERE connector_instance_id = ? AND stream = ? AND version > ?")
+          .run(...args);
+        getDb()
+          .prepare("UPDATE version_counter SET max_version = ? WHERE connector_instance_id = ? AND stream = ?")
+          .run(version, instanceId, STREAM);
+        return;
+      }
+      await postgresQuery(
+        "DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 AND version > $3",
+        args
+      );
+      await postgresQuery(
+        "UPDATE version_counter SET max_version = $3 WHERE connector_instance_id = $1 AND stream = $2",
+        args
+      );
     },
     teardown,
   };
@@ -233,6 +255,34 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
     await assert.rejects(backend.list({ changes_since: backend.legacyToken(2) }), { code: "cursor_expired" });
   });
 
+
+  scenario("a token ahead of a same-generation restore is rejected with cursor_expired", async (backend) => {
+    await backend.put("a");
+    await backend.put("b");
+    await backend.put("c");
+    const synced = await backend.list({ changes_since: "beginning" });
+    assert.deepEqual(ids(synced), ["a", "b", "c"]);
+    assert.ok(synced.next_changes_since);
+    await backend.restoreTo(2);
+    await assert.rejects(backend.list({ changes_since: synced.next_changes_since }), { code: "cursor_expired" });
+    const resync = await backend.list({ changes_since: "beginning" });
+    assert.ok(resync.next_changes_since, "beginning still recovers after the restore");
+  });
+
+  scenario(
+    "a changes page cursor whose snapshot is ahead of a same-generation restore is rejected",
+    async (backend) => {
+      await backend.put("a");
+      await backend.put("b");
+      await backend.put("c");
+      const first = await backend.list({ changes_since: "beginning", limit: 1 });
+      assert.equal(first.has_more, true);
+      assert.ok(first.next_cursor);
+      await backend.restoreTo(2);
+      await assert.rejects(backend.list({ cursor: first.next_cursor, limit: 1 }), { code: "cursor_expired" });
+    },
+    { needsPaging: true }
+  );
 
   scenario(
     "a changes page cursor that spans a reset is rejected",

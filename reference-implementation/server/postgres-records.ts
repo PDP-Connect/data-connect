@@ -2365,6 +2365,15 @@ async function queryPostgresChangesSince({
       err.code = "cursor_expired";
       throw err;
     }
+    // The counter only grows within a generation, so a token past the head names
+    // versions this database never issued, as after restoring an older backup.
+    // Answering it would return an empty page and a token at the older head,
+    // which cannot tell the client to drop what it learned after that head.
+    if (decodedVersion > sessionMax) {
+      const err: PgQueryError = new Error("changes_since cursor is ahead of the stream's history; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
+    }
     const rows = await client.query(
       `SELECT DISTINCT ON (record_key)
               record_key, record_json, deleted, deleted_at, emitted_at, version

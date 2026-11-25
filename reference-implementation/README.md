@@ -179,7 +179,11 @@ horizon `V - L`, keeping each live key's current row and its newest row at or
 below the horizon. The horizon is stored per stream as
 `version_counter.changes_floor`. A token below the floor, or a changes page
 cursor whose snapshot is below it, expires. A bulk stream reset expires earlier
-nonzero tokens: they carry the connection's `record_reset_generation`.
+nonzero tokens: they carry the connection's `record_reset_generation`. A token
+past the stream's head, as after restoring an older backup, also expires. If
+writes after such a restore pass the old head before the client returns, its
+token looks valid again, so a restore must also advance
+`record_reset_generation` for every connection it rolls back.
 
 Each request reads from one database snapshot (one read transaction on SQLite,
 one `REPEATABLE READ` transaction on PostgreSQL), so a concurrent prune cannot
