@@ -97,15 +97,15 @@ try {
 
   const setup = await page.goto(`${origin}/setup`, { waitUntil: "domcontentloaded" });
   assert.equal(setup?.status(), 200, "first boot must show the owner setup form");
-  await page.getByLabel("Setup token").fill(setupToken);
-  await page.getByLabel(/New password/).fill(ownerPassword);
+  await page.getByLabel("Setup code").fill(setupToken);
+  await page.getByLabel(/^Password \(15 characters minimum\)/).fill(ownerPassword);
   const claim = await waitForResponse(page, "/setup", "POST", () =>
-    page.getByRole("button", { name: "Claim this install" }).click()
+    page.getByRole("button", { name: "Set up DataConnect" }).click()
   );
   assert.equal(claim.status(), 201, "setup token must claim first sign-in");
 
   await page.goto(`${origin}/owner/login?return_to=%2F`, { waitUntil: "domcontentloaded" });
-  await page.getByLabel("Owner password").fill(ownerPassword);
+  await page.getByLabel("Password", { exact: true }).fill(ownerPassword);
   const login = await waitForResponse(page, "/owner/login", "POST", () =>
     page.getByRole("button", { name: "Sign in" }).click()
   );

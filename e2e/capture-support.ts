@@ -13,7 +13,7 @@ export async function loginAsOwner(page: Page): Promise<void> {
   if (!password)
     throw new Error("E2E_OWNER_PASSWORD is missing; use e2e/harness.mjs")
   await page.goto(`${BASE_URL}/owner/login?return_to=%2F`)
-  await page.getByLabel("Owner password").fill(password)
+  await page.getByLabel("Password", { exact: true }).fill(password)
   const [response] = await Promise.all([
     page.waitForResponse(
       res =>
@@ -143,9 +143,9 @@ export async function seedConnector(
     `${BASE_URL}/device?user_code=${encodeURIComponent(device.user_code)}`
   )
   await page
-    .getByRole("button", { name: "Approve and issue owner token" })
+    .getByRole("button", { name: "Approve", exact: true })
     .click()
-  await expect(page.getByText("CLI access approved")).toBeVisible()
+  await expect(page.getByText("Your device can finish signing in.")).toBeVisible()
 
   const tokenResponse = await page.request.post(`${BASE_URL}/oauth/token`, {
     form: {

@@ -133,7 +133,7 @@ async function newOwnerContext(
   track(context)
   const page = await context.newPage()
   await page.goto(`${baseUrl}/owner/login?return_to=%2Fsettings`)
-  await page.getByLabel("Owner password").fill(OWNER_PASSWORD)
+  await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
   await Promise.all([
     page.waitForURL(url => !url.pathname.startsWith("/owner/login")),
     page.getByRole("button", { name: "Sign in" }).click(),

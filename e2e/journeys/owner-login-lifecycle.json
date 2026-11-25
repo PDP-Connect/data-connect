@@ -5,9 +5,9 @@
     {
       "id": "signed-in-owner",
       "open": "/owner/login",
-      "readyText": "You are signed in to DataConnect.",
-      "desktopReadyHeading": "DataConnect owner access",
-      "phoneReadyHeading": "DataConnect owner access",
+      "readyText": "You are signed in.",
+      "desktopReadyHeading": "DataConnect",
+      "phoneReadyHeading": "DataConnect",
       "assertText": "Sign out"
     },
     {
@@ -17,10 +17,10 @@
         "role": "button",
         "name": "Sign out"
       },
-      "readyText": "Owner password",
+      "readyText": "Use your password to continue.",
       "desktopReadyHeading": "Sign in to DataConnect",
       "phoneReadyHeading": "Sign in to DataConnect",
-      "assertText": "Owner password"
+      "assertText": "Use your password to continue."
     }
   ]
 }

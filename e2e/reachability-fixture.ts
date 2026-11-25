@@ -22,7 +22,7 @@ export async function ownedReachabilityPlan() {
 export async function signIn(page: Page) {
   await page.goto("/owner/login?return_to=%2Fsettings")
   await page
-    .getByLabel("Owner password")
+    .getByLabel("Password", { exact: true })
     .fill(process.env.E2E_OWNER_PASSWORD ?? "")
   await page.getByRole("button", { name: "Sign in", exact: true }).click()
   await page.waitForURL("**/settings")
