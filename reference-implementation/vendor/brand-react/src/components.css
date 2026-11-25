@@ -32,6 +32,8 @@
 }
 .pdpp-popover {
   z-index: 20;
+  background: var(--popover);
+  box-shadow: var(--shadow-floating);
 }
 
 .pdpp-sheet {
@@ -523,12 +525,11 @@
   padding: 4px 0;
   color: var(--foreground);
   outline: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
   /* Same elevation exception as IcDialog: a floating surface earns one shadow. */
-  box-shadow: 0 8px 24px -6px
-    color-mix(in oklab, var(--foreground) 28%, transparent);
+  box-shadow: var(--shadow-floating);
   /* Fade on open/close (base-ui data attrs). */
   transition: opacity var(--duration-state) var(--ease-standard);
 }
@@ -628,12 +629,11 @@
   padding: 20px;
   color: var(--foreground);
   outline: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   /* The one shadow exception: a floating modal earns soft elevation. */
-  box-shadow: 0 16px 48px -12px
-    color-mix(in oklab, var(--foreground) 40%, transparent);
+  box-shadow: var(--shadow-floating);
   transform: translate(-50%, -50%);
   transition:
     opacity var(--duration-state) var(--ease-standard),
@@ -2677,13 +2677,11 @@
   width: min(280px, calc(100vw - 32px));
   max-width: min(280px, calc(100vw - 32px));
   padding: 12px;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
   border-top: 2px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-datechip__presets {
   display: flex;
@@ -2935,14 +2933,12 @@
   margin: 0;
   overflow-y: auto;
   list-style: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
   border-radius: var(--radius);
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-typeahead__item {
   display: block;
@@ -3055,8 +3051,8 @@
   /* D-6: clamp to viewport width so the popup never escapes on 390px screens */
   width: min(360px, calc(100vw - 32px));
   max-width: min(360px, calc(100vw - 32px));
-  /* Ink Carbon card treatment: --card bg, hairline --border-strong, menu
-     shadow, comfortable padding, shared box radius.
+  /* Ink Carbon floating surface: --popover bg, hairline --border-strong,
+     shared shadow, comfortable padding, shared box radius.
      border-top uses --primary at low opacity so the card reads visually
      anchored to its trigger (the primary-colored "operators" summary). */
   padding: 14px 16px;
@@ -3065,14 +3061,12 @@
   color: var(--muted-foreground);
   /* D-12: allow inline code chips to wrap rather than overflow */
   overflow-wrap: break-word;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
   border-radius: var(--radius);
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-help__body code {
   display: inline-block;
@@ -3127,14 +3121,12 @@
   width: min(360px, calc(100vw - 32px));
   max-width: min(360px, calc(100vw - 32px));
   padding: 14px 16px;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
   border-radius: var(--radius);
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-options__group {
   display: flex;

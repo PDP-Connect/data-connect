@@ -150,6 +150,11 @@ function buildNavigationCommands(basePath: string, segments: DashboardSegments):
       section: "Navigate",
       title: "Server",
     },
+  ];
+}
+
+function buildLiveOnlyNavigationCommands(basePath: string): DashboardCommand[] {
+  return [
     {
       description: "Settings for this DataConnect.",
       href: `${basePath}/settings`,
@@ -159,11 +164,6 @@ function buildNavigationCommands(basePath: string, segments: DashboardSegments):
       section: "Navigate",
       title: "Settings",
     },
-  ];
-}
-
-function buildLiveOnlyNavigationCommands(basePath: string): DashboardCommand[] {
-  return [
     {
       description: "Get an alert on this device when a data source needs you.",
       href: `${basePath}/notifications`,
@@ -240,7 +240,7 @@ function buildLiveOnlyQuickActions(basePath: string, segments: DashboardSegments
       keywords: ["audit", "trace", "failure", "failed", "debug"],
       kind: "action",
       section: "Quick action",
-      title: "Failed reads",
+      title: "Failed activity",
     },
     {
       description: "Syncs that did not finish.",

@@ -281,12 +281,21 @@ const subscribeNever = () => () => undefined;
 const clientJumpLabel = () => jumpShortcutLabel(detectPlatform());
 const serverJumpLabel = () => DEFAULT_JUMP_SHORTCUT_LABEL;
 
-function JumpButton({ onJump }: { onJump: () => void }) {
+function JumpButton({ onJump, onClose }: { onJump: () => void; onClose?: () => void }) {
   // The server snapshot is the neutral label, so hydration matches the server
   // markup; the client snapshot switches to the Command glyph on Apple platforms.
   const label = useSyncExternalStore(subscribeNever, clientJumpLabel, serverJumpLabel);
   return (
-    <button aria-label={`Search or jump to… ${label}`} className="rr-search-button" onClick={onJump} type="button">
+    <button
+      aria-keyshortcuts="Control+K"
+      aria-label="Search or jump to commands"
+      className="rr-search-button"
+      onClick={() => {
+        onClose?.();
+        onJump();
+      }}
+      type="button"
+    >
       <span>Search or jump to…</span>
       <span className="rr-kbd">{label}</span>
     </button>
@@ -299,8 +308,6 @@ interface RecordroomShellProps {
   /** Optional build override for development or a downstream distribution. */
   build?: string;
   children: ReactNode;
-  /** Retained for compatible callers; the frame footer shows the app version. */
-  host?: string;
   /** Called when the search or jump affordance is activated (open the command palette). */
   onJump?: () => void;
 }
@@ -362,7 +369,7 @@ export function RecordroomShell({
                   Close
                 </IcDialogClose>
               </div>
-              {onJump ? <JumpButton onJump={onJump} /> : null}
+              {onJump ? <JumpButton onClose={closeDrawer} onJump={onJump} /> : null}
               <div className="rr-drawer__nav">
                 <NavList onNavigate={closeDrawer} pathname={pathname} />
               </div>

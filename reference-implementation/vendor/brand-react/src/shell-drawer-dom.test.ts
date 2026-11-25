@@ -235,3 +235,33 @@ test("backdrop and close button dismiss the drawer", async () => {
   await settle();
   assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
 });
+
+test("search in the drawer closes it before opening the jump dialog", async () => {
+  const { host } = installBrowserGlobals();
+  const currentBrowser = browser;
+  assert.ok(currentBrowser);
+  const jumps: string[] = [];
+  const { RecordroomShell } = await import("./shell-frame.tsx");
+  act(() => {
+    currentBrowser.root.render(
+      app(createElement(RecordroomShell, { onJump: () => jumps.push("opened") }, createElement("p", null, "Content")))
+    );
+  });
+
+  const trigger = host.querySelector<HTMLButtonElement>(".rr-menu-btn");
+  assert.ok(trigger);
+  act(() => trigger.click());
+  await settle();
+
+  const dialog = currentBrowser.dom.window.document.querySelector<HTMLElement>('[role="dialog"]');
+  assert.ok(dialog);
+  const search = dialog.querySelector<HTMLButtonElement>(".rr-search-button");
+  assert.ok(search);
+  await act(async () => {
+    await userEvent.setup({ delay: null, document: currentBrowser.dom.window.document }).click(search);
+  });
+  await settle();
+
+  assert.deepEqual(jumps, ["opened"]);
+  assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
+});

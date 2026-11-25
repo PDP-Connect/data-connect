@@ -56,7 +56,7 @@ const PALETTE_USES_CONTEXT = /const palette = useCommandPalette\(\)/;
 const LAYOUT_PROVIDER_WRAP =
   /<CommandPaletteProvider>[\s\S]*\{children\}[\s\S]*<CommandPalette basePath=\{CONSOLE_BASE_PATH\} mode="live" segments=\{CONSOLE_SEGMENTS\} \/>[\s\S]*<\/CommandPaletteProvider>/;
 const SHELL_BRIDGE_USES_CONTEXT = /const \{ toggle \} = useCommandPalette\(\)/;
-const SHELL_BRIDGE_WIRES_JUMP = /<RecordroomShell build=\{build\} host=\{host\} onJump=\{toggle\}>/;
+const SHELL_BRIDGE_WIRES_JUMP = /<RecordroomShell build=\{build\} onJump=\{toggle\}>/;
 const PALETTE_USES_REGISTRY = /import \{[^}]*\bmatchDashboardCommands\b[^}]*\} from "\.\/command-registry\.ts"/;
 const CONSOLE_REEXPORTS_UNIFIED_RE =
   /export \{[\s\S]*CommandPalette[\s\S]*\} from "@pdpp\/operator-ui\/components\/command-palette"/;
@@ -379,6 +379,23 @@ test("Notifications nav command is present in live mode", () => {
   const notifications = all.find((c) => c.id === "nav-notifications");
   assert.ok(notifications, "nav-notifications must exist in live mode");
   assert.equal(notifications.href, "/notifications");
+});
+
+test("Settings navigation is live-only because the sandbox has no settings route", () => {
+  const live = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS });
+  assert.equal(live.find((c) => c.id === "nav-settings")?.href, "/settings");
+
+  const sandbox = listDashboardCommands(SANDBOX_OPTS);
+  assert.equal(sandbox.find((c) => c.id === "nav-settings"), undefined);
+});
+
+test("failed audit actions use activity wording and keep their search keywords", () => {
+  const failedActivity = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS }).find(
+    (c) => c.id === "quick-failed-traces"
+  );
+  assert.ok(failedActivity);
+  assert.equal(failedActivity.title, "Failed activity");
+  assert.deepEqual(failedActivity.keywords, ["audit", "trace", "failure", "failed", "debug"]);
 });
 
 test("Connect nav command is present in live mode", () => {

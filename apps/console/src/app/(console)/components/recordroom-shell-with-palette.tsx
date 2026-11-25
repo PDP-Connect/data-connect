@@ -32,10 +32,10 @@ interface RecordroomShellWithPaletteProps {
   host?: string;
 }
 
-export function RecordroomShellWithPalette({ build, children, host }: RecordroomShellWithPaletteProps) {
+export function RecordroomShellWithPalette({ build, children }: RecordroomShellWithPaletteProps) {
   const { toggle } = useCommandPalette();
   return (
-    <RecordroomShell build={build} host={host} onJump={toggle}>
+    <RecordroomShell build={build} onJump={toggle}>
       <LiveStatusStrip />
       {children}
     </RecordroomShell>

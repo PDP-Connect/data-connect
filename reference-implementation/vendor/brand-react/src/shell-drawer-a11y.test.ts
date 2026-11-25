@@ -21,7 +21,7 @@ const CONDITIONAL_DRAWER = /drawerOpen\s*&&/;
 const PORTAL_BACKDROP = /<IcDialogPortal>[\s\S]*<IcDialogBackdrop className="rr-drawer-overlay"/;
 const FIXED_POSITION = /position:\s*fixed/;
 const VIEWPORT_INSET = /inset|top:\s*0/;
-const BACKDROP_COLOR = /background:\s*color-mix\(in oklab, var\(--foreground\) 50%, transparent\)/;
+const BACKDROP_COLOR = /background:\s*var\(--scrim\)/;
 const ABOVE_BACKDROP = /z-index:\s*71/;
 const RIGHT_EDGE_RESET = /right:\s*auto/;
 const MAX_WIDTH_RESET = /max-width:\s*none/;
@@ -84,6 +84,7 @@ test("the portaled drawer owns its cascade geometry and shell tokens", async () 
   assert.match(popup, RIGHT_EDGE_RESET);
   assert.match(popup, MAX_WIDTH_RESET);
   assert.match(popup, TRANSFORM_RESET);
+  assert.match(popup, /border-radius:\s*0 var\(--radius\) var\(--radius\) 0/);
   assert.match(css, SHELL_MASTHEAD_SCOPE);
   // DIRECTION.md "The frame and the menu": the mark stays legible on the light phone bar.
   assert.match(css, MARK_USES_THEME_FOREGROUND);

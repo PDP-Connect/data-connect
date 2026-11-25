@@ -64,8 +64,8 @@ html:has(.rr-app) {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* No top padding: the brand block owns the masthead band so its rule lands
-     at exactly --rr-masthead-height, level with .rr-head's rule. */
+  /* No top padding: the brand block owns the masthead band. On phones its
+     bottom rule lines up with the main header. */
   padding: 0 0 14px;
   background: var(--sidebar);
   border-right: 1px solid var(--border);
@@ -317,7 +317,7 @@ html:has(.rr-app) {
   width: 100vw;
   height: 100dvh;
   overflow: hidden;
-  background: color-mix(in oklab, var(--foreground) 50%, transparent);
+  background: var(--scrim);
 }
 @media (prefers-reduced-motion: no-preference) {
   .pdpp-dialog-backdrop.rr-drawer-overlay {
@@ -344,7 +344,7 @@ html:has(.rr-app) {
   background: var(--sidebar);
   border: 0;
   border-right: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: 0 var(--radius) var(--radius) 0;
   box-shadow: none;
   transform: none;
 }
@@ -429,8 +429,21 @@ html:has(.rr-app) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    min-height: 36px;
+    width: 44px;
+    min-height: 44px;
     padding: 0;
+  }
+  .pdpp-dialog.rr-drawer .rr-nav-item--child {
+    min-height: 44px;
+  }
+  .pdpp-dialog.rr-drawer .rr-side__theme {
+    width: 44px;
+    min-height: 44px;
+  }
+  .pdpp-dialog.rr-drawer .rr-search-button {
+    min-height: 44px;
+  }
+  .rr-kbd {
+    display: none;
   }
 }
