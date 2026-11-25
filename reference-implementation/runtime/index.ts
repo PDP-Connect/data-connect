@@ -60,6 +60,7 @@ import {
   coveredRequiredKeys,
   decideCheckpointCommits,
   type ReportedOmission,
+  streamsCheckpointedBy,
   type WithholdReason,
   withholdReasonKey,
 } from "./checkpoint-commit-decision.ts";
@@ -5568,8 +5569,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // Proven a non-empty, in-scope stream name by the validator above.
       const stateStream = msg.stream as string;
 
-      // Flush records for this stream before persisting state
-      await flushBatch(stateStream);
+      // The staged cursor vouches for every record already buffered on this
+      // stream and on the streams it owns (co-emitted `state_stream` children
+      // and detail lanes), so all of them must be durable before staging.
+      for (const stream of streamsCheckpointedBy(stateStream, manifestByStream.keys(), {
+        detailParentsByStream: manifestDetailParentStreamsByStream,
+        stateStreamByStream: manifestStateStreamByStream,
+      })) {
+        // biome-ignore lint/performance/noAwaitInLoops: flushes are sequential so a failure stops before staging.
+        await flushBatch(stream);
+      }
       // Transient manifest drift: this stream's batch was rejected as
       // not_found for a manifest-declared stream and recorded as a per-stream
       // gap. Do NOT stage its cursor — leaving it uncommitted makes the next

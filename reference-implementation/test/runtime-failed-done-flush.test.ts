@@ -31,8 +31,9 @@
 // re-walks from the last good checkpoint. A certified stream-scoped failure
 // (DONE.error.code "stream_collection_failed" plus a matching SKIP_RESULT)
 // commits the staged checkpoints of its other streams; a failed terminal flush
-// does not change that, because STATE flushes its stream before the cursor is
-// staged, so a committed cursor never covers a dropped record.
+// does not change that, because STATE flushes its stream and every stream it
+// owns before the cursor is staged, so a committed cursor never covers a
+// dropped record.
 
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -49,6 +50,7 @@ import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connecto
 
 const ITEMS = "items";
 const ORDERS = "orders";
+const ORDER_NOTES = "order_notes";
 
 const MANIFEST = {
   connector_id: "https://registry.pdpp.dev/connectors/failed-done-flush-stub",
@@ -173,6 +175,7 @@ interface Scenario {
   exitCode: number;
   failIngest?: boolean;
   failIngestAfter?: number;
+  manifest?: typeof MANIFEST;
   messages: readonly StubMessage[];
   runId: string;
 }
@@ -227,7 +230,7 @@ async function runScenario(t: TestContext, scenario: Scenario) {
           return null;
         },
       },
-      manifest: MANIFEST,
+      manifest: scenario.manifest ?? MANIFEST,
       onInteraction: () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
       // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double.
       onProgress: () => {},
@@ -398,6 +401,68 @@ test("certified stream-scoped failure with a failing terminal flush: the staged 
   const data = terminalData(events, "run.failed");
   assert.equal(data.connector_error_code, "stream_collection_failed");
   assert.equal(data.buffered_records_dropped, 4, "the items tail and the orders did not land");
+});
+
+test("certified stream-scoped failure with a failing terminal flush: a parent's STATE first makes its co-emitted child's records durable", async (t) => {
+  // order_notes declares state_stream: orders, so the orders cursor vouches
+  // for the notes buffered before it. items fails and is certified. Two
+  // ingest POSTs succeed; the terminal flush then fails. If STATE flushed only
+  // orders, the terminal flush would deliver items first (it was buffered
+  // first), fail on order_notes, and the committed orders cursor would cover
+  // two dropped notes.
+  const manifest = {
+    ...MANIFEST,
+    streams: [
+      ...MANIFEST.streams.filter((stream) => stream.name === ITEMS),
+      { ...(MANIFEST.streams[0] as (typeof MANIFEST.streams)[number]), name: ORDERS },
+      { ...(MANIFEST.streams[0] as (typeof MANIFEST.streams)[number]), name: ORDER_NOTES, state_stream: ORDERS },
+    ],
+  };
+  const { outcome, outcomeError, requests, stateCommits } = await runScenario(t, {
+    exitCode: 1,
+    failIngestAfter: 2,
+    manifest,
+    messages: [
+      ...records(ITEMS, 2),
+      ...records(ORDER_NOTES, 2),
+      record(ORDERS, "orders_0"),
+      { cursor: { offset: 1 }, stream: ORDERS, type: "STATE" },
+      { message: "upstream 500", reason: "stream_collection_failed", stream: ITEMS, type: "SKIP_RESULT" },
+      {
+        error: { code: "stream_collection_failed", message: "stream collection failed: items: upstream 500", retryable: true },
+        records_emitted: 5,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    runId: "run_failed_done_flush_shared_parent",
+  });
+
+  assert.equal(outcomeError, null);
+  assert.equal(outcome?.status, "failed");
+  assert.deepEqual(
+    stateCommits.map((r) => Object.keys((JSON.parse(r.body) as { state: Record<string, unknown> }).state)),
+    [[ORDERS]],
+    "the parent's checkpoint commits"
+  );
+  const acceptedPosts = requests
+    .filter((r) => r.method === "POST" && r.pathname.startsWith("/v1/ingest/"))
+    .slice(0, 2)
+    .map((r) => ({
+      keys: r.body
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => (JSON.parse(line) as { key: string }).key),
+      stream: decodeURIComponent(r.pathname.slice("/v1/ingest/".length)),
+    }));
+  assert.deepEqual(
+    acceptedPosts,
+    [
+      { keys: ["orders_0"], stream: ORDERS },
+      { keys: ["order_notes_0", "order_notes_1"], stream: ORDER_NOTES },
+    ],
+    "both accepted ingests happen at STATE and hold every record the committed cursor covers"
+  );
 });
 
 test("DONE succeeded: the tail is flushed and STATE is committed (control)", async (t) => {
