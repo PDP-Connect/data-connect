@@ -148,13 +148,15 @@ test("blank overview still offers the existing Add a data source route", async (
 
 // Add-page design "Page 1": one list of services that can be connected, found by search.
 test("the Add page builds one list of connectable services from the catalog", async () => {
-  const [page, list] = await Promise.all([
+  const [page, read, list] = await Promise.all([
     readFile(RECORDS_ADD_PAGE_FILE, "utf8"),
+    readFile(`${SOURCES}add/add-source-catalog-read.ts`, "utf8"),
     readFile(`${SOURCES}add/add-source-list.tsx`, "utf8"),
   ]);
-  assert.match(page, LIST_CONNECTOR_MANIFESTS_RE);
-  assert.match(page, LIST_OWNER_CONNECTOR_TEMPLATES_RE);
-  assert.match(page, BUILD_CONNECTOR_CATALOG_RE);
+  assert.match(read, LIST_CONNECTOR_MANIFESTS_RE);
+  assert.match(read, LIST_OWNER_CONNECTOR_TEMPLATES_RE);
+  assert.match(read, BUILD_CONNECTOR_CATALOG_RE);
+  assert.match(page, /readAddSourceCatalog\(\)/);
   assert.match(page, /buildAddSourceList\(/);
   assert.match(page, /<AddSourceList /);
   assert.match(page, /title=\{ADD_SOURCE_COPY\.heading\}/);

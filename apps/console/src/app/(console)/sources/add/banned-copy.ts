@@ -38,7 +38,11 @@ export function visibleText(html: string): string {
   const text = html
     .replace(/<script[\s\S]*?<\/script>/g, " ")
     .replace(/<[^>]*>/g, " ")
-    .replace(/&(?:amp|lt|gt|quot|#x27|#39);/g, " ");
+    .replace(/&(?:#x27|#39);/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
   return `${text} ${labels}`;
 }
 
@@ -58,7 +62,9 @@ export function bannedCopyProblems(html: string, options: BannedCopyOptions = {}
     if (summary !== allowedFold) problems.push(`fold "${summary}"`);
   }
   if (/<details\b(?![^>]*>\s*<summary)/.test(html)) problems.push("fold without a summary");
-  const text = visibleText(html);
+  // The one allowed fold holds the server's own message; its words are not ours to judge.
+  const ownCopy = html.replace(/<details\b[^>]*>\s*<summary\b[^>]*>\s*What went wrong\s*<\/summary>[\s\S]*?<\/details>/g, "");
+  const text = visibleText(ownCopy);
   const allow = new Set((options.allowWords ?? []).map((word) => word.toLowerCase()));
   for (const [name, pattern] of BANNED_WORDS) {
     const hit = pattern.exec(text);

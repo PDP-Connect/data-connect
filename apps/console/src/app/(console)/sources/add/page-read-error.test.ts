@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
+const CATALOG_READ_FILE = `${HERE}add-source-catalog-read.ts`;
 const INSTALLED_SOURCES_FILE = fileURLToPath(new URL("./installed-source-catalog.ts", import.meta.url));
 const SHARED_SOURCE_READER_FILE = fileURLToPath(new URL("../../components/existing-sources-by-connector.ts", import.meta.url));
 const TOLERATES_REFUSAL_RE = /options\.tolerateRefusal && isContinuationRefusal\(err\)/;
@@ -28,12 +29,12 @@ test("Add Source renders a fixed deterministic read failure before it reaches Ne
 
 // Design "Page 1" (list of connectable services): the transient busy state keeps the list honest.
 test("Add Source passes the transient package-catalog state to the list model", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
+  const src = await readFile(CATALOG_READ_FILE, "utf8");
   assert.match(src, /catalogTransientlyUnavailable: installSnapshot\?\.catalogUnavailableReason === "transient_busy"/);
 });
 
 test("Add Source marks existing accounts from the shared exact reader, even when the lookup was refused part way", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
+  const src = await readFile(CATALOG_READ_FILE, "utf8");
   const installedSources = await readFile(INSTALLED_SOURCES_FILE, "utf8");
   const sharedReader = await readFile(SHARED_SOURCE_READER_FILE, "utf8");
   assert.match(src, /readInstalledSourceCatalog\(catalog\.map/);

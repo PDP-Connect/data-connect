@@ -5,8 +5,8 @@
 
 import { IcButton } from "@pdpp/brand-react";
 import { type SyntheticEvent, useState } from "react";
-import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
-import { connectionNameFieldContract } from "../../../lib/source-setup-form-contract.ts";
+import { accountCopy, acceptedFilesLine, fileCopy, formatBytes } from "../../../sources/add/connect-copy.ts";
+import { StartFailed } from "../../../sources/add/connect-parts.tsx";
 
 interface ManualUploadSetupForForm {
   accepted_file_extensions: string[];
@@ -128,21 +128,6 @@ function formatMediaCoverage(value: unknown): string | null {
   }
   const { status } = value as { status?: unknown };
   return typeof status === "string" && status.length > 0 ? status.replaceAll("_", " ") : null;
-}
-
-function formatBytes(bytes: number): string {
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  let unit = units[0] ?? "B";
-  for (const nextUnit of units) {
-    unit = nextUnit;
-    if (value < 1024 || nextUnit === units.at(-1)) {
-      break;
-    }
-    value /= 1024;
-  }
-  return `${value >= 10 || unit === "B" ? Math.round(value) : value.toFixed(1)} ${unit}`;
 }
 
 function PreviewCard({ preview }: { preview: ManualUploadPreview }) {
@@ -645,23 +630,22 @@ async function importManualUploads(
 
 export function ManualUploadForm({
   existingSources,
+  name,
   setup,
   targetConnectionId,
 }: {
   existingSources: ExistingManualUploadSource[];
+  name: string;
   setup: ManualUploadSetupForForm;
   targetConnectionId?: string | null;
 }) {
   const [state, setState] = useState<UploadState>({ ok: null });
   const [pending, setPending] = useState(false);
-  const accepted = [
-    ...setup.accepted_file_names,
-    ...setup.accepted_file_extensions.map((extension) => `*${extension}`),
-  ];
-  const acceptLabel = accepted.length > 0 ? accepted.join(", ") : "supported export file";
+  const [addToExisting, setAddToExisting] = useState(false);
   const acceptAttribute = [...setup.accepted_file_names, ...setup.accepted_file_extensions].join(",");
   const hasValidator = setup.validation_expectations.length > 0;
-  const connectionName = connectionNameFieldContract(setup.display_name);
+  const choosesTarget = !targetConnectionId && existingSources.length > 0;
+  const firstExisting = existingSources[0];
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -682,7 +666,7 @@ export function ManualUploadForm({
       }
       window.location.href = await importManualUploads(setup, submission.files, submission.target, setState);
     } catch (err) {
-      setState({ message: err instanceof Error ? err.message : "Manual upload setup failed.", ok: false });
+      setState({ message: err instanceof Error ? err.message : "The import did not finish.", ok: false });
     } finally {
       setPending(false);
     }
@@ -692,68 +676,61 @@ export function ManualUploadForm({
     <form className="grid max-w-2xl gap-4" onSubmit={handleSubmit}>
       <input name="connector_id" type="hidden" value={setup.connector_id} />
       {targetConnectionId ? <input name="connection_id" type="hidden" value={targetConnectionId} /> : null}
-      {targetConnectionId ? (
-        <p className="pdpp-caption text-muted-foreground">
-          These files will be added to the data source you came from. To keep them separate, return to Add a data source
-          and start a new one.
-        </p>
-      ) : (
-        <p className="pdpp-caption text-muted-foreground">
-          Choose whether to make a new data source or add these files to one you already have.
-        </p>
-      )}
-      {targetConnectionId ? null : (
-        <fieldset className="grid gap-2 border-b border-border py-3">
-          <legend className="pdpp-eyebrow px-1">Import target</legend>
+      {choosesTarget && firstExisting ? (
+        <fieldset className="grid gap-2">
           <label className="flex min-h-11 items-center gap-2 text-sm">
-            <input defaultChecked name="source_target" type="radio" value="new" />
-            <span>Create a new data source for these files</span>
+            <input
+              checked={addToExisting}
+              name="source_target"
+              onChange={() => setAddToExisting(true)}
+              type="radio"
+              value="existing"
+            />
+            <span>{fileCopy.addTo(existingSources.length === 1 ? firstExisting.display_name : name)}</span>
           </label>
-          {existingSources.length > 0 ? (
-            <>
-              <label className="flex min-h-11 items-center gap-2 text-sm">
-                <input name="source_target" type="radio" value="existing" />
-                <span>Add these files to an existing data source</span>
-              </label>
-              <label className="grid gap-1" htmlFor="manual-upload-existing-source">
-                <span className="pdpp-caption text-muted-foreground">Existing data source</span>
-                <select
-                  className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
-                  id="manual-upload-existing-source"
-                  name="existing_connection_id"
-                >
-                  {existingSources.map((source) => (
-                    <option key={source.connection_id} value={source.connection_id}>
-                      {source.display_name} · {source.detail}
-                    </option>
-                  ))}
-                </select>
-                <span className="pdpp-caption text-muted-foreground">
-                  Select this only when the export belongs with that existing data source.
-                </span>
-              </label>
-            </>
+          {addToExisting && existingSources.length > 1 ? (
+            <select
+              aria-label={fileCopy.addTo(name)}
+              className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+              name="existing_connection_id"
+            >
+              {existingSources.map((source) => (
+                <option key={source.connection_id} value={source.connection_id}>
+                  {source.display_name}
+                </option>
+              ))}
+            </select>
           ) : null}
+          {addToExisting && existingSources.length === 1 ? (
+            <input name="existing_connection_id" type="hidden" value={firstExisting.connection_id} />
+          ) : null}
+          <label className="flex min-h-11 items-center gap-2 text-sm">
+            <input
+              checked={!addToExisting}
+              name="source_target"
+              onChange={() => setAddToExisting(false)}
+              type="radio"
+              value="new"
+            />
+            <span>{fileCopy.separate}</span>
+          </label>
         </fieldset>
-      )}
-      {targetConnectionId ? null : (
+      ) : null}
+      {choosesTarget && !addToExisting ? (
         <label className="grid gap-1" htmlFor="manual-upload-display-name">
-          <span className="pdpp-eyebrow">{connectionName.label}</span>
+          <span className="pdpp-eyebrow">{accountCopy.nameLabel}</span>
           <input
             className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             id="manual-upload-display-name"
-            maxLength={connectionName.maxLength}
-            name={connectionName.name}
-            placeholder={connectionName.placeholder}
+            maxLength={200}
+            name="display_name"
+            placeholder={accountCopy.namePlaceholder(name)}
             type="text"
           />
-          <span className="pdpp-caption text-muted-foreground">
-            {connectionName.helpText.replace("new source", "new data source")}
-          </span>
         </label>
-      )}
+      ) : null}
       <label className="grid gap-1" htmlFor="manual-upload-file">
-        <span className="pdpp-eyebrow">Export files</span>
+        <span className="sr-only">{fileCopy.chooseStep}</span>
         <input
           accept={acceptAttribute || undefined}
           className="flex min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:font-medium file:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -763,69 +740,25 @@ export function ManualUploadForm({
           required
           type="file"
         />
-        <span className="pdpp-caption text-muted-foreground">
-          Accepted files: {acceptLabel}
-          {setup.max_file_bytes ? `, up to ${formatBytes(setup.max_file_bytes)} each` : ""}
-          {setup.help_url ? (
-            <>
-              {". "}
-              <OpenExternalLink
-                className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
-                href={setup.help_url}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                Export instructions in a new tab
-              </OpenExternalLink>
-            </>
-          ) : null}
+        <span className="pdpp-caption text-muted-foreground" data-testid="accepted-files">
+          {acceptedFilesLine(setup.accepted_file_extensions, setup.accepted_file_names, setup.max_file_bytes)}
         </span>
-        {setup.help_text ? (
-          <details className="pdpp-caption text-muted-foreground">
-            <summary className="inline-flex min-h-11 cursor-pointer items-center">Export details</summary>
-            <span className="mt-1 block">{setup.help_text.replaceAll(/PDPP/giu, "DataConnect")}</span>
-          </details>
-        ) : null}
       </label>
-      {hasValidator ? (
-        <details className="pdpp-caption text-muted-foreground">
-          <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
-          <p className="mt-1">
-            DataConnect checks the file before importing it: {setup.validation_expectations.join(", ")}. Only files that
-            pass are imported.
-          </p>
-        </details>
-      ) : null}
       {state.ok === false && state.message ? (
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive" role="alert">
-          <p>The file could not be processed. Try again.</p>
-          <details className="mt-2">
-            <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
-            <p className="mt-1">{state.message.replaceAll(/PDPP/giu, "DataConnect")}</p>
-          </details>
-        </div>
+        <StartFailed message={state.message} sentence="The file could not be imported. Try again." />
       ) : null}
       {state.progress ? <ProgressCard progress={state.progress} /> : null}
-      {state.preview ? (
-        <details className="max-w-2xl" open>
-          <summary className="pdpp-caption inline-flex min-h-11 cursor-pointer items-center text-muted-foreground underline decoration-dotted underline-offset-4">
-            Details
-          </summary>
-          <PreviewCard preview={state.preview} />
-        </details>
-      ) : null}
+      {state.preview ? <PreviewCard preview={state.preview} /> : null}
       <div className="flex flex-wrap gap-2">
         <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="import">
-          {pending ? "Importing..." : "Import file"}
+          {pending ? "Importing…" : fileCopy.button}
         </IcButton>
-        <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="preview" variant="ghost">
-          {pending ? "Checking..." : "Preview only"}
-        </IcButton>
+        {hasValidator ? (
+          <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="preview" variant="ghost">
+            {pending ? "Checking…" : fileCopy.checkFirst}
+          </IcButton>
+        ) : null}
       </div>
-      <details className="pdpp-caption text-muted-foreground">
-        <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
-        <p className="mt-1">Import can accept multiple files into one data source. Preview checks one file without committing it.</p>
-      </details>
     </form>
   );
 }

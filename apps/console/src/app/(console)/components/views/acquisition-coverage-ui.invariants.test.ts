@@ -45,15 +45,8 @@ const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open \{d
 // RAISE-RULES.md 4: "source" alone becomes "data source".
 const STATUS_SOURCE_DETAILS_LINK = /href=\{sourceDetailHref\(status\)\}[\s\S]*Data source details/;
 const CONNECTOR_LEVEL_STATUS_RECORDS_LINK = /href=\{`\/sources\/\$\{encodeURIComponent\(status\.connector_id\)\}`\}/;
-const OWNER_SAFE_STORAGE_COPY = /stored for this source and is not exposed to connected apps or clients/;
-// RAISE-RULES.md 4: plain words ("checks the file before importing it").
-const VALIDATES_BEFORE_COMMIT_COPY = /checks the file before importing it/i;
 // RAISE-RULES.md 4 bans "coverage" on screen; the receipt stays revisitable through the status page link.
 const COVERAGE_RECEIPT_COPY = /\/connect\/status\/\$\{encodeURIComponent\(connectionId\)\}/;
-const PRIMARY_METHODS_IDENTIFIER = /primaryMethods/;
-const ADVANCED_METHODS_IDENTIFIER = /advancedMethods/;
-const OTHER_EXPORT_PATHS_DISCLOSURE = /<details[\s\S]*?Other ways to export this data/;
-const IMPORT_OWNER_ARTIFACT_CTA = /Import file[\s\S]*Preview only/;
 const OLD_FIRST_SYNC_CTA = /Upload and start first sync/;
 const PROVIDER_CREDENTIAL_COPY = /provider account sign-in is required|provider credential/;
 const DEPLOYMENT_SEMANTICS_COPY = /pnpm --dir|packages\/[a-z]|connector_instance_id|source_instance_id/;
@@ -84,28 +77,30 @@ const IMPORT_RECEIPT_STATE_REFERENCE = /status\.import_receipt/;
 
 // ── 2. Manual/upload page is a coverage-assistant start ─────────────────────
 
-test("manual upload page has owner-safe storage and validate-before-commit language", async () => {
+// Design "File services": the page prints the service's own export steps and offers "Import" and "Check the file first".
+test("manual upload page prints the export steps and checks the file before importing", async () => {
   const pageSrc = await readFile(MANUAL_UPLOAD_FILE, "utf8");
   const formSrc = await readFile(MANUAL_UPLOAD_FORM_FILE, "utf8");
-  assert.match(pageSrc, OWNER_SAFE_STORAGE_COPY);
-  // Validates before durable commit when a validator exists.
-  assert.match(formSrc, VALIDATES_BEFORE_COMMIT_COPY);
+  const bodies = await readFile(`${HERE}../../sources/add/connect-bodies.tsx`, "utf8");
+  assert.match(bodies, /data-testid="export-steps"/);
+  assert.match(bodies, /data-testid="export-links"/);
+  assert.match(pageSrc, /exportInstructions\(/);
   // It speaks of a durable receipt the owner can revisit.
   assert.match(formSrc, COVERAGE_RECEIPT_COPY);
 });
 
-test("manual upload page leads with primary methods and hides advanced behind one disclosure", async () => {
+test("manual upload page leads with primary methods and lists other ways as plain links", async () => {
   const src = await readFile(MANUAL_UPLOAD_FILE, "utf8");
-  assert.match(src, PRIMARY_METHODS_IDENTIFIER);
-  assert.match(src, ADVANCED_METHODS_IDENTIFIER);
-  // Exactly one disclosure for the secondary/advanced paths.
-  assert.match(src, OTHER_EXPORT_PATHS_DISCLOSURE);
+  const steps = await readFile(`${HERE}../../connect/manual-upload/[connectorId]/manual-upload-steps.ts`, "utf8");
+  assert.match(src, /exportInstructions\(setup\.acquisition_methods\)/);
+  assert.match(steps, /method\.posture === "primary"/);
+  assert.doesNotMatch(src, /<details/);
 });
 
 test("manual upload CTA imports an owner artifact rather than starting a sync", async () => {
   const src = await readFile(MANUAL_UPLOAD_FORM_FILE, "utf8");
   // The owner artifact is imported/validated, never "first sync".
-  assert.match(src, IMPORT_OWNER_ARTIFACT_CTA);
+  assert.match(src, /fileCopy\.button[\s\S]*fileCopy\.checkFirst/);
   assert.doesNotMatch(src, OLD_FIRST_SYNC_CTA);
 });
 

@@ -6,23 +6,24 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const PAGE_FILE = fileURLToPath(new URL("./page.tsx", import.meta.url));
+const COPY_FILE = fileURLToPath(new URL("../../../sources/add/connect-copy.ts", import.meta.url));
+const PAGE_FILE = fileURLToPath(new URL("../../../sources/add/connect-bodies.tsx", import.meta.url));
+const ROUTE_FILE = fileURLToPath(new URL("./page.tsx", import.meta.url));
 
+// Design "Key services": lead, fields, one storage sentence, "Where to find it", one button.
 test("static-secret setup preserves the fields and uses matching connect and reconnect copy", async () => {
-  const page = await readFile(PAGE_FILE, "utf8");
-  assert.match(page, /title: `Connect \$\{displayName\}`/);
-  assert.match(page, /title: `Reconnect \$\{displayName\}`/);
-  assert.match(page, /Paste your \$\{displayName\} API key\./);
-  assert.match(page, /hasExistingTarget \? "Reconnect and sync"/);
-  assert.match(page, /formContract\.credentialFields\.map/);
+  const [page, copy, route] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(COPY_FILE, "utf8"), readFile(ROUTE_FILE, "utf8")]);
+  assert.match(page, /title=\{reconnecting \? `Reconnect \$\{name\}` : connectHeading\(name\)\}/);
+  assert.match(page, /reconnecting \? `Reconnect \$\{name\}` : keyCopy\.button\(name\)/);
+  assert.match(copy, /\$\{name\} gives you a key that lets DataConnect read your data\./);
+  assert.match(copy, /whereToFind: "Where to find it"/);
+  assert.match(copy, /storageNotReady: "This server is not set up to store keys yet\."/);
+  assert.match(route, /setup\.credential_capture\.fields\.map/);
   // RAISE-RULES.md 7: provider help links must work as labelled and have touch-sized targets.
   assert.match(page, /className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"[\s\S]{0,200}target="_blank"/);
-  assert.match(page, /Your key is stored on your server\. Apps and assistants can't see it\./);
-  // DIRECTION.md, “Values” and RAISE-RULES.md 7: controls remain easy to use by touch.
-  assert.match(page, /<summary className="inline-flex min-h-11 cursor-pointer items-center">Details<\/summary>/);
   assert.match(page, /Set <code>\{blocker\.key\}<\/code>/);
-  assert.equal((page.match(/Back to Data sources/g) ?? []).length, 1);
-  assert.match(page, /isReplaceMode \? `Back to \$\{setup\.display_name\}` : "Back to Data sources"/);
+  // Removed by design: the folds, the second back link and the explainer callouts.
+  assert.doesNotMatch(page, /<details|Details|Back to Data sources|Callout|Credential storage/);
 });
 
 test("static-secret copy samples avoid banned words outside Details", () => {

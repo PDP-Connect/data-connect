@@ -6,6 +6,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+const CREDENTIAL_FIELDS_FILE = fileURLToPath(new URL("../sources/add/credential-fields.tsx", import.meta.url));
+const BODIES_FILE = fileURLToPath(new URL("../sources/add/connect-bodies.tsx", import.meta.url));
 const PAGE_FILE = fileURLToPath(new URL("./static-secret/[connectorId]/page.tsx", import.meta.url));
 const ACTION_FILE = fileURLToPath(new URL("./static-secret/[connectorId]/actions.ts", import.meta.url));
 const STATUS_PAGE_FILE = fileURLToPath(new URL("./status/[connectionId]/page.tsx", import.meta.url));
@@ -21,10 +23,10 @@ const GET_SETUP = /getStaticSecretSetup\(connectorId\)/;
 // Assert both are imported and referenced — the selector pattern is the invariant.
 const FORM_ACTION_CREATE = /createStaticSecretConnectionAction/;
 const FORM_ACTION_REPLACE = /replaceStaticSecretCredentialAction/;
-const EXISTING_TARGET_ACTION = /action=\{hasExistingTarget \? replaceStaticSecretCredentialAction/;
-const RETRY_CONNECTION_ID = /hasExistingTarget && pageParams\.connectionId/;
-const DRAFT_RETRY_MODE = /draftRetry/;
-const FIELDS_MAP = /formContract\.credentialFields\.map/;
+const EXISTING_TARGET_ACTION = /action=\{connectionId \? replaceStaticSecretCredentialAction/;
+const RETRY_CONNECTION_ID = /\{connectionId \? <input name="connection_id"/;
+const DRAFT_RETRY_MODE = /draft_retry/;
+const FIELDS_MAP = /setup\.credential_capture\.fields\.map/;
 // F2: native HTML `required` must not be hardcoded to the field's own flag —
 // it must also fall back to false whenever the BLOCK-level
 // credential_capture.required is false (BOTH-OR-NONE's blank-optional
@@ -32,18 +34,20 @@ const FIELDS_MAP = /formContract\.credentialFields\.map/;
 // server-side buildStaticSecretPayload/validateBundledSecret contract
 // already accepts.
 const REQUIRED_HONORS_BLOCK_LEVEL_FACT =
-  /required=\{setup\.credential_capture\.required !== false && field\.required\}/;
+  /keyIsOptional=\{setup\.credential_capture\.required === false\}/;
+// The per-field gate now lives in the shared field list, behind the block-level fact the page passes.
+const FIELD_REQUIRED_BEHIND_BLOCK_FACT = /required=\{required && field\.required\}/;
+const BODY_REQUIRED_FROM_BLOCK_FACT = /required=\{!keyIsOptional\}/;
 const NO_FIELD_ONLY_REQUIRED_ATTRIBUTE = /required=\{field\.required\}/;
-const CONNECTION_NAME_FIELD = /name=\{formContract\.connectionName\.name\}/;
-const CONNECTION_NAME_MAX_LENGTH = /maxLength=\{formContract\.connectionName\.maxLength\}/;
+// Design "Every item": the name field shows only when an account of this service exists.
+const CONNECTION_NAME_FIELD = /<AccountNameField accounts=\{accounts\} fieldName="display_name"/;
 const HELP_URL = /field\.help_url/;
 const OPENS_VIA_SYSTEM_BROWSER = /<OpenExternalLink/;
-const OPEN_HELP_COPY = /Open provider setup page in a new tab/;
-const SECRET_BOUNDARY_COPY = /formContract\.credentialSectionDescription/;
-const STORAGE_NOT_READY_COPY = /Credential storage is not ready/;
-const RECONNECT_REPAIR_TITLE = /title: `Reconnect \$\{displayName\}`/;
-const RECONNECT_REPAIR_SUBMIT = /formContract\.primaryActionLabel/;
-const RETRY_COPY = /Retrying the same connection/;
+const OPEN_HELP_COPY = /keyCopy\.whereToFind/;
+const SECRET_BOUNDARY_COPY = /keyCopy\.storage\(name\)/;
+const STORAGE_NOT_READY_COPY = /keyCopy\.storageNotReady/;
+const RECONNECT_REPAIR_TITLE = /`Reconnect \$\{name\}`/;
+const RECONNECT_REPAIR_SUBMIT = /reconnecting \? `Reconnect/;
 const STALE_REPAIR_TITLE = /Update \$\{setup\.display_name\} credential/;
 const STALE_REPAIR_SUBMIT = /Update credential and run sync/;
 const NO_CONNECTOR_BRANCH = /connectorId\s*===/;
@@ -125,7 +129,7 @@ function sourceBlock(source: string, startMarker: string, endMarker: string): st
 }
 
 test("static-secret page is an owner-session capture form, not an agent secret prompt", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
+  const src = `${await readFile(PAGE_FILE, "utf8")}\n${await readFile(BODIES_FILE, "utf8")}`;
   assert.match(src, GET_SETUP);
   // Mode-aware form actions: both create (new connection) and replace (repair/edit) must be wired.
   assert.match(src, FORM_ACTION_CREATE);
@@ -133,16 +137,16 @@ test("static-secret page is an owner-session capture form, not an agent secret p
   assert.match(src, EXISTING_TARGET_ACTION);
   assert.match(src, RETRY_CONNECTION_ID);
   assert.match(src, DRAFT_RETRY_MODE);
-  assert.match(src, RETRY_COPY);
   assert.match(src, FIELDS_MAP);
   // F2: the native `required` attribute must be gated by the block-level
   // credential_capture.required fact, never the field's own `required`
   // alone — otherwise the browser silently blocks a blank submission the
   // server-side contract already accepts (Venmo's exact failure mode).
   assert.match(src, REQUIRED_HONORS_BLOCK_LEVEL_FACT);
+  assert.match(src, BODY_REQUIRED_FROM_BLOCK_FACT);
   assert.doesNotMatch(src, NO_FIELD_ONLY_REQUIRED_ATTRIBUTE);
+  assert.match(await readFile(CREDENTIAL_FIELDS_FILE, "utf8"), FIELD_REQUIRED_BEHIND_BLOCK_FACT);
   assert.match(src, CONNECTION_NAME_FIELD);
-  assert.match(src, CONNECTION_NAME_MAX_LENGTH);
   assert.match(src, HELP_URL);
   assert.match(
     src,
