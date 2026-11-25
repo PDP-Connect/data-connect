@@ -7,6 +7,7 @@
  */
 
 import { execSync } from "child_process"
+import { createRequire } from "node:module"
 import {
   existsSync,
   mkdirSync,
@@ -39,9 +40,22 @@ function exec(cmd, opts = {}) {
 }
 
 // Get Playwright browser path
-function getPlaywrightBrowserPath() {
-  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    return process.env.PLAYWRIGHT_BROWSERS_PATH
+export function getPlaywrightBrowserPath({
+  env = process.env,
+  resolveCoreManifest = () =>
+    createRequire(createRequire(import.meta.url).resolve("playwright")).resolve(
+      "playwright-core/package.json"
+    ),
+} = {}) {
+  const configuredPath = env.PLAYWRIGHT_BROWSERS_PATH
+  if (configuredPath === "0") {
+    return join(
+      dirname(resolveCoreManifest()),
+      ".local-browsers"
+    )
+  }
+  if (configuredPath) {
+    return configuredPath
   }
   // Playwright stores browsers in different locations depending on OS:
   // - macOS: ~/Library/Caches/ms-playwright
@@ -50,7 +64,7 @@ function getPlaywrightBrowserPath() {
   if (PLATFORM === "darwin") {
     return join(homedir(), "Library", "Caches", "ms-playwright")
   } else if (PLATFORM === "win32") {
-    return join(process.env.LOCALAPPDATA || "", "ms-playwright")
+    return join(env.LOCALAPPDATA || "", "ms-playwright")
   }
   return join(homedir(), ".cache", "ms-playwright")
 }
@@ -208,6 +222,16 @@ export function parseBuildOptions(argv) {
   return { isLean, outputPath, requireBrowser, target }
 }
 
+export function reportBuildCompletion(platformName, signBinary, writeLog) {
+  // macOS builds are not complete unless the required signer succeeds.
+  if (platformName === "darwin") {
+    writeLog("Signing binary for macOS...")
+    signBinary()
+    writeLog("Binary signed successfully")
+  }
+  writeLog("Build complete!")
+}
+
 async function build(options) {
   const { isLean, outputPath, requireBrowser, target } = options
 
@@ -289,22 +313,11 @@ async function build(options) {
     log("Skipping browser copy (lean build)")
   }
 
-  // Sign the binary on macOS (required for it to run after being copied)
-  if (PLATFORM === "darwin") {
-    log("Signing binary for macOS...")
-    try {
-      execSync(`codesign --force --sign - "${outputPath}"`, {
-        stdio: "inherit",
-      })
-      log("Binary signed successfully")
-    } catch (e) {
-      log(
-        "Warning: Failed to sign binary (may cause issues running the binary)"
-      )
-    }
-  }
-
-  log("Build complete!")
+  reportBuildCompletion(PLATFORM, () => {
+    execSync(`codesign --force --sign - "${outputPath}"`, {
+      stdio: "inherit",
+    })
+  }, log)
   log(`Output: ${DIST}`)
 
   // List output

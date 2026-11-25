@@ -453,7 +453,6 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly recordsIngestRepairCurrentDerivedFacts: MutationQuery;
   readonly recordsIngestUpsertRecord: MutationQuery;
   readonly recordsListStreamVisibleCandidates: IterateQuery;
-  readonly recordsSnapshotsGetMinRecordChangeVersion: ReadOneQuery;
   // Records — change-log snapshot/page reads for /changes feed.
   readonly recordsSnapshotsGetSnapshotAtVersion: ReadOneQuery;
   readonly recordsSnapshotsListChangeGroups: IterateQuery;
@@ -552,6 +551,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   // Spine — controller-side terminal-event existence probe.
   readonly spineCheckRunTerminal: ReadOneQuery;
   // Spine — run-handle status lookups (bounded LIMIT 1 lifecycle reads).
+  readonly spineGetRunRecordOutcomes: ReadOneQuery;
   readonly spineGetRunStartedEvent: ReadOneQuery;
   readonly spineGetRunTerminalEvent: ReadOneQuery;
   readonly spineGetTerminalRunCommitReceipt: ReadOneQuery;
@@ -801,6 +801,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "spineListEventsByTraceId",
     "spineListEventsByGrantId",
     "spineListEventsByRunId",
+    "spineGetRunRecordOutcomes",
     "spineGetRunStartedEvent",
     "spineGetRunTerminalEvent",
     "spineGetTerminalRunCommitReceipt",
@@ -892,7 +893,6 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "recordsGetFieldWindow",
     // Records — change-log snapshot/page.
     "recordsSnapshotsGetSnapshotAtVersion",
-    "recordsSnapshotsGetMinRecordChangeVersion",
     "recordsSnapshotsListChangeGroups",
     // Records — deletion.
     "recordsDeleteCountRecordsByStream",

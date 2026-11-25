@@ -22,12 +22,14 @@ import {
   deriveTokenAuditId,
   normalizeDeviceAuditFields,
   postgresEmitSpineEvent,
+  postgresGetRunRecordOutcomes,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
   postgresListSpineCorrelations,
   postgresListSpineEventsPage,
   postgresSearchSpine,
+  type RunRecordOutcomesRow,
 } from "./postgres-spine.ts";
 
 /**
@@ -907,6 +909,33 @@ export async function getRunStartedEvent(runId: string): Promise<RunLifecycleEve
     ? ((await postgresGetRunStartedEvent(runId)) as RunLifecycleEventRow | null | undefined)
     : getOne<RunLifecycleEventRow>(referenceQueries.spineGetRunStartedEvent, [runId]);
   return summarizeRunLifecycleRow(row);
+}
+
+/**
+ * Whole-run record outcomes the connector reported through spine events,
+ * summed over ALL of the run's events (never a timeline page).
+ *
+ * `rejected_in_batches` is the sum of `records_permanently_rejected` over the
+ * run's `run.batch_ingested` events, or `null` when some batch event carries
+ * no such count (events from before the field existed): that sum would be a
+ * guess, so it is absent rather than a smaller number. `unaccounted_by_stream`
+ * merges `run.stream_evidence_declared` `outcomes.unaccounted` per stream and
+ * lists only streams with a positive count.
+ */
+export interface RunRecordOutcomes {
+  readonly rejected_in_batches: number | null;
+  readonly unaccounted_by_stream: Readonly<Record<string, number>>;
+}
+
+export async function getRunRecordOutcomes(runId: string): Promise<RunRecordOutcomes> {
+  const row = isPostgresStorageBackend()
+    ? await postgresGetRunRecordOutcomes(runId)
+    : getOne<RunRecordOutcomesRow>(referenceQueries.spineGetRunRecordOutcomes, [runId, runId]);
+  const unaccounted = row?.unaccounted_json ? (JSON.parse(row.unaccounted_json) as Record<string, number>) : {};
+  return {
+    rejected_in_batches: Number(row?.unreported_batches ?? 0) > 0 ? null : Number(row?.rejected_in_batches ?? 0),
+    unaccounted_by_stream: unaccounted,
+  };
 }
 
 /**

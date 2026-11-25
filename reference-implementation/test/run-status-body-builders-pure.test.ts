@@ -21,23 +21,30 @@ import test from "node:test";
 
 import {
   buildActiveRunStatusBody,
+  buildRecordOutcomes,
   buildTerminalRunStatusBody,
   type RunStatusLifecycleEvent,
+  type RunStatusRecordOutcomes,
   type RunStatusTerminalEvent,
 } from "../server/routes/ref-run-status.ts";
+
+const NO_OUTCOMES: RunStatusRecordOutcomes = { unaccounted_by_stream: {} };
 
 // ---------------------------------------------------------------------------
 // buildActiveRunStatusBody
 // ---------------------------------------------------------------------------
 
 test("buildActiveRunStatusBody: active-run shape with null terminal fields and a timeline link", () => {
-  const body = buildActiveRunStatusBody({
-    connector_id: "amazon",
-    connector_instance_id: "ci-1",
-    run_id: "run-1",
-    started_at: "2024-01-01T00:00:00Z",
-    trace_id: "tr-1",
-  });
+  const body = buildActiveRunStatusBody(
+    {
+      connector_id: "amazon",
+      connector_instance_id: "ci-1",
+      run_id: "run-1",
+      started_at: "2024-01-01T00:00:00Z",
+      trace_id: "tr-1",
+    },
+    NO_OUTCOMES
+  );
   assert.equal(body.object, "run_status");
   assert.equal(body.status, "active");
   assert.equal(body.completed_at, null);
@@ -51,13 +58,16 @@ test("buildActiveRunStatusBody: active-run shape with null terminal fields and a
 });
 
 test("buildActiveRunStatusBody: run id is URL-encoded in the timeline link", () => {
-  const body = buildActiveRunStatusBody({
-    connector_id: "amazon",
-    connector_instance_id: "ci-1",
-    run_id: "run/with slash",
-    started_at: "2024-01-01T00:00:00Z",
-    trace_id: "tr-1",
-  });
+  const body = buildActiveRunStatusBody(
+    {
+      connector_id: "amazon",
+      connector_instance_id: "ci-1",
+      run_id: "run/with slash",
+      started_at: "2024-01-01T00:00:00Z",
+      trace_id: "tr-1",
+    },
+    NO_OUTCOMES
+  );
   assert.equal(body.links.timeline, "/_ref/runs/run%2Fwith%20slash/timeline");
 });
 
@@ -75,7 +85,7 @@ const succeededTerminal: RunStatusTerminalEvent = {
 };
 
 test("buildTerminalRunStatusBody: completed_at + status come from the terminal event", () => {
-  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, null);
+  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, null, NO_OUTCOMES);
   assert.equal(body.status, "completed");
   assert.equal(body.completed_at, "2024-01-02T00:00:00Z");
   assert.equal(body.connector_instance_id, null, "spine does not carry the connection id");
@@ -90,13 +100,13 @@ test("buildTerminalRunStatusBody: trace_id prefers the started event, started_at
     occurred_at: "2024-01-01T00:00:00Z",
     trace_id: "tr-started",
   };
-  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, started);
+  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, started, NO_OUTCOMES);
   assert.equal(body.trace_id, "tr-started", "started trace_id wins over terminal");
   assert.equal(body.started_at, "2024-01-01T00:00:00Z");
 });
 
 test("buildTerminalRunStatusBody: with no started event, trace_id falls back to terminal and started_at is null", () => {
-  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, null);
+  const body = buildTerminalRunStatusBody("run-2", succeededTerminal, null, NO_OUTCOMES);
   assert.equal(body.trace_id, "tr-terminal", "terminal trace_id used when no started");
   assert.equal(body.started_at, null);
 });
@@ -110,7 +120,10 @@ test("buildTerminalRunStatusBody: connector_id resolves from started actor_id, t
     occurred_at: "s",
     trace_id: "t",
   };
-  assert.equal(buildTerminalRunStatusBody("r", succeededTerminal, startedActor).connector_id, "started-connector");
+  assert.equal(
+    buildTerminalRunStatusBody("r", succeededTerminal, startedActor, NO_OUTCOMES).connector_id,
+    "started-connector"
+  );
 
   // started has no actor_id but a connector data.source.
   const startedSource: RunStatusLifecycleEvent = {
@@ -120,11 +133,17 @@ test("buildTerminalRunStatusBody: connector_id resolves from started actor_id, t
     occurred_at: "s",
     trace_id: "t",
   };
-  assert.equal(buildTerminalRunStatusBody("r", succeededTerminal, startedSource).connector_id, "source-connector");
+  assert.equal(
+    buildTerminalRunStatusBody("r", succeededTerminal, startedSource, NO_OUTCOMES).connector_id,
+    "source-connector"
+  );
 
   // no started -> falls back to the terminal event's connector id.
   const terminalWithActor: RunStatusTerminalEvent = { ...succeededTerminal, actor_id: "terminal-connector" };
-  assert.equal(buildTerminalRunStatusBody("r", terminalWithActor, null).connector_id, "terminal-connector");
+  assert.equal(
+    buildTerminalRunStatusBody("r", terminalWithActor, null, NO_OUTCOMES).connector_id,
+    "terminal-connector"
+  );
 });
 
 test("buildTerminalRunStatusBody: terminal_reason reads data.reason, then data.failure_reason", () => {
@@ -133,14 +152,17 @@ test("buildTerminalRunStatusBody: terminal_reason reads data.reason, then data.f
     data: { reason: "primary_reason" },
     status: "failed",
   };
-  assert.equal(buildTerminalRunStatusBody("r", withReason, null).terminal_reason, "primary_reason");
+  assert.equal(buildTerminalRunStatusBody("r", withReason, null, NO_OUTCOMES).terminal_reason, "primary_reason");
 
   const withFailureReason: RunStatusTerminalEvent = {
     ...succeededTerminal,
     data: { failure_reason: "fallback_reason" },
     status: "failed",
   };
-  assert.equal(buildTerminalRunStatusBody("r", withFailureReason, null).terminal_reason, "fallback_reason");
+  assert.equal(
+    buildTerminalRunStatusBody("r", withFailureReason, null, NO_OUTCOMES).terminal_reason,
+    "fallback_reason"
+  );
 
   // reason takes precedence over failure_reason.
   const withBoth: RunStatusTerminalEvent = {
@@ -148,8 +170,41 @@ test("buildTerminalRunStatusBody: terminal_reason reads data.reason, then data.f
     data: { failure_reason: "lose", reason: "win" },
     status: "failed",
   };
-  assert.equal(buildTerminalRunStatusBody("r", withBoth, null).terminal_reason, "win");
+  assert.equal(buildTerminalRunStatusBody("r", withBoth, null, NO_OUTCOMES).terminal_reason, "win");
 
   // neither -> null.
-  assert.equal(buildTerminalRunStatusBody("r", succeededTerminal, null).terminal_reason, null);
+  assert.equal(buildTerminalRunStatusBody("r", succeededTerminal, null, NO_OUTCOMES).terminal_reason, null);
+});
+
+// ---------------------------------------------------------------------------
+// buildRecordOutcomes
+// ---------------------------------------------------------------------------
+
+test("buildRecordOutcomes: the terminal total wins, including a reported zero", () => {
+  const batch = { rejected_in_batches: 2, unaccounted_by_stream: { orders: 1 } };
+  const outcomes = buildRecordOutcomes(batch, { ...succeededTerminal, data: { records_permanently_rejected: 5 } });
+  assert.deepEqual(outcomes, { permanently_rejected: 5, unaccounted_by_stream: { orders: 1 } });
+  assert.equal(
+    buildRecordOutcomes(batch, { ...succeededTerminal, data: { records_permanently_rejected: 0 } })
+      .permanently_rejected,
+    0,
+    "a reported zero is kept, not treated as absent"
+  );
+});
+
+test("buildRecordOutcomes: falls back to the batch sum, and omits the total when neither source has one", () => {
+  for (const data of [{}, { records_permanently_rejected: -1 }, { records_permanently_rejected: "3" }]) {
+    const fromBatches = buildRecordOutcomes(
+      { rejected_in_batches: 2, unaccounted_by_stream: {} },
+      { ...succeededTerminal, data }
+    );
+    assert.equal(fromBatches.permanently_rejected, 2, `batch sum used for ${JSON.stringify(data)}`);
+    const neither = buildRecordOutcomes(
+      { rejected_in_batches: null, unaccounted_by_stream: {} },
+      { ...succeededTerminal, data }
+    );
+    assert.equal("permanently_rejected" in neither, false, `omitted for ${JSON.stringify(data)}`);
+  }
+  const fromBatchesOnly = buildRecordOutcomes({ rejected_in_batches: 4, unaccounted_by_stream: {} }, null);
+  assert.equal(fromBatchesOnly.permanently_rejected, 4);
 });
