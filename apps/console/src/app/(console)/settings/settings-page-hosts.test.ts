@@ -84,22 +84,24 @@ test("an unmanaged server host renders Remote access and Attach a desktop app bu
   assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render on a server")
   assert.doesNotMatch(html, /data-widget="recovery-key"/, "recovery widget must not render on a server")
   assert.doesNotMatch(html, /Vault recovery code/)
-  assert.doesNotMatch(html, /Control how DataConnect starts on this computer/)
+  assert.doesNotMatch(html, /Control how DataConnect starts on the computer that runs it/)
 })
 
 test("in the desktop app window a managed desktop host renders the Desktop and Vault recovery sections alongside Remote access", async () => {
   const html = await render(true)
   assert.match(html, /data-widget="remote-access"/)
-  assert.match(html, /Control how DataConnect starts on this computer/)
+  assert.match(html, /Control how DataConnect starts on the computer that runs it/)
   assert.match(html, /data-widget="desktop-settings"/)
   assert.match(html, /Vault recovery code/)
   assert.match(html, /data-widget="recovery-key"/)
 })
 
-test("a browser reaching a managed desktop host does not render the Desktop section", async () => {
+test("a browser reaching a managed desktop host over remote access still renders the Desktop section", async () => {
+  // Owner-password sign-in only, no desktop reveal proof: the case
+  // e2e/live-settings.spec.ts drives from a second device.
   const html = await render(true, false)
   assert.match(html, /data-widget="remote-access"/)
-  assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render outside the desktop app")
-  assert.doesNotMatch(html, /Control how DataConnect starts on this computer/)
-  assert.match(html, /data-widget="recovery-key"/, "Vault recovery keeps its managed-host rule")
+  assert.match(html, /data-widget="desktop-settings"/)
+  assert.match(html, /Control how DataConnect starts on the computer that runs it/)
+  assert.match(html, /data-widget="recovery-key"/)
 })
