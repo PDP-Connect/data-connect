@@ -1664,7 +1664,7 @@ test("event spine", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams`, {
           headers: { Authorization: `Bearer ${approval.token}` },
         });
-        assert.equal(rejectedResp.status, 403);
+        assert.equal(rejectedResp.status, 401);
         const requestId = rejectedResp.headers.get("Request-Id");
         const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(requestId?.startsWith("req_"));
