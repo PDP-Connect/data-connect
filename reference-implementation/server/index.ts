@@ -37,6 +37,7 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
+  getRunRecordOutcomes,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
@@ -5961,6 +5962,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ? R
         : never;
     },
+    getRunRecordOutcomes: (runId: string) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
     handleError,
