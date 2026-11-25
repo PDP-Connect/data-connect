@@ -472,23 +472,21 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
                   ? "Everything is up to date"
                   : "Nothing needs you";
 
-  const dataSourceTotal = input.summaryFailed
-    ? sourceReadComplete
-      ? preparedSources.length
-      : null
-    : input.summary
+  // A refreshing summary still carries the last known total; rebuilding,
+  // stale, failed or unknown states do not.
+  const recordState = input.summary?.projection?.state;
+  const summaryCurrent = !input.summaryFailed && (recordState === "fresh" || recordState === "refreshing");
+  // The server counts connections in the same projection as records, so a
+  // stale summary can say 0 while the full source list shows three. Without a
+  // current summary, count the source list when it was read in full.
+  const dataSourceTotal =
+    summaryCurrent && input.summary
       ? input.summary.connector_count
       : sourceReadComplete
         ? preparedSources.length
         : null;
   const dataSourceCount = dataSourceTotal === null ? null : number(dataSourceTotal);
-  // A refreshing summary still carries the last known total; rebuilding,
-  // stale, failed or unknown states do not.
-  const recordState = input.summary?.projection?.state;
-  const recordTotal =
-    !input.summaryFailed && (recordState === "fresh" || recordState === "refreshing")
-      ? (input.summary?.record_count ?? null)
-      : null;
+  const recordTotal = summaryCurrent ? (input.summary?.record_count ?? null) : null;
   const subtitle =
     [
       dataSourceTotal === null ? null : counted(dataSourceTotal, "data source", "data sources"),

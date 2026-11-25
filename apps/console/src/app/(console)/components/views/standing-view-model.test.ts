@@ -749,8 +749,18 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   assert.equal(stale.recordCount, null);
   // DIRECTION.md, Home: stale totals show the plain status link.
   assert.equal(stale.warning, true);
-  // DIRECTION.md, Home: the source count remains a direct summary field.
-  assert.equal(stale.dataSourceCount, String(SUMMARY.connector_count));
+  // The connection count lives in the same projection as the record count, so a
+  // stale summary's count is not trusted: a full source list is counted instead.
+  assert.equal(stale.dataSourceCount, "0");
+  const threeSources = { hasMore: false, kind: "ok" as const, sources: [statusSource(20, "GitHub"), statusSource(20, "Reddit"), statusSource(20, "Spotify")] };
+  const staleZero = buildHomeViewModel(
+    base({ sourcePage: threeSources, summary: { ...SUMMARY, connector_count: 0, projection: { state: "stale" } } }),
+  );
+  assert.equal(staleZero.subtitle, "3 data sources");
+  const stalePaged = buildHomeViewModel(
+    base({ sourcePage: { ...threeSources, hasMore: true }, summary: { ...SUMMARY, projection: { state: "stale" } } }),
+  );
+  assert.equal(stalePaged.dataSourceCount, null);
 
   const unknown = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: undefined } }));
   // DIRECTION.md, Home: unknown summary state does not prove a current record total.
@@ -763,8 +773,8 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
     "1 data source · 1 record",
   );
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
-  assert.equal(stale.subtitle, "4 data sources");
-  assert.equal(unknown.subtitle, "4 data sources");
+  assert.equal(stale.subtitle, "0 data sources");
+  assert.equal(unknown.subtitle, "0 data sources");
 
   const failed = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
   // DIRECTION.md, Home: a failed summary has a local retry state.
@@ -956,7 +966,8 @@ test("the record total shows while the summary is refreshing, not while rebuildi
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "rebuilding" } } })).subtitle,
-    "4 data sources",
+    // Not current, so the source count is the full list's length (empty in this fixture).
+    "0 data sources",
   );
 });
 
