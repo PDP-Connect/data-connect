@@ -157,13 +157,14 @@ interface CompactionFingerprintDeclaration {
   readonly exclude_keys: readonly string[];
   readonly representative_policy?: "current";
 }
-interface ManifestStreamLike {
+export interface ManifestStreamLike {
   readonly compaction_fingerprint?: CompactionFingerprintDeclaration;
   readonly name?: unknown;
 }
-interface ManifestLike {
+export interface ManifestLike {
   readonly connector_id?: unknown;
   readonly connector_key?: unknown;
+  readonly storage_binding?: unknown;
   readonly streams?: readonly ManifestStreamLike[];
 }
 
@@ -257,12 +258,25 @@ function isPresentFieldValue(value: unknown): boolean {
   return Boolean(value);
 }
 
-/** Every `CompactionPolicy`, derived generically from every shipped
- * manifest's streams — the complete, generic replacement for what used to
- * be a hand-maintained, connector-keyed literal array. */
-function buildCompactionPoliciesFromManifests(): CompactionPolicy[] {
-  const policies: CompactionPolicy[] = [];
-  for (const manifest of readAllManifests()) {
+export interface CompactionPolicySet {
+  /** `<connector key>/<stream>` declared by more than one manifest. */
+  readonly conflicts: readonly string[];
+  readonly policies: readonly CompactionPolicy[];
+}
+
+/**
+ * Every `CompactionPolicy` the given manifests declare. A manifest's
+ * connector key comes from `canonicalConnectorKeyFromManifest`, the identity
+ * rule the server applies when it registers a manifest, so a manifest that
+ * names itself only by `connector_id` or `storage_binding.connector_id` is
+ * eligible like one with `connector_key`. A stream declared by two manifests
+ * under one key gets no policy, so nothing is compacted for it: this tool
+ * deletes history and must not pick one declaration silently. It is reported
+ * in `conflicts` instead.
+ */
+export function compactionPoliciesFromManifests(manifests: readonly ManifestLike[]): CompactionPolicySet {
+  const byId = new Map<string, CompactionPolicy[]>();
+  for (const manifest of manifests) {
     const connectorKey = canonicalConnectorKeyFromManifest(manifest);
     if (!connectorKey) {
       continue;
@@ -272,10 +286,17 @@ function buildCompactionPoliciesFromManifests(): CompactionPolicy[] {
       if (!declaration || typeof stream.name !== "string") {
         continue;
       }
-      policies.push(buildPolicyFromManifestStream(connectorKey, stream.name, declaration));
+      const id = `${connectorKey}/${stream.name}`;
+      byId.set(id, [...(byId.get(id) ?? []), buildPolicyFromManifestStream(connectorKey, stream.name, declaration)]);
     }
   }
-  return policies;
+  const declared = [...byId];
+  return {
+    conflicts: declared.filter(([, policies]) => policies.length > 1).map(([id]) => id),
+    policies: declared
+      .filter(([, policies]) => policies.length === 1)
+      .map(([, [policy]]) => policy as CompactionPolicy),
+  };
 }
 
 // ─── Shared types ───────────────────────────────────────────────────────
@@ -366,17 +387,23 @@ interface EnrichedRow {
  * is `'audit'`, which ignores both fields and keeps its existing conservative
  * retention for every policy.
  */
-export const COMPACTION_POLICIES: CompactionPolicy[] = buildCompactionPoliciesFromManifests();
+const SHIPPED_POLICY_SET = compactionPoliciesFromManifests(readAllManifests());
+
+export const COMPACTION_POLICIES: readonly CompactionPolicy[] = SHIPPED_POLICY_SET.policies;
 
 export function findPolicy(connectorId: string, stream: string): CompactionPolicy | null {
   return COMPACTION_POLICIES.find((p) => p.connectorIds.includes(connectorId) && p.stream === stream) || null;
 }
 
 export function describePolicies(): string {
-  return COMPACTION_POLICIES.map(
+  const lines = COMPACTION_POLICIES.map(
     (p) =>
       `  - ${p.connectorIds[0]}/${p.stream}${p.excludeKeys.length ? ` (excludes ${p.excludeKeys.join(",")})` : ""}${isCanonicalEligible(p) ? " [canonical-eligible]" : ""}`
-  ).join("\n");
+  );
+  for (const id of SHIPPED_POLICY_SET.conflicts) {
+    lines.push(`  - ${id} [not compacted: declared by more than one manifest]`);
+  }
+  return lines.join("\n");
 }
 
 // ─── Canonical-mode eligibility ─────────────────────────────────────────
