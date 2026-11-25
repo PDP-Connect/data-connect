@@ -24,6 +24,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../components/warnings-banner.tsx";
+import { exploreRecordRow } from "../../../explore/explore-presentation.ts";
 import { formatStreamCollectionFacts, type StreamCollectionFacts } from "../../../lib/collection-report.ts";
 import { connectorRunSummaryId } from "../../../lib/connector-run-summary-status.ts";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../lib/owner-token.ts";
@@ -62,6 +63,7 @@ import {
   reverseChildListLinksFromManifest,
 } from "../../lib/relationships.ts";
 import { ColumnsMenu } from "./columns-menu.tsx";
+import { partialReadSentence } from "./record-list-presentation.ts";
 import { RecordOrderSelect } from "./record-order-select.tsx";
 
 export const dynamic = "force-dynamic";
@@ -414,7 +416,7 @@ export default async function StreamPage({
     const { kind } = classifyRecordKind(streamName, data, declaredFieldTypes, undefined, declaredRoles);
     const preview = buildRecordPreview(kind, data, declaredFieldTypes, declaredRoles);
     const hasImage = buildBlobAffordance(data, fieldCapabilities)?.state === "available";
-    return { hasImage, preview };
+    return { hasImage, kind, preview };
   };
 
   // Reverse parent → filtered-child-list links, rendered per row. The displayed
@@ -435,6 +437,7 @@ export default async function StreamPage({
           parentStream: streamName,
         })
       : [];
+  const partialReadMessage = partialReadSentence(page.warnings);
 
   return (
     <RecordroomShellWithPalette>
@@ -499,126 +502,139 @@ export default async function StreamPage({
         </div>
       </details>
 
+      {partialReadMessage ? <p className="pdpp-caption mb-3 text-muted-foreground">{partialReadMessage}</p> : null}
       {page.data.length === 0 ? (
         <p className="pdpp-caption text-muted-foreground italic">No records.</p>
       ) : (
-        <>
-          {/* Mobile list */}
-          <ul className="divide-y divide-border/70 border-border/70 border-y sm:hidden">
+        <ul className="divide-y divide-border/70 border-border/70 border-y">
             {page.data.map((r) => {
               const reverseLinks = reverseChildListLinksForRow(r);
               const identity = recordIdentityFor(r);
+              const timestamp = primaryTimestamp(pickSemanticTimestamp(listStreamMetadata, r.data), r.emitted_at);
+              // Explore's own row rule over the same preview Explore builds: title,
+              // then first human text (e.g. an artist's name), then the kind name.
+              const row = exploreRecordRow({
+                connectionDisplayName: sourceLabel,
+                displayAt: timestamp.value,
+                preview: identity.preview ?? undefined,
+                stream: streamName,
+              });
               return (
-                <li key={r.id}>
-                  <Link className="block px-3 pt-3 hover:bg-muted/40" href={recordHref(r.id)}>
-                    <RecordCard
-                      columns={columns}
-                      declaredFieldTypes={declaredFieldTypes}
-                      hasImage={identity.hasImage}
-                      preview={identity.preview}
-                      record={r}
-                      streamMetadata={listStreamMetadata}
-                    />
+                <li className="py-2" key={r.id}>
+                  <Link
+                    aria-label={`Open ${row.title} · ${row.kind} · ${row.source}`}
+                    className="rr-x-row"
+                    href={recordHref(r.id)}
+                  >
+                    <span aria-hidden="true" className="rr-x-record-logo">
+                      <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
+                    </span>
+                    <span className="rr-x-row__body">
+                      <span className="rr-x-row__title text-[15px]">{row.title}</span>
+                      <span className="rr-x-row__meta truncate text-[13px] text-muted-foreground">
+                        {row.kind} · {row.source}
+                      </span>
+                    </span>
+                    {row.time ? <span className="rr-x-row__time text-[13px]">{row.time}</span> : null}
                   </Link>
-                  {reverseLinks.length > 0 && (
-                    <div className="px-3 pt-1 pb-3">
-                      <ReverseChildLinks links={reverseLinks} />
+
+                  <details className="px-3 pb-2">
+                    <summary className="pdpp-caption cursor-pointer text-muted-foreground">Details</summary>
+                    <div className="pt-3">
+                      <div className="sm:hidden">
+                        <RecordCard
+                          columns={columns}
+                          declaredFieldTypes={declaredFieldTypes}
+                          hasImage={identity.hasImage}
+                          preview={identity.preview}
+                          record={r}
+                          streamMetadata={listStreamMetadata}
+                        />
+                      </div>
+
+                      <div className="hidden overflow-x-auto sm:block">
+                        <table className="min-w-full">
+                          <thead className="bg-muted/40">
+                            <tr>
+                              <th className={TH}>date</th>
+                              <th className={TH}>record</th>
+                              {columns.map((c) => (
+                                <th className={TH} key={c}>
+                                  {humanizeFieldLabel(c)}
+                                </th>
+                              ))}
+                              {hasReverseChildEdges && <th className={TH}>related</th>}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr className="transition-colors hover:bg-muted/30">
+                              <td className={`${TD} whitespace-nowrap text-muted-foreground`}>
+                                <Link className="block" href={recordHref(r.id)}>
+                                  <RecordDateLabel
+                                    emittedAt={r.emitted_at}
+                                    recordData={r.data}
+                                    streamMetadata={listStreamMetadata}
+                                  />
+                                </Link>
+                              </td>
+                              <td className={`${TD} align-top`}>
+                                <Link className="block" href={recordHref(r.id)}>
+                                  <RecordIdentity
+                                    hasImage={identity.hasImage}
+                                    preview={identity.preview}
+                                    recordKey={r.id}
+                                    showKey
+                                    variant="table-cell"
+                                  />
+                                </Link>
+                              </td>
+                              {columns.map((c) => {
+                                const parentLink = parentLinkForCell(r, c);
+                                if (parentLink) {
+                                  return (
+                                    <td className={`${TD} align-top`} key={c}>
+                                      <Link
+                                        className="block max-w-[24rem] truncate font-mono text-foreground underline underline-offset-2 hover:no-underline"
+                                        href={parentLink.href}
+                                        title={`${humanizeFieldLabel(parentLink.parentStream)} · ${stringifyCell(r.data?.[c])}`}
+                                      >
+                                        {stringifyCell(r.data?.[c])}
+                                      </Link>
+                                    </td>
+                                  );
+                                }
+                                const display = cellText(r, c);
+                                const rawValue = r.data?.[c];
+                                const dateValue = isDateValue(rawValue) ? rawValue : null;
+                                return (
+                                  <td className={`${TD} align-top`} key={c}>
+                                    <Link
+                                      aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
+                                      className="block"
+                                      href={recordHref(r.id)}
+                                    >
+                                      <span className="block max-w-[24rem] truncate">
+                                        {dateValue ? <IcTimestamp value={dateValue} /> : display}
+                                      </span>
+                                    </Link>
+                                  </td>
+                                );
+                              })}
+                              {hasReverseChildEdges && (
+                                <td className={`${TD} whitespace-nowrap align-top`}>
+                                  <ReverseChildLinks links={reverseLinks} />
+                                </td>
+                              )}
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  )}
+                  </details>
                 </li>
               );
             })}
-          </ul>
-
-          {/* Desktop table */}
-          <div className="hidden overflow-x-auto sm:block">
-            <table className="min-w-full">
-              <thead className="bg-muted/40">
-                <tr>
-                  <th className={TH}>date</th>
-                  {/* The leading identity column is the SHARED RecordIdentity cell — the
-                      same declared-or-honest-generic title the feed/peek/detail lead with,
-                      NOT the old raw `id`-mono lead (THE-LENS Gate 3: one record, one
-                      identity everywhere). The record key stays reachable as the cell's
-                      quiet mono token + the row link. */}
-                  <th className={TH}>record</th>
-                  {columns.map((c) => (
-                    <th className={TH} key={c}>
-                      {humanizeFieldLabel(c)}
-                    </th>
-                  ))}
-                  {hasReverseChildEdges && <th className={TH}>related</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {page.data.map((r) => {
-                  const identity = recordIdentityFor(r);
-                  return (
-                    <tr className="transition-colors hover:bg-muted/30" key={r.id}>
-                      <td className={`${TD} whitespace-nowrap text-muted-foreground`}>
-                        <Link className="block" href={recordHref(r.id)}>
-                          <RecordDateLabel
-                            emittedAt={r.emitted_at}
-                            recordData={r.data}
-                            streamMetadata={listStreamMetadata}
-                          />
-                        </Link>
-                      </td>
-                      <td className={`${TD} align-top`}>
-                        <Link className="block" href={recordHref(r.id)}>
-                          <RecordIdentity
-                            hasImage={identity.hasImage}
-                            preview={identity.preview}
-                            recordKey={r.id}
-                            showKey
-                            variant="table-cell"
-                          />
-                        </Link>
-                      </td>
-                      {columns.map((c) => {
-                        const parentLink = parentLinkForCell(r, c);
-                        if (parentLink) {
-                          return (
-                            <td className={`${TD} align-top`} key={c}>
-                              <Link
-                                className="block max-w-[24rem] truncate font-mono text-foreground underline underline-offset-2 hover:no-underline"
-                                href={parentLink.href}
-                                title={`${humanizeFieldLabel(parentLink.parentStream)} · ${stringifyCell(r.data?.[c])}`}
-                              >
-                                {stringifyCell(r.data?.[c])}
-                              </Link>
-                            </td>
-                          );
-                        }
-                        const display = cellText(r, c);
-                        const rawValue = r.data?.[c];
-                        const dateValue = isDateValue(rawValue) ? rawValue : null;
-                        return (
-                          <td className={`${TD} align-top`} key={c}>
-                            <Link
-                              aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
-                              className="block"
-                              href={recordHref(r.id)}
-                            >
-                              <span className="block max-w-[24rem] truncate">
-                                {dateValue ? <IcTimestamp value={dateValue} /> : display}
-                              </span>
-                            </Link>
-                          </td>
-                        );
-                      })}
-                      {hasReverseChildEdges && (
-                        <td className={`${TD} whitespace-nowrap align-top`}>
-                          <ReverseChildLinks links={reverseChildListLinksForRow(r)} />
-                        </td>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </>
+        </ul>
       )}
 
       <Pager next={nextHref} prev={prevHref} />

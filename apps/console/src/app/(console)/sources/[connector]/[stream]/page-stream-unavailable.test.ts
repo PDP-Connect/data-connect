@@ -37,6 +37,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { buildRecordPreview, classifyRecordKind, type RecordPreview } from "@pdpp/display";
+import { exploreRecordRow } from "../../../explore/explore-presentation.ts";
+import type { CanonicalReadWarning } from "../../../lib/read-envelope.ts";
+import { partialReadSentence } from "./record-list-presentation.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
@@ -60,6 +64,18 @@ const CARD_DATE_FIELD_FORMATTED_RE = /const dateValue = isDateValue\(raw\)[\s\S]
 const TABLE_DATE_FIELD_FORMATTED_RE = /const rawValue = r\.data\?\.\[c\][\s\S]*?<IcTimestamp value=\{dateValue\} \/>/;
 const KIND_MAIN_COPY_RE = /<PageHeader\n {8}actions=[\s\S]*?(?=<details)/;
 const BANNED_VISIBLE_KIND_WORDS_RE = /\b(?:stream|run|connector|manifest|cursor|grant|trace|projection)\b|Raw JSON|Source-scoped Syncs/i;
+const BULLET_RE = /•/;
+const PARTIAL_WARNING_USE_RE = /partialReadSentence\(page\.warnings\)/;
+const WARNING_DETAILS_RE = /<WarningsBanner warnings=\{page\.warnings\} \/>/;
+const PARTIAL_WARNING_BEFORE_EMPTY_STATE_RE = /partialReadMessage[\s\S]*?page\.data\.length === 0/;
+const EXPLORE_STYLE_RECORD_LINK_RE = /<Link[\s\S]*?className="rr-x-row"[\s\S]*?href=\{recordHref\(r\.id\)\}/;
+const EXPLORE_PRESENTATION_USE_RE = /const row = exploreRecordRow\(\{[\s\S]*?preview: identity\.preview \?\? undefined,/;
+const RECORD_TITLE_LINK_RE = /<Link\n\s+aria-label=\{`Open \$\{row\.title\}[\s\S]*?<\/Link>/;
+const IDENTITY_IN_RECORD_LINK_RE = /RecordIdentity/;
+const RECORD_DETAILS_KEY_RE = /<details className="px-3 pb-2">[\s\S]*?recordKey=\{r\.id\}[\s\S]*?showKey/;
+const EXPLORE_ROW_TITLE_RE = /<span className="rr-x-row__title text-\[15px\]">\{row\.title\}<\/span>/;
+const EXPLORE_ROW_SUMMARY_RE = /<span className="rr-x-row__meta truncate text-\[13px\] text-muted-foreground">\s*\{row\.kind\} · \{row\.source\}\s*<\/span>/;
+const EXPLORE_ROW_TIME_RE = /<span className="rr-x-row__time text-\[13px\]">\{row\.time\}<\/span>/;
 
 test("stream page imports the typed ResourceServerHttpError so it can branch on status", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -121,4 +137,73 @@ test("rs-client.authedFetch throws the typed ResourceServerHttpError on non-OK r
     RS_CLIENT_THROWS_TYPED_HTTP_ERROR,
     "authedFetch must throw ResourceServerHttpError on non-OK so callers can branch on status"
   );
+});
+
+test("a kind row is titled by Explore's rule, so a record without a declared title shows its name", () => {
+  // Spotify declares no title role; the page builds the preview exactly as Explore does.
+  const data = { followers: 98_000_000, id: "spotify:artist:0L8ExT028jH3ddEcZwqJJ5", name: "Taylor Swift", popularity: 100 };
+  const { kind } = classifyRecordKind("top_artists", data, {}, undefined, {});
+  const row = exploreRecordRow(
+    {
+      connectionDisplayName: "Spotify",
+      displayAt: "2026-11-25T18:00:00.000Z",
+      preview: buildRecordPreview(kind, data, {}, {}) ?? undefined,
+      stream: "top_artists",
+    },
+    Date.UTC(2026, 10, 25, 19)
+  );
+
+  // Data-repair brief, P1: the same calm row Explore shows (Explore titles this record "Taylor Swift").
+  assert.equal(row.title, "Taylor Swift");
+  // DIRECTION.md, "The look is for" 5: the row keeps its human kind, source and relative time.
+  assert.equal(row.kind, "Top artists");
+  assert.equal(row.source, "Spotify");
+  assert.equal(row.time, "1 hour ago");
+});
+
+test("an empty title part falls through to the record's text, with no stray bullet", () => {
+  const preview: RecordPreview = { body: "Taylor Swift", kind: "generic", title: " " };
+  const row = exploreRecordRow({ connectionDisplayName: "Spotify", displayAt: "", preview, stream: "top_artists" });
+
+  // Data-repair brief, P2: an empty title part must not leave a stray bullet or hide the text.
+  assert.equal(row.title, "Taylor Swift");
+  assert.doesNotMatch(row.title, BULLET_RE);
+});
+
+test("only a partial-results warning shows the plain sentence above the list", () => {
+  const partialWarning: CanonicalReadWarning = { code: "partial_results", message: "one source unavailable" };
+  const otherWarning: CanonicalReadWarning = { code: "deprecated_alias_used" };
+
+  // DIRECTION.md, “One data source”: use a plain sentence for the state above the page sections.
+  assert.equal(partialReadSentence([partialWarning]), "Some records could not be read.");
+  // DIRECTION.md, “The server's own sentence ... appears ... inside Details”: unrelated warnings stay folded.
+  assert.equal(partialReadSentence([otherWarning]), null);
+  // DIRECTION.md, “Few words”: an empty warning list adds no sentence.
+  assert.equal(partialReadSentence([]), null);
+});
+
+test("the page keeps warning details folded and renders Explore-style links as the list", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+
+  // Data-repair brief, P2: keep warning detail folded while showing one sentence above the list.
+  assert.match(src, PARTIAL_WARNING_USE_RE);
+  // Data-repair brief, P2: show the sentence even when the records list is empty.
+  assert.match(src, PARTIAL_WARNING_BEFORE_EMPTY_STATE_RE);
+  // Data-repair brief, P2: detailed warning codes stay inside Details.
+  assert.match(src, WARNING_DETAILS_RE);
+  // DIRECTION.md, “The look is for” 5: render the list with the same title, context and time anatomy as Explore.
+  assert.match(src, EXPLORE_STYLE_RECORD_LINK_RE);
+  // Data-repair brief, P1: use Explore's record title and row presentation helpers.
+  assert.match(src, EXPLORE_PRESENTATION_USE_RE);
+  // Data-repair brief, P1: do not put the record identity glyph in the visible title row.
+  assert.doesNotMatch(src.match(RECORD_TITLE_LINK_RE)?.[0] ?? "", IDENTITY_IN_RECORD_LINK_RE);
+  // Data-repair brief, P1: keep the raw record key under each record's Details disclosure.
+  assert.match(src, RECORD_DETAILS_KEY_RE);
+  // DIRECTION.md, “Values”: row title 15px weight 500, second line and time 13px, second text colour.
+  // DIRECTION.md, “The look is for” 5: the title comes from the row presentation.
+  assert.match(src, EXPLORE_ROW_TITLE_RE);
+  // DIRECTION.md, “The look is for” 5: the row carries its summary context.
+  assert.match(src, EXPLORE_ROW_SUMMARY_RE);
+  // DIRECTION.md, “The look is for” 5: the row carries its relative time.
+  assert.match(src, EXPLORE_ROW_TIME_RE);
 });
