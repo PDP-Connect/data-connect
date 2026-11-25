@@ -22,7 +22,7 @@
  *   - absorbs the SLVP-standard case the same way the leaf boundaries do —
  *     quiet skeleton, no failure copy, capped backoff — for a BOUNDED number
  *     of attempts;
- *   - falls back to the pre-existing "Something went wrong" panel only after
+ *   - falls back to the "This page could not be loaded." panel only after
  *     that bound is exceeded, which is strictly no worse than its prior
  *     immediate-failure-panel behavior and materially better for the common
  *     transient case.
@@ -52,7 +52,10 @@ const CALLS_RESET_RE = /reset\(\)/;
 const SCHEDULES_RETRY_RE = /setTimeout\([\s\S]*reset\(\)/;
 const BOUNDED_ATTEMPTS_RE = /MAX_QUIET_ATTEMPTS/;
 const NUMERIC_BOUND_RE = /const MAX_QUIET_ATTEMPTS = \d+/;
-const HAS_TERMINAL_FALLBACK_RE = /Something went wrong/;
+const HAS_TERMINAL_FALLBACK_RE = /This page could not be loaded\./;
+const HAS_PLAIN_SENTENCE_RE = /Try again\. If it keeps happening, check that DataConnect is running\./;
+const WRAPS_FRAME_RE = /<RecordroomShellWithPalette>[\s\S]*dashboard-read-recovering[\s\S]*<RecordroomShellWithPalette>[\s\S]*This page could not be loaded/;
+const RAW_ERROR_FOLDED_RE = /<details\b[\s\S]*<summary[^>]*>Details<\/summary>[\s\S]*\{details\}[\s\S]*<\/details>/;
 const HAS_TRY_AGAIN_BUTTON_RE = /Try again/;
 const HAS_SIGN_IN_LINK_RE = /Sign in again/;
 const SERVER_ONLY_IMPORT_RE = /^import[\s\S]*?from\s+["'][^"']*(owner-token|server-only|data-source|ref-client)/m;
@@ -83,6 +86,15 @@ test("the boundary still has a reachable terminal fallback panel after the quiet
   assert.match(src, HAS_TERMINAL_FALLBACK_RE);
   assert.match(src, HAS_TRY_AGAIN_BUTTON_RE);
   assert.match(src, HAS_SIGN_IN_LINK_RE);
+});
+
+test("both phases render inside the frame, and the raw error stays in a folded Details", async () => {
+  const src = await readFile(ERROR_FILE, "utf8");
+  assert.match(src, WRAPS_FRAME_RE);
+  assert.match(src, HAS_PLAIN_SENTENCE_RE);
+  assert.match(src, RAW_ERROR_FOLDED_RE);
+  // The raw message reaches the screen only through the folded `details` text.
+  assert.equal(src.match(/error\.message/g)?.length, 1);
 });
 
 test("the boundary is self-contained: no server-only import", async () => {
