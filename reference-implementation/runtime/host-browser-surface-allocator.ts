@@ -137,7 +137,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #surfaceIdsByRunId = new Map<string, string>();
 	readonly #ensuresInFlightBySurfaceId = new Map<
 		string,
-		Promise<BrowserSurface>
+		{ readonly ensure: Promise<BrowserSurface>; readonly runId: string | undefined }
 	>();
 	readonly #lastStartFailureByRunId = new Map<
 		string,
@@ -173,31 +173,42 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	/**
-	 * One host request per surface at a time. A second caller joins the first
-	 * one's request: two requests for the same run could finish in either
-	 * order, and a timed-out one finishing last would record the surface as
-	 * starting over the ready lease the other one got.
+	 * One host request per surface and run at a time. A second caller for the
+	 * same run joins the first one's request: two requests could finish in
+	 * either order, and a timed-out one finishing last would record the
+	 * surface as starting over the ready lease the other one got. A surface
+	 * is reused by the next run once its lease is released, so a caller for a
+	 * newly bound run never joins an older run's request.
 	 */
 	ensureSurface(request: EnsureBrowserSurfaceRequest): Promise<BrowserSurface> {
+		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
 		const inFlight = this.#ensuresInFlightBySurfaceId.get(request.surfaceId);
-		if (inFlight) {
-			return inFlight;
+		if (inFlight && inFlight.runId === runId) {
+			return inFlight.ensure;
 		}
-		const ensure = this.#ensureSurfaceOnce(request).finally(() => {
-			this.#ensuresInFlightBySurfaceId.delete(request.surfaceId);
+		const ensure: Promise<BrowserSurface> = this.#ensureSurfaceOnce(
+			request,
+			runId,
+		).finally(() => {
+			if (this.#ensuresInFlightBySurfaceId.get(request.surfaceId)?.ensure === ensure) {
+				this.#ensuresInFlightBySurfaceId.delete(request.surfaceId);
+			}
 		});
-		this.#ensuresInFlightBySurfaceId.set(request.surfaceId, ensure);
+		this.#ensuresInFlightBySurfaceId.set(request.surfaceId, { ensure, runId });
 		return ensure;
 	}
 
 	async #ensureSurfaceOnce(
 		request: EnsureBrowserSurfaceRequest,
+		runId: string | undefined,
 	): Promise<BrowserSurface> {
 		const existing = this.#leasesBySurfaceId.get(request.surfaceId);
-		if (existing?.hostSurfaceId) {
+		// The binding is consumed when a start succeeds, so an unbound surface
+		// with a ready lease is that run's surface. A newly bound run never
+		// reuses another run's lease.
+		if (existing?.hostSurfaceId && (runId === undefined || existing.runId === runId)) {
 			return existing.surface;
 		}
-		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
 		if (!runId) {
 			throw new HostBrowserSurfaceAllocatorError(
 				"host_browser_surface_missing_lease_context",
@@ -238,29 +249,60 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 					// starting one for this run. Report the surface as starting. The
 					// lease manager asks again within its readiness budget, and the
 					// host answers a repeated run_id with the start it already has.
-					return this.#recordSurface(request, runId, null);
+					return this.#recordSurfaceIfStillBound(request, runId, null);
 				}
 			}
 			throw error;
 		}
 		this.#lastStartFailureByRunId.delete(runId);
-		const surface = this.#recordSurface(
+		const stillBound = this.#isBound(request.surfaceId, runId);
+		const surface = this.#recordSurfaceIfStillBound(
 			request,
 			runId,
 			parseHostSurfaceLeaseResponse(response),
 		);
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		if (stillBound) {
+			this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+			this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		}
 		return surface;
 	}
 
-	#recordSurface(
+	#isBound(surfaceId: string, runId: string): boolean {
+		return this.#pendingRunIdsBySurfaceId.get(surfaceId) === runId;
+	}
+
+	/**
+	 * Record a start's answer, unless the surface was released or bound to
+	 * another run while the request ran. That answer belongs to a run that no
+	 * longer owns the surface, so it is returned to its caller and not stored
+	 * over the current run's state. Releasing a run makes the host drop any
+	 * browser it still starts for it.
+	 */
+	#recordSurfaceIfStillBound(
 		request: EnsureBrowserSurfaceRequest,
 		runId: string,
 		hostLease: HostSurfaceLeaseResponse | null,
 	): BrowserSurface {
+		const surface = this.#describeSurface(request, hostLease);
+		if (!this.#isBound(request.surfaceId, runId)) {
+			return surface;
+		}
+		this.#leasesBySurfaceId.set(request.surfaceId, {
+			hostSurfaceId: hostLease?.surface_id ?? null,
+			runId,
+			surface,
+		});
+		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
+		return surface;
+	}
+
+	#describeSurface(
+		request: EnsureBrowserSurfaceRequest,
+		hostLease: HostSurfaceLeaseResponse | null,
+	): BrowserSurface {
 		const now = this.#now().toISOString();
-		const surface: BrowserSurface = {
+		return {
 			...(hostLease
 				? { allocator_metadata: { host_surface_id: hostLease.surface_id } }
 				: {}),
@@ -277,13 +319,6 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			stream_base_url: "",
 			surface_id: request.surfaceId,
 		};
-		this.#leasesBySurfaceId.set(request.surfaceId, {
-			hostSurfaceId: hostLease?.surface_id ?? null,
-			runId,
-			surface,
-		});
-		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
-		return surface;
 	}
 
 	async getSurfaceStatus(surfaceId: string): Promise<BrowserSurface | null> {

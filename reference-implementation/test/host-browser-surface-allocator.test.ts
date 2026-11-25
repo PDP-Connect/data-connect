@@ -422,6 +422,79 @@ test("overlapping ensures of one surface share one host request, so a ready leas
 	assert.equal((await allocator.getSurfaceStatus("surface_1"))?.health, "ready");
 });
 
+/** A host whose lease answers wait until the test answers each run by id. */
+function createGatedHost(): {
+	readonly answer: (runId: string) => void;
+	readonly postedRunIds: string[];
+	readonly fetchImpl: typeof fetch;
+} {
+	const gates = new Map<string, () => void>();
+	const postedRunIds: string[] = [];
+	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+		const runId = (JSON.parse(String(init?.body ?? "{}")) as { run_id: string }).run_id;
+		postedRunIds.push(runId);
+		await new Promise<void>((resolve) => {
+			gates.set(runId, resolve);
+		});
+		return {
+			json: async () => ({
+				cdp_url: `http://127.0.0.1:9222/${runId}`,
+				surface_id: `host-surface-${runId}`,
+			}),
+			ok: true,
+			status: 200,
+		} as Response;
+	}) as typeof fetch;
+	const answer = (runId: string) => {
+		const open = gates.get(runId);
+		assert.ok(open, `no start is waiting for ${runId}`);
+		open();
+	};
+	return { answer, fetchImpl, postedRunIds };
+}
+
+/** Let queued promise callbacks run, so a fake fetch reaches its gate. */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("a surface rebound to the next run starts for that run, and the older run's late answer is not recorded", async () => {
+	const host = createGatedHost();
+	const allocator = hostAllocator(host.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-old", surfaceId: "surface_1" });
+	const older = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	allocator.bindRunToSurface({ runId: "run-next", surfaceId: "surface_1" });
+	const next = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+
+	assert.deepEqual(host.postedRunIds, ["run-old", "run-next"]);
+	host.answer("run-next");
+	assert.equal((await next).cdp_url, "http://127.0.0.1:9222/run-next");
+	host.answer("run-old");
+	await older;
+	assert.equal(
+		(await allocator.getSurfaceStatus("surface_1"))?.cdp_url,
+		"http://127.0.0.1:9222/run-next",
+	);
+});
+
+test("an older run's answer that lands after the next run is bound leaves that binding in place", async () => {
+	const host = createGatedHost();
+	const allocator = hostAllocator(host.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-old", surfaceId: "surface_1" });
+	const older = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	allocator.bindRunToSurface({ runId: "run-next", surfaceId: "surface_1" });
+	host.answer("run-old");
+	await older;
+
+	assert.equal(await allocator.getSurfaceStatus("surface_1"), null);
+	const next = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	host.answer("run-next");
+	assert.equal((await next).cdp_url, "http://127.0.0.1:9222/run-next");
+	assert.deepEqual(host.postedRunIds, ["run-old", "run-next"]);
+});
+
 test("stopping an unanswered start releases its run, so the host drops the browser when the start completes", async () => {
 	const host = createSlowStartHost();
 	const allocator = slowStartAllocator(host.fetchImpl);
