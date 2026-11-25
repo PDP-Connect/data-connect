@@ -357,13 +357,25 @@ test("validateRuntimeRequirements: a manifest keyed database cannot declare a se
   assertRejects(declare("PDPP_DATABASE_PAGE_SIZE"), "is a server-owned environment variable");
 });
 
+const SHARED_OR_NESTED = /shared with or nested in another installed connector's/;
+
 test("validateRuntimeRequirements: a key in a longer installed namespace is not the shorter connector's", () => {
   const foo = { connector_key: "foo", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
   assert.equal(validateRuntimeRequirements(foo, CODE), undefined, "no longer connector installed");
-  assert.throws(
-    () => validateRuntimeRequirements(foo, CODE, ["foo", "foo_bar"]),
-    /belongs to a longer installed namespace/
-  );
+  assert.throws(() => validateRuntimeRequirements(foo, CODE, ["foo", "foo_bar"]), SHARED_OR_NESTED);
   const fooBar = { connector_key: "foo_bar", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
   assert.equal(validateRuntimeRequirements(fooBar, CODE, ["foo", "foo_bar"]), undefined);
+});
+
+test("validateRuntimeRequirements: a key in a namespace another installed connector shares is no one's", () => {
+  // google_messages and google-messages are distinct keys with one namespace, PDPP_GOOGLE_MESSAGES_.
+  const declare = (key: string) => ({
+    connector_key: key,
+    runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MESSAGES_PAGE_SIZE"] },
+  });
+  const installed = ["google-messages", "google_messages"];
+  for (const key of installed) {
+    assert.equal(validateRuntimeRequirements(declare(key), CODE, [key]), undefined, `${key} alone owns it`);
+    assert.throws(() => validateRuntimeRequirements(declare(key), CODE, installed), SHARED_OR_NESTED);
+  }
 });

@@ -91,6 +91,13 @@
  *     as the operator's rollback handle.
  *   - Insert/delete row counts are asserted equal before commit; any
  *     mismatch rolls the transaction back.
+ *   - The transaction takes the connector instance's write lock, then the
+ *     stream's version_counter row (the order ingest uses), and raises
+ *     version_counter.changes_floor to the newest version that superseded a
+ *     removed row, so changes_since tokens that needed a removed row expire
+ *     with 410 instead of getting a silently wrong delta. A stream with no
+ *     counter row has nowhere to record that floor, so apply refuses it.
+ *   - Run plan and apply back to back: apply does not re-validate the plan.
  *
  * Usage:
  *   node reference-implementation/scripts/compact-record-history.mjs \
@@ -112,6 +119,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  connectorInstanceAdvisoryLockKey,
+  connectorInstanceLockWaitMs,
+} from "../server/connector-instance-write-coordinator.ts";
 import { canonicalConnectorKeyFromManifest, REGISTRY_CONNECTOR_PREFIX } from "../server/connector-key.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 
@@ -157,13 +168,14 @@ interface CompactionFingerprintDeclaration {
   readonly exclude_keys: readonly string[];
   readonly representative_policy?: "current";
 }
-interface ManifestStreamLike {
+export interface ManifestStreamLike {
   readonly compaction_fingerprint?: CompactionFingerprintDeclaration;
   readonly name?: unknown;
 }
-interface ManifestLike {
+export interface ManifestLike {
   readonly connector_id?: unknown;
   readonly connector_key?: unknown;
+  readonly storage_binding?: unknown;
   readonly streams?: readonly ManifestStreamLike[];
 }
 
@@ -257,12 +269,25 @@ function isPresentFieldValue(value: unknown): boolean {
   return Boolean(value);
 }
 
-/** Every `CompactionPolicy`, derived generically from every shipped
- * manifest's streams — the complete, generic replacement for what used to
- * be a hand-maintained, connector-keyed literal array. */
-function buildCompactionPoliciesFromManifests(): CompactionPolicy[] {
-  const policies: CompactionPolicy[] = [];
-  for (const manifest of readAllManifests()) {
+export interface CompactionPolicySet {
+  /** `<connector key>/<stream>` declared by more than one manifest. */
+  readonly conflicts: readonly string[];
+  readonly policies: readonly CompactionPolicy[];
+}
+
+/**
+ * Every `CompactionPolicy` the given manifests declare. A manifest's
+ * connector key comes from `canonicalConnectorKeyFromManifest`, the identity
+ * rule the server applies when it registers a manifest, so a manifest that
+ * names itself only by `connector_id` or `storage_binding.connector_id` is
+ * eligible like one with `connector_key`. A stream declared by two manifests
+ * under one key gets no policy, so nothing is compacted for it: this tool
+ * deletes history and must not pick one declaration silently. It is reported
+ * in `conflicts` instead.
+ */
+export function compactionPoliciesFromManifests(manifests: readonly ManifestLike[]): CompactionPolicySet {
+  const byId = new Map<string, CompactionPolicy[]>();
+  for (const manifest of manifests) {
     const connectorKey = canonicalConnectorKeyFromManifest(manifest);
     if (!connectorKey) {
       continue;
@@ -272,10 +297,17 @@ function buildCompactionPoliciesFromManifests(): CompactionPolicy[] {
       if (!declaration || typeof stream.name !== "string") {
         continue;
       }
-      policies.push(buildPolicyFromManifestStream(connectorKey, stream.name, declaration));
+      const id = `${connectorKey}/${stream.name}`;
+      byId.set(id, [...(byId.get(id) ?? []), buildPolicyFromManifestStream(connectorKey, stream.name, declaration)]);
     }
   }
-  return policies;
+  const declared = [...byId];
+  return {
+    conflicts: declared.filter(([, policies]) => policies.length > 1).map(([id]) => id),
+    policies: declared
+      .filter(([, policies]) => policies.length === 1)
+      .map(([, [policy]]) => policy as CompactionPolicy),
+  };
 }
 
 // ─── Shared types ───────────────────────────────────────────────────────
@@ -366,17 +398,23 @@ interface EnrichedRow {
  * is `'audit'`, which ignores both fields and keeps its existing conservative
  * retention for every policy.
  */
-export const COMPACTION_POLICIES: CompactionPolicy[] = buildCompactionPoliciesFromManifests();
+const SHIPPED_POLICY_SET = compactionPoliciesFromManifests(readAllManifests());
+
+export const COMPACTION_POLICIES: readonly CompactionPolicy[] = SHIPPED_POLICY_SET.policies;
 
 export function findPolicy(connectorId: string, stream: string): CompactionPolicy | null {
   return COMPACTION_POLICIES.find((p) => p.connectorIds.includes(connectorId) && p.stream === stream) || null;
 }
 
 export function describePolicies(): string {
-  return COMPACTION_POLICIES.map(
+  const lines = COMPACTION_POLICIES.map(
     (p) =>
       `  - ${p.connectorIds[0]}/${p.stream}${p.excludeKeys.length ? ` (excludes ${p.excludeKeys.join(",")})` : ""}${isCanonicalEligible(p) ? " [canonical-eligible]" : ""}`
-  ).join("\n");
+  );
+  for (const id of SHIPPED_POLICY_SET.conflicts) {
+    lines.push(`  - ${id} [not compacted: declared by more than one manifest]`);
+  }
+  return lines.join("\n");
 }
 
 // ─── Canonical-mode eligibility ─────────────────────────────────────────
@@ -959,11 +997,39 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
   const client = await pool.connect();
   let inserted = 0;
   let deleted = 0;
+  // Newest version that superseded a removed row. A removed row (k, v) is the
+  // snapshot a changes_since token s needs when v <= s < next(k), so tokens
+  // below this version can no longer be answered exactly.
+  let changesFloor = 0;
   try {
     await client.query("BEGIN");
+    // Same lock ingest and stream resets take (bounded wait), then the counter row.
+    await client.query(`SET LOCAL lock_timeout = '${connectorInstanceLockWaitMs()}ms'`);
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
+      connectorInstanceAdvisoryLockKey(plan.connectorInstanceId),
+    ]);
+    const counter = await client.query(
+      "SELECT 1 FROM version_counter WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE",
+      [plan.connectorInstanceId, plan.stream]
+    );
+    if (counter.rowCount === 0) {
+      throw new Error(
+        `cannot compact ${plan.connectorInstanceId}/${plan.stream}: no version_counter row to record the changes floor`
+      );
+    }
 
     for (const [recordKey, versions] of plan.removableByKey) {
       const versionsAsNumbers = versions.map(Number);
+      const successors = await client.query<{ floor: string | null }>(
+        `SELECT MAX((SELECT MIN(n.version) FROM record_changes n
+                      WHERE n.connector_instance_id = rc.connector_instance_id AND n.stream = rc.stream
+                        AND n.record_key = rc.record_key AND n.version > rc.version))::bigint AS floor
+           FROM record_changes rc
+          WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.record_key = $3
+            AND rc.version = ANY($4::bigint[])`,
+        [plan.connectorInstanceId, plan.stream, recordKey, versionsAsNumbers]
+      );
+      changesFloor = Math.max(changesFloor, Number(successors.rows[0]?.floor ?? 0));
       // biome-ignore lint/performance/noAwaitInLoops: every insert/delete pair in this loop shares ONE pg.PoolClient inside a single BEGIN/COMMIT transaction -- a pg client serializes queries on one connection regardless, and parallelizing here would not overlap I/O, only reorder statements inside the transaction non-deterministically.
       const insertRes = await client.query(
         `INSERT INTO ${quoteIdent(backupTable)}
@@ -995,6 +1061,12 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
       inserted += insertRes.rowCount || 0;
       deleted += deleteRes.rowCount || 0;
     }
+
+    await client.query(
+      `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
+        WHERE connector_instance_id = $1 AND stream = $2`,
+      [plan.connectorInstanceId, plan.stream, changesFloor]
+    );
 
     await client.query("COMMIT");
   } catch (err) {
