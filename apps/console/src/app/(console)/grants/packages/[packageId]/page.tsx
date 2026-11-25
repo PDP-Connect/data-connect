@@ -35,7 +35,7 @@ import {
 } from "../../../lib/ref-client.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { technicalClientCaption } from "../../client-caption.ts";
-import { activePackageAccesses, appSourceName } from "../../app-access.ts";
+import { activePackageAccesses, appSourceName, UNKNOWN_APP_NAME } from "../../app-access.ts";
 import { RemovePackageAccess } from "../../remove-access-confirmation.tsx";
 import { revokePackageAction } from "./revoke-action.ts";
 
@@ -88,7 +88,7 @@ export default async function GrantPackageDetailPage({
   }
 
   const summaries = await listGrants({ client_id: pkg.client_id, limit: 50 }).catch(() => null);
-  const appName = summaries?.data.find((grant) => grant.client?.client_name?.trim())?.client?.client_name?.trim() ?? "App";
+  const appName = summaries?.data.find((grant) => grant.client?.client_name?.trim())?.client?.client_name?.trim() ?? UNKNOWN_APP_NAME;
   const activeChildren = activePackageAccesses(pkg.children);
   const sources = [...new Set(activeChildren.flatMap((child) => appSourceName(child.source) ?? []))];
   const childIds = new Set(pkg.children.map((child) => child.grant_id));

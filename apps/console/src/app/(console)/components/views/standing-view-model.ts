@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { formatRelative, humanizeFieldLabel } from "@pdpp/display";
-import { appNamesByClientId, appSourceName, pendingApprovalAppName } from "../../grants/app-access.ts";
+import { appNamesByClientId, appSourceName, pendingApprovalAppName, UNKNOWN_APP_NAME } from "../../grants/app-access.ts";
 import type {
   DatasetSummary,
   GrantSummary,
@@ -187,7 +187,7 @@ function clientLabel(name: string | null, fallbackId: string): string {
   const raw = name?.trim() || fallbackId;
   const host = hostFromUrl(raw);
   if (host) return host;
-  return looksLikeTechnicalId(raw) ? "Unnamed app" : raw;
+  return looksLikeTechnicalId(raw) ? UNKNOWN_APP_NAME : raw;
 }
 
 function appAccesses(

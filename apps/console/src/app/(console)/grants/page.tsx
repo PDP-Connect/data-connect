@@ -11,7 +11,7 @@ import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { AppAccessList } from "./app-access-list.tsx";
-import { appNamesByClientId, appSourceName, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups } from "./app-access.ts";
+import { appNamesByClientId, appSourceName, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups, UNKNOWN_APP_NAME } from "./app-access.ts";
 import { DeveloperModeRequestLink } from "./developer-mode-gate.tsx";
 import { revokeGrantAccessAction } from "./[grantId]/revoke-action.ts";
 import { ServerUnreachable } from "../components/shell.tsx";
@@ -103,7 +103,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
   const apps = groupGrantAccessByApp(result.data);
   const appGroups = splitAppAccessGroups(apps);
   const clientNames = appNamesByClientId(result.data);
-  const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, clientNames.get(grant.client_id) || "App"] as const] : [])).entries()];
+  const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, clientNames.get(grant.client_id) || UNKNOWN_APP_NAME] as const] : [])).entries()];
   const filterSources = [...new Map(result.data.flatMap((grant) => grant.source ? [[grant.source.id, appSourceName(grant.source) ?? "Data source"] as const] : [])).entries()];
 
   // A later page, or a list narrowed by data source, search or state, holds only

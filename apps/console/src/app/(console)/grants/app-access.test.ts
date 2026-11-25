@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { GrantSummary } from "../lib/ref-client.ts";
-import { activePackageAccesses, appSourceName, formatAppLastRead, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups } from "./app-access.ts";
+import { activePackageAccesses, appSourceName, formatAppLastRead, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups, UNKNOWN_APP_NAME } from "./app-access.ts";
 
 function grant(overrides: Partial<GrantSummary> = {}): GrantSummary {
   return {
@@ -153,4 +153,15 @@ test("waiting request titles never fall back to the request address host", async
   const body = helper.slice(start, helper.indexOf("\n}\n", start));
   assert.ok(start >= 0 && body.length > 0);
   assert.doesNotMatch(body, /new URL\(|hostname|client_?[iI]d/);
+});
+
+test("an app with no usable name is called the same thing on every page", async () => {
+  assert.equal(UNKNOWN_APP_NAME, "An app");
+  assert.equal(pendingApprovalAppName("  "), UNKNOWN_APP_NAME);
+  assert.equal(groupGrantAccessByApp([grant({ client: undefined })])[0]?.name, UNKNOWN_APP_NAME);
+  const pages = ["./page.tsx", "./[grantId]/page.tsx", "./packages/[packageId]/page.tsx", "../components/views/standing-view-model.ts"];
+  for (const page of pages) {
+    const source = await readFile(new URL(page, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /(\|\||\?\?|\?)\s*"(App|Unnamed app)"/, page);
+  }
 });

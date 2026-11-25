@@ -12,7 +12,7 @@ import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getGrantTimeline, listGrants } from "../../lib/ref-client.ts";
 import { RemoveThisAccess } from "../remove-access-confirmation.tsx";
-import { appSourceName } from "../app-access.ts";
+import { appSourceName, UNKNOWN_APP_NAME } from "../app-access.ts";
 import { revokeGrantAccessAction } from "./revoke-action.ts";
 
 export const dynamic = "force-dynamic";
@@ -65,7 +65,7 @@ export default async function GrantDetailPage({
   }
 
   const revoked = envelope.events.some((e) => e.event_type === "grant.revoked" || e.status === "revoked");
-  const appName = grant?.client?.client_name?.trim() || "App";
+  const appName = grant?.client?.client_name?.trim() || UNKNOWN_APP_NAME;
   const what = appSourceName(grant?.source) ?? "Not available";
   const canRemove = grant?.status === "active" || grant?.status === "issued";
   const relative = (value: string | null | undefined) => {

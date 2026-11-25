@@ -66,8 +66,11 @@ export function appNamesByClientId(
  * (`/oauth/client-metadata/…`), and any app can pick a host shaped like a
  * trusted name (`chatgpt.com.example.io`).
  */
+/** The one name every page uses for an app that did not give a usable name. */
+export const UNKNOWN_APP_NAME = "An app";
+
 export function pendingApprovalAppName(clientName: string | null | undefined): string {
-  return clientName?.trim() || "An app";
+  return clientName?.trim() || UNKNOWN_APP_NAME;
 }
 
 export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAccess[] {
@@ -83,7 +86,7 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
           grantIds: [],
           hrefId: grant.grant_id,
           lastRead: null,
-          name: names.get(key) || "App",
+          name: names.get(key) || UNKNOWN_APP_NAME,
           packageIds: [],
           sources: [],
           stoppedAt: null,
