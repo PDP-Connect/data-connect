@@ -45,12 +45,14 @@ function acceptedSubscription(): Response {
 
 // Per-test answers. Each test sets these before mounting.
 const scenario: {
+  deleteResponse: () => Response;
   existing: PushSubscription | null;
   inspect: () => Promise<unknown>;
   permissionAnswer: NotificationPermission;
   subscribe: () => Promise<unknown>;
   subscriptionResponse: () => Response;
 } = {
+  deleteResponse: acceptedSubscription,
   existing: null,
   inspect: () => Promise.resolve(registration),
   permissionAnswer: "granted",
@@ -62,6 +64,10 @@ const scenario: {
 const pushSubscription = {
   endpoint: "https://push.example.test/subscription-1",
   options: { applicationServerKey: Uint8Array.from([1, 2, 3]).buffer },
+  unsubscribe: () => {
+    scenario.existing = null;
+    return Promise.resolve(true);
+  },
   toJSON: () => ({
     endpoint: "https://push.example.test/subscription-1",
     keys: { auth: "auth", p256dh: "key" },
@@ -105,6 +111,9 @@ const harness = (async () => {
     fetch: (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       if (String(input) === "/_ref/web-push/subscriptions" && init?.method === "POST") {
         return Promise.resolve(scenario.subscriptionResponse());
+      }
+      if (String(input) === "/_ref/web-push/subscriptions" && init?.method === "DELETE") {
+        return Promise.resolve(scenario.deleteResponse());
       }
       throw new Error(`unexpected request: ${String(input)}`);
     },
@@ -308,5 +317,20 @@ test("a subscription shown as healthy is not shown so after the browser could no
     buttonNamed(container, "Enable this device");
   }, LISTED_CURRENT_ENDPOINT);
   scenario.inspect = () => Promise.resolve(registration);
+  scenario.existing = null;
+});
+
+test("after Disable removes the browser subscription but the server refuses, the device is not shown as subscribed", async () => {
+  scenario.existing = pushSubscription as unknown as PushSubscription;
+  scenario.deleteResponse = refusedSubscription;
+  await mounted(async (container) => {
+    assert.match(container.textContent ?? "", SUBSCRIBED, "healthy before Disable");
+    await press(container, "Manage");
+    await press(container, "Disable this device");
+    assert.equal(scenario.existing, null, "the browser dropped its subscription first");
+    assert.doesNotMatch(container.textContent ?? "", SUBSCRIBED);
+    buttonNamed(container, "Enable this device");
+  }, LISTED_CURRENT_ENDPOINT);
+  scenario.deleteResponse = acceptedSubscription;
   scenario.existing = null;
 });

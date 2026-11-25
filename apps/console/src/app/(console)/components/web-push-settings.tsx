@@ -788,6 +788,9 @@ export function WebPushSettings({
       dispatch({ status: "Web Push is disabled for this browser.", type: "disabled" });
     } catch (err) {
       dispatch({ status: err instanceof Error ? err.message : "Failed to disable Web Push.", type: "status" });
+      // The browser may already have dropped its subscription before the server
+      // refused, so read the browser again rather than keep showing the old one.
+      await refreshSubscriptionState();
     } finally {
       setBusy(false);
     }
