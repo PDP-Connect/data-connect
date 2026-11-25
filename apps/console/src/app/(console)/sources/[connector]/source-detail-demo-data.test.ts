@@ -20,20 +20,20 @@ test("seeded detail scenarios render the shared sentence and row for each status
     const html = renderToStaticMarkup(
       createElement(SourceStateSentenceText, { connectionId: model.connectionId, sentence, status })
     );
-    const visibleText = html.replace(/<[^>]*>/g, " ");
+    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 
     // DIRECTION.md §One data source: render the pure helper's sentence and status row on the page.
     assert.equal(status.row, row, `demo row ${row}`);
-    assert.ok(html.includes(sentence.text), `sentence for row ${row}`);
+    // Brief decision 3: the row 8 sentence is split into attention and second-text spans.
+    assert.ok(visibleText.includes(sentence.text), `sentence for row ${row}`);
     assert.ok(html.includes(`data-status-row="${row}"`), `status row attribute ${row}`);
     assert.ok(html.includes(`data-source-id="${model.connectionId}"`), `source id attribute ${row}`);
     assert.doesNotMatch(html, /<(?:a|button)\b/, `status sentence must not contain controls for row ${row}`);
     assert.doesNotMatch(visibleText, /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i, `plain words for row ${row}`);
     assert.ok(!visibleText.includes(model.connectionId), `raw source id is not visible for row ${row}`);
     if (status.action) assert.equal(typeof status.action.filled, "boolean", `single status action for row ${row}`);
-    if (sentence.slot === "what_you_can_do") {
-      assert.ok(html.includes(`Use “${status.action?.label}” above.`), `action guidance for row ${row}`);
-    }
+    // Brief decision 3: the sentence never points at an action above.
+    assert.doesNotMatch(visibleText, /Use “.+” above\./, `no duplicate action instruction for row ${row}`);
   }
 });
 
@@ -43,13 +43,30 @@ test("the existing atlas recovery demo remains the row 16 scenario", () => {
   assert.equal(sourceStatusWords(model.source, { now: NOW }).row, 16);
 });
 
-test("the per-kind collection line shows no internal axis word", () => {
+test("per-kind evidence is rendered inside folded Details", () => {
   const model = buildRecoveryDemoModel();
   assert.ok(model.collectionFactsByStream.size > 0, "the atlas demo seeds collection facts");
   for (const facts of model.collectionFactsByStream.values()) {
-    const html = renderToStaticMarkup(createElement(StreamCollectionFactsLine, { facts }));
-    const text = html.replace(/<[^>]*>/g, " ");
-    // PAGE-RULES item 6 / DIRECTION.md "What must stay true" 3: "coverage" is not shown outside Details.
-    assert.doesNotMatch(text, /\bcoverage\b/i);
+    const html = renderToStaticMarkup(
+      createElement("details", null, createElement("summary", null, "Details"), createElement(StreamCollectionFactsLine, { facts }))
+    );
+    // Brief decision 6: collection evidence moves into the folded Details section.
+    assert.match(html, /<details><summary>Details<\/summary>[\s\S]*stream-collection-facts/);
+  }
+});
+
+test("pending details replace up-to-date wording on rows 19 and 20", () => {
+  for (const row of [19, 20] as const) {
+    const model = buildRecoveryDemoModel(row, true);
+    const status = sourceStatusWords(model.source, { now: NOW });
+    const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName });
+    const html = renderToStaticMarkup(
+      createElement(SourceStateSentenceText, { connectionId: model.connectionId, pendingDetails: true, sentence, status })
+    );
+    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+
+    // Brief decision 5: pending details use the plain sentence and never conflict with “Up to date”.
+    assert.match(visibleText, /^Synced .*\. Some details are still being fetched\.$/);
+    assert.doesNotMatch(visibleText, /Up to date|next in|has not checked this against the source/);
   }
 });

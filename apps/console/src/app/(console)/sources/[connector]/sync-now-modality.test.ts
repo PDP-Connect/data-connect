@@ -56,7 +56,7 @@ const NON_OWNER_HEADER_ACTIONS_RETURN_NULL =
   /if \(action\.audience !== "owner" \|\| action\.satisfied_when\.kind === "none"\) \{\s*return null;\s*\}/;
 const EXACT_SYNC_TARGET_GUARD = /action\.target\?\.kind !== "sync"/;
 const EXACT_SYNC_RUN_HREF = /href=\{`\/syncs\/\$\{encodeURIComponent\(action\.target\.run_id\)\}`\}/;
-const EXACT_SYNC_LINK_LABEL = /\{action\.cta\}/;
+const EXACT_SYNC_LINK_LABEL = /\{label \?\? action\.cta\}/;
 const EXACT_SYNC_LINK_NO_TITLE = /title="Open the exact sync that needs owner input\."/;
 const EXACT_SYNC_LINK_NO_GENERIC_FALLBACK = /href=\{syncDetailHref \?\? "\/syncs"\}/;
 // A device-local add_info recovery is NOT navigable — it must render as
@@ -161,8 +161,8 @@ test("SyncNowButton renders only in status or named secondary-action branches", 
   const renders = src.match(/<SyncNowButton/g) ?? [];
   assert.equal(
     renders.length,
-    6,
-    "expected repair, status sync, manual reprocess, optional schedule sync, outlined fallback, and cooldown force render sites"
+    7,
+    "expected repair, status sync, first-sync fallback, manual reprocess, optional schedule sync, outlined fallback, and cooldown force render sites"
   );
   assert.match(src, MANUAL_UPLOAD_IMPORT_LINK);
   assert.match(src, MANUAL_UPLOAD_REPROCESS_BUTTON);
@@ -266,7 +266,7 @@ test("paused schedules keep Resume alone at the top and offer one-off sync below
   assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTOR_ID_INPUT);
   assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTION_ID_INPUT);
   // DIRECTION.md §One data source: the server action follows its status-table filled/outlined choice.
-  assert.match(pausedBranch, /<IcButton[^>]*variant=\{filled \? "default" : "ghost"\}>\s*\{action\.cta\}/);
+  assert.match(pausedBranch, /<IcButton[^>]*variant=\{filled \? "default" : "ghost"\}>\s*\{label \?\? action\.cta\}/);
   // DIRECTION.md §One data source: the status-table action is the only action at the top of the page.
   assert.doesNotMatch(pausedBranch, /canSync|<SyncNowButton/);
   const sync = src.match(/\{scheduleSyncAvailable \? \(\s*<SyncNowButton([\s\S]*?)\/>\s*\) : null\}/)?.[1];

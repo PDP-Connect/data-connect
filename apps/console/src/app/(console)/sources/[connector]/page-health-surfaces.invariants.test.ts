@@ -5,7 +5,7 @@
  * Source-regex guards for the connection-detail health surfaces:
  *
  *   1. one server-owned rendered verdict path for health explanation
- *   2. 14-day streak strip
+ *   2. No duplicate recent-sync strip
  *   3. Auto-paused banner in the run timeline
  *
  * These are structural invariants, not behavioural tests. Behavioural
@@ -28,12 +28,6 @@ const RE_FAILURE_EXPANDER_COMPONENT = /<FailureExpander/;
 const RE_FAILURE_EXPANDER_TESTID = /data-testid="failure-expander"/;
 const RE_CONNECTION_DIAGNOSTICS_COMPONENT = /<ConnectionDiagnostics/;
 const RE_CONNECTION_DIAGNOSTICS_VERDICT_PROP = /renderedVerdict=\{connectionRenderedVerdict\}/;
-const RE_DERIVE_STREAK_DOTS = /deriveStreakDots/;
-const RE_STREAK_DOTS_CONDITIONAL = /streakDots\.length\s*>\s*0/;
-const RE_STREAK_STRIP_COMPONENT = /<StreakStrip/;
-const RE_STREAK_STRIP_TESTID = /data-testid="streak-strip"/;
-const RE_STREAK_STRIP_IN_LATEST_SYNCS =
-  /function RecentRunsSection[\s\S]*?title="Latest syncs"[\s\S]*?streakDots\.length > 0 \? <StreakStrip dots=\{streakDots\} \/> : null/;
 const RE_DERIVE_AUTO_PAUSED_BANNER = /deriveAutoPausedBanner/;
 const RE_AUTO_PAUSED_BANNER_CONDITIONAL = /autoPausedBanner\s*\?/;
 const RE_AUTO_PAUSED_BANNER_ROW_COMPONENT = /<AutoPausedBannerRow/;
@@ -85,29 +79,14 @@ test("page routes health explanation through ConnectionDiagnostics rendered_verd
   assert.match(src, RE_CONNECTION_DIAGNOSTICS_VERDICT_PROP);
 });
 
-// ─── Surface 2: streak strip ──────────────────────────────────────────────────
+// ─── Surface 2: recent-sync strip ────────────────────────────────────────────
 
-test("page imports deriveStreakDots from connection-evidence", async () => {
+test("Latest syncs has no duplicate streak strip or second history action", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_DERIVE_STREAK_DOTS);
-});
-
-test("page renders StreakStrip when streakDots is non-empty", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_STREAK_DOTS_CONDITIONAL);
-  assert.match(src, RE_STREAK_STRIP_COMPONENT);
-});
-
-test("recent sync strip stays inside Latest syncs", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // DIRECTION.md §One data source: the recent-sync strip stays in Latest syncs.
-  assert.match(src, RE_STREAK_STRIP_IN_LATEST_SYNCS);
-  assert.match(src, /<RecentRunsSection[\s\S]{0,240}streakDots=\{streakDots\}/);
-});
-
-test("streak strip has a data-testid for integration targeting", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_STREAK_STRIP_TESTID);
+  // Brief decision 7: each sync appears once and All sync history is the only history link.
+  assert.doesNotMatch(src, /deriveStreakDots|StreakStrip|streak-strip|Open sync history/);
+  assert.equal((src.match(/>All sync history<\/Link>/g) ?? []).length, 1);
+  assert.match(src, RE_RECENT_RUNS_SECTION);
 });
 
 // ─── Surface 3: auto-paused banner ───────────────────────────────────────────
@@ -141,18 +120,19 @@ test("auto-paused banner is placed inside Latest syncs, not outside", async () =
   assert.ok(bannerIdx > latestSyncsSectionIdx, "auto-paused banner should be inside Latest syncs");
 });
 
-test("detail page keeps acquisition evidence in the plain-language collected section", async () => {
+test("detail page keeps acquisition evidence inside folded Details", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const sectionStart = src.indexOf("function AcquisitionCoverageSection");
   const sectionEnd = src.indexOf("/**\n * Latest syncs", sectionStart);
   const sectionSrc = src.slice(sectionStart, sectionEnd);
-  // DIRECTION.md: acquisition evidence stays in the main column with plain headings.
+  // Brief decisions 6 and 11: collection facts move to the folded Details section.
   assert.match(src, RE_ACQUISITION_COVERAGE_MAPPING);
   assert.match(src, RE_ACQUISITION_COVERAGE_SECTION);
   assert.match(src, RE_ACQUISITION_COVERAGE_TITLE);
   assert.match(src, RE_ACQUISITION_COVERAGE_RECEIPT_LINK);
   assert.match(src, RE_ACQUISITION_COVERAGE_OWNER_COPY);
   assert.doesNotMatch(sectionSrc, RE_ACQUISITION_COVERAGE_SOURCE_NEUTRAL);
+  assert.ok(src.indexOf('data-testid="source-details"') < src.indexOf("<AcquisitionCoverageSection"));
 });
 
 test("connector detail page labels each reauthentication surface precisely", async () => {
@@ -161,12 +141,13 @@ test("connector detail page labels each reauthentication surface precisely", asy
   assert.match(src, RE_BROWSER_SESSION_ACTION_USES_SERVER_CTA);
 });
 
-test("owner confirmation is reachable from the connection detail page through structured backend evidence", async () => {
+test("owner confirmation remains reachable inside folded Details through structured evidence", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, RE_CONFIRMATION_IMPORT);
   assert.match(src, RE_CONFIRMATION_RENDER);
   assert.match(src, RE_CONFIRMATION_STRUCTURED_ACK);
   assert.match(src, RE_CONFIRMATION_GAP_WIRING);
+  assert.ok(src.indexOf('data-testid="source-details"') < src.indexOf("<ConnectionConfirmation"));
   assert.doesNotMatch(
     src,
     RE_NO_RENDERED_FORWARD_STATEMENT,

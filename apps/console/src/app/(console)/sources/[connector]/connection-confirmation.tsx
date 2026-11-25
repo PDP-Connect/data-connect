@@ -15,6 +15,7 @@ import {
   pendingLossAcknowledgements,
 } from "../../lib/generic-confirmation-evidence.ts";
 import type { RefAcknowledgedLossRecord, RefCoverageHorizon } from "../../lib/ref-client.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 type ConfirmationAction = (formData: FormData) => void | Promise<void>;
 
@@ -65,7 +66,7 @@ function HorizonEvidence({ horizons }: { horizons: readonly RefCoverageHorizon[]
     <div className="flex flex-col gap-3">
       <h3 className="pdpp-body font-medium text-foreground">Recorded history boundaries</h3>
       {horizons.map((horizon) => (
-        <div className="rounded-md border border-border p-3" key={horizon.horizonId}>
+    <div className="border-t border-border pt-3" key={horizon.horizonId}>
           <dl className="grid gap-3 sm:grid-cols-2">
             <EvidenceField label="Kind of record" value={horizon.stream} />
             <EvidenceField label="Earliest available" value={horizon.earliestAvailable} />
@@ -96,7 +97,7 @@ function HorizonForm({
   candidate: ReturnType<typeof boundaryClaimGaps>[number];
 }) {
   return (
-    <form action={action} className="flex flex-col gap-3 rounded-md border border-border p-4">
+    <form action={action} className="flex flex-col gap-3 border-t border-border pt-4">
       <input name="connection_id" type="hidden" value={connectionId} />
       <input name="stream" type="hidden" value={stream} />
       <div>
@@ -169,7 +170,7 @@ function HorizonForm({
 
 function LossEvidence({ record }: { record: RefAcknowledgedLossRecord }) {
   return (
-    <div className="rounded-md border border-border p-3">
+    <div className="border-t border-border pt-3">
       <h3 className="pdpp-body font-medium text-foreground">Recorded loss acknowledgement</h3>
       <dl className="mt-3 grid gap-3 sm:grid-cols-2">
         <EvidenceField label="Cause" value={record.cause} />
@@ -195,7 +196,7 @@ function LossForm({
   candidate: ReturnType<typeof pendingLossAcknowledgements>[number];
 }) {
   return (
-    <form action={action} className="flex flex-col gap-3 rounded-md border border-border p-4">
+    <form action={action} className="flex flex-col gap-3 border-t border-border pt-4">
       <input name="connection_id" type="hidden" value={connectionId} />
       <input name="stream" type="hidden" value={stream} />
       <div>
@@ -304,12 +305,19 @@ export function ConnectionConfirmation({
       </p>
     </div>,
     error ? (
-      <div className="pdpp-caption mb-4 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5 text-destructive">
-        {error}
+      <div className="pdpp-caption mb-4 text-destructive" role="alert">
+        <p>{ACTION_ERROR_COPY}</p>
+        <details className="mt-1 text-muted-foreground">
+          <summary className="cursor-pointer">Details</summary>
+          <code className="mt-1 block break-words font-mono text-xs">{error}</code>
+        </details>
       </div>
     ) : null,
     message ? (
-      <div className="pdpp-caption mb-4 rounded-md border border-border px-4 py-2.5 text-foreground">{message}</div>
+      <details className="pdpp-caption mb-4">
+        <summary className="cursor-pointer text-muted-foreground">Details</summary>
+        <code className="mt-1 block break-words font-mono text-xs">{message}</code>
+      </details>
     ) : null,
     pendingBoundaryGaps.map((candidate) => (
       <HorizonForm

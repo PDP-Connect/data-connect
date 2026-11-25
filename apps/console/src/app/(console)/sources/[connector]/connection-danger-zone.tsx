@@ -8,7 +8,7 @@ import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 interface Props {
   /**
@@ -48,33 +48,25 @@ interface Props {
 export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
   return (
     <Section
-      description="These actions affect only this data source. Other data sources and their saved sign-in sessions are unchanged."
+      description="These actions affect this data source. Other data sources stay as they are."
       id="danger-zone"
-      title="Destructive actions"
+      title="Remove or reset"
     >
-      {error ? (
-        <div className="pdpp-caption mb-4 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{error}</span>
-        </div>
-      ) : null}
-      {message ? (
-        <div className="pdpp-caption mb-4 rounded-md border border-border px-4 py-2.5">
-          <span className="font-medium text-muted-foreground">{message}</span>
-        </div>
-      ) : null}
+      {error ? <ActionFeedback message={error} tone="error" /> : null}
+      {message ? <ActionFeedback message={message} tone="success" /> : null}
 
       {connectionId === null ? (
         <p className="pdpp-caption text-muted-foreground italic">
           This data source has no ID yet, so there is nothing to disconnect or delete.
         </p>
       ) : (
-        <div className="flex flex-col gap-6 rounded-md border border-border p-4">
+        <div className="flex flex-col gap-5">
           {setupFailed ? null : (
             <>
               <ResetSourceForm connectionId={connectionId} />
-              <div className="border-border border-t" />
+              <div aria-hidden className="border-border border-t" />
               <RevokeForm connectionId={connectionId} />
-              <div className="border-border border-t" />
+              <div aria-hidden className="border-border border-t" />
             </>
           )}
           <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
@@ -91,7 +83,7 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
   const [isPending, startTransition] = useTransition();
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-destructive">Sync again from the start</h3>
+      <h3 className="pdpp-body font-medium">Sync again from the start</h3>
       <p className="pdpp-caption text-muted-foreground">
         Clears the saved sync position, then starts a full sync. Records and sign-in details are kept.
       </p>
@@ -111,7 +103,7 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
               setMessage(
                 result.ok
                   ? { text: "Sync state cleared. Full sync started.", tone: "success" }
-                  : { text: plainDataSourceCopy(result.message).replaceAll(connectionId, "this data source"), tone: "error" }
+                  : { text: result.message, tone: "error" }
               );
             });
           }}
@@ -121,13 +113,7 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
           {isPending ? "Starting…" : "Sync again from the start"}
         </IcButton>
         {message ? (
-          <span
-            aria-live="polite"
-            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-muted-foreground"}`}
-            role={message.tone === "error" ? "alert" : "status"}
-          >
-            {message.text}
-          </span>
+            <ActionFeedback message={message.text} tone={message.tone} />
         ) : null}
       </div>
     </div>
@@ -137,7 +123,7 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
 function RevokeForm({ connectionId }: { connectionId: string }) {
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-destructive">Disconnect</h3>
+      <h3 className="pdpp-body font-medium">Disconnect</h3>
       <p className="pdpp-caption text-muted-foreground">
         Stops future syncing and signs out its saved browser session. Your records, app access, and activity history are kept.
       </p>
@@ -162,7 +148,7 @@ function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null;
   const confirmed = typed === connectionId;
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-destructive">Delete</h3>
+      <h3 className="pdpp-body font-medium">Delete</h3>
       <p className="pdpp-caption text-muted-foreground">
         Permanently erases this data source's records, its sync position, and its saved browser session. This cannot be undone.
       </p>
@@ -178,7 +164,7 @@ function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null;
         <input name="connection_id" type="hidden" value={connectionId} />
         {activeRunId ? <input name="cancel_run_id" type="hidden" value={activeRunId} /> : null}
         <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground" htmlFor="confirm-delete-input">
-          <span>Type the ID shown in Details to confirm.</span>
+          <span>Type this ID to confirm: {connectionId}</span>
           <IcInput
             aria-label="Type the data source ID to confirm deletion"
             autoComplete="off"
@@ -198,4 +184,19 @@ function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null;
       </form>
     </div>
   );
+}
+
+function ActionFeedback({ message, tone }: { message: string; tone: "error" | "success" }) {
+  if (tone === "error") {
+    return (
+      <div className="mb-3 text-sm" role="alert">
+        <p className="text-destructive">{ACTION_ERROR_COPY}</p>
+        <details className="mt-1 text-muted-foreground">
+          <summary className="cursor-pointer">Details</summary>
+          <code className="mt-1 block break-words font-mono text-xs">{message}</code>
+        </details>
+      </div>
+    );
+  }
+  return <p aria-live="polite" className="mb-3 text-sm text-muted-foreground" role="status">{message}</p>;
 }

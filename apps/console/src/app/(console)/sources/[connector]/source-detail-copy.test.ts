@@ -3,16 +3,9 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
-test("owner-facing detail copy replaces the page's internal vocabulary", () => {
-  const copy = plainDataSourceCopy(
-    "The connector's stream run has coverage. This connection's grant uses a bearer token from the manifest projection on the fleet reference server."
-  );
-
-  // PAGE-RULES item 6: visible copy uses plain data-source, record and sync words.
-  assert.doesNotMatch(copy, /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|connection|instance|reference server)\b/i);
-  assert.match(copy, /data source/);
-  assert.match(copy, /kind of record/);
-  assert.match(copy, /sync/);
+test("action errors use plain copy while raw server text is disclosed separately", () => {
+  // Brief decision 4: show a plain sentence and keep the raw response in folded Details.
+  assert.equal(ACTION_ERROR_COPY, "This could not be done. Try again.");
 });

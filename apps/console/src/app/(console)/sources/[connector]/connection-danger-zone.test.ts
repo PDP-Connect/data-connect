@@ -55,7 +55,7 @@ const DZ_REVOKE_RETAINED_RE = /Your records, app access, and activity history ar
 const DZ_REVOKE_FUTURE_RE = /future syncing/i;
 const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
 const DZ_REVOKE_SIGNS_OUT_RE = /Stops future syncing and signs out its saved browser session/;
-const DZ_SIBLING_SESSION_RE = /Other data sources and their saved sign-in sessions are unchanged/;
+const DZ_SIBLING_SESSION_RE = /Other data sources stay as they are/;
 const DZ_DELETE_ERASES_RE = /[Ee]rases this data source's records/;
 /**
  * Delete must distinguish itself from revoke. The copy states this positively —
@@ -73,7 +73,7 @@ const PAGE_PASSES_ACTIVE_RUN_RE = /activeRunId=\{dangerActiveRunId \?\? schedule
 const DZ_DELETE_CONFIRMED_RE = /const confirmed = typed === connectionId/;
 const DZ_DELETE_DISABLED_RE = /disabled=\{!confirmed\}/;
 const DZ_DESTRUCTIVE_VARIANT_RE = /<IcButton className="text-destructive" disabled=\{!confirmed\} type="submit" variant="ghost">/;
-const DZ_DELETE_ID_FROM_DETAILS_RE = /Type the ID shown in Details to confirm\./;
+const DZ_DELETE_ID_IN_CONFIRMATION_RE = /Type this ID to confirm: \{connectionId\}/;
 const DZ_DELETE_ID_NOT_ECHOED_RE = /placeholder="Data source ID"/;
 const DZ_DELETE_NO_RAW_ID_COPY_RE = /Type this data source's ID to confirm: \{connectionId\}/;
 const DZ_CONFIRM_DELETE_FIELD_RE = /name="confirm_delete"/;
@@ -177,12 +177,20 @@ test("delete requires reproducing the connection id before the destructive submi
   const dz = await read(DANGER_ZONE_FILE);
   assert.match(dz, DZ_DELETE_CONFIRMED_RE);
   assert.match(dz, DZ_DELETE_DISABLED_RE);
-  // DIRECTION.md §One data source: Delete needs typed confirmation and no raw ID outside Details.
+  // Brief decision 9: Delete shows the ID in its own confirmation step.
   assert.match(dz, DZ_DESTRUCTIVE_VARIANT_RE);
-  assert.match(dz, DZ_DELETE_ID_FROM_DETAILS_RE);
+  assert.match(dz, DZ_DELETE_ID_IN_CONFIRMATION_RE);
   assert.match(dz, DZ_DELETE_ID_NOT_ECHOED_RE);
   assert.doesNotMatch(dz, DZ_DELETE_NO_RAW_ID_COPY_RE);
   assert.match(dz, DZ_CONFIRM_DELETE_FIELD_RE);
+});
+
+test("lifecycle actions use their group title without a bordered red box", async () => {
+  const dz = await read(DANGER_ZONE_FILE);
+  // Brief decision 9: use a hairline group titled Remove or reset; red stays on remove/reset buttons.
+  assert.match(dz, /title="Remove or reset"/);
+  assert.doesNotMatch(dz, /border(?:-\w+)?\s+border-(?:destructive|red)/);
+  assert.match(dz, /className="text-destructive"/);
 });
 
 test("revoke uses a confirm checkbox and the shared revoke action", async () => {

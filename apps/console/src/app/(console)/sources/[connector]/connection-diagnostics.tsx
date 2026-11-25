@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcTimestamp } from "@pdpp/brand-react";
-import { formatRelative } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { CONNECTION_HEALTH_VOCABULARY, type StatusVocabulary } from "@pdpp/operator-ui/components/status-vocabularies";
+import { formatRelative } from "@pdpp/display";
 import Link from "next/link";
 import {
   pdppLocalCollectorDoctorCommand,
@@ -48,7 +48,6 @@ import {
   RECOVERY_STALL_CADENCE_MS,
   type RecoveryPanelViewModel,
 } from "../../lib/source-recovery-state.ts";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 /**
  * Server-rendered diagnostics block for the connector detail page.
@@ -229,13 +228,6 @@ function recoveryTimeLabel(value: string | null): string | null {
   return Number.isNaN(date.getTime()) ? null : formatRelative(date, Date.now());
 }
 
-function plainRecoveryCopy(value: string): string {
-  return plainDataSourceCopy(value).replaceAll(
-    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b/g,
-    (timestamp) => recoveryTimeLabel(timestamp) ?? "time unavailable"
-  );
-}
-
 interface BackgroundLocalDeviceDrain {
   heartbeatAt: string | null;
   hostLabels: readonly string[];
@@ -281,10 +273,7 @@ function BackgroundLocalDeviceDrainPanel({ summary }: { summary: BackgroundLocal
       ? "the local host"
       : `the local host${summary.hostLabels.length === 1 ? "" : "s"} (${summary.hostLabels.join(", ")})`;
   return (
-    <div
-      className="mb-3 flex flex-col gap-1.5 border border-border/70 bg-muted/30 px-3 py-2"
-      data-testid="diagnostics-background-drain"
-    >
+    <div className="mb-3 flex flex-col gap-1.5 border-y border-border py-2" data-testid="diagnostics-background-drain">
       <p className="pdpp-caption font-medium text-foreground">Uploading from the local host</p>
       <p className="pdpp-caption text-muted-foreground">
         The collector on {hostPhrase} is sending saved work in the background. No dashboard action is needed while this
@@ -312,23 +301,19 @@ function BackgroundLocalDeviceDrainPanel({ summary }: { summary: BackgroundLocal
  * `system_issue` step reads as a system condition — never as a retry prompt.
  */
 function RecoveryPanel({ model }: { model: RecoveryPanelViewModel }) {
-  const isSystemCondition = model.step === "stalled" || model.step === "system_issue";
-  const containerClass = isSystemCondition
-    ? "mb-3 flex flex-col gap-1.5 border border-destructive/40 bg-destructive/5 px-3 py-2"
-    : "mb-3 flex flex-col gap-1.5 border border-border/70 bg-muted/30 px-3 py-2";
   return (
-    <div className={containerClass} data-recovery-step={model.step} data-testid="diagnostics-recovery-panel">
+    <div className="mb-3 flex flex-col gap-1.5 border-y border-border py-2" data-recovery-step={model.step} data-testid="diagnostics-recovery-panel">
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-recovery-sentence">
-        {plainRecoveryCopy(model.primarySentence)}
+        {model.primarySentence}
       </p>
       {model.evidence.length > 0 ? (
         <p className="pdpp-caption text-muted-foreground tabular-nums" data-testid="diagnostics-recovery-progress">
-          {plainRecoveryCopy(model.evidence.join(" · "))}
+          {model.evidence.join(" · ")}
         </p>
       ) : null}
       {model.blocker ? (
         <p className="pdpp-caption text-muted-foreground" data-testid="diagnostics-recovery-blocker">
-          {plainRecoveryCopy(model.blocker)}
+          {model.blocker}
         </p>
       ) : null}
       {model.nextEligibleAt ? (
@@ -612,10 +597,10 @@ function ProjectedStateDiagnostics({
         </p>
       ) : null}
       {axisChips.length > 0 ? (
-        <ul className="flex flex-wrap items-center gap-1.5" data-testid="diagnostics-axes">
+        <ul className="flex flex-wrap gap-x-4 gap-y-1" data-testid="diagnostics-axes">
           {axisChips.map((c) => (
             <li
-              className={`pdpp-caption inline-flex items-center gap-1 px-2 py-0.5 ${diagnosticsAxisChipClass(c.tone)}`}
+              className={`pdpp-caption ${diagnosticsAxisTextClass(c.tone)}`}
               data-axis-tone={c.tone}
               key={c.label}
               title={c.title}
@@ -730,17 +715,17 @@ function forwardDispositionTextClass(tone: "neutral" | "success" | "warning" | "
   return "text-foreground";
 }
 
-function diagnosticsAxisChipClass(tone: "neutral" | "success" | "warning" | "danger"): string {
+function diagnosticsAxisTextClass(tone: "neutral" | "success" | "warning" | "danger"): string {
   if (tone === "success") {
-    return "border border-border bg-muted/40 text-muted-foreground";
+    return "text-muted-foreground";
   }
   if (tone === "warning") {
-    return "border border-attention/40 bg-attention/5 text-attention";
+    return "text-attention";
   }
   if (tone === "danger") {
-    return "border border-destructive/40 bg-destructive/5 text-destructive";
+    return "text-destructive";
   }
-  return "border border-muted-foreground/30 bg-muted/40 text-muted-foreground";
+  return "text-muted-foreground";
 }
 
 function ScheduleDiagnostics({
@@ -1191,7 +1176,7 @@ function OutboxStallRemediationPanel({
     : `Retryable outbound work on the local collector is not draining. The dashboard cannot clear it remotely — run these on ${hostPhrase}, in order:`;
   return (
     <div
-      className="flex flex-col gap-1.5 border border-destructive/40 bg-destructive/5 px-3 py-2"
+      className="flex flex-col gap-1.5 border-y border-border py-2"
       data-testid="diagnostics-outbox-remediation"
     >
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-outbox-remediation-label">
@@ -1230,7 +1215,7 @@ function OutboxStallRemediationPanel({
                 Command unavailable — open this source on the host that holds the data to recover it.
               </p>
             ) : (
-              <div className="flex min-w-0 items-center gap-2 border border-border/70 bg-muted/30 px-3 py-2">
+              <div className="flex min-w-0 items-center gap-2 py-1">
                 <code
                   className="pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"
                   data-testid="diagnostics-outbox-remediation-command"

@@ -19,10 +19,11 @@ async function read(path: string): Promise<string> {
 test("the detail route keeps setup-failed identity and renders same-connection recovery", async () => {
   const page = await read(PAGE_FILE);
   assert.match(page, /setupFailed:\s*isSetupFailedSource\(summary\)/);
-  assert.match(page, /setupFailed \? <ResumeSetupSection connectionId=\{connectionId\} \/> : null/);
   assert.match(page, /<ConnectionDangerZone[\s\S]*connectionId=\{connectorInstanceId \?\? connectionId\}/);
-  // DIRECTION.md status table row 2: the resume-setup action is named "Continue setup".
-  assert.match(page, /function ResumeSetupSection[\s\S]*>\s*Continue setup\s*<\/IcButton>/);
+  // DIRECTION.md status table row 2: the resume-setup action is named "Continue setup". detail-page-2 decision 2:
+  // it appears once, in the header, and posts the route's connection ID to the same server action.
+  assert.match(page, /statusAction\?\.kind === "continue_setup"[\s\S]*?<form action=\{resumeSetupConnectionAction\}><input name="connection_id" type="hidden" value=\{routeConnectionId\} \/>[\s\S]*?>Continue setup<\/IcButton>/);
+  assert.doesNotMatch(page, /function ResumeSetupSection/);
 });
 
 test("the reference client carries source visibility on scoped connection reads", async () => {

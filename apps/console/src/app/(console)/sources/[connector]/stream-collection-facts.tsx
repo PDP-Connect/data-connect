@@ -1,9 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EvidenceTone } from "@pdpp/display";
 import { type StreamCollectionFacts, streamOwnerActionCueNeeded } from "../../lib/collection-report.ts";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 /**
  * Per-stream collection facts rendered under a stream row on the connector
@@ -14,9 +12,8 @@ import { plainDataSourceCopy } from "./source-detail-copy.ts";
  * not just a record total.
  *
  * Honest-by-default (the formatter enforces it): an unknown considered
- * denominator never renders a fabricated fraction, and the coverage chip reuses
- * the same vocabulary as the connection headline, so a stream entry never
- * disagrees with the connection-level disposition.
+ * denominator never renders a fabricated fraction. These facts stay plain and
+ * folded under Details so the stream list remains a short list of kinds.
  *
  * Renders `null` when there is nothing to say (no entry for this stream), so a
  * reference predating the field — or a stream with no report entry — leaves the
@@ -35,37 +32,19 @@ export function StreamCollectionFactsLine({
   const { coverage, disposition, countsLabel, countsTitle, pendingDetailGaps, pendingDetailGapsLabel, skipLabel } =
     facts;
   return (
-    <div
-      className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1"
-      data-stream={facts.stream}
-      data-testid="stream-collection-facts"
-    >
-      <span
-        className={`pdpp-caption inline-flex items-center gap-0 px-2 py-0.5 ${streamFactsChipClass(coverage.tone)}`}
-        data-axis-tone={coverage.tone}
-        data-testid="stream-coverage-chip"
-        title={plainCollectionCopy(coverage.title)}
-      >
-        <span className="sr-only">{plainCollectionCopy(coverage.label)}</span>
-        <span aria-hidden className="opacity-60">
-          {coverage.dimension.toLowerCase() === "coverage" ? "Records" : coverage.dimension}
-        </span>
-        <span aria-hidden className="mx-1 opacity-40">
-          ·
-        </span>
-        <span aria-hidden className="font-medium">
-          {coverage.value}
-        </span>
-      </span>
+    <div className="mt-2 flex flex-col gap-1 border-t border-border pt-2" data-stream={facts.stream} data-testid="stream-collection-facts">
+      <p className="pdpp-caption text-muted-foreground" data-testid="stream-coverage-fact" title={coverage.title}>
+        {coverage.dimension.toLowerCase() === "coverage" ? "Records" : coverage.dimension}: {coverage.value}
+      </p>
 
       {disposition ? (
         <span
           className="pdpp-caption text-muted-foreground"
           data-disposition={disposition.value}
           data-testid="stream-forward-disposition"
-          title={plainCollectionCopy(disposition.title)}
+          title={disposition.title}
         >
-          Next sync: <span className={streamFactsTextClass(disposition.tone)}>{plainCollectionCopy(disposition.label)}</span>
+          Next sync: {disposition.label}
           {streamOwnerActionCueNeeded(disposition, ownerActionAvailable) ? (
             <span className="ml-1 text-muted-foreground">(needs you)</span>
           ) : null}
@@ -76,7 +55,7 @@ export function StreamCollectionFactsLine({
         <span
           className="pdpp-caption text-muted-foreground tabular-nums"
           data-testid="stream-collected-counts"
-          title={plainCollectionCopy(countsTitle)}
+          title={countsTitle}
         >
           {countsLabel}
         </span>
@@ -84,7 +63,7 @@ export function StreamCollectionFactsLine({
 
       {pendingDetailGaps > 0 ? (
         <span
-          className="pdpp-caption text-attention tabular-nums"
+          className="pdpp-caption text-muted-foreground tabular-nums"
           data-testid="stream-pending-gaps"
           title={
             facts.pendingDetailGapsIsFloor
@@ -102,46 +81,11 @@ export function StreamCollectionFactsLine({
           data-testid="stream-skip-label"
           title="The system reported this kind of record as skipped on the last sync."
         >
-          {plainCollectionCopy(skipLabel)}
+          {skipLabel}
         </span>
       ) : null}
     </div>
   );
 }
 
-/**
- * Chip background/border/text by tone. Mirrors `axisChipClass` in
- * `connector-row.tsx` and `diagnosticsAxisChipClass` in
- * `connection-diagnostics.tsx` — the established per-surface idiom in this
- * codebase keeps a tiny local copy rather than a shared chip abstraction.
- */
-function streamFactsChipClass(tone: EvidenceTone): string {
-  if (tone === "success") {
-    return "border border-border bg-muted/40 text-muted-foreground";
-  }
-  if (tone === "warning") {
-    return "border border-attention/40 bg-attention/5 text-attention";
-  }
-  if (tone === "danger") {
-    return "border border-destructive/40 bg-destructive/5 text-destructive";
-  }
-  return "border border-muted-foreground/30 bg-muted/40 text-muted-foreground";
-}
 
-/** Inline text colour for the forward-disposition word (mirrors the detail diagnostics block). */
-function streamFactsTextClass(tone: EvidenceTone): string {
-  if (tone === "success") {
-    return "text-muted-foreground";
-  }
-  if (tone === "warning") {
-    return "text-attention";
-  }
-  if (tone === "danger") {
-    return "text-destructive";
-  }
-  return "text-foreground";
-}
-
-function plainCollectionCopy(value: string): string {
-  return plainDataSourceCopy(value);
-}

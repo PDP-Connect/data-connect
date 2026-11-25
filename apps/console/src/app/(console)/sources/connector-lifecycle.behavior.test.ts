@@ -102,8 +102,10 @@ test("reset control requires confirmation and reports refusal or success", async
     await act(async () => button.click());
     assert.equal(resetCalls, 1);
     assert.equal(runCalls, 0);
-    // PAGE-RULES item 6: "run" is shown as "sync" outside Details.
-    assert.equal(container.querySelector('[role="alert"]')?.textContent, "A collection sync is already active.");
+    // detail-page-2 decision 4: a plain sentence; the raw server text sits only in the folded Details under it.
+    const alert = container.querySelector('[role="alert"]');
+    assert.equal(alert?.querySelector("p")?.textContent, "This could not be done. Try again.");
+    assert.equal(alert?.querySelector("details code")?.textContent, "A collection run is already active.");
 
     resetFailure = null;
     await act(async () => button.click());

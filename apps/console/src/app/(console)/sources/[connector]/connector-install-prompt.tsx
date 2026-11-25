@@ -8,12 +8,10 @@ import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import {
   connectorInstallActionLabel,
-  connectorInstallExplainer,
-  connectorInstallFailureCopy,
   connectorNotInstalledCopy,
 } from "../../lib/connector-implementation.ts";
 import { installConnectorForSourceAction } from "./install-connector-action.ts";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 interface Props {
   /** Bare connector key the owner install route accepts (e.g. `chase`). */
@@ -31,11 +29,7 @@ interface Props {
   onInstalled?: () => void;
 }
 
-type Feedback = { message: string; tone: "error" | "success" } | null;
-
-function plainInstallCopy(value: string): string {
-  return plainDataSourceCopy(value);
-}
+type Feedback = { message: string; rawDetails?: string; tone: "error" | "success" } | null;
 
 /**
  * Says that this source's connector is not installed and offers the one
@@ -52,21 +46,21 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
     startTransition(async () => {
       const result = await installConnectorForSourceAction(connectorKey, routeId);
       if (!result.ok) {
-        setFeedback({ message: plainInstallCopy(connectorInstallFailureCopy(displayName, result.message)), tone: "error" });
+        setFeedback({ message: ACTION_ERROR_COPY, rawDetails: result.message, tone: "error" });
         return;
       }
       setFeedback({ message: "Installed. Refreshing…", tone: "success" });
       onInstalled?.();
       router.refresh();
     });
-  }, [connectorKey, displayName, onInstalled, routeId, router]);
+  }, [connectorKey, onInstalled, routeId, router]);
 
   const notice = variant === "notice";
   return (
     <div
       className={
         notice
-          ? "grid min-w-0 gap-2 rounded-sm border border-attention/30 bg-attention/5 p-3 text-attention"
+          ? "grid min-w-0 gap-2 border-y border-border py-3 text-attention"
           : "grid min-w-0 gap-1.5"
       }
       data-connector-key={connectorKey}
@@ -74,10 +68,10 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
       role={notice ? "status" : undefined}
     >
       <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
-        {plainInstallCopy(connectorNotInstalledCopy(displayName))}
+        {connectorNotInstalledCopy(displayName)}
       </p>
       {notice ? (
-        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">{plainInstallCopy(connectorInstallExplainer(displayName))}</p>
+        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Installing adds the latest signed package. Your records stay.</p>
       ) : null}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <IcButton
@@ -91,7 +85,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
           {isPending ? "Installing…" : actionLabel ?? connectorInstallActionLabel(displayName)}
         </IcButton>
         {feedback ? (
-          <span
+          <div
             aria-live="polite"
             className={`pdpp-caption min-w-0 break-words ${
               feedback.tone === "error" ? "text-destructive" : "text-muted-foreground"
@@ -99,8 +93,14 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
             data-testid="connector-install-feedback"
             role={feedback.tone === "error" ? "alert" : "status"}
           >
-            {feedback.message}
-          </span>
+            <p>{feedback.message}</p>
+            {feedback.rawDetails ? (
+              <details className="mt-1 text-muted-foreground">
+                <summary className="cursor-pointer">Details</summary>
+                <code className="mt-1 block break-words font-mono text-xs">{feedback.rawDetails}</code>
+              </details>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>

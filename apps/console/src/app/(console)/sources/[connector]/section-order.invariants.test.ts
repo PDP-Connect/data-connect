@@ -40,25 +40,25 @@ async function renderOrder(): Promise<SectionOffsets> {
     details: src.indexOf('data-testid="source-details"'),
     diagnostics: src.indexOf("<ConnectionDiagnostics"),
     runs: src.indexOf("<RecentRunsSection"),
-    whatIsHere: src.indexOf("title={`What is here"),
+    whatIsHere: src.indexOf('title="What is here"'),
   };
 }
 
-test("What is here, Latest syncs, and collected evidence stay in the main column before Details", async () => {
+test("What is here and Latest syncs lead; collected evidence stays inside folded Details", async () => {
   const at = await renderOrder();
   for (const [name, index] of Object.entries(at)) {
     assert.notEqual(index, -1, `${name} must render on this page`);
   }
-  // DIRECTION.md §One data source: What is here, Latest syncs, then collected evidence.
+  // Brief decisions 6–7: the two plain-language sections lead; evidence moves into Details.
   assert.ok(at.whatIsHere < at.runs, "What is here precedes Latest syncs");
-  assert.ok(at.runs < at.collected, "Latest syncs precedes collected evidence");
-  assert.ok(at.collected < at.details, "collected evidence precedes folded Details");
+  assert.ok(at.runs < at.details, "Latest syncs precedes folded Details");
+  assert.ok(at.details < at.collected, "collected evidence is inside folded Details");
 });
 
 test("the header shows the account line and a 48px source mark", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   // DIRECTION.md §One data source: the logo, title, and account line lead the page.
-  assert.match(src, /description=\{\s*connectionLabelSeed \|\|\s*\(source\.source_kind === "local_device" \? accountDeviceLabels\.join\(", "\) \|\| "On your device" : undefined\)\s*\}/);
+  assert.match(src, /description=\{accountLine === displayName \? undefined : accountLine\}/);
   // DIRECTION.md §What must stay true: raw IDs stay inside folded Details.
   assert.match(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name/);
   assert.doesNotMatch(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name \?\? source\.device_id/);
@@ -78,15 +78,15 @@ test("device collector trouble is shown under the state sentence when local reco
   const src = await readFile(PAGE_FILE, "utf8");
   const sentence = src.indexOf("<SourceStateSentenceText");
   const trouble = src.indexOf('data-testid="device-collector-trouble"');
+  const details = src.indexOf('data-testid="source-details"');
   const recovery = src.indexOf("<ConnectionRecoverySummary");
-  const installNotice = src.indexOf("{installPromptShown ?");
   // DIRECTION.md §One data source: device collector trouble sits directly under the state sentence.
   assert.ok(sentence < trouble, "state sentence precedes the device recovery note");
-  // DIRECTION.md §One data source: other state sections follow the device recovery note.
-  assert.ok(trouble < recovery && recovery < installNotice, "collector summaries precede the next state section");
+  // Brief decision 5: recovery information is folded under Details.
+  assert.ok(trouble < details && details < recovery, "device note stays visible while recovery details are folded");
   // DIRECTION.md §One status, from one place: use the existing structured local-device condition.
   assert.match(src, /hasPrimaryOwnerLocalDeviceRemediation\(connectionRenderedVerdict\)/);
-  // DIRECTION.md §One data source: technical diagnostics remain inside folded Details.
+  // Brief decision 5: technical diagnostics remain inside folded Details.
   assert.match(src, /showRecoverySummary=\{false\}/);
 });
 

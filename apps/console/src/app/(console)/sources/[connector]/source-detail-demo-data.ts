@@ -35,7 +35,10 @@ function toRunRef(summary: RefConnectorRunSummary | null) {
   };
 }
 
-export function buildRecoveryDemoModel(statusRow: SourceStatusRow = 16): ConnectorPageModel {
+export function buildRecoveryDemoModel(
+  statusRow: SourceStatusRow = 16,
+  includePendingDetails = statusRow === 16
+): ConnectorPageModel {
   const connectionId = "cin_demo_claude_code_workstation";
   const run: RunSummary = {
     connection_id: connectionId,
@@ -279,7 +282,7 @@ export function buildRecoveryDemoModel(statusRow: SourceStatusRow = 16): Connect
     accountDeviceLabels: ["workstation"],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",
-    headerCount: "464 records, 2 kinds of record",
+    headerCount: "464 records",
     latestKnownGaps: [],
     manifest: {
       connector_id: "claude-code",
@@ -324,7 +327,7 @@ export function buildRecoveryDemoModel(statusRow: SourceStatusRow = 16): Connect
     streams,
     totalRecords: 464,
   };
-  return applyStatusRow(model, statusRow);
+  return applyStatusRow(model, statusRow, includePendingDetails);
 }
 
 function statusSchedule(
@@ -376,9 +379,21 @@ function ownerAction(
   };
 }
 
-function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow): ConnectorPageModel {
+function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, includePendingDetails: boolean): ConnectorPageModel {
   if (row === 16) {
-    return model;
+    return {
+      ...model,
+      latestKnownGaps: [
+        {
+          boundary_claim: "provider_history_boundary",
+          earliest_available: "2021-04-03",
+          note: "Provider export says this is the oldest available message.",
+          reason_code: "provider_retention_policy",
+          stream: "messages",
+        },
+        { recovery_hint: { action: "not_retriable" }, stream: "sessions" },
+      ],
+    };
   }
 
   const demoHealth = model.connectionHealth!;
@@ -451,7 +466,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow): Connec
         terminal_setup_disposition: disposition,
         rendered_verdict: {
           ...source.rendered_verdict!,
-          required_actions: [ownerAction(label)],
+          required_actions: row === 6 ? [] : [ownerAction(label)],
         },
       };
       break;
@@ -536,7 +551,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow): Connec
   }
 
   const status = sourceStatusWords(source, { now: DEMO_NOW });
-  if (["review_setup", "retry_first_sync", "review_result"].includes(status.action?.kind ?? "")) {
+  if (["review_setup", "review_result"].includes(status.action?.kind ?? "")) {
     const action = status.action;
     source = {
       ...source,
@@ -549,30 +564,46 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow): Connec
   const sourceRun = source.last_run ?? null;
   const recentRuns = row === 11 && sourceRun
     ? [{ ...model.recentRuns[0]!, event_count: sourceRun.event_count, failure_reason: null, first_at: sourceRun.first_at, last_at: sourceRun.last_at, run_id: sourceRun.run_id, status: sourceRun.status }]
-    : model.recentRuns;
+    : row === 12
+      ? model.recentRuns
+      : [];
+  const health = source.connection_health && !includePendingDetails
+    ? { ...source.connection_health, conditions: [], detail_gap_backlog: null }
+    : source.connection_health;
+  const visibleFacts = includePendingDetails ? model.collectionFactsByStream : new Map<string, StreamCollectionFacts>();
+  const visibleReport = includePendingDetails ? source.collection_report : [];
+  source = {
+    ...source,
+    collection_report: visibleReport,
+    connection_health: health,
+  };
 
   return {
     ...model,
-    connectionHealth: source.connection_health,
+    collectionFactsByStream: visibleFacts,
+    connectionHealth: health,
     connectionPrimaryAction: source.rendered_verdict?.required_actions[0] ?? null,
     connectionRenderedVerdict: source.rendered_verdict ?? null,
     connectorNotInstalled,
     deviceLabels: row === 1 ? model.deviceLabels : [],
     overview: {
       ...model.overview,
-      connectionHealth: source.connection_health,
+      acquisitionCoverage: includePendingDetails ? model.overview.acquisitionCoverage : null,
+      collectionReport: visibleReport,
+      connectionHealth: health,
       connectionStatus,
       isRunning: running,
       lastRun: sourceRun ? toRunRef(sourceRun) : null,
       lastSuccessfulRun: source.last_successful_run ? toRunRef(source.last_successful_run) : null,
-      localDeviceProgress: row === 1 ? model.overview.localDeviceProgress : null,
+      localDeviceProgress: row === 1 || includePendingDetails ? model.overview.localDeviceProgress : null,
       revokedAt: source.revoked_at ?? null,
     },
     recentRuns,
     schedule,
+    latestKnownGaps: [],
     setupFailed,
     source,
     sourceBindingKind: source.source_binding_kind ?? null,
-    sourceInstances: row === 1 ? model.sourceInstances : [],
+    sourceInstances: row === 1 || includePendingDetails ? model.sourceInstances : [],
   };
 }

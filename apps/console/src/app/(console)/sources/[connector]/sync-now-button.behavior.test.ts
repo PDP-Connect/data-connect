@@ -129,10 +129,9 @@ test("Install calls the owner install action with the connector key and shows a 
     installResult = { message: "no verified update target for chase.", ok: false };
     await act(async () => button(container, "Install Chase").click());
     assert.deepEqual(installCalls, [{ connectorKey: "chase", routeId: "cin_chase" }]);
-    assert.equal(
-      container.querySelector('[role="alert"]')?.textContent,
-      "Couldn't install Chase: no verified update target for chase."
-    );
+    const feedback = container.querySelector('[data-testid="connector-install-feedback"]');
+    assert.equal(feedback?.querySelector("p")?.textContent, "This could not be done. Try again.");
+    assert.equal(feedback?.querySelector("details code")?.textContent, "no verified update target for chase.");
     assert.equal(refreshCalls, 0, "a failed install does not pretend the state changed");
 
     installResult = { ok: true };
@@ -170,8 +169,10 @@ test("a run-start error flows below the button and wraps instead of floating ove
   };
   await mounted({}, async (container) => {
     await act(async () => button(container, "Refresh now").click());
-    const toast = container.querySelector('[role="status"]');
+    const toast = container.querySelector('[role="alert"]');
     assert.ok(toast, "the error renders");
+    assert.equal(toast.querySelector("details code")?.textContent, "x".repeat(400));
+    assert.match(toast.textContent ?? "", /^This could not be done\. Try again\./);
     const classes = toast.className.split(/\s+/);
     // The old caption was `absolute top-full right-0 w-max`: it reserved no
     // space and grew leftward past the viewport edge on narrow screens.

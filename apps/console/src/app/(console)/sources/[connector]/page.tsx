@@ -14,8 +14,10 @@ import {
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { buildBreakdownLabel } from "@pdpp/operator-ui/lib/source-storage";
+import { formatTotalRecordsLabel } from "../../lib/total-records-label.ts";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound, redirect } from "next/navigation";
 import {
   canonicalConnectorKey,
@@ -36,13 +38,11 @@ import {
   type AutoPausedBanner,
   deriveAutoPausedBanner,
   derivePrimaryRowAction,
-  deriveStreakDots,
   type PrimaryRowAction,
-  type StreakDot,
   syncActionIdleLabel,
 } from "../../lib/connection-evidence.ts";
 import { isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
-import { connectorInstallKey, connectorNotInstalledCopy, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
+import { connectorInstallKey, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { isRevokedConnection } from "../../lib/records-list-classification.ts";
@@ -79,7 +79,7 @@ import { type SourceStatusAction, type SourceStatusRow, sourceStateSentence, sou
 import { isUnexpectedStreamDeclaration, streamCountLabel } from "../../lib/stream-evidence-state.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
-import { formatConnectorHeaderCount } from "../sources-view-model.ts";
+import { readConnectorUpdates } from "../connector-updates-read.ts";
 import {
   pauseConnectionAction,
   resumeConnectionAction,
@@ -94,10 +94,11 @@ import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
 import { ConnectionDiagnostics, ConnectionRecoverySummary } from "./connection-diagnostics.tsx";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
 import { RenameConnection } from "./rename-connection.tsx";
-import { plainDataSourceCopy } from "./source-detail-copy.ts";
 import { SourceStateSentenceText } from "./source-state-sentence.tsx";
 import { StreamCollectionFactsLine } from "./stream-collection-facts.tsx";
 import { SyncNowButton } from "./sync-now-button.tsx";
+import { SourceUpdateSlot, type SourceUpdateModel } from "./source-update-section.tsx";
+import { buildSourceUpdateModel } from "./source-update-view-model.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -106,10 +107,19 @@ function addSourceHrefForConnector(connectorId: string): string {
 }
 
 function demoStatusRow(value: string | undefined): SourceStatusRow | null {
-  const match = value?.match(/^status-(\d{1,2})$/);
+  const match = value?.match(/^status-(\d{1,2})(?:-local-device)?$/);
   if (!match) return null;
   const row = Number(match[1]);
   return row >= 1 && row <= 24 ? (row as SourceStatusRow) : null;
+}
+
+function buildDemoSourceUpdate(shared: boolean): SourceUpdateModel {
+  return {
+    connectorKey: "claude-code",
+    currentVersion: "1.4.0",
+    otherSources: shared ? ["Claude Code personal", "Claude Code work"] : [],
+    targetVersion: "1.5.0",
+  };
 }
 
 function canStartSyncFromSummary(source: RefConnectorSummary): boolean {
@@ -425,9 +435,16 @@ export default async function ConnectorPage({
 
   let model: ConnectorPageModel;
   const demoRow = demoStatusRow(sp.demo);
-  if (process.env.NODE_ENV !== "production" && (sp.demo === "atlas" || demoRow !== null)) {
+  const updateDemo = process.env.NODE_ENV !== "production" && (sp.demo === "update-ready" || sp.demo === "update-ready-shared")
+    ? buildDemoSourceUpdate(sp.demo === "update-ready-shared")
+    : null;
+  if (process.env.NODE_ENV !== "production" && (sp.demo === "atlas" || demoRow !== null || sp.demo === "pending-details" || sp.demo === "pending-details-19" || updateDemo !== null)) {
     const demo = await import("./source-detail-demo-data.ts");
-    model = demo.buildRecoveryDemoModel(demoRow ?? 16);
+    const row = sp.demo === "pending-details" ? 20 : sp.demo === "pending-details-19" ? 19 : demoRow ?? (sp.demo === "atlas" ? 16 : 19);
+    model = demo.buildRecoveryDemoModel(row, sp.demo === "pending-details" || sp.demo === "pending-details-19" || row === 16);
+    if (sp.demo === "status-10-local-device") {
+      model = { ...model, source: { ...model.source, source_kind: "local_device" }, sourceInstances: demo.buildRecoveryDemoModel(1).sourceInstances };
+    }
   } else {
     try {
       model = await loadConnectorPageModel(routeId, sp.connection_id ?? null);
@@ -448,6 +465,9 @@ export default async function ConnectorPage({
   // its stall watchdog against real time. This page is `force-dynamic`, so the
   // instant is fresh on every request.
   const now = new Date().toISOString();
+  const updates = updateDemo
+    ? undefined
+    : buildSourceUpdateModel(model.connectorId, model.source.display_name ?? model.displayName, readConnectorUpdates);
   return (
     <ConnectorPageView
       dangerActiveRunId={sp.active_run_id}
@@ -455,6 +475,8 @@ export default async function ConnectorPage({
       dangerMessage={sp.message}
       model={model}
       now={now}
+      updateDemo={updateDemo}
+      updates={updates}
     />
   );
 }
@@ -551,13 +573,8 @@ async function loadConnectorPageModel(
   // filesystem-class collectors (claude-code, codex), the same connector
   // type can be active on multiple devices; without these labels, two
   // claude-code instances are visually indistinguishable.
-  const { accountDeviceLabels, deviceLabels, pendingOnDevices } = summarizeSourceInstancesForHeader(diagnostics.sourceInstances);
-  const headerCount = formatConnectorHeaderCount({
-    pendingOnDevices,
-    streamCount: streams.length,
-    totalRecords,
-    totalRecordsState: summary.total_records_state,
-  });
+  const { accountDeviceLabels, deviceLabels } = summarizeSourceInstancesForHeader(diagnostics.sourceInstances);
+  const headerCount = formatTotalRecordsLabel(totalRecords, summary.total_records_state, "records");
   // The retained payload for this connection was already projected onto the
   // overview and then discarded by every renderer. Surface it in the header.
   // `total_retained_bytes` is `null` whenever the retained-bytes evidence is
@@ -716,6 +733,8 @@ function ConnectorPageView({
   dangerMessage,
   dangerError,
   now,
+  updateDemo,
+  updates,
 }: {
   model: ConnectorPageModel;
   /** The run that blocked a delete, forwarded from the delete action redirect. */
@@ -724,6 +743,8 @@ function ConnectorPageView({
   dangerError?: string;
   /** Server render instant (ISO-8601) for the diagnostics recovery stall watchdog. */
   now: string;
+  updateDemo: SourceUpdateModel | null;
+  updates?: Promise<SourceUpdateModel | null>;
 }) {
   const {
     activeRunId: scheduleActiveRunId,
@@ -781,7 +802,7 @@ function ConnectorPageView({
   // a real Resume action. Without this, a `paused` connection outside the
   // archive-recovery journey would be visible but unrecoverable from the
   // console, which is the dead end pause/resume exists to remove.
-  const pausedResumable = paused && !pausedHistoricalArchive;
+  const pausedResumable = paused && !pausedHistoricalArchive && source.source_kind !== "local_device";
   // Pause is offered only on a connection that is actually collecting. A
   // draft/revoked/already-paused row has nothing to pause, and the route would
   // answer `connector_instance_not_active` anyway.
@@ -826,18 +847,22 @@ function ConnectorPageView({
   });
   const syncIdleLabel = syncActionIdleLabel(overview.lastRun?.status);
   const scheduleSyncAvailable = connectionPrimaryAction?.kind === "reattach_schedule" && primaryAction.kind === "sync";
-  const streakDots = deriveStreakDots(recentRuns.map((run) => ({ ...run, failure_reason: null })));
   const autoPausedBanner = deriveAutoPausedBanner(schedule);
   const renderedAt = new Date(now);
   const sourceStatus = sourceStatusWords(source, { now: renderedAt });
   const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName });
+  const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
   const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
+  const pendingDetails = Boolean(connectionHealth?.detail_gap_backlog?.pending) ||
+    [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const manifestStreams = Array.isArray(manifest.streams) ? manifest.streams : [];
   const streamLabelsByName = new Map(
     manifestStreams.map(
       (stream) => [stream.name, streamDisplayLabel(stream.name, stream as StreamManifestEntry)] as const
     )
   );
+  const accountLine = connectionLabelSeed ||
+    (source.source_kind === "local_device" ? accountDeviceLabels.join(", ") || "On your device" : undefined);
 
   return (
     <RecordroomShellWithPalette>
@@ -858,30 +883,12 @@ function ConnectorPageView({
             routeConnectionId={connectionId}
             sourceInstances={sourceInstances}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
-            statusAction={sourceStatus.action}
+            statusAction={pageStatusAction}
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
-        count={
-          retainedStorage === null ? (
-            headerCount
-          ) : (
-            <>
-              {headerCount}
-              <span
-                className="ml-3 text-muted-foreground/70"
-                data-testid="header-retained-bytes"
-                title={retainedStorage.breakdown ?? undefined}
-              >
-                {retainedStorage.total} retained
-              </span>
-            </>
-          )
-        }
-        description={
-          connectionLabelSeed ||
-          (source.source_kind === "local_device" ? accountDeviceLabels.join(", ") || "On your device" : undefined)
-        }
+        count={headerCount}
+        description={accountLine === displayName ? undefined : accountLine}
         title={
           <span className="inline-flex items-center gap-2 [&_.pdpp-connector-icon]:size-12">
             <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
@@ -890,7 +897,7 @@ function ConnectorPageView({
         }
       />
 
-      <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
+      <SourceStateSentenceText connectionId={connectionId} pendingDetails={pendingDetails} sentence={stateSentence} status={sourceStatus} />
 
       {hasDeviceLocalRemediation ? (
         <section className="mb-6" data-testid="device-collector-trouble">
@@ -900,74 +907,41 @@ function ConnectorPageView({
           </p>
         </section>
       ) : null}
-      <ConnectionRecoverySummary
-        connectionHealth={connectionHealth}
-        localDeviceProgress={overview.localDeviceProgress ?? null}
-        now={now}
-        renderedVerdict={connectionRenderedVerdict}
-        sourceInstances={sourceInstances}
-      />
-
-      {installPromptShown ? <p className="mb-6 text-sm text-muted-foreground">{connectorNotInstalledCopy(displayName).replaceAll(/connector/gi, "data source")}</p> : null}
       {revoked && !setupFailed ? <RevokedConnectionSection revokedAt={overview.revokedAt ?? null} /> : null}
-      {setupFailed ? <ResumeSetupSection connectionId={connectionId} /> : null}
-      {pausedHistoricalArchive ? <PausedHistoricalArchiveSection credentialUpdateHref={credentialUpdateHref} /> : null}
-      {pausedResumable ? <PausedConnectionSection connectionId={renameSelector} /> : null}
 
       <div className="grid min-w-0 gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
         <div className="min-w-0">
-      <Section
-        description={
-          collectionFactsByStream.size > 0
-            ? 'Counts show what this data source currently keeps. The latest report shows what was collected and what may be missing.'
-            : undefined
-        }
-        title={`What is here · ${streams.length} ${streams.length === 1 ? "kind of record" : "kinds of record"}`}
-        action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>}
-      >
+      <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         {streams.length === 0 ? (
           <p className="pdpp-caption text-muted-foreground italic">{emptyStreamsHint(primaryAction, syncIdleLabel)}</p>
         ) : (
           <DataList>
             {streams.map((s) => {
-              const facts = collectionFactsByStream.get(s.name) ?? null;
-              const ownerActionAvailable = collectionOwnerActionByStream[s.name] ?? true;
               const countLabel = streamCountLabel(s);
               const unexpected = isUnexpectedStreamDeclaration(s.declaration_state);
               const displayLabel = streamLabelsByName.get(s.name) ?? s.name;
               const lastUpdated = sourceTimeLabel(s.last_updated);
+              const reportEntry = source.collection_report?.find((entry) => entry.stream === s.name);
+              const incompleteLine = reportEntry &&
+                typeof reportEntry.collected === "number" &&
+                typeof reportEntry.considered === "number" &&
+                reportEntry.collected < reportEntry.considered
+                ? `${reportEntry.collected.toLocaleString()} of ${reportEntry.considered.toLocaleString()} fetched so far.`
+                : null;
               return (
                 <li key={s.name}>
                   <Link
-                    className={`flex flex-col gap-1 px-3 pt-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 ${
-                      facts ? "pb-2" : "pb-3"
-                    }`}
+                    className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
                     href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(s.name)}`}
                   >
-                    <StreamDisplayName displayLabel={displayLabel} name={s.name} unexpected={unexpected} />
-                    <span
-                      className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums"
-                      data-count-state={s.count_state ?? "unknown_state"}
-                    >
-                      <span
-                        className={countLabel.tone === "warning" ? "text-attention" : undefined}
-                        title={plainDetailCopy(countLabel.title) || undefined}
-                      >
-                        {countLabel.text}
+                    <span className="flex min-w-0 flex-col gap-1">
+                      <StreamDisplayName displayLabel={displayLabel} name={s.name} unexpected={unexpected} />
+                      <span className="pdpp-caption text-muted-foreground tabular-nums" data-count-state={s.count_state ?? "unknown_state"}>
+                        {countLabel.text}{lastUpdated ? ` · latest ${lastUpdated}` : ""}
                       </span>
-                      {lastUpdated ? (
-                        <>
-                          <span aria-hidden>·</span>
-                          <span>{lastUpdated}</span>
-                        </>
-                      ) : null}
+                      {incompleteLine ? <span className="pdpp-caption text-muted-foreground">{incompleteLine}</span> : null}
                     </span>
                   </Link>
-                  {facts ? (
-                    <div className="px-3 pb-3">
-                      <StreamCollectionFactsLine facts={facts} ownerActionAvailable={ownerActionAvailable} />
-                    </div>
-                  ) : null}
                 </li>
               );
             })}
@@ -980,34 +954,7 @@ function ConnectorPageView({
         autoPausedBanner={autoPausedBanner}
         connectorId={connectorId}
         recentRuns={recentRuns}
-        streakDots={streakDots}
       />
-      <AcquisitionCoverageSection
-        connectionId={connectorInstanceId ?? connectionId}
-        coverage={overview.acquisitionCoverage ?? null}
-      />
-      <ConnectionConfirmation
-        acknowledgeConnectionLossAction={acknowledgeConnectionLossAction}
-        acknowledgedLoss={connectionRenderedVerdict?.detail.acknowledged_loss ?? null}
-        confirmCoverageHorizonAction={confirmCoverageHorizonAction}
-        connectionId={connectorInstanceId ?? connectionId}
-        error={dangerError ? plainDetailFeedback(dangerError, connectionId) : undefined}
-        latestKnownGaps={latestKnownGaps}
-        message={dangerMessage ? plainDetailFeedback(dangerMessage, connectionId) : undefined}
-        pendingHorizons={coverageHorizons}
-      />
-      {primaryAction.kind === "cooldown_wait" ? (
-        <Section title="Sync options">
-          <CooldownPrimaryAction
-            action={primaryAction}
-            connectionId={connectorInstanceId ?? connectionId}
-            connectorId={connectorId}
-            displayName={displayName}
-            installPromptShown={installPromptShown}
-            running={running}
-          />
-        </Section>
-      ) : null}
       {manualUploadHref || scheduleSyncAvailable ? (
         <Section title="More sync options">
           <div className="flex flex-wrap items-center gap-3">
@@ -1035,26 +982,34 @@ function ConnectorPageView({
 
         <aside className="min-w-0">
           <ScheduleSummary schedule={schedule} />
-          <SourceVersion version={source.manifest_version} />
+          <Suspense fallback={<SourceVersion version={source.manifest_version ?? null} />}>
+            <SourceUpdateSlot
+              demoModel={updateDemo}
+              displayName={displayName}
+              updates={updates}
+              version={source.manifest_version ?? null}
+            />
+          </Suspense>
           <Section title="This data source">
             <RenameConnection
               connectionId={renameSelector}
               currentLabel={connectionLabelSeed}
-              displayName={displayName}
               typeName={formatConnectorKeyForDisplay(connectorId)}
             />
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
+            {pausedResumable ? <p className="pdpp-caption text-muted-foreground">Syncing is paused. Your records, schedule, and sign-in are kept.</p> : null}
             <CredentialRepairLinks
               revoked={revoked}
               setupFailed={setupFailed}
               storedCredentialUpdateHref={storedCredentialUpdateHref}
               hasStaticSecretCredentialUpdate={storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"}
             />
+            <div aria-hidden className="my-4 border-border border-t" />
             <ConnectionDangerZone
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
-              error={dangerError ? plainDetailFeedback(dangerError, connectionId) : undefined}
-              message={dangerMessage ? plainDetailFeedback(dangerMessage, connectionId) : undefined}
+              error={dangerError}
+              message={dangerMessage}
               setupFailed={setupFailed}
             />
           </Section>
@@ -1077,6 +1032,69 @@ function ConnectorPageView({
               />
               {retainedStorage ? <p className="mt-2 text-sm text-muted-foreground">{retainedStorage.total} retained</p> : null}
               <p className="mt-2 text-sm text-muted-foreground">Connector: {formatConnectorKeyForDisplay(connectorId)}</p>
+              {recentRuns.some((sync) => sync.failure_reason || typeof sync.event_count === "number") ? (
+                <details className="mt-4 border-t border-border pt-3" data-testid="sync-details">
+                  <summary className="cursor-pointer text-sm text-muted-foreground">Sync details</summary>
+                  <ul className="mt-2 flex flex-col gap-2">
+                    {recentRuns.filter((sync) => sync.failure_reason || typeof sync.event_count === "number").map((sync) => (
+                      <li className="text-sm" key={sync.run_id}>
+                        <span>{sourceTimeLabel(sync.first_at) ?? "Time unavailable"}: </span>
+                        {typeof sync.event_count === "number" ? <span>{sync.event_count.toLocaleString()} events. </span> : null}
+                        {sync.failure_reason ? <code className="break-words font-mono text-xs">{sync.failure_reason}</code> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+              {schedule?.scheduler_backoff?.reason_class ? (
+                <p className="mt-3 text-sm text-muted-foreground" data-testid="auto-pause-reason">
+                  <code className="break-words font-mono text-xs">{schedule.scheduler_backoff.reason_class}</code>
+                </p>
+              ) : null}
+              <ConnectionRecoverySummary
+                connectionHealth={connectionHealth}
+                localDeviceProgress={overview.localDeviceProgress ?? null}
+                now={now}
+                renderedVerdict={connectionRenderedVerdict}
+                sourceInstances={sourceInstances}
+              />
+              <AcquisitionCoverageSection
+                connectionId={connectorInstanceId ?? connectionId}
+                coverage={overview.acquisitionCoverage ?? null}
+              />
+              <ConnectionConfirmation
+                acknowledgeConnectionLossAction={acknowledgeConnectionLossAction}
+                acknowledgedLoss={connectionRenderedVerdict?.detail.acknowledged_loss ?? null}
+                confirmCoverageHorizonAction={confirmCoverageHorizonAction}
+                connectionId={connectorInstanceId ?? connectionId}
+                error={dangerError}
+                latestKnownGaps={latestKnownGaps}
+                message={dangerMessage}
+                pendingHorizons={coverageHorizons}
+              />
+              {primaryAction.kind === "cooldown_wait" ? (
+                <Section title="Sync options">
+                  <p className="mb-2 text-sm text-muted-foreground">The next attempt is delayed.</p>
+                  <CooldownPrimaryAction
+                    action={primaryAction}
+                    connectionId={connectorInstanceId ?? connectionId}
+                    connectorId={connectorId}
+                    displayName={displayName}
+                    installPromptShown={installPromptShown}
+                    running={running}
+                  />
+                </Section>
+              ) : null}
+              {streams.map((stream) => {
+                const facts = collectionFactsByStream.get(stream.name) ?? null;
+                return facts ? (
+                  <StreamCollectionFactsLine
+                    facts={facts}
+                    key={stream.name}
+                    ownerActionAvailable={collectionOwnerActionByStream[stream.name] ?? true}
+                  />
+                ) : null;
+              })}
               <ConnectionDiagnostics
                 connectionHealth={connectionHealth}
                 connectionId={connectorInstanceId ?? connectionId}
@@ -1245,7 +1263,23 @@ function ConnectorPrimaryHeaderAction({
     return device ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link> : null;
   }
   if (statusAction?.kind === "review_setup" || statusAction?.kind === "retry_first_sync" || statusAction?.kind === "review_result") {
-    return renderedOwnerAction ? <RenderedVerdictHeaderAction action={renderedOwnerAction} browserSessionRepairHref={browserSessionRepairHref} connectionId={connectionId} connectorId={connectorId} credentialUpdateHref={credentialUpdateHref} displayName={displayName} filled={statusAction.filled} installPromptShown={installPromptShown} running={running} storedCredentialUpdateHref={storedCredentialUpdateHref} /> : null;
+    return renderedOwnerAction ? (
+      <RenderedVerdictHeaderAction action={renderedOwnerAction} browserSessionRepairHref={browserSessionRepairHref} connectionId={connectionId} connectorId={connectorId} credentialUpdateHref={credentialUpdateHref} displayName={displayName} filled={statusAction.filled} installPromptShown={installPromptShown} label={statusAction.label} running={running} storedCredentialUpdateHref={storedCredentialUpdateHref} />
+    ) : statusAction.kind === "retry_first_sync" ? (
+      <SyncNowButton
+        connectionId={connectionId}
+        connectorId={connectorId}
+        displayName={displayName}
+        installPromptShown={installPromptShown}
+        idleLabel={statusAction.label}
+        initialRunning={running}
+        variant={statusAction.filled ? "default" : "outline"}
+      />
+    ) : (
+      <Link className={buttonVariants({ size: "sm", variant: statusAction.filled ? "default" : "ghost" })} href={`/sources/${encodeURIComponent(routeConnectionId)}`}>
+        {statusAction.label}
+      </Link>
+    );
   }
   // During a source-pressure cooldown the ordinary sync waits; the page keeps
   // only the named "Force run anyway" override in Sync options.
@@ -1320,6 +1354,7 @@ function RenderedVerdictHeaderAction({
   displayName,
   filled,
   installPromptShown,
+  label,
   running,
   storedCredentialUpdateHref,
 }: {
@@ -1331,6 +1366,7 @@ function RenderedVerdictHeaderAction({
   displayName: string;
   filled: boolean;
   installPromptShown: boolean;
+  label?: string;
   running: boolean;
   storedCredentialUpdateHref: string | null;
 }) {
@@ -1352,7 +1388,7 @@ function RenderedVerdictHeaderAction({
         href={repair.href}
         title={repair.title}
       >
-        {repair.label}
+        {label ?? repair.label}
       </Link>
     );
   }
@@ -1374,7 +1410,7 @@ function RenderedVerdictHeaderAction({
           data-testid="detail-action-rendered-verdict-device-local"
           title="Use the recovery commands shown in Details, on the host that holds this data source's data."
         >
-          {action.cta} — see the commands in Details
+          {label ?? action.cta} — see the commands in Details
         </span>
       );
     }
@@ -1388,7 +1424,7 @@ function RenderedVerdictHeaderAction({
           className="pdpp-caption max-w-[18rem] text-right text-muted-foreground"
           data-testid="detail-action-rendered-verdict"
         >
-          {action.cta}
+          {label ?? action.cta}
         </span>
       );
     }
@@ -1410,7 +1446,7 @@ function RenderedVerdictHeaderAction({
           data-action-stale-target="true"
           data-testid="detail-action-rendered-verdict"
         >
-          {action.cta} — no sync is waiting right now
+          {label ?? action.cta} — no sync is waiting right now
         </span>
       ) : (
         <Link
@@ -1420,7 +1456,7 @@ function RenderedVerdictHeaderAction({
           href={browserSessionRepairHref}
           title="No sync is waiting right now. Open the secure browser session to sign in again; the next sync will pick up from there."
         >
-          {action.cta}
+          {label ?? action.cta}
         </Link>
       );
     }
@@ -1430,7 +1466,7 @@ function RenderedVerdictHeaderAction({
         data-testid="detail-action-rendered-verdict"
         href={`/syncs/${encodeURIComponent(action.target.run_id)}`}
       >
-        {action.cta}
+        {label ?? action.cta}
       </Link>
     );
   }
@@ -1443,7 +1479,7 @@ function RenderedVerdictHeaderAction({
         <input name="connector_id" type="hidden" value={connectorId} />
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-reattach-schedule" size="sm" type="submit" variant={filled ? "default" : "ghost"}>
-          {action.cta}
+          {label ?? action.cta}
         </IcButton>
       </form>
     );
@@ -1454,7 +1490,7 @@ function RenderedVerdictHeaderAction({
       connectorId={connectorId}
       displayName={displayName}
       installPromptShown={installPromptShown}
-      idleLabel={action.cta}
+      idleLabel={label ?? action.cta}
       initialRunning={running}
       runningLabel="Repair running"
       title="Starts a sync for this data source to satisfy the server's required action."
@@ -1618,13 +1654,11 @@ function RecentRunsSection({
   autoPausedBanner,
   connectorId,
   recentRuns,
-  streakDots,
 }: {
   activeRunHref: string | null;
   autoPausedBanner: AutoPausedBanner | null;
   connectorId: string;
   recentRuns: RunSummary[];
-  streakDots: StreakDot[];
 }) {
   return (
     <Section
@@ -1636,7 +1670,6 @@ function RecentRunsSection({
       }
       title="Latest syncs"
     >
-      {streakDots.length > 0 ? <StreakStrip dots={streakDots} /> : null}
       {recentRuns.length === 0 ? (
         <p className="pdpp-caption text-muted-foreground italic">No syncs are listed for this data source yet.</p>
       ) : (
@@ -1654,7 +1687,6 @@ function RecentRunsSection({
               >
                 <span className="pdpp-caption flex items-center gap-2">
                   <span>{syncOutcome(r)}</span>
-                  <span className="text-muted-foreground">{r.event_count} {r.event_count === 1 ? "event" : "events"}</span>
                 </span>
                 <span className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums">
                   <span>{sourceTimeLabel(r.first_at) ?? "Time unavailable"}</span>
@@ -1685,26 +1717,12 @@ function emptyStreamsHint(action: PrimaryRowAction, syncIdleLabel: string): stri
 }
 
 function syncOutcome(sync: RunSummary): string {
-  if (["succeeded", "completed", "success"].includes(sync.status)) return "Finished";
-  if (["cancelled", "canceled"].includes(sync.status)) return "Cancelled";
-  if (["failed", "error"].includes(sync.status)) {
-    let reason: string | null = sync.failure_reason ? plainDetailCopy(sync.failure_reason) : null;
-    if (reason && sync.connection_id) reason = reason.replaceAll(sync.connection_id, "this data source");
-    if (reason && sync.run_id) reason = reason.replaceAll(sync.run_id, "this sync");
-    return reason ? `Stopped: ${reason}` : "Stopped";
-  }
-  return "Syncing";
-}
-
-function plainDetailCopy(value: string): string {
-  return plainDataSourceCopy(value).replaceAll(
-    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b/g,
-    "the latest sync"
-  );
-}
-
-function plainDetailFeedback(value: string, connectionId: string): string {
-  return plainDetailCopy(value).replaceAll(connectionId, "this data source");
+  if (["succeeded", "completed", "success", "succeeded_with_gaps"].includes(sync.status)) return "Finished";
+  if (["cancelled", "canceled", "rejected"].includes(sync.status)) return "Stopped";
+  if (["failed", "error"].includes(sync.status)) return "Failed";
+  if (["pending", "started", "in_progress", "running"].includes(sync.status)) return "Running";
+  if (["waiting_for_input", "needs_input", "waiting_for_owner"].includes(sync.status)) return "Waiting for you";
+  return "Stopped";
 }
 
 /**
@@ -1734,7 +1752,7 @@ function CooldownPrimaryAction({
       <span
         className="pdpp-caption max-w-[18rem] text-right text-muted-foreground"
         data-testid="detail-action-cooldown-wait"
-        title={plainDetailCopy(action.detail)}
+        title={action.detail}
       >
         {action.label}
       </span>
@@ -1765,7 +1783,7 @@ function PrimaryActionNotice({ action }: { action: Exclude<PrimaryRowAction, { k
     <span
       className="pdpp-caption max-w-[18rem] text-right text-muted-foreground"
       data-testid="detail-action-device-wait"
-      title={plainDetailCopy(action.detail)}
+      title={action.detail}
     >
       {action.label}
     </span>
@@ -1825,48 +1843,6 @@ function ConnectionIdentityLine({
 }
 
 /**
- * Notice for a recovered historical-archive connection: paused (never
- * revoked) with `source_binding.kind === 'historical_archive'`. This is the
- * ONLY owner-facing surface for the archive-reconnect journey — there is no
- * separate "Resume" button, because a recovered row typically carries no
- * surviving credential, and resuming without one would just flip the row to
- * `active` and then fail on the next run. Instead this reuses the SAME
- * `credentialUpdateHref` the detail page already computes for repair
- * (static-secret capture or browser-session reconnect, whichever this
- * connection's binding requires) — the server-side capture/run hooks resume
- * the row automatically once a working credential lands, so the owner makes
- * one decision (repair the credential) and the resume follows as its result,
- * never a second manual step.
- */
-/**
- * Notice + Resume action for an ordinarily paused connection — one the owner
- * paused deliberately, as opposed to a recovered archive row (which gets
- * {@link PausedHistoricalArchiveSection} and its credential-repair route
- * instead). Stating what was KEPT is the point of the copy: the owner needs to
- * see that pausing cost them nothing before they trust the button that undoes
- * it, and that pause is not the same act as revoke.
- *
- * Renders unconditionally for a paused, non-archive row: unlike the archive
- * notice there is no href that can be missing, so this can never silently
- * render nothing and strand the connection.
- */
-function PausedConnectionSection({ connectionId }: { connectionId: string | null }) {
-  return (
-    <Section
-      description="Syncing is paused. Your records, schedule, and sign-in are kept."
-      title="This data source is paused"
-    >
-      <form action={resumeConnectionAction}>
-        {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
-        <IcButton data-testid="detail-action-resume-connection" size="sm" type="submit" variant="ghost">
-          Resume
-        </IcButton>
-      </form>
-    </Section>
-  );
-}
-
-/**
  * Pause control for a connection that is actively collecting. Deliberately
  * NOT in the danger zone with revoke/delete, and deliberately unconfirmed:
  * pause changes no data and is undone by one click on the same page, so the
@@ -1876,49 +1852,15 @@ function PausedConnectionSection({ connectionId }: { connectionId: string | null
  */
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
-    <Section
-      description="Stop syncing for now. Your records, schedule, and sign-in are kept, and you can resume any time."
-      title="Pause syncing"
-    >
+    <div className="flex flex-col items-start gap-2">
+      <p className="pdpp-caption text-muted-foreground">Stop syncing for now. Your records, schedule, and sign-in are kept.</p>
       <form action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-pause-connection" size="sm" type="submit" variant="ghost">
           Pause syncing
         </IcButton>
       </form>
-    </Section>
-  );
-}
-
-function PausedHistoricalArchiveSection({ credentialUpdateHref }: { credentialUpdateHref: string | null }) {
-  if (!credentialUpdateHref) {
-    return null;
-  }
-  return (
-    <Section
-      description="Update sign-in details to resume syncing. Existing records stay."
-      title="Paused"
-    >
-      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>
-        Update sign-in details
-      </Link>
-    </Section>
-  );
-}
-
-function ResumeSetupSection({ connectionId }: { connectionId: string }) {
-  return (
-    <Section
-      description="Setup was never completed. The same data source will be kept."
-      title="Setup never completed"
-    >
-      <form action={resumeSetupConnectionAction}>
-        <input name="connection_id" type="hidden" value={connectionId} />
-        <IcButton data-testid="setup-failed-resume-setup" size="sm" type="submit" variant="ghost">
-          Continue setup
-        </IcButton>
-      </form>
-    </Section>
+    </div>
   );
 }
 
@@ -1934,11 +1876,9 @@ function RevokedConnectionSection({ revokedAt }: { revokedAt: string | null }) {
 function summarizeSourceInstancesForHeader(sourceInstances: readonly DeviceSourceInstance[]): {
   accountDeviceLabels: string[];
   deviceLabels: string[];
-  pendingOnDevices: number;
 } {
   const accountDeviceLabels: string[] = [];
   const deviceLabels: string[] = [];
-  let pendingOnDevices = 0;
   for (const source of sourceInstances) {
     const accountLabel = source.display_name ?? source.local_binding_name;
     if (
@@ -1953,11 +1893,8 @@ function summarizeSourceInstancesForHeader(sourceInstances: readonly DeviceSourc
     if (typeof label === "string" && label.length > 0) {
       deviceLabels.push(label);
     }
-    if (typeof source.records_pending === "number") {
-      pendingOnDevices += source.records_pending;
-    }
   }
-  return { accountDeviceLabels, deviceLabels, pendingOnDevices };
+  return { accountDeviceLabels, deviceLabels };
 }
 
 function errorMessage(reason: unknown): string {
@@ -1965,51 +1902,6 @@ function errorMessage(reason: unknown): string {
     return reason.message;
   }
   return String(reason);
-}
-
-// ─── Surface 2: 14-day streak strip ──────────────────────────────────────────
-
-function streakDotToneClass(tone: StreakDot["tone"]): string {
-  if (tone === "success") {
-    return "text-muted-foreground";
-  }
-  if (tone === "danger") {
-    return "text-destructive";
-  }
-  if (tone === "warning") {
-    return "text-attention";
-  }
-  return "text-muted-foreground";
-}
-
-/**
- * Compact per-run symbol strip showing the last ≤14 runs at a glance.
- *
- * Design: §B.2 of the mocks. Symbols are ✓ ⚠ ✕ ⊘ ⏸ per decision 8
- * (no sparklines; symbols are scannable and accessible). Renders just below
- * the page header so the operator gets a health fingerprint before diving in.
- */
-function StreakStrip({ dots }: { dots: StreakDot[] }) {
-  return (
-    <div className="flex items-center gap-3 border-border/70 border-b px-4 py-2" data-testid="streak-strip">
-      <span className="pdpp-eyebrow text-muted-foreground">Last {dots.length === 1 ? "sync" : `${dots.length} syncs`}</span>
-      <span className="flex items-center gap-1">
-        {dots.map((d, i) => (
-          <span
-            aria-hidden
-            className={["text-sm tabular-nums", streakDotToneClass(d.tone)].join(" ")}
-            key={i}
-            title={`${d.statusLabel} · ${sourceTimeLabel(d.at) ?? "Time unavailable"}`}
-          >
-            {d.symbol}
-          </span>
-        ))}
-      </span>
-      <Link className="pdpp-caption ml-auto text-muted-foreground hover:text-foreground" href="/syncs">
-        Open sync history →
-      </Link>
-    </div>
-  );
 }
 
 // ─── Surface 3: Auto-paused banner in the run timeline ───────────────────────
@@ -2024,48 +1916,26 @@ function StreakStrip({ dots }: { dots: StreakDot[] }) {
  */
 function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner; connectorId: string }) {
   const failures = banner.consecutiveFailures;
-  const failureNoun = `${failures} consecutive failure${failures === 1 ? "" : "s"}`;
-  const reasonSuffix = banner.reasonLabel ? ` of ${plainDetailCopy(banner.reasonLabel)}` : "";
+  const failureNoun = `${failures} failed sync${failures === 1 ? "" : "s"}`;
 
   return (
-    <div
-      className={[
-        "mx-4 my-1 rounded px-4 py-3",
-        banner.isTerminal
-          ? "bg-destructive/10 text-destructive"
-          : "bg-attention/10 text-attention",
-      ].join(" ")}
-      data-testid="auto-paused-banner-row"
-    >
+    <p className="px-3 py-3 text-sm text-muted-foreground" data-testid="auto-paused-banner-row">
       {banner.isTerminal ? (
         <>
-          <span className="pdpp-body font-medium">⊘ Stopped retrying.</span>{" "}
-          <span className="pdpp-caption">
-            After {failureNoun}
-            {reasonSuffix}, automatic syncing is paused.{" "}
+          Automatic syncing is paused after {failureNoun}.{" "}
             <Link className="underline hover:no-underline" href={addSourceHrefForConnector(connectorId)}>
               Start a new setup
-            </Link>{" "}
-            or try a sync manually.
-          </span>
+            </Link>
         </>
       ) : (
         <>
-          <span className="pdpp-body font-medium">
-            ⏱ Auto-paused after {failureNoun}
-            {reasonSuffix}.
-          </span>
+          Automatic syncing paused after {failureNoun}.
           {sourceTimeLabel(banner.nextRunAt) ? (
-            <>
-              {" "}
-              <span className="pdpp-caption">
-                Next retry {sourceTimeLabel(banner.nextRunAt)}.
-              </span>
-            </>
+            <> Next attempt {sourceTimeLabel(banner.nextRunAt)}.</>
           ) : null}
         </>
       )}
-    </div>
+    </p>
   );
 }
 
@@ -2108,8 +1978,9 @@ function ScheduleSummary({ schedule }: { schedule: RefSchedule | null }) {
 }
 
 function SourceVersion({ version }: { version: string | null }) {
-  // Update-ready wording belongs here when this page reads update availability.
-  return <Section title="Version"><p className="text-sm text-muted-foreground">{version ? `${version}, the newest.` : "Version not available."}</p></Section>;
+  return version ? (
+    <Section title="Version"><p className="text-sm text-muted-foreground">{version}, the newest.</p></Section>
+  ) : null;
 }
 
 function CredentialRepairLinks({

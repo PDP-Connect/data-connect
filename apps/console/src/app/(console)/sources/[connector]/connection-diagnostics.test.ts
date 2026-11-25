@@ -30,7 +30,6 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIAG_FILE = `${HERE}connection-diagnostics.tsx`;
 const PAGE_FILE = `${HERE}page.tsx`;
-const SOURCES_VIEW_MODEL_FILE = fileURLToPath(new URL("../sources-view-model.ts", import.meta.url));
 
 const PROJECTION_MISSING_TESTID = /data-testid="diagnostics-projection-missing"/;
 const PROJECTION_UNAVAILABLE_COPY = /Projection unavailable/;
@@ -163,10 +162,10 @@ const SUPPRESSED_EVIDENCE_DETAIL_FIELD_ATTR = /data-detail-field=\{signal\.detai
 
 const AXES_TESTID = /data-testid="diagnostics-axes"/;
 const AXIS_CHIPS_HELPER = /summarizeAxisChips/;
-const AXIS_CHIPS_USE_TONE_CLASS = /diagnosticsAxisChipClass\(c\.tone\)/;
-const AXIS_CHIP_SUCCESS_CLASS = /function diagnosticsAxisChipClass[\s\S]*bg-muted\/40 text-muted-foreground/;
-const AXIS_CHIP_WARNING_CLASS = /function diagnosticsAxisChipClass[\s\S]*border-attention\/40 bg-attention\/5 text-attention/;
-const AXIS_CHIP_DANGER_CLASS = /function diagnosticsAxisChipClass[\s\S]*destructive/;
+const AXES_USE_TONE_TEXT_CLASS = /diagnosticsAxisTextClass\(c\.tone\)/;
+const AXIS_SUCCESS_TEXT_CLASS = /function diagnosticsAxisTextClass[\s\S]*return "text-muted-foreground"/;
+const AXIS_WARNING_TEXT_CLASS = /function diagnosticsAxisTextClass[\s\S]*return "text-attention"/;
+const AXIS_DANGER_TEXT_CLASS = /function diagnosticsAxisTextClass[\s\S]*return "text-destructive"/;
 const REDUNDANT_OUTBOX_LINE_TESTID = /data-testid="diagnostics-outbox"/;
 
 const COLLECTION_RATE_BLOCK_TITLE = /title="Collection rate"/;
@@ -182,13 +181,12 @@ const FORWARD_DISPOSITION_GUARDED = /forwardDisposition \? \(/;
 const FORWARD_DISPOSITION_TONE_CLASS = /forwardDispositionTextClass\(forwardDisposition\.tone\)/;
 const FORWARD_DISPOSITION_NEXT_RUN_COPY = /Next run:/;
 
-test("connection-diagnostics renders the outbox axis as a colored chip, the source of truth", async () => {
-  // The axis chip (data-axis-tone + label) is the single owner-visible
-  // surface for Outbox · active/stalled/unknown color and label. The
-  // remediation panel below handles the stalled case in full.
+test("connection-diagnostics renders axis facts as plain text inside Details", async () => {
+  // Brief decisions 6 and 11: diagnostic facts remain available without chips or boxes.
   const src = await readFile(DIAG_FILE, "utf8");
   assert.match(src, AXES_TESTID);
   assert.match(src, AXIS_CHIPS_HELPER);
+  assert.match(src, /className="flex flex-wrap gap-x-4 gap-y-1" data-testid="diagnostics-axes"/);
 });
 
 test("connector detail page threads rendered_verdict into diagnostics", async () => {
@@ -225,20 +223,21 @@ test("connection-diagnostics renders suppressed verdict evidence only in the det
   assert.match(src, SUPPRESSED_EVIDENCE_DETAIL_FIELD_ATTR);
 });
 
-test("connection-diagnostics applies the axis tone to visible chip classes", async () => {
-  // `data-axis-tone` is useful for tests, but the owner-visible fix depends on
-  // using that tone in the actual class list. This keeps active/success,
-  // warning, and danger axes materially distinct on the detail page.
+test("connection-diagnostics uses text color for axis tone without drawing chips", async () => {
+  // Brief decision 11: text may keep its status color, while axes have no border or filled box.
   const src = await readFile(DIAG_FILE, "utf8");
-  // PAGE-RULES: colors use shared tokens and the rebuilt pages do not use green.
-  assert.match(src, AXIS_CHIPS_USE_TONE_CLASS);
-  assert.match(src, AXIS_CHIP_SUCCESS_CLASS);
-  assert.match(src, AXIS_CHIP_WARNING_CLASS);
-  assert.match(src, AXIS_CHIP_DANGER_CLASS);
+  assert.match(src, AXES_USE_TONE_TEXT_CLASS);
+  assert.match(src, AXIS_SUCCESS_TEXT_CLASS);
+  assert.match(src, AXIS_WARNING_TEXT_CLASS);
+  assert.match(src, AXIS_DANGER_TEXT_CLASS);
+  const start = src.indexOf("function diagnosticsAxisTextClass");
+  const end = src.indexOf("\n}", start) + 2;
+  assert.ok(start >= 0 && end > start, "axis color helper exists");
+  assert.doesNotMatch(src.slice(start, end), /border|bg-/);
 });
 
 test("connection-diagnostics does not render a redundant plain-text outbox line", async () => {
-  // The plain-text `summarizeOutboxForRow` line duplicated the axis chip's
+  // The plain-text `summarizeOutboxForRow` line duplicated the axis row's
   // label but in a flat muted tone — rendering danger ("stalled") in neutral
   // grey and reintroducing the "Outbox unknown" noise the axis-chip gate
   // (outboxAxisIsApplicable) suppresses for non-local connections. The axis
@@ -428,9 +427,9 @@ test("active local-device drain renders calm background upload progress, not rec
   assert.match(src, BACKGROUND_DRAIN_STALE_LEASE_GUARD);
   assert.match(src, BACKGROUND_DRAIN_USES_HOST_LABELS);
   assert.match(src, BACKGROUND_DRAIN_RENDERED_IN_SUMMARY);
-  // DIRECTION.md §One data source: owner-relevant recovery progress sits beside the state sentence; technical diagnostics stay folded.
-  assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf("<ConnectionRecoverySummary"));
-  assert.ok(page.indexOf("<ConnectionRecoverySummary") < page.indexOf('<summary className="cursor-pointer text-sm font-medium text-muted-foreground">Details</summary>'));
+  // Brief decision 5: recovery progress and diagnostics stay inside folded Details.
+  assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf('data-testid="source-details"'));
+  assert.ok(page.indexOf('data-testid="source-details"') < page.indexOf("<ConnectionRecoverySummary"));
   assert.match(page, /showRecoverySummary=\{false\}/);
 });
 
@@ -498,16 +497,10 @@ test("connector detail page mounts <ConnectionDiagnostics>", async () => {
   assert.match(page, PAGE_MOUNTS_DIAGNOSTICS);
 });
 
-// Multi-device clarity: when the connection has bound source instances,
-// the page header must surface the device label(s) so two filesystem-class
-// instances of the same connector are visually distinguishable, and it
-// must mention any pending records still on devices.
+// Device labels stay in Details. The header carries one fact line: the record count.
 
 const PAGE_DERIVES_DEVICE_LABELS = /summarizeSourceInstancesForHeader/;
 const PAGE_RENDERS_DEVICE_LABELS_TESTID = /data-testid="records-device-labels"/;
-const PAGE_DERIVES_PENDING_ON_DEVICES = /summarizeSourceInstancesForHeader[\s\S]{0,200}pendingOnDevices/;
-const PAGE_THREADS_PENDING_ON_DEVICES = /formatConnectorHeaderCount\(\{[\s\S]{0,200}pendingOnDevices/;
-const HEADER_COUNT_RENDERS_PENDING_ON_DEVICES = /pending on devices/;
 
 test("connector detail page surfaces device labels for bound source instances", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
@@ -515,12 +508,10 @@ test("connector detail page surfaces device labels for bound source instances", 
   assert.match(page, PAGE_RENDERS_DEVICE_LABELS_TESTID);
 });
 
-test("connector detail page surfaces pending-on-devices delta when source instances report queued work", async () => {
+test("connector detail header shows only the total record count", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
-  assert.match(page, PAGE_DERIVES_PENDING_ON_DEVICES);
-  assert.match(page, PAGE_THREADS_PENDING_ON_DEVICES);
-  const viewModel = await readFile(SOURCES_VIEW_MODEL_FILE, "utf8");
-  assert.match(viewModel, HEADER_COUNT_RENDERS_PENDING_ON_DEVICES);
+  assert.match(page, /formatTotalRecordsLabel\(totalRecords, summary\.total_records_state, "records"\)/);
+  assert.doesNotMatch(page, /formatConnectorHeaderCount|pendingOnDevices/);
 });
 
 // Local-collector recovery (connection-lifecycle objective #2): a stalled
@@ -581,7 +572,6 @@ const RECOVERY_PANEL_GATED_ON_BACKLOG =
   /hasRecoverableWork\(connectionHealth\.detail_gap_backlog\)[\s\S]{0,120}buildRecoveryPanelViewModel\(/;
 const RECOVERY_PANEL_ARMS_STALL_WATCHDOG =
   /buildRecoveryPanelViewModel\(renderedVerdict, connectionHealth, \{[\s\S]{0,120}cadenceWindowMs: RECOVERY_STALL_CADENCE_MS,[\s\S]{0,40}now,/;
-const RECOVERY_PANEL_SYSTEM_CONDITION_STYLING = /model\.step === "stalled" \|\| model\.step === "system_issue"/;
 const PAGE_CAPTURES_RENDER_INSTANT = /const now = new Date\(\)\.toISOString\(\)/;
 const PAGE_PASSES_NOW_TO_DIAGNOSTICS = /<ConnectionDiagnostics[\s\S]{0,400}\bnow=\{now\}/;
 
@@ -593,8 +583,12 @@ test("recovery panel is gated on a durable backlog and arms the stall watchdog w
   // rather than indefinite "catching up" (design D8).
   assert.match(src, RECOVERY_PANEL_GATED_ON_BACKLOG);
   assert.match(src, RECOVERY_PANEL_ARMS_STALL_WATCHDOG);
-  // A stalled/system-issue step renders as a system condition, never a retry prompt.
-  assert.match(src, RECOVERY_PANEL_SYSTEM_CONDITION_STYLING);
+  const start = src.indexOf("function RecoveryPanel");
+  const end = src.indexOf("\n/** Owner-facing labels", start);
+  const panel = src.slice(start, end);
+  assert.match(panel, /data-recovery-step=\{model\.step\}/);
+  assert.match(panel, /\{model\.primarySentence\}/);
+  assert.doesNotMatch(panel, /<IcButton|<Link|<form/);
 });
 
 test("source detail page captures a fresh render instant and threads it into diagnostics", async () => {

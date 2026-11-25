@@ -8,6 +8,7 @@ import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState, useTransition } from "react";
 import { confirmConfigAction, proposeConfigAction } from "./config-actions.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 import {
   buildCurrentSettings,
   buildDraft,
@@ -77,8 +78,12 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
   if (availability.kind === "unreadable") {
     return (
       <ConfigShell>
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{availability.message}</span>
+        <div className="pdpp-caption border-y border-border py-2.5" role="alert">
+          <p className="font-medium text-destructive">Settings could not be loaded.</p>
+          <details className="mt-1 text-muted-foreground">
+            <summary className="cursor-pointer">Details</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{availability.message}</code>
+          </details>
         </div>
         <TechnicalDetails>
           <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
@@ -230,7 +235,7 @@ function ConfigEditor({
   return (
     <ConfigShell>
       {applied ? (
-        <div className="pdpp-caption rounded-md border border-border bg-muted/40 px-4 py-2.5">
+        <div className="pdpp-caption border-y border-border py-2.5">
           <span className="font-medium text-muted-foreground">
             Revision {applied.revision} is active. Future syncs use this configuration.
           </span>
@@ -238,14 +243,22 @@ function ConfigEditor({
       ) : null}
 
       {failure ? (
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{failure}</span>
+        <div className="pdpp-caption py-2.5" role="alert">
+          <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
+          <details className="mt-1 text-muted-foreground">
+            <summary className="cursor-pointer">Details</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{failure}</code>
+          </details>
         </div>
       ) : null}
 
       {stale ? (
-        <div className="pdpp-caption flex flex-col gap-2 rounded-md border border-attention/30 bg-attention/5 px-4 py-2.5">
-          <span className="font-medium text-attention">{stale.message}</span>
+        <div className="pdpp-caption flex flex-col gap-2 border-y border-border py-2.5" role="alert">
+          <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
+          <details className="text-muted-foreground">
+            <summary className="cursor-pointer">Details</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{stale.message}</code>
+          </details>
           <span className="text-muted-foreground">
             Your edits are still here. Review them against the latest configuration before saving.
           </span>
@@ -369,7 +382,7 @@ function DraftEditor({
   // active revision. Passing the revision again would change nothing rendered.
   const groups = groupRows(buildCurrentSettings(schema, null));
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+    <div className="flex flex-col gap-4 border-y border-border py-4">
       {groups.map(([group, rowsInGroup]) => (
         <fieldset className="flex flex-col gap-3" key={group.id}>
           <legend className="pdpp-body font-medium text-foreground">{group.title}</legend>
@@ -572,7 +585,7 @@ function ReviewChanges({
   unchanged: number;
 }) {
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+    <div className="flex flex-col gap-4 border-y border-border py-4">
       <div className="flex flex-col gap-2">
         <h3 className="pdpp-body font-medium text-foreground">What changes</h3>
         {changes.map((change) => (
@@ -640,7 +653,7 @@ function PendingProposal({
   const byKey = new Map(schema.options.map((option) => [option.option_key, option]));
   const proposedBy = revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by);
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-attention/30 bg-attention/5 p-4">
+    <div className="flex flex-col gap-3 border-y border-border py-4">
       <div className="flex flex-col gap-0.5">
         <h3 className="pdpp-body font-medium text-attention">Awaiting your confirmation</h3>
         <p className="pdpp-caption text-muted-foreground">
