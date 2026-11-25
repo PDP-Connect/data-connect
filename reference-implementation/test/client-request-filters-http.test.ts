@@ -28,6 +28,7 @@ interface Body {
   filter_fields: unknown;
   grant: { version: string; streams: Array<{ filter_fields?: unknown }> };
   has_more: boolean;
+  meta?: { count?: unknown };
   next_changes_since: string;
   next_cursor: string;
   request_uri: string;
@@ -320,18 +321,34 @@ for (const backend of ["sqlite", "postgres"] as const) {
       assert.equal(preciseAggregate.status, 200, JSON.stringify(preciseAggregate.body));
       assert.equal(preciseAggregate.body.value, 1);
       // A selective filter must find a match that sorts past any internal read batch.
-      for (let index = 0; index < 300; index += 1) {
+      // The second match sorts past 500 rows, so a filtered read that works in
+      // batches must carry its position across a batch boundary.
+      for (let index = 0; index < 600; index += 1) {
         const id = `m${String(index).padStart(3, "0")}`;
         // biome-ignore lint/performance/noAwaitInLoops: Fixture writes are sequential.
-        await write(id, index === 150 ? "rare" : "bulk");
+        await write(id, index === 150 || index === 550 ? "rare" : "bulk");
       }
-      const selective = await request(`${base}/records?fields=id&limit=1&filter[status]=rare`, modern.token);
+      const selective = await request(
+        `${base}/records?fields=id&limit=1&order=asc&count=exact&filter[status]=rare`,
+        modern.token
+      );
       assert.equal(selective.status, 200, JSON.stringify(selective.body));
       assert.deepEqual(
         selective.body.data.map((record) => record.id),
         ["m150"]
       );
-      assert.equal(selective.body.has_more, false);
+      assert.equal(selective.body.has_more, true);
+      assert.deepEqual(selective.body.meta?.count, { kind: "exact", value: 2 });
+      const selectiveNext = await request(
+        `${base}/records?fields=id&limit=1&order=asc&count=exact&filter[status]=rare&cursor=${encodeURIComponent(selective.body.next_cursor)}`,
+        modern.token
+      );
+      assert.equal(selectiveNext.status, 200, JSON.stringify(selectiveNext.body));
+      assert.deepEqual(
+        selectiveNext.body.data.map((record) => record.id),
+        ["m550"]
+      );
+      assert.equal(selectiveNext.body.has_more, false);
       // A deletion in a filtered feed is the same bare tombstone as a filter
       // exit, and deleting a record the filter never matched reports nothing.
       const beforeDeletes = await request(`${base}/records?fields=id&${filters}&changes_since=beginning`, modern.token);

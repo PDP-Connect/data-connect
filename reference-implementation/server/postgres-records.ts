@@ -181,6 +181,7 @@ interface PgRow {
   record_count?: number | string;
   record_json: unknown;
   record_json_bytes?: number | string;
+  record_json_text?: string;
   record_key: string;
   reset_generation?: string;
   semantic_time?: string | null;
@@ -2436,6 +2437,7 @@ async function queryPostgresChangesSince({
 }
 
 async function queryPostgresRecordPage({
+  clientFilter,
   connectorInstanceId,
   countParams,
   countWhere,
@@ -2453,6 +2455,7 @@ async function queryPostgresRecordPage({
   requestWarnings,
   stream,
 }: {
+  clientFilter: ((recordJson: unknown) => boolean) | null;
   connectorInstanceId: string;
   countParams: unknown[];
   countWhere: string;
@@ -2479,48 +2482,73 @@ async function queryPostgresRecordPage({
       throw err;
     }
   }
-  const params: unknown[] = [...countParams];
-  let where = countWhere;
-  // The seek selects rows strictly after the cursor in the ORDER BY below.
+  // The seek selects rows strictly after a position in the ORDER BY below.
   // The null-cursor group comes after present rows in asc and before them in
-  // desc, ordered by primary key. `cursor = NULL` is never true, so a cursor
-  // that ends inside the null group needs its own predicate.
+  // desc, ordered by primary key. `cursor = NULL` is never true, so a
+  // position inside the null group needs its own predicate.
   const cmp = order === "asc" ? ">" : "<";
   const nullGroupFollowsPresent = order === "asc";
-  if (cursorPosition) {
-    const cursorValue = cursorPosition.cursor_value ?? null;
+  function seekAfter(position: OrderPosition, params: unknown[]): string {
+    const cursorValue = position.cursor_value ?? null;
     if (cursorValue === null) {
-      params.push(cursorPosition.primary_key_text);
+      params.push(position.primary_key_text);
       const laterInNullGroup = `(${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length})`;
-      where += nullGroupFollowsPresent
+      return nullGroupFollowsPresent
         ? ` AND ${laterInNullGroup}`
         : ` AND (${laterInNullGroup} OR ${cursorSql} IS NOT NULL)`;
-    } else {
-      params.push(cursorValue, cursorPosition.primary_key_text);
-      const cursorParam = `$${params.length - 1}`;
-      const keyParam = `$${params.length}`;
-      where += ` AND (
+    }
+    params.push(cursorValue, position.primary_key_text);
+    const cursorParam = `$${params.length - 1}`;
+    const keyParam = `$${params.length}`;
+    return ` AND (
         (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
         OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
         ${nullGroupFollowsPresent ? `OR ${cursorSql} IS NULL` : ""}
       )`;
-    }
   }
   const dir = order === "asc" ? "ASC" : "DESC";
   const nulls = order === "asc" ? "NULLS LAST" : "NULLS FIRST";
-  params.push(limit + 1);
-  const result = await postgresQuery(
-    `SELECT record_key, record_json, emitted_at,
-            ${cursorSql} AS cursor_value,
-            ${primarySql} AS primary_key_text
-     FROM records
-     ${where}
-     ORDER BY ${cursorSql} ${dir} ${nulls}, ${primarySql} ${dir}
-     LIMIT $${params.length}`,
-    params
-  );
-  const hasMore = result.rows.length > limit;
-  const pageRows = result.rows.slice(0, limit);
+  function readOrdered(position: OrderPosition | null, rowLimit: number) {
+    const params: unknown[] = [...countParams];
+    const where = countWhere + (position ? seekAfter(position, params) : "");
+    params.push(rowLimit);
+    return postgresQuery(
+      `SELECT record_key, record_json, emitted_at,
+              ${clientFilter ? "record_json::text AS record_json_text," : ""}
+              ${cursorSql} AS cursor_value,
+              ${primarySql} AS primary_key_text
+       FROM records
+       ${where}
+       ORDER BY ${cursorSql} ${dir} ${nulls}, ${primarySql} ${dir}
+       LIMIT $${params.length}`,
+      params
+    );
+  }
+  // A client filter is tested on the row the page serves, so a write between
+  // two reads cannot put a non-matching row on the page. The scan stops once
+  // it holds `limit + 1` matches.
+  let rows: PgRow[];
+  if (clientFilter) {
+    rows = [];
+    let position: OrderPosition | null = cursorPosition;
+    for (;;) {
+      // Each batch continues after the last row the previous batch read.
+      const batch = await readOrdered(position, CLIENT_FILTER_SCAN_BATCH);
+      for (const row of batch.rows) {
+        if (rows.length <= limit && clientFilter(row.record_json_text)) {
+          rows.push(row);
+        }
+      }
+      position = batch.rows.at(-1) ?? null;
+      if (rows.length > limit || batch.rows.length < CLIENT_FILTER_SCAN_BATCH || !position) {
+        break;
+      }
+    }
+  } else {
+    rows = (await readOrdered(cursorPosition, limit + 1)).rows;
+  }
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
   const responseRows = pageRows.map((row) => ({
     record_key: row.record_key,
     responseRecord: responseRecord({ fields, identity, row, stream }),
@@ -2543,10 +2571,16 @@ async function queryPostgresRecordPage({
       primary_key_text: last.primary_key_text,
     });
   }
+  const wantsCount = typeof requestParams.count === "string" && requestParams.count !== "none";
+  const wantsWindow = typeof requestParams.window === "string" && requestParams.window !== "none";
+  const counted =
+    clientFilter && (wantsCount || wantsWindow)
+      ? await narrowToClientFilterMatches(countWhere, countParams, clientFilter)
+      : { params: countParams, where: countWhere };
   const countOutcome = await computePostgresGradedRecordCount({
     connectorInstanceId,
-    countParams,
-    countWhere,
+    countParams: counted.params,
+    countWhere: counted.where,
     effective,
     requestParams,
     stream,
@@ -2556,8 +2590,8 @@ async function queryPostgresRecordPage({
   }
   const windowOutcome = await computePostgresRecordWindow({
     consentTimeField: manifestStream?.consent_time_field || null,
-    countParams,
-    countWhere,
+    countParams: counted.params,
+    countWhere: counted.where,
     requestParams,
   });
   if (windowOutcome) {
@@ -2645,30 +2679,11 @@ export async function postgresQueryRecords(
   appendGrantVisibilityClauses(whereParts, params, effective);
   let where = `WHERE ${whereParts.join(" AND ")}`;
   where += buildFilterClause(compiledFilters, requestParams.filter, params);
-  if (compiledFilters.some((filter) => filter.kind === "client")) {
-    const keys: string[] = [];
-    let after: string | null = null;
-    for (;;) {
-      // Each keyset batch starts after the previous batch's terminal key.
-      // biome-ignore lint/performance/noAwaitInLoops: The next batch depends on this result.
-      const batch = await postgresQuery(
-        "SELECT record_key, record_json::text AS record_json FROM records WHERE connector_instance_id = $1 AND stream = $2 AND deleted = FALSE AND ($3::text IS NULL OR record_key > $3) ORDER BY record_key LIMIT 500",
-        [connectorInstanceId, stream, after]
-      );
-      for (const row of batch.rows) {
-        if (passesRequestFilters(filterRecordData(row.record_json), compiledFilters)) {
-          keys.push(row.record_key);
-        }
-      }
-      const last = batch.rows.at(-1);
-      if (batch.rows.length < 500 || !last) {
-        break;
-      }
-      after = last.record_key;
-    }
-    params.push(keys);
-    where += ` AND record_key = ANY($${params.length}::text[])`;
-  }
+  // Client filters compare lossless JSON values, so they run in JS on the
+  // row's own text rather than in SQL.
+  const clientFilter = compiledFilters.some((filter) => filter.kind === "client")
+    ? (recordJson: unknown) => passesRequestFilters(filterRecordData(recordJson), compiledFilters)
+    : null;
   // Snapshot the filter-only WHERE clause / params for the graded-count
   // query. The count MUST reflect matching visible rows BEFORE pagination
   // or the cursor — matching the SQLite semantics in
@@ -2678,6 +2693,7 @@ export async function postgresQueryRecords(
   const countParams = [...params];
 
   return queryPostgresRecordPage({
+    clientFilter,
     connectorInstanceId,
     countParams,
     countWhere,
@@ -2695,6 +2711,46 @@ export async function postgresQueryRecords(
     requestWarnings,
     stream,
   });
+}
+
+/** A row's place in the list order: its sort value and primary key text. */
+type OrderPosition = Pick<PgRow, "cursor_value" | "primary_key_text">;
+
+/** Rows read per query while a client filter fills a page or counts matches. */
+const CLIENT_FILTER_SCAN_BATCH = 500;
+
+/**
+ * Narrow `where` to the client-filter matches, for the count and window
+ * queries only. A page never needs this full scan; it stops at `limit + 1`.
+ */
+async function narrowToClientFilterMatches(
+  where: string,
+  params: unknown[],
+  clientFilter: (recordJson: unknown) => boolean
+): Promise<{ where: string; params: unknown[] }> {
+  const keys: string[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const batchParams = [...params, after, CLIENT_FILTER_SCAN_BATCH];
+    // Each keyset batch starts after the previous batch's terminal key.
+    const batch = await postgresQuery(
+      `SELECT record_key, record_json::text AS record_json FROM records ${where}
+         AND ($${batchParams.length - 1}::text IS NULL OR record_key > $${batchParams.length - 1})
+       ORDER BY record_key LIMIT $${batchParams.length}`,
+      batchParams
+    );
+    for (const row of batch.rows) {
+      if (clientFilter(row.record_json)) {
+        keys.push(row.record_key);
+      }
+    }
+    const last = batch.rows.at(-1);
+    if (batch.rows.length < CLIENT_FILTER_SCAN_BATCH || !last) {
+      break;
+    }
+    after = last.record_key;
+  }
+  return { params: [...params, keys], where: `${where} AND record_key = ANY($${params.length + 1}::text[])` };
 }
 
 // Compute the bounded `meta.window` aggregate for the Postgres list path,
