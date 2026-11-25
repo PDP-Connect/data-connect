@@ -150,6 +150,7 @@ import {
 import "./explore-page.css";
 
 const UNDERSCORE_RE = /_/g;
+const EXPLORE_PATH_RE = /\/explore\/?$/;
 /** Split a query string on whitespace (used by zero-results token removal). */
 const QUERY_WHITESPACE_RE = /\s+/;
 /**
@@ -1340,6 +1341,7 @@ function FeedControls({
   dataSourcesOpen,
   dateInitiallyOpen,
   showTimeSort,
+  warnings,
 }: {
   draft: string;
   order: SortOrder;
@@ -1378,6 +1380,7 @@ function FeedControls({
    * Descriptor-gated so an unhonorable sort claim is structurally unreachable.
    */
   showTimeSort: boolean;
+  warnings: readonly ExplorerWarning[];
 }) {
   return (
     <div className="rr-x-controls">
@@ -1449,6 +1452,7 @@ function FeedControls({
             </div>
           ) : null}
           <CopyViewLinkButton href={currentViewHref} />
+          {warnings.length > 0 ? <WarningList warnings={warnings} /> : null}
         </div>
       </details>
     </div>
@@ -2104,77 +2108,6 @@ function buildZeroEscapeActions(
   });
 }
 
-function ZeroResultsRouting({
-  chips,
-  loadedCount,
-  explorePath,
-  exploreState,
-  onClearAll,
-}: {
-  chips: readonly FilterChip[];
-  /** Number of records loaded by the server before client-side narrowing. */
-  loadedCount: number;
-  explorePath: string;
-  exploreState: ZeroResultsExploreState;
-  onClearAll: () => void;
-}) {
-  const hasFilters =
-    chips.length > 0 ||
-    exploreState.query.trim().length > 0 ||
-    Boolean(exploreState.since) ||
-    Boolean(exploreState.until);
-
-  const escapeActions = useMemo<ZeroResultsEscapeAction[]>(
-    () => buildZeroEscapeActions(chips, loadedCount, explorePath, exploreState, hasFilters),
-    [chips, loadedCount, explorePath, exploreState, hasFilters]
-  );
-
-  // Honest heading: loadedCount > 0 means server returned records but client filters removed them all.
-  const headingText = loadedCount > 0 ? "No records matched the active filters" : "No records in this view";
-  let descriptionText: string;
-  if (loadedCount > 0) {
-    const plural = loadedCount === 1 ? "" : "s";
-    descriptionText = `${loadedCount.toLocaleString()} record${plural} loaded before the active filters ran.`;
-  } else if (hasFilters) {
-    descriptionText = "The active filters returned nothing.";
-  } else {
-    descriptionText = "There are no records to show here yet.";
-  }
-
-  return (
-    <div aria-live="polite" className="rr-x-zero" role="status">
-      <div aria-hidden="true" className="rr-x-zero__icon">
-        ⊘
-      </div>
-      <div className="rr-x-zero__heading">{headingText}</div>
-      <p className="rr-x-zero__desc">{descriptionText}</p>
-      {escapeActions.length > 0 && (
-        <>
-          <div className="rr-x-zero__label">Try instead</div>
-          <ul className="rr-x-zero__list">
-            {escapeActions.map((action) => (
-              <li key={action.key}>
-                <Link className="rr-x-zero__action" href={action.href}>
-                  <span className="rr-x-zero__action-text">
-                    <span className="rr-x-zero__action-title">{action.title}</span>
-                    <span className="rr-x-zero__action-desc">{action.description}</span>
-                  </span>
-                  <span className="rr-x-zero__action-count">{action.count}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      {hasFilters && chips.length > 0 && (
-        <button className="rr-link rr-x-zero__clearall" onClick={onClearAll} type="button">
-          clear all filters →
-        </button>
-      )}
-    </div>
-  );
-}
-
 function FeedDays({
   connectorIcons,
   dayGroups,
@@ -2219,24 +2152,27 @@ function FeedDays({
   };
 }) {
   if (dayGroups.length === 0) {
+    const state = zeroResultsProps?.exploreState;
+    const hasFilters = Boolean(
+      chipsPresent || state?.query.trim() || state?.connectionIds.length || state?.excludeConnectionIds.length ||
+        state?.streams.length || state?.excludeStreams.length || state?.since || state?.until
+    );
+    const escapeAction = state && zeroResultsProps
+      ? buildZeroEscapeActions(chips, zeroResultsProps.loadedCount, zeroResultsProps.explorePath, state, hasFilters)[0]
+      : undefined;
+    let emptyAction: ReactNode;
+    if (escapeAction) {
+      emptyAction = <Link className="rr-link" href={escapeAction.href}>{escapeAction.title} →</Link>;
+    } else if (hasFilters) {
+      emptyAction = <button className="rr-link" onClick={onClearAll} type="button">Clear filters</button>;
+    } else {
+      const addSourceHref = zeroResultsProps?.explorePath.replace(EXPLORE_PATH_RE, "/sources/add") ?? "/sources/add";
+      emptyAction = <a className="rr-link" href={addSourceHref}>Add a data source</a>;
+    }
     return (
       <div className="rr-x-empty">
         <p className="rr-x-empty__line">{EXPLORE_EMPTY_MESSAGE}</p>
-        <details className="rr-x-technical-details">
-          <summary>Details</summary>
-          {zeroResultsProps ? (
-            <ZeroResultsRouting
-              chips={chips}
-              explorePath={zeroResultsProps.explorePath}
-              exploreState={zeroResultsProps.exploreState}
-              loadedCount={zeroResultsProps.loadedCount}
-              onClearAll={onClearAll}
-            />
-          ) : null}
-          {!zeroResultsProps && chipsPresent ? (
-            <button className="rr-link" onClick={onClearAll} type="button">Clear filters</button>
-          ) : null}
-        </details>
+        {emptyAction}
       </div>
     );
   }
@@ -2504,6 +2440,14 @@ function FeedBody({
       <div className="rr-x-empty">
         <p className="rr-x-empty__line">{EXPLORE_FAILED_MESSAGE}</p>
         <a className="rr-x-loadmore" href={`${explorePath}?demo=atlas`}>Try again</a>
+      </div>
+    );
+  }
+  if (demoState === "empty") {
+    return (
+      <div className="rr-x-empty">
+        <p className="rr-x-empty__line">{EXPLORE_EMPTY_MESSAGE}</p>
+        <a className="rr-link" href={explorePath.replace(EXPLORE_PATH_RE, "/sources/add")}>Add a data source</a>
       </div>
     );
   }
@@ -3467,7 +3411,9 @@ export function ExploreCanvas({
   // and the feed claims the freed width — no reserved-empty 420px inspector (the
   // dead-canvas + query-bar/inspector-overlap root cause). `data.peek != null` is
   // the single source of selection truth (selectedPeekParam derives from it).
-  const hasSelection = data.peek !== null && data.peek !== undefined;
+  // Empty and failed feed states have no selected record or inspector.
+  const feedStateOnly = demoState === "empty" || demoState === "failed" || (visibleFeed.length === 0 && data.upcomingTotal === 0 && !data.peek);
+  const hasSelection = !feedStateOnly && data.peek !== null && data.peek !== undefined;
   return (
     <div className={hasSelection ? "rr-x explore-page has-selection" : "rr-x explore-page"}>
       {/* ── In-page route progress bar ──
@@ -3578,7 +3524,7 @@ export function ExploreCanvas({
             failing the single-h1 a11y bar. This is the page's real, visible
             title, not a visually-hidden duplicate. */}
         <h1 className="rr-x-h1">Explore</h1>
-        {demoState === "failed" ? null : (
+        {feedStateOnly ? null : (
           <FeedStatusLine exactCountIsCurrent={exactCountIsCurrent} exactTotal={exactTotal} visibleCount={visibleFeed.length} />
         )}
         <FeedControls
@@ -3615,10 +3561,11 @@ export function ExploreCanvas({
           showTimeSort={showTimeSort}
           streamCounts={streamCountsMap}
           streamSuggestions={streamSuggestions}
+          warnings={feedStateOnly ? [] : data.warnings}
         />
 
         {/* ── Descriptor-driven search header (escape ramps + recall-honest sort) ── */}
-        {data.fromSearch && data.query ? (
+        {!feedStateOnly && data.fromSearch && data.query ? (
           <SearchHeader
             buildSearchSortHref={buildSearchSortHref}
             connectorIcons={connectorIcons}
@@ -3628,13 +3575,6 @@ export function ExploreCanvas({
             recordsBasePath={recordsBasePath}
             streamDoor={data.streamDoor}
           />
-        ) : null}
-
-        {data.warnings.length > 0 ? (
-          <details className="rr-x-technical-details">
-            <summary>Details</summary>
-            <WarningList warnings={data.warnings} />
-          </details>
         ) : null}
 
         {/* The redundant feed-level read-request disclosure was REMOVED (feedback
@@ -3648,7 +3588,7 @@ export function ExploreCanvas({
             Only on the non-search feed when the assembler detected records that
             arrived after the current snapshot anchor. Clicking refreshes to the
             live head (drops anchor + cursor). We do NOT auto-insert rows. */}
-        {!data.fromSearch && data.newSinceAnchor !== null && data.newSinceAnchor > 0 ? (
+        {!(feedStateOnly || data.fromSearch) && data.newSinceAnchor !== null && data.newSinceAnchor > 0 ? (
           <button className="rr-x-new-pill" onClick={() => navigate({ clearCursor: true })} type="button">
             {data.newSinceAnchor.toLocaleString()} new
           </button>
@@ -3666,7 +3606,7 @@ export function ExploreCanvas({
             height-matched skeleton so the feed never jumps; when `bucketRequest`
             is null (search / relevance_bounded / no targets) we render nothing,
             exactly the prior suppression contract. */}
-        {bucketSeries ? (
+        {!feedStateOnly && bucketSeries ? (
           <OverTimeChart
             descriptorKind={data.descriptor.kind}
             onSelectRange={setRange}
@@ -3680,7 +3620,7 @@ export function ExploreCanvas({
             has not landed). A loaded-but-empty/failed band resolves to null (NOT a
             forever-spinning skeleton), and search / relevance_bounded / no-targets ⇒
             null bucketRequest ⇒ no request ⇒ render nothing (prior suppression). */}
-        {bucketBandPending ? <ChartSkeleton /> : null}
+        {!feedStateOnly && bucketBandPending ? <ChartSkeleton /> : null}
 
         <FeedBody
           chips={chips}
@@ -3726,10 +3666,10 @@ export function ExploreCanvas({
 
       {/* ── Record inspector (shared) ── */}
       <RecordInspector
-        record={data.peek}
-        recordHref={data.peek ? buildRecordDetailHref(recordsBasePath, data.peek) : null}
+        record={feedStateOnly ? null : data.peek}
+        recordHref={!feedStateOnly && data.peek ? buildRecordDetailHref(recordsBasePath, data.peek) : null}
         relationships={peekRelationships}
-        streamRecordsHref={data.peek ? buildStreamRecordsHref(recordsBasePath, data.peek) : null}
+        streamRecordsHref={!feedStateOnly && data.peek ? buildStreamRecordsHref(recordsBasePath, data.peek) : null}
       />
     </div>
   );

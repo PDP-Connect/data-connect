@@ -86,9 +86,11 @@ test("Explore rows show one title, a human kind and data-source name, and a rela
 });
 
 test("Explore empty, loading and failed states use one plain sentence each", () => {
-  assert.equal(EXPLORE_EMPTY_MESSAGE, "Nothing matches. Try another word or date.");
+  // Explore repair P2: an empty state has one plain sentence.
+  assert.equal(EXPLORE_EMPTY_MESSAGE, "No records match this view.");
   assert.equal(EXPLORE_LOADING_MESSAGE, "Loading records.");
-  assert.equal(EXPLORE_FAILED_MESSAGE, "This could not be loaded. Try again.");
+  // Explore repair P2: the failed sentence and its Try again action are separate.
+  assert.equal(EXPLORE_FAILED_MESSAGE, "This could not be loaded.");
 });
 
 test("all Explore demo samples keep visible copy free of system words", () => {
@@ -116,5 +118,15 @@ test("all Explore demo samples keep visible copy free of system words", () => {
     ].join(" ");
 
     assert.doesNotMatch(copy, SYSTEM_WORDS_RE, `${state} sample includes system wording`);
+  }
+});
+
+test("empty and failed Explore demos contain no record decorations", () => {
+  for (const state of ["empty", "failed"] as const) {
+    const data = buildExploreDemoData(state);
+    // Explore repair P2: these states keep one sentence and their one useful action, without stale feed decoration.
+    assert.equal(data.newSinceAnchor, 0);
+    assert.equal(data.peek, null);
+    assert.deepEqual(data.streamSeeAllLinks, []);
   }
 });

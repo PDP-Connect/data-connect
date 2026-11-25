@@ -54,11 +54,11 @@ const RECORD_DETAIL_IMPORTS_HELPER_RE =
 const RECORD_DETAIL_NO_STREAM_HREF_APPEND_RE =
   /const streamHref = buildStreamRecordsHref\(recordsBasePath, entry\);\s*return \[streamHref, encodeURIComponent\(entry\.recordId\)\]\.join\("\/"\);/;
 const INSPECTOR_STREAM_HREF_RE =
-  /streamRecordsHref=\{data\.peek \? buildStreamRecordsHref\(recordsBasePath, data\.peek\) : null\}/;
+  /streamRecordsHref=\{!feedStateOnly && data\.peek \? buildStreamRecordsHref\(recordsBasePath, data\.peek\) : null\}/;
 const INSPECTOR_STREAM_LINK_RE =
   /<a className="rr-x-stream-all" href=\{streamRecordsHref\}>Browse this kind →<\/a>/;
 const CANVAS_PASSES_RECORDS_BASE_RE =
-  /<RecordInspector[\s\S]*record=\{data\.peek\}[\s\S]*relationships=\{peekRelationships\}/;
+  /<RecordInspector[\s\S]*record=\{feedStateOnly \? null : data\.peek\}[\s\S]*relationships=\{peekRelationships\}/;
 const HEADER_FULL_STREAM_USES_HELPER_RE =
   /const fullListHref =[\s\S]*buildCompleteStreamHref\(\s*recordsBasePath,[\s\S]*connectionId: scopedConnection\.connectionId,[\s\S]*connectorId: scopedConnection\.connectorId,[\s\S]*stream: selectedStreams\[0\] \?\? ""[\s\S]*fullListHref=\{fullListHref\}/;
 const BURST_STREAM_LABEL_RE = /const kindLabel = rep\?\.stream \? humanizeFieldLabel\(rep\.stream\) : "Records";[\s\S]*<div className="rr-x-burst__head">\{kindLabel\} · \{sourceName\}<\/div>/;
@@ -147,8 +147,8 @@ const SORT_OLDEST_ARIA_RE = /aria-pressed=\{order === "oldest"\}/;
 const DATE_PRESET_ARIA_CHECKED_RE = /aria-checked=\{selected\}/;
 const RAW_JSON_DISCLOSURE_RE =
   /<details className="rr-x-raw rr-x-inspector-details">[\s\S]*<summary>Details<\/summary>[\s\S]*<summary>Raw JSON<\/summary>[\s\S]*<pre>\{record\.bodyJson\}<\/pre>/;
-const INSPECTOR_OPEN_FULL_RECORD_RE = /recordHref \? <a href=\{recordHref\}>Open full record<\/a>/;
-const CANVAS_RECORD_HREF_RE = /recordHref=\{data\.peek \? buildRecordDetailHref\(recordsBasePath, data\.peek\) : null\}/;
+const INSPECTOR_OPEN_FULL_RECORD_TOP_RE = /<SheetHead>[\s\S]*recordHref \? <a href=\{recordHref\}>Open full record →<\/a>/;
+const CANVAS_RECORD_HREF_RE = /recordHref=\{!feedStateOnly && data\.peek \? buildRecordDetailHref\(recordsBasePath, data\.peek\) : null\}/;
 const CANVAS_COUNT_LINE_RE = /<FeedStatusLine exactCountIsCurrent=\{exactCountIsCurrent\} exactTotal=\{exactTotal\} visibleCount=\{visibleFeed\.length\} \/>/;
 const CANVAS_NO_OLD_VIEWS_COUNT_RE = /<div className="rr-x-views"|<span className="rr-x-views__name">/;
 const CANVAS_COUNT_HELPER_CALL_RE =
@@ -485,7 +485,8 @@ test("Explore rows show one human context line and a sans relative time", async 
   assert.match(css, ROW_TIME_CSS_RE, "row time uses the sans face and secondary type");
   assert.match(src, DESKTOP_ROW_PEEK_ONCLICK_RE, "the whole desktop row opens the inspector");
   assert.match(src, MOBILE_ROW_LABEL_OWNS_ACTION_RE, "the phone row opens its full record");
-  assert.match(inspector, INSPECTOR_OPEN_FULL_RECORD_RE, "the full record remains reachable in Details");
+  // Explore repair P2: the full-record action is a plain link at the top of the inspector.
+  assert.match(inspector, INSPECTOR_OPEN_FULL_RECORD_TOP_RE, "the full record link is at the top of the inspector");
   assert.doesNotMatch(src, CANVAS_NO_EXTRA_ROW_CONTROLS_RE, "rows have no inspect control or extra snippet");
 
   assert.match(src, UPCOMING_USES_SERVER_RE, "the canvas renders the server's upcoming records");
@@ -498,13 +499,14 @@ test("Explore rows show one human context line and a sans relative time", async 
   assert.match(sharedCss, SEARCH_HEADER_CSS_RE, "search title and escape controls retain their layout");
 });
 
-// Explore brief decision 5: the desktop row opens the inspector; the full record remains in Details.
-test("Explore desktop row peeks and the full record stays reachable in Details", async () => {
+// Explore brief decision 5 and repair P2: the row opens the inspector; the full record link is at its top.
+test("Explore desktop row peeks and the full record link is at the top of the inspector", async () => {
   const src = await readFile(EXPLORE_CANVAS_FILE, "utf8");
   const inspector = await readFile(RECORD_INSPECTOR_FILE, "utf8");
   assert.match(src, DESKTOP_ROW_PEEK_ONCLICK_RE, "the desktop row button opens the peek");
   assert.match(src, CANVAS_RECORD_HREF_RE, "the full record destination is computed");
-  assert.match(inspector, INSPECTOR_OPEN_FULL_RECORD_RE, "the full record link is in Details");
+  // Explore repair P2: keep the full-record action immediately visible.
+  assert.match(inspector, INSPECTOR_OPEN_FULL_RECORD_TOP_RE, "the full record link is at the inspector top");
 });
 
 test("Slice 3: focused/selected row is machine-readable (aria-pressed + data-selected) and visible", async () => {
@@ -736,10 +738,21 @@ const RRX_420PX_RE = /420px/;
 const RRX_HAS_SELECTION_THREE_COL_RE =
   /\.rr-x\.has-selection\s*\{\s*grid-template-columns:\s*230px\s+minmax\(0,\s*1fr\)\s+420px;\s*\}/;
 const RRX_EMPTY_INSPECTOR_HIDDEN_RE = /\.rr-x:not\(\.has-selection\)\s*>\s*\.rr-inspector\s*\{\s*display:\s*none;\s*\}/;
-const RRX_1280_RESETS_BOTH_RE =
-  /@media \(max-width: 1280px\) \{[\s\S]*?\.rr-x,\s*\.rr-x\.has-selection \{\s*grid-template-columns:\s*200px\s+minmax\(0,\s*1fr\);/;
-const HAS_SELECTION_DERIVES_FROM_PEEK_RE = /const hasSelection = data\.peek !== null && data\.peek !== undefined;/;
+const RRX_LAPTOP_SELECTION_RE =
+  /@media \(min-width: 981px\) and \(max-width: 1200px\) \{\s*\.rr-x\.has-selection \{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+340px;[\s\S]*?\.rr-x\.has-selection > \.rr-inspector \{\s*grid-column:\s*2;\s*grid-row:\s*1 \/ span 2;/;
+const RRX_1280_KEEPS_INSPECTOR_RE =
+  /@media \(max-width: 1280px\) \{[\s\S]*?\.rr-x\.has-selection\s*\{\s*grid-template-columns:\s*200px\s+minmax\(0,\s*1fr\)\s+360px;/;
+const HAS_SELECTION_DERIVES_FROM_PEEK_RE = /const hasSelection = !feedStateOnly && data\.peek !== null && data\.peek !== undefined;/;
 const HAS_SELECTION_CLASS_WIRING_RE = /className=\{hasSelection \? "rr-x explore-page has-selection" : "rr-x explore-page"\}/;
+const FAILED_STATE_ACTION_RE = /if \(demoState === "failed"\)[\s\S]*EXPLORE_FAILED_MESSAGE[\s\S]*>Try again<\/a>/;
+const EMPTY_STATE_ACTION_RE = /if \(demoState === "empty"\)[\s\S]*EXPLORE_EMPTY_MESSAGE[\s\S]*>Add a data source<\/a>/;
+const FEED_STATE_ONLY_RE = /const feedStateOnly = demoState === "empty" \|\| demoState === "failed" \|\|/;
+const NEW_COUNT_FEED_STATE_GUARD_RE = /!\(feedStateOnly \|\| data\.fromSearch\) && data\.newSinceAnchor/;
+const INSPECTOR_FEED_STATE_GUARD_RE = /record=\{feedStateOnly \? null : data\.peek\}/;
+const NO_FEED_DECORATIONS_IN_STATE_BRANCH_RE = /rr-x-new-pill|rr-x-see-all/;
+const DETAILS_SUMMARY_RE = /<summary>Details<\/summary>/g;
+const WARNINGS_IN_TOOLBAR_DETAILS_RE = /<CopyViewLinkButton href=\{currentViewHref\} \/>[\s\S]*<WarningList warnings=\{warnings\} \/>/;
+const SEPARATE_WARNINGS_DETAILS_RE = /data\.warnings\.length > 0 \? \(\s*<details/;
 const BURST_VISIBLE_ENTRIES_PREVIEW_RE = /const visibleEntries = expanded \? burst\.entries : burst\.preview;/;
 const BURST_HEAD_LEFT_ALIGN_RE = /\.rr-x-burst__head \{[\s\S]*?text-align:\s*left;/;
 const ROW_TITLE_ELLIPSIS_CSS_RE =
@@ -781,26 +794,59 @@ test("8.4: the base .rr-x grid is 2-col (NO reserved 420px inspector); the 420px
     "no-selection state hides the empty inspector so it never reserves/forces a column"
   );
 
-  // Responsive overrides must collapse the selected 3-col track too (specificity:
-  // `.rr-x.has-selection` (0,2,0) outranks a bare `.rr-x` (0,1,0) in a media query,
-  // so the override must name `.rr-x.has-selection` explicitly or a selected record
-  // would keep forcing the 420px track below 1280).
+  // Explore repair P1: the selected inspector stays beside the list down to the 1024px desktop threshold.
   assert.match(
     css,
-    RRX_1280_RESETS_BOTH_RE,
-    "≤1280 must reset BOTH .rr-x and .rr-x.has-selection to 2-col (stacked inspector)"
+    RRX_1280_KEEPS_INSPECTOR_RE,
+    "≤1280 selected layout keeps a dedicated inspector column"
+  );
+  // Explore repair P1 (deputy): at 981-1200px three columns starve the feed, so the
+  // list moves above the feed and the inspector keeps the right column (pictured at 1024x768).
+  assert.match(
+    css,
+    RRX_LAPTOP_SELECTION_RE,
+    "981-1200px selected layout keeps the inspector beside the feed"
   );
 });
 
 test("8.4 (wiring): the canvas adds .has-selection to the .rr-x root ONLY when a record is peeked (data.peek)", async () => {
   const src = await readFile(EXPLORE_CANVAS_FILE, "utf8");
-  // Selection truth = data.peek != null, applied as the has-selection class.
+  // Explore repair P2: empty and failed feed states clear the selection; otherwise it derives from data.peek.
   assert.match(
     src,
     HAS_SELECTION_DERIVES_FROM_PEEK_RE,
     "selection state derives from data.peek (the URL-addressable peek), the single source of truth"
   );
   assert.match(src, HAS_SELECTION_CLASS_WIRING_RE, "the .rr-x root gets has-selection only when a record is peeked");
+});
+
+test("Explore empty and failed states keep one sentence and one useful action", async () => {
+  const src = await readFile(EXPLORE_CANVAS_FILE, "utf8");
+  const feedBodyStart = src.indexOf("function FeedBody(");
+  const feedBodyEnd = src.indexOf('    <div className="rr-x-days">', feedBodyStart);
+  assert.ok(feedBodyStart >= 0 && feedBodyEnd > feedBodyStart);
+  const stateBranches = src.slice(feedBodyStart, feedBodyEnd);
+
+  // Explore repair P2: empty and failed states use one sentence and one action; no stale new-count or See all cards remain.
+  assert.match(stateBranches, FAILED_STATE_ACTION_RE);
+  assert.match(stateBranches, EMPTY_STATE_ACTION_RE);
+  assert.match(src, FEED_STATE_ONLY_RE);
+  assert.match(src, NEW_COUNT_FEED_STATE_GUARD_RE);
+  assert.match(src, INSPECTOR_FEED_STATE_GUARD_RE);
+  assert.doesNotMatch(stateBranches, NO_FEED_DECORATIONS_IN_STATE_BRANCH_RE);
+});
+
+test("Explore warning and toolbar options share one Details disclosure", async () => {
+  const src = await readFile(EXPLORE_CANVAS_FILE, "utf8");
+  const controlsStart = src.indexOf("function FeedControls(");
+  const controlsEnd = src.indexOf("// ─── Descriptor-driven search header", controlsStart);
+  assert.ok(controlsStart >= 0 && controlsEnd > controlsStart);
+  const controls = src.slice(controlsStart, controlsEnd);
+
+  // Explore repair P2: warnings live inside the existing toolbar Details disclosure.
+  assert.equal([...controls.matchAll(DETAILS_SUMMARY_RE)].length, 1);
+  assert.match(controls, WARNINGS_IN_TOOLBAR_DETAILS_RE);
+  assert.doesNotMatch(src, SEPARATE_WARNINGS_DETAILS_RE);
 });
 
 test("D1 render contract: the BurstRow renders burst.preview (collapsed) so a burst is never a content-less header", async () => {

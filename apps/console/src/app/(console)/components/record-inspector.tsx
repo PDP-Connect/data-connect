@@ -21,6 +21,8 @@ import { humanizeFieldLabel } from "@pdpp/display";
 import type { ParentBackLink, RelatedLink, ReverseChildListLink } from "../sources/lib/relationships.ts";
 
 const IMAGE_MIME_RE = /^image\//i;
+const IDENTIFIER_FIELD_RE = /(?:^|[_\s-])id$/i;
+const CAMEL_CASE_IDENTIFIER_FIELD_RE = /Id$/;
 
 export interface RecordInspectorRelationships {
   parentBackLinks: ParentBackLink[];
@@ -45,6 +47,53 @@ function parseRecordBody(record: ExplorerPeekData): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function isIdentifierField(name: string): boolean {
+  return IDENTIFIER_FIELD_RE.test(name) || CAMEL_CASE_IDENTIFIER_FIELD_RE.test(name);
+}
+
+function identifierValue(record: ExplorerPeekData, body: Record<string, unknown>, name: string): string {
+  const field = record.fields.find((item) => item.name === name);
+  const value = body[name] ?? (field?.valueJson ? parseFieldValue(field.valueJson) : undefined);
+  return typeof value === "string" || typeof value === "number" ? String(value) : "—";
+}
+
+function parseFieldValue(valueJson: string): unknown {
+  try {
+    return JSON.parse(valueJson) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function IdentifierDetailRow({ body, name, record }: { body: Record<string, unknown>; name: string; record: ExplorerPeekData }) {
+  const field = record.fields.find((item) => item.name === name);
+  return (
+    <div className="rr-x-inspector-details__row">
+      <dt>{humanizeFieldLabel(name)} · {name}</dt>
+      <dd>{identifierValue(record, body, name)}{field ? ` · ${field.type ?? "Type not declared"} · ${field.state}` : ""}</dd>
+    </div>
+  );
+}
+
+function IdentifierDetails({
+  body,
+  fields,
+  record,
+}: {
+  body: Record<string, unknown>;
+  fields: readonly string[];
+  record: ExplorerPeekData;
+}) {
+  if (fields.length === 0) {
+    return null;
+  }
+  return (
+    <dl className="rr-x-inspector-details__fields">
+      {fields.map((name) => <IdentifierDetailRow body={body} key={name} name={name} record={record} />)}
+    </dl>
+  );
 }
 
 function blobAffordance(record: ExplorerPeekData): ExplorerBlobAffordance | null {
@@ -107,6 +156,11 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
   }
 
   const body = parseRecordBody(record);
+  const identifierFields = [...new Set([
+    ...Object.keys(body),
+    ...record.fields.map((field) => field.name),
+  ].filter(isIdentifierField))];
+  const visibleBody = Object.fromEntries(Object.entries(body).filter(([name]) => !isIdentifierField(name)));
   const declaredTypes: Record<string, string> = {};
   for (const field of record.fields) {
     if (field.type) {
@@ -129,12 +183,13 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
       <SheetHead>
         <SheetTitle>{humanizeFieldLabel(record.stream)}</SheetTitle>
         <p className="rr-x-facets__note">{record.connectionDisplayName ?? "Data source"}</p>
+        {recordHref ? <a href={recordHref}>Open full record →</a> : null}
       </SheetHead>
       <SheetBody>
         {record.error ? (
           <p className="rr-x-warn__msg">This could not be loaded. Try again.</p>
         ) : (
-          <RecordBody blobAffordance={blob ?? undefined} data={body} declaredTypes={declaredTypes} stream={record.stream} />
+          <RecordBody blobAffordance={blob ?? undefined} data={visibleBody} declaredTypes={declaredTypes} stream={record.stream} />
         )}
         {blob ? <BlobAffordanceView affordance={blob} mimeType={blobMime} /> : null}
         {relationGroups.length > 0 ? (
@@ -149,7 +204,6 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
         <details className="rr-x-raw rr-x-inspector-details">
           <summary>Details</summary>
           <div className="rr-x-inspector-details__body">
-            {recordHref ? <a href={recordHref}>Open full record</a> : null}
             <div className="rr-x-compiled">
               <span className="rr-x-compiled__label">Record ID</span>
               <CopyMono text={record.recordId} />
@@ -158,8 +212,9 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
               <span className="rr-x-compiled__label">Read request</span>
               <CopyMono text={`GET ${record.readUrl}`} />
             </div>
+            <IdentifierDetails body={body} fields={identifierFields} record={record} />
             <dl className="rr-x-inspector-details__fields">
-              {record.fields.map((field) => (
+              {record.fields.filter((field) => !isIdentifierField(field.name)).map((field) => (
                 <div className="rr-x-inspector-details__row" key={field.name}>
                   <dt>{humanizeFieldLabel(field.name)} · {field.name}</dt>
                   <dd>{field.type ?? "Type not declared"} · {field.state}</dd>

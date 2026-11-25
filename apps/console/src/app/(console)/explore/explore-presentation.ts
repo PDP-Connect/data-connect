@@ -7,8 +7,8 @@ import type { ExplorerConnectionFacet } from "@pdpp/operator-ui/components/views
 import type { SourceStreamGroup } from "./explore-facet-groups.ts";
 
 export const EXPLORE_LOADING_MESSAGE = "Loading records.";
-export const EXPLORE_EMPTY_MESSAGE = "Nothing matches. Try another word or date.";
-export const EXPLORE_FAILED_MESSAGE = "This could not be loaded. Try again.";
+export const EXPLORE_EMPTY_MESSAGE = "No records match this view.";
+export const EXPLORE_FAILED_MESSAGE = "This could not be loaded.";
 
 const NUMBER_ONLY_RE = /^[-+]?\d+(?:[.,]\d+)?%?$/;
 const BOOLEAN_ONLY_RE = /^(?:true|false)$/i;
