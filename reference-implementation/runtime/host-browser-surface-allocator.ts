@@ -156,10 +156,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		request: EnsureBrowserSurfaceRequest,
 	): Promise<BrowserSurface> {
 		const existing = this.#leasesBySurfaceId.get(request.surfaceId);
-		if (existing) {
+		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
+		if (existing && (runId === undefined || existing.runId === runId)) {
 			return existing.surface;
 		}
-		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
 		if (!runId) {
 			throw new HostBrowserSurfaceAllocatorError(
 				"host_browser_surface_missing_lease_context",
@@ -216,6 +216,9 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			stream_base_url: "",
 			surface_id: request.surfaceId,
 		};
+		if (this.#pendingRunIdsBySurfaceId.get(request.surfaceId) !== runId) {
+			return surface;
+		}
 		const record = { hostSurfaceId: hostLease.surface_id, runId, surface };
 		this.#leasesBySurfaceId.set(request.surfaceId, record);
 		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
@@ -235,16 +238,17 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async releaseRun(runId: string): Promise<void> {
-		const surfaceId = this.#surfaceIdsByRunId.get(runId);
-		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
-			([, pendingRunId]) => pendingRunId === runId,
-		)?.[0];
 		await this.#requestNoContent("DELETE", this.#runUrl(runId));
-		if (surfaceId) {
-			this.#leasesBySurfaceId.delete(surfaceId);
+		// A start for the released run may have answered during DELETE.
+		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		if (surfaceId !== undefined) {
+			if (this.#leasesBySurfaceId.get(surfaceId)?.runId === runId) {
+				this.#leasesBySurfaceId.delete(surfaceId);
+			}
 			this.#surfaceIdsByRunId.delete(runId);
 		}
-		if (pendingSurfaceId) {
+		for (const [pendingSurfaceId, pendingRunId] of this.#pendingRunIdsBySurfaceId) {
+			if (pendingRunId !== runId) continue;
 			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
 			this.#migrateProfileBySurfaceId.delete(pendingSurfaceId);
 		}
@@ -255,15 +259,19 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		request: StopBrowserSurfaceRequest,
 	): Promise<BrowserSurface | null> {
 		const record = this.#leasesBySurfaceId.get(request.surfaceId);
-		if (!record) {
-			return null;
+		if (!record) return null;
+		await this.#requestNoContent("DELETE", this.#leaseUrl(record.hostSurfaceId));
+		if (this.#leasesBySurfaceId.get(request.surfaceId) === record) {
+			this.#leasesBySurfaceId.delete(request.surfaceId);
 		}
-		await this.#requestNoContent(
-			"DELETE",
-			this.#leaseUrl(record.hostSurfaceId),
-		);
-		this.#leasesBySurfaceId.delete(request.surfaceId);
-		this.#surfaceIdsByRunId.delete(record.runId);
+		if (
+			this.#surfaceIdsByRunId.get(record.runId) === request.surfaceId &&
+			this.#leasesBySurfaceId.get(request.surfaceId)?.runId !== record.runId
+		) this.#surfaceIdsByRunId.delete(record.runId);
+		if (this.#pendingRunIdsBySurfaceId.get(request.surfaceId) === record.runId) {
+			this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+			this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		}
 		return { ...record.surface, health: "stopping" };
 	}
 
