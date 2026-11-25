@@ -355,7 +355,7 @@ export function withStatusDemoVariant(model: ConnectorPageModel, variant: string
       },
     };
   } else if (variant === "historical-archive") {
-    source = { ...source, source_binding_kind: "historical_archive" };
+    source = { ...source, source_binding_kind: "historical_archive", source_kind: "account" };
   } else if (variant === "local-device") {
     source = { ...source, source_kind: "local_device" };
     sourceInstances = buildRecoveryDemoModel(1).sourceInstances;

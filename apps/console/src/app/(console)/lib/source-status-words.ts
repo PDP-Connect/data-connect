@@ -49,6 +49,13 @@ export interface SourceStateSentence {
 
 export interface SourceStatusOptions {
   now: Date;
+  /**
+   * Whether the data source's own page has an address where the person can
+   * update its sign-in. Only that page knows (it reads the connector's setup
+   * needs). Left out elsewhere, so a paused archive keeps "Reconnect" and links
+   * to the page, which then decides.
+   */
+  signInRepairAvailable?: boolean;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -99,7 +106,11 @@ function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
   return canStartSync(source) ? action("sync_now", "Sync now", false) : null;
 }
 
-function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof projectSourceActionability>): MatchedStatus | null {
+function lifecycleRow(
+  source: RefConnectorSummary,
+  projection: ReturnType<typeof projectSourceActionability>,
+  signInRepairAvailable: boolean | undefined
+): MatchedStatus | null {
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null };
   if (projection.renderedStatus.kind === "setup_failed") {
     return { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
@@ -110,8 +121,23 @@ function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof
   }
 
   switch (source.terminal_setup_disposition) {
-    case "unverified_missing_counts":
-      return { row: 5, words: "First sync needs a look", tone: "attention", action: action("review_setup", "Review setup", true) };
+    case "unverified_missing_counts": {
+      const serverAction = ownerAction(source);
+      const renderableServerAction = serverAction && serverAction.satisfied_when.kind !== "none";
+      const fallbackAction = source.source_kind === "local_device"
+        ? syncAction(source)
+        : source.status === "paused"
+          ? action("resume", "Resume syncing", false)
+          : syncAction(source);
+      return {
+        row: 5,
+        words: "First sync needs a look",
+        tone: "attention",
+        action: renderableServerAction
+          ? action("review_setup", "Review setup", true)
+          : fallbackAction ? { ...fallbackAction, filled: true } : null,
+      };
+    }
     case "unverified_zero":
       return { row: 6, words: "First sync found no records", tone: "attention", action: action("retry_first_sync", "Retry first sync", true) };
     case "verified_empty":
@@ -120,10 +146,16 @@ function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof
 
   const resolver = source.owner_state?.resolver;
   if (projection.paused) {
+    // A recovered archive usually has no sign-in on this server, so resuming it
+    // alone makes the next sync fail. Updating the sign-in resumes it too (the
+    // server resumes a paused archive when it saves the sign-in). Resume is the
+    // next step only when there is no sign-in to update.
     const pausedAction = source.source_kind === "local_device"
       ? action("view_device", "View this device", false)
       : source.source_binding_kind === "historical_archive"
-        ? action("repair_credential", "Reconnect", false)
+        ? signInRepairAvailable === false
+          ? action("resume", "Resume syncing", false)
+          : action("repair_credential", "Reconnect", false)
         : action("resume", "Resume", false);
     return { row: 10, words: "Paused", tone: "faint", action: pausedAction };
   }
@@ -175,9 +207,9 @@ function fallbackPillRow(source: RefConnectorSummary, now: Date): MatchedStatus 
   return { row: 23, words: "Status not available", tone: "faint", action: null };
 }
 
-function matchSourceStatus(source: RefConnectorSummary, { now }: SourceStatusOptions): MatchedStatus {
+function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvailable }: SourceStatusOptions): MatchedStatus {
   const projection = projectSourceActionability(source);
-  const lifecycle = lifecycleRow(source, projection);
+  const lifecycle = lifecycleRow(source, projection, signInRepairAvailable);
   if (lifecycle) return lifecycle;
 
   const resolver = source.owner_state?.resolver;

@@ -795,17 +795,6 @@ function ConnectorPageView({
   // A revoked or never-set-up source has no sync to unblock, so the install
   // prompt only shows where installing lets the next run start.
   const installPromptShown = connectorNotInstalled && !revoked && !setupFailed;
-  // A recovered historical-archive row: paused (never revoked), landed by the
-  // archive-recovery operation rather than an owner revoke. It gets the
-  // credential-repair notice INSTEAD of a plain Resume action — see
-  // `PausedHistoricalArchiveSection`'s doc comment for why resuming such a row
-  // without first repairing its credential would just fail on the next run.
-  const pausedHistoricalArchive = paused && sourceBindingKind === "historical_archive";
-  // Every OTHER paused row — including one the owner paused deliberately — gets
-  // a real Resume action. Without this, a `paused` connection outside the
-  // archive-recovery journey would be visible but unrecoverable from the
-  // console, which is the dead end pause/resume exists to remove.
-  const pausedResumable = paused && !pausedHistoricalArchive && source.source_kind !== "local_device";
   // Pause is offered only on a connection that is actually collecting. A
   // draft/revoked/already-paused row has nothing to pause, and the route would
   // answer `connector_instance_not_active` anyway.
@@ -854,8 +843,9 @@ function ConnectorPageView({
   const renderedAt = new Date(now);
   const pendingDetails = Boolean(connectionHealth?.detail_gap_backlog?.pending) ||
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
-  const sourceStatus = sourceStatusWords(source, { now: renderedAt });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, pendingDetails });
+  const signInRepairAvailable = credentialUpdateHref !== null;
+  const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
+  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, pendingDetails, signInRepairAvailable });
   const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
   const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const manifestStreams = Array.isArray(manifest.streams) ? manifest.streams : [];
@@ -893,8 +883,10 @@ function ConnectorPageView({
         count={headerCount}
         description={accountLine === displayName ? undefined : accountLine}
         title={
-          <span className="inline-flex items-center gap-2 [&_.pdpp-connector-icon]:size-12">
-            <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
+          <span>
+            <span className="mr-2 inline-block align-middle [&_.pdpp-connector-icon]:size-12">
+              <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
+            </span>
             {displayName}
           </span>
         }
@@ -1002,7 +994,6 @@ function ConnectorPageView({
               typeName={formatConnectorKeyForDisplay(connectorId)}
             />
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
-            {pausedResumable ? <p className="mt-6 pdpp-caption text-muted-foreground">Syncing is paused. Your records, schedule, and sign-in are kept.</p> : null}
             <CredentialRepairLinks
               revoked={revoked}
               setupFailed={setupFailed}
@@ -1251,7 +1242,7 @@ function ConnectorPrimaryHeaderAction({
     return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link>;
   }
   if (statusAction?.kind === "resume") {
-    return <form action={resumeConnectionAction}><input name="connection_id" type="hidden" value={connectionId ?? ""} /><IcButton size="sm" type="submit" variant="ghost">Resume</IcButton></form>;
+    return <form action={resumeConnectionAction}><input name="connection_id" type="hidden" value={connectionId ?? ""} /><IcButton size="sm" type="submit" variant="ghost">{statusAction.label}</IcButton></form>;
   }
   if (statusAction?.kind === "repair_credential" && credentialUpdateHref) {
     return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;
@@ -1673,11 +1664,7 @@ function RecentRunsSection({
       title="Latest syncs"
     >
       {recentRuns.length === 0 ? (
-        hasSyncHistory ? (
-          <p className="pdpp-caption text-muted-foreground">
-            See every sync in <Link className="text-primary hover:underline" href="/syncs">Sync history</Link>.
-          </p>
-        ) : <p className="pdpp-caption text-muted-foreground">No syncs yet.</p>
+        hasSyncHistory ? null : <p className="pdpp-caption text-muted-foreground">No syncs yet.</p>
       ) : (
         <DataList>
           {autoPausedBanner ? (

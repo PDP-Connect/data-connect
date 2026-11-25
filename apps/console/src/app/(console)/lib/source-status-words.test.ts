@@ -127,7 +127,30 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 test("row 2 words a setup that never completed", () => assertRow(2, "Setup never completed", "faint", { kind: "continue_setup", label: "Continue setup", filled: false }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
 test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs its collector installed", "attention", { kind: "install", label: "Install", filled: true }));
-test("row 5 words a first sync with missing counts", () => assertRow(5, "First sync needs a look", "attention", { kind: "review_setup", label: "Review setup", filled: true }));
+test("row 5 uses the server action or starts a sync when no server action exists", () => {
+  const status = sourceStatusWords(fixture(5), { now: NOW });
+  // DIRECTION.md, one status table row 5: the needs-you status has one next action.
+  assert.deepEqual(status.action, { kind: "sync_now", label: "Sync now", filled: true });
+
+  const serverAction = sourceStatusWords(source({
+    ...fixture(5),
+    rendered_verdict: verdict("Can't collect", [requiredAction({ cta: "Review setup" })]),
+  }), { now: NOW });
+  assert.deepEqual(serverAction.action, { kind: "review_setup", label: "Review setup", filled: true });
+
+  const unavailableServerAction = sourceStatusWords(source({
+    ...fixture(5),
+    rendered_verdict: verdict("Can't collect", [requiredAction({ satisfied_when: { kind: "none" } })]),
+  }), { now: NOW });
+  assert.deepEqual(unavailableServerAction.action, { kind: "sync_now", label: "Sync now", filled: true });
+
+  const pausedDevice = sourceStatusWords(source({
+    ...fixture(5),
+    source_kind: "local_device",
+    status: "paused",
+  }), { now: NOW });
+  assert.deepEqual(pausedDevice.action, { kind: "view_device", label: "View this device", filled: true });
+});
 test("row 6 words an unverified empty first sync", () => assertRow(6, "First sync found no records", "attention", { kind: "retry_first_sync", label: "Retry first sync", filled: true }));
 test("row 7 words a verified empty first sync", () => assertRow(7, "No records found", "plain", { kind: "review_result", label: "Review result", filled: false }));
 test("row 8 words a required owner action", () => assertRow(8, "Needs you to sign in again", "attention", { kind: "server_cta", label: "Review this source", filled: true }));
@@ -268,9 +291,22 @@ test("a local-device source offers neither sync now nor resume", () => {
   assert.equal(deviceUnmeasured.action?.kind, "view_device");
 });
 
-test("a paused historical archive offers credential repair instead of resume", () => {
-  const result = sourceStatusWords(source({ ...fixture(10), source_binding_kind: "historical_archive" }), { now: NOW });
-  assert.equal(result.action?.kind, "repair_credential");
+test("a paused historical archive resumes only when it has no sign-in to update", () => {
+  const archive = source({ ...fixture(10), source_binding_kind: "historical_archive" });
+  // DIRECTION.md, one status table row 10: resume alone would fail the next sync while a sign-in can be updated;
+  // updating it resumes the archive.
+  assert.deepEqual(
+    sourceStatusWords(archive, { now: NOW, signInRepairAvailable: false }).action,
+    { kind: "resume", label: "Resume syncing", filled: false }
+  );
+  assert.deepEqual(
+    sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action,
+    { kind: "repair_credential", label: "Reconnect", filled: false }
+  );
+  // Home and the list do not know; they keep Reconnect, which links to the source's page.
+  assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Reconnect", filled: false });
+  // No server sign-in action does not mean no sign-in is needed.
+  assert.equal(sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action?.kind, "repair_credential");
 });
 
 test("rows 17 and 22 offer sync only when this server can start it", () => {

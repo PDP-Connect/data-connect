@@ -203,6 +203,8 @@ test("each status row renders the shared sentence and only the controls for that
     assert.match(visibleText, /Browse records/);
     assert.match(visibleText, /Latest syncs/);
     assert.match(visibleText, /All sync history/);
+    // DIRECTION.md, one data source: keep All sync history as the only history link.
+    assert.doesNotMatch(visibleText, /See every sync in Sync history/);
     assert.match(visibleText, /Schedule/);
     assert.match(visibleText, /This data source/);
     assert.match(visibleText, /Rename/);
@@ -240,12 +242,13 @@ test("each status row renders the shared sentence and only the controls for that
     }
     if (row === 10) {
       assert.equal(visibleText.split("Resume").length - 1, 1, "ordinary paused source has one Resume action");
-      assert.match(visibleText, /Syncing is paused\. Your records, schedule, and sign-in are kept\./);
+      // DIRECTION.md, one data source row 10: the state sentence already says what the pause keeps.
+      assert.doesNotMatch(visibleText, /Syncing is paused\. Your records, schedule, and sign-in are kept\./);
     }
     if (row === 11) assert.match(visibleText, /Active sync/);
     if (row === 19 || row === 20) {
       // DIRECTION.md, one data source: no per-source sync list is available; link to Sync history.
-      assert.match(visibleText, /See every sync in Sync history\./);
+      assert.match(visibleText, /All sync history/);
       assert.doesNotMatch(visibleText, /No syncs yet|No syncs are listed/);
     }
     if (row === 22) {
@@ -298,7 +301,7 @@ test("record kinds use the same humanised names as their pages", async (t) => {
   assert.doesNotMatch(text, /\bmessages\b|\bsessions\b/);
 });
 
-test("rows 5 and 7 keep a server action and hide the no-action self-link fallback", async (t) => {
+test("row 5 falls back to Sync now and row 7 has no action without a server action", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   for (const [row, label] of [[5, "Review setup"], [7, "Review result"]] as const) {
     const withAction = await renderDemo(`status-${row}`);
@@ -313,24 +316,34 @@ test("rows 5 and 7 keep a server action and hide the no-action self-link fallbac
     const withoutAction = await renderDemo(`status-${row}-no-server-action`);
     const document = withoutAction.window.document;
     // DIRECTION.md, What must stay true: a page control cannot point back to the same page.
-    assert.equal(
-      [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === label).length,
-      0,
-      `row ${row} hides a review action when the server supplies none`
-    );
+    if (row === 5) {
+      // DIRECTION.md, one status table row 5: a needs-you status always has a next action.
+      assert.equal(
+        [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === "Sync now").length,
+        1,
+        "row 5 can start a sync when the server supplies no review action"
+      );
+    } else {
+      assert.equal(
+        [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === label).length,
+        0,
+        `row ${row} hides a review action when the server supplies none`
+      );
+    }
     assert.equal(document.querySelector('a[href="/sources/cin_demo_claude_code_workstation"]'), null);
   }
 });
 
-test("paused historical archives keep their credential repair action instead of Resume", async (t) => {
+test("paused historical archives resume when they have no sign-in repair address", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const dom = await renderDemo("status-10-historical-archive");
   const document = dom.window.document;
   const controls = [...document.querySelectorAll("button, a")];
-  // DIRECTION.md, one status table row 10: historical archives use credential repair, never Resume.
+  // DIRECTION.md, one status table row 10: Resume is the fallback when no repair address exists.
   assert.equal(document.querySelector("[data-status-row]")?.getAttribute("data-status-row"), "10");
   assert.equal(controls.some((element) => element.textContent?.trim() === "Resume"), false);
-  // The demo archive has no sign-in repair address, so the header offers no action and no self-link.
+  // DIRECTION.md, one status table row 10: without a repair address, Resume is the next step.
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume syncing"), true);
   assert.equal(controls.some((element) => element.textContent?.trim() === "Reconnect"), false);
   assert.equal(document.querySelector('a[href="/sources/cin_demo_claude_code_workstation"]'), null);
 });
@@ -340,7 +353,8 @@ test("a failed sync without a per-source row still links to Sync history", async
   const dom = await renderDemo("status-22-failed-last-run");
   const text = visibleOutsideDetails(dom);
   // DIRECTION.md, one data source: show the history link when any sync exists but the list has no rows.
-  assert.match(text, /See every sync in Sync history\./);
+  // DIRECTION.md, one data source: use the section action as the sole history link.
+  assert.match(text, /All sync history/);
   assert.doesNotMatch(text, /No syncs yet\./);
 });
 
