@@ -99,7 +99,7 @@ export function RenameConnection({ connectionId, currentLabel, typeName }: Props
           type="button"
           variant="ghost"
         >
-          <Pencil aria-hidden className="h-6 w-6" />
+          <Pencil aria-hidden className="size-4" />
           Rename
         </IcButton>
         {toast ? <Toast message={toast.message} tone={toast.tone} /> : null}

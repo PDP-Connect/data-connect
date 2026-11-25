@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcInput } from "@pdpp/brand-react";
-import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
@@ -47,11 +46,10 @@ interface Props {
  */
 export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
   return (
-    <Section
-      description="These actions affect this data source. Other data sources stay as they are."
-      id="danger-zone"
-      title="Remove or reset"
-    >
+    // Opens by itself when a refused or finished action redirects here with a result to show.
+    <details className="mt-6 border-t border-border pt-4" data-testid="danger-zone" id="danger-zone" open={Boolean(error || message)}>
+      <summary className="cursor-pointer text-sm font-medium text-foreground">Remove or reset</summary>
+      <p className="mt-2 pdpp-caption text-muted-foreground">These actions affect this data source. Other data sources stay as they are.</p>
       {error ? <ActionFeedback message={error} tone="error" /> : null}
       {message ? <ActionFeedback message={message} tone="success" /> : null}
 
@@ -72,7 +70,7 @@ export function ConnectionDangerZone({ activeRunId = null, connectionId, error, 
           <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
         </div>
       )}
-    </Section>
+    </details>
   );
 }
 
@@ -85,11 +83,11 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
     <div className="flex flex-col gap-2">
       <h3 className="pdpp-body font-medium">Sync again from the start</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Clears the saved sync position, then starts a full sync. Records and sign-in details are kept.
+        Collects everything again. Your records and sign-in stay.
       </p>
       <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
         <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-        <span>Clear the saved sync position and start a full sync for this data source.</span>
+        <span>Sync again from the start for this data source.</span>
       </label>
       <div className="flex flex-wrap items-center gap-3">
         <IcButton

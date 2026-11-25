@@ -127,7 +127,9 @@ test("a failed update read falls back to the plain version line", async () => {
     displayName: "Claude Code",
     version: "1.4.0",
   }));
-  assert.match(html, /1\.4\.0, the newest\./);
+  // DIRECTION.md, one data source Version: the version line must not claim newness without proof.
+  assert.match(html, /Version 1\.4\.0\./);
+  assert.doesNotMatch(html, /newest/);
   assert.doesNotMatch(html, /Version 1\.5\.0 is ready/);
 });
 
@@ -135,13 +137,15 @@ test("an update read that never resolves leaves the version fallback visible", a
   const SourceUpdateSlot = await sourceUpdateSection;
   const never = new Promise<null>(() => {});
   const html = renderToStaticMarkup(createElement(Suspense, {
-    fallback: createElement("p", null, "1.4.0, the newest."),
+    fallback: createElement("p", null, "Version 1.4.0."),
   }, createElement(SourceUpdateSlot, {
     demoModel: null,
     displayName: "Claude Code",
     updates: never,
     version: "1.4.0",
   })));
-  assert.match(html, /1\.4\.0, the newest\./);
+  // DIRECTION.md, one data source Version: an unresolved update check cannot prove newness.
+  assert.match(html, /Version 1\.4\.0\./);
+  assert.doesNotMatch(html, /newest/);
   assert.doesNotMatch(html, /Update 1\.5\.0/);
 });

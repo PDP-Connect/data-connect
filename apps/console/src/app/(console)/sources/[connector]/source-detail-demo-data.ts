@@ -330,6 +330,69 @@ export function buildRecoveryDemoModel(
   return applyStatusRow(model, statusRow, includePendingDetails);
 }
 
+export function withStatusDemoVariant(model: ConnectorPageModel, variant: string): ConnectorPageModel {
+  let source = model.source;
+  let sourceInstances = model.sourceInstances;
+  const currentActions = source.rendered_verdict?.required_actions ?? [];
+
+  if (variant === "no-server-action") {
+    source = {
+      ...source,
+      rendered_verdict: source.rendered_verdict ? { ...source.rendered_verdict, required_actions: [] } : null,
+    };
+  } else if (variant === "failed-last-run") {
+    source = {
+      ...source,
+      last_run: {
+        event_count: 0,
+        failure_reason: "The source did not return records.",
+        finished_at: DEMO_SUCCESS,
+        first_at: DEMO_SUCCESS,
+        last_at: DEMO_SUCCESS,
+        run_id: "run_demo_failed_without_rows",
+        started_at: DEMO_SUCCESS,
+        status: "failed",
+      },
+    };
+  } else if (variant === "historical-archive") {
+    source = { ...source, source_binding_kind: "historical_archive" };
+  } else if (variant === "local-device") {
+    source = { ...source, source_kind: "local_device" };
+    sourceInstances = buildRecoveryDemoModel(1).sourceInstances;
+  } else if (variant === "stored-credential" || variant === "provider-interaction" || variant === "owner-device") {
+    const surface = variant === "stored-credential"
+      ? "stored_credential"
+      : variant === "provider-interaction"
+        ? "provider_interaction"
+        : "local_device";
+    const label = variant === "stored-credential"
+      ? "Update sign-in details"
+      : variant === "provider-interaction"
+        ? "Continue sign in"
+        : "See device steps";
+    source = {
+      ...source,
+      source_kind: variant === "owner-device" ? "local_device" : source.source_kind,
+      rendered_verdict: source.rendered_verdict
+        ? { ...source.rendered_verdict, required_actions: [ownerAction(label, "reauth", surface)] }
+        : null,
+    };
+    if (variant === "owner-device") sourceInstances = buildRecoveryDemoModel(1).sourceInstances;
+  } else if (variant !== "browser-session" && currentActions.length === 0) {
+    return model;
+  }
+
+  const renderedVerdict = source.rendered_verdict ?? null;
+  return {
+    ...model,
+    connectionPrimaryAction: renderedVerdict?.required_actions[0] ?? null,
+    connectionRenderedVerdict: renderedVerdict,
+    source,
+    sourceBindingKind: source.source_binding_kind ?? null,
+    sourceInstances,
+  };
+}
+
 function statusSchedule(
   effectiveMode: RefSchedule["effective_mode"],
   backoff: RefSchedule["scheduler_backoff"] = null,

@@ -49,7 +49,7 @@ const ISLAND_HIDES_WHEN_NULL_RE = /if \(connectionId === null\) \{\s*return null
 // via a `::before` pseudo-element (`inset-[-10px]`) rather than the visible
 // box, so this pins the technique, not just a bigger className.
 const ISLAND_HIT_AREA_RE = /before:absolute before:inset-\[-10px\] before:content-\[''\]/;
-const ISLAND_VISIBLE_BOX_RE = /h-6 w-6/;
+const ISLAND_VISIBLE_BOX_RE = /size-4/;
 
 const PAGE_SEED_RE = /isFallbackConnectionLabel\(\{[\s\S]*?\}\)\s*\?\s*""\s*:\s*\(summary\.display_name \?\? ""\)/;
 const PAGE_RENDERS_ISLAND_RE = /<RenameConnection/;
@@ -106,10 +106,10 @@ test("rename island hides itself when there is no addressable connection", async
   assert.match(src, ISLAND_HIDES_WHEN_NULL_RE);
 });
 
-test("rename button's hit area meets the 44px touch-target bar without resizing the visible 24x24 icon box", async () => {
+test("rename button's hit area meets the 44px touch-target bar with a 16px icon", async () => {
   const src = await readFile(ISLAND_FILE, "utf8");
   assert.match(src, ISLAND_HIT_AREA_RE);
-  // 24px box + 10px expansion each side = 44px hit area.
+  // Brief repair 2: the pencil stays small while its existing hit area stays 44px.
   assert.match(src, ISLAND_VISIBLE_BOX_RE);
 });
 

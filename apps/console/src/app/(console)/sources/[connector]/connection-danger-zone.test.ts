@@ -187,8 +187,10 @@ test("delete requires reproducing the connection id before the destructive submi
 
 test("lifecycle actions use their group title without a bordered red box", async () => {
   const dz = await read(DANGER_ZONE_FILE);
-  // Brief decision 9: use a hairline group titled Remove or reset; red stays on remove/reset buttons.
-  assert.match(dz, /title="Remove or reset"/);
+  // Brief repair 1: destructive actions sit inside one closed Remove or reset section.
+  assert.match(dz, /<details[^>]*id="danger-zone"/);
+  assert.match(dz, /<summary[^>]*>Remove or reset<\/summary>/);
+  assert.doesNotMatch(dz, /<details[^>]*\bopen(?:\s|>)/);
   assert.doesNotMatch(dz, /border(?:-\w+)?\s+border-(?:destructive|red)/);
   assert.match(dz, /className="text-destructive"/);
 });

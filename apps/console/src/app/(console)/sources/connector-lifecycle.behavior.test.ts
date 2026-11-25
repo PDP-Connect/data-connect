@@ -93,8 +93,8 @@ test("reset control requires confirmation and reports refusal or success", async
     assert.ok(button);
     assert.equal(button.disabled, true);
     const checkbox = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-      // DIRECTION.md "This data source": the confirmation keeps its meaning in plain words.
-      input.closest("label")?.textContent?.includes("Clear the saved sync position and start a full sync")
+      // detail-repair 5: "saved sync position" is system language; the confirmation names the action in plain words.
+      input.closest("label")?.textContent?.includes("Sync again from the start for this data source.")
     );
     assert.ok(checkbox);
     await act(async () => checkbox.click());
@@ -112,6 +112,24 @@ test("reset control requires confirmation and reports refusal or success", async
     assert.equal(resetCalls, 2);
     assert.equal(runCalls, 0);
     assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Full sync started/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Remove or reset opens by itself when it carries a result to show", async () => {
+  const { ConnectionDangerZone, dom } = await component;
+  const container = dom.window.document.createElement("div");
+  dom.window.document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1" })));
+    // detail-repair 1: the section starts closed so the page ends calm.
+    assert.equal(container.querySelector<HTMLDetailsElement>("#danger-zone")?.open, false);
+    // A refused disconnect or delete redirects to #danger-zone with ?error=; a closed section would hide it.
+    await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1", error: "This could not be done." })));
+    assert.equal(container.querySelector<HTMLDetailsElement>("#danger-zone")?.open, true);
   } finally {
     await act(async () => root.unmount());
     container.remove();

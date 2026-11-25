@@ -190,7 +190,25 @@ test("row 21 words a source with a past successful sync and no measured state", 
 test("the unchecked pill belongs to row 21, not the row 20 fixture", () => {
   assert.equal(fixture(20).rendered_verdict?.pill.label, "Healthy");
   assert.equal(fixture(21).rendered_verdict?.pill.label, "Collected, not independently checked");
-  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect has not yet checked this for gaps.");
+  // DIRECTION.md row 21: use plain words instead of the banned word "gaps".
+  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect has not checked for missing records.");
+});
+
+test("pending detail work uses one shared sentence for rows 19 and 20", () => {
+  // DIRECTION.md rows 19–20: pending detail wording belongs to the shared sentence function.
+  for (const row of [19, 20] as const) {
+    assert.equal(
+      sourceStateSentence(fixture(row), { now: NOW, name: "Example source", pendingDetails: true }).text,
+      "Synced 2 hours ago. Some details are still being fetched."
+    );
+  }
+});
+test("pending detail work keeps the sentence of every other row and adds the note", () => {
+  // Intake repair: before this round the page added the note on every row; row 16 must not lose it.
+  assert.equal(
+    sourceStateSentence(fixture(16), { now: NOW, name: "Example source", pendingDetails: true }).text,
+    `${sourceStateSentence(fixture(16), { now: NOW, name: "Example source" }).text} Some details are still being fetched.`
+  );
 });
 test("row 22 words a manual import with no completed import", () => assertRow(22, "Nothing imported yet", "plain"));
 test("row 23 uses the pill when the owner state is missing", () => assertRow(23, "Synced 2 hours ago", "plain"));

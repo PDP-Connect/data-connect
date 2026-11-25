@@ -206,13 +206,16 @@ test("each status row renders the shared sentence and only the controls for that
     assert.match(visibleText, /Schedule/);
     assert.match(visibleText, /This data source/);
     assert.match(visibleText, /Rename/);
-    assert.match(visibleText, /Remove or reset/);
-    assert.match(visibleText, /Delete data source and erase its records/);
+    const dangerText = document.querySelector("#danger-zone")?.textContent ?? "";
+    assert.match(dangerText, /Remove or reset/);
+    // DIRECTION.md, one data source: destructive actions sit in a folded section.
+    assert.ok(!document.querySelector('#danger-zone[open]'), "Remove or reset starts closed");
+    assert.match(dangerText, /Delete data source and erase its records/);
     if (row !== 2) {
-      assert.match(visibleText, /Sync again from the start/);
-      assert.match(visibleText, /Disconnect/);
+      assert.match(dangerText, /Sync again from the start/);
+      assert.match(dangerText, /Disconnect/);
     } else {
-      assert.doesNotMatch(visibleText, /Sync again from the start|Disconnect/);
+      assert.doesNotMatch(dangerText, /Sync again from the start|Disconnect/);
     }
 
     if (status.action && status.action.kind !== "view_device") {
@@ -240,6 +243,15 @@ test("each status row renders the shared sentence and only the controls for that
       assert.match(visibleText, /Syncing is paused\. Your records, schedule, and sign-in are kept\./);
     }
     if (row === 11) assert.match(visibleText, /Active sync/);
+    if (row === 19 || row === 20) {
+      // DIRECTION.md, one data source: no per-source sync list is available; link to Sync history.
+      assert.match(visibleText, /See every sync in Sync history\./);
+      assert.doesNotMatch(visibleText, /No syncs yet|No syncs are listed/);
+    }
+    if (row === 22) {
+      // DIRECTION.md, one data source: say No syncs yet only when no sync has ever happened.
+      assert.match(visibleText, /No syncs yet\./);
+    }
     if (row === 12) {
       const details = document.querySelector('details[data-testid="source-details"]');
       assert.ok(document.querySelector('[data-testid="auto-paused-banner"]'), "backoff banner renders with a recent sync");
@@ -261,8 +273,90 @@ test("pending details replace the up-to-date wording on rows 19 and 20", async (
   for (const row of [19, 20] as const) {
     const dom = await renderDemo(row === 20 ? "pending-details" : "pending-details-19");
     const text = dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "";
+    // DIRECTION.md, one data source rows 19–20: pending details replace the normal state sentence.
     assert.match(text, /^Synced .*\. Some details are still being fetched\.$/);
     assert.doesNotMatch(text, /Up to date|next in|has not checked this against the source/);
+  }
+});
+
+test("pending details still show on a row other than 19 and 20", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const dom = await renderDemo("atlas");
+  const sentence = dom.window.document.querySelector('[data-testid="source-state-sentence"]');
+  // Intake repair: the shared sentence keeps the pending note the page showed on row 16 before.
+  assert.equal(sentence?.getAttribute("data-status-row"), "16");
+  assert.match(sentence?.textContent ?? "", /^Trouble syncing\. .*Some details are still being fetched\.$/);
+});
+
+test("record kinds use the same humanised names as their pages", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const dom = await renderDemo("status-19");
+  const text = visibleOutsideDetails(dom);
+  // DIRECTION.md, one data source: What is here names kinds of records for people.
+  assert.match(text, /Messages/);
+  assert.match(text, /Sessions/);
+  assert.doesNotMatch(text, /\bmessages\b|\bsessions\b/);
+});
+
+test("rows 5 and 7 keep a server action and hide the no-action self-link fallback", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  for (const [row, label] of [[5, "Review setup"], [7, "Review result"]] as const) {
+    const withAction = await renderDemo(`status-${row}`);
+    const withActionControl = [...withAction.window.document.querySelectorAll("button, a")]
+      .find((element) => element.textContent?.trim() === label);
+    // DIRECTION.md, one status table: the server action keeps its existing destination.
+    assert.ok(withActionControl, `row ${row} keeps its server action`);
+    if (withActionControl?.tagName === "A") {
+      assert.notEqual(withActionControl.getAttribute("href"), "/sources/cin_demo_claude_code_workstation");
+    }
+
+    const withoutAction = await renderDemo(`status-${row}-no-server-action`);
+    const document = withoutAction.window.document;
+    // DIRECTION.md, What must stay true: a page control cannot point back to the same page.
+    assert.equal(
+      [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === label).length,
+      0,
+      `row ${row} hides a review action when the server supplies none`
+    );
+    assert.equal(document.querySelector('a[href="/sources/cin_demo_claude_code_workstation"]'), null);
+  }
+});
+
+test("paused historical archives keep their credential repair action instead of Resume", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const dom = await renderDemo("status-10-historical-archive");
+  const document = dom.window.document;
+  const controls = [...document.querySelectorAll("button, a")];
+  // DIRECTION.md, one status table row 10: historical archives use credential repair, never Resume.
+  assert.equal(document.querySelector("[data-status-row]")?.getAttribute("data-status-row"), "10");
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume"), false);
+  // The demo archive has no sign-in repair address, so the header offers no action and no self-link.
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Reconnect"), false);
+  assert.equal(document.querySelector('a[href="/sources/cin_demo_claude_code_workstation"]'), null);
+});
+
+test("a failed sync without a per-source row still links to Sync history", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const dom = await renderDemo("status-22-failed-last-run");
+  const text = visibleOutsideDetails(dom);
+  // DIRECTION.md, one data source: show the history link when any sync exists but the list has no rows.
+  assert.match(text, /See every sync in Sync history\./);
+  assert.doesNotMatch(text, /No syncs yet\./);
+});
+
+test("needs-you variants render the matching shared sentence and server action", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const cases = [
+    ["stored-credential", "Claude Code workstation needs its saved sign-in details updated.", "Update credential"],
+    ["provider-interaction", "Claude Code workstation is waiting for you to finish a step.", "Continue sign in"],
+    ["owner-device", "Claude Code workstation needs attention on your device.", "See device steps"],
+  ] as const;
+  for (const [variant, sentence, action] of cases) {
+    const dom = await renderDemo(`status-8-${variant}`);
+    const text = visibleOutsideDetails(dom);
+    // DIRECTION.md, one status table row 8: words follow the required action surface.
+    assert.ok(text.includes(sentence), `${variant} sentence`);
+    assert.ok(text.includes(action), `${variant} action`);
   }
 });
 

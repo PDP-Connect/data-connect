@@ -7,6 +7,7 @@ import {
   formatConnectorKeyForDisplay,
   formatConnectorNameForDisplay,
   formatRelative,
+  humanizeFieldLabel,
   isFallbackConnectionLabel,
   isSetupFailedSource,
   streamDisplayLabel,
@@ -107,7 +108,7 @@ function addSourceHrefForConnector(connectorId: string): string {
 }
 
 function demoStatusRow(value: string | undefined): SourceStatusRow | null {
-  const match = value?.match(/^status-(\d{1,2})(?:-local-device)?$/);
+  const match = value?.match(/^status-(\d{1,2})(?:-[a-z-]+)?$/);
   if (!match) return null;
   const row = Number(match[1]);
   return row >= 1 && row <= 24 ? (row as SourceStatusRow) : null;
@@ -442,6 +443,8 @@ export default async function ConnectorPage({
     const demo = await import("./source-detail-demo-data.ts");
     const row = sp.demo === "pending-details" ? 20 : sp.demo === "pending-details-19" ? 19 : demoRow ?? (sp.demo === "atlas" ? 16 : 19);
     model = demo.buildRecoveryDemoModel(row, sp.demo === "pending-details" || sp.demo === "pending-details-19" || row === 16);
+    const demoVariant = sp.demo?.replace(/^status-\d{1,2}-?/, "");
+    if (demoRow !== null && demoVariant) model = demo.withStatusDemoVariant(model, demoVariant);
     if (sp.demo === "status-10-local-device") {
       model = { ...model, source: { ...model.source, source_kind: "local_device" }, sourceInstances: demo.buildRecoveryDemoModel(1).sourceInstances };
     }
@@ -849,12 +852,12 @@ function ConnectorPageView({
   const scheduleSyncAvailable = connectionPrimaryAction?.kind === "reattach_schedule" && primaryAction.kind === "sync";
   const autoPausedBanner = deriveAutoPausedBanner(schedule);
   const renderedAt = new Date(now);
-  const sourceStatus = sourceStatusWords(source, { now: renderedAt });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName });
-  const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
-  const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const pendingDetails = Boolean(connectionHealth?.detail_gap_backlog?.pending) ||
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
+  const sourceStatus = sourceStatusWords(source, { now: renderedAt });
+  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, pendingDetails });
+  const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
+  const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const manifestStreams = Array.isArray(manifest.streams) ? manifest.streams : [];
   const streamLabelsByName = new Map(
     manifestStreams.map(
@@ -897,7 +900,7 @@ function ConnectorPageView({
         }
       />
 
-      <SourceStateSentenceText connectionId={connectionId} pendingDetails={pendingDetails} sentence={stateSentence} status={sourceStatus} />
+      <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
 
       {hasDeviceLocalRemediation ? (
         <section className="mb-6" data-testid="device-collector-trouble">
@@ -919,7 +922,8 @@ function ConnectorPageView({
             {streams.map((s) => {
               const countLabel = streamCountLabel(s);
               const unexpected = isUnexpectedStreamDeclaration(s.declaration_state);
-              const displayLabel = streamLabelsByName.get(s.name) ?? s.name;
+              const manifestLabel = streamLabelsByName.get(s.name);
+              const displayLabel = manifestLabel && manifestLabel !== s.name ? manifestLabel : humanizeFieldLabel(s.name);
               const lastUpdated = sourceTimeLabel(s.last_updated);
               const reportEntry = source.collection_report?.find((entry) => entry.stream === s.name);
               const incompleteLine = reportEntry &&
@@ -953,6 +957,7 @@ function ConnectorPageView({
         activeRunHref={activeRunHref}
         autoPausedBanner={autoPausedBanner}
         connectorId={connectorId}
+        hasSyncHistory={Boolean(source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? source.last_run?.last_at)}
         recentRuns={recentRuns}
       />
       {manualUploadHref || scheduleSyncAvailable ? (
@@ -997,14 +1002,13 @@ function ConnectorPageView({
               typeName={formatConnectorKeyForDisplay(connectorId)}
             />
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
-            {pausedResumable ? <p className="pdpp-caption text-muted-foreground">Syncing is paused. Your records, schedule, and sign-in are kept.</p> : null}
+            {pausedResumable ? <p className="mt-6 pdpp-caption text-muted-foreground">Syncing is paused. Your records, schedule, and sign-in are kept.</p> : null}
             <CredentialRepairLinks
               revoked={revoked}
               setupFailed={setupFailed}
               storedCredentialUpdateHref={storedCredentialUpdateHref}
               hasStaticSecretCredentialUpdate={storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"}
             />
-            <div aria-hidden className="my-4 border-border border-t" />
             <ConnectionDangerZone
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
@@ -1250,7 +1254,7 @@ function ConnectorPrimaryHeaderAction({
     return <form action={resumeConnectionAction}><input name="connection_id" type="hidden" value={connectionId ?? ""} /><IcButton size="sm" type="submit" variant="ghost">Resume</IcButton></form>;
   }
   if (statusAction?.kind === "repair_credential" && credentialUpdateHref) {
-    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>Update sign-in details</Link>;
+    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;
   }
   if (statusAction?.kind === "continue_setup") {
     return <form action={resumeSetupConnectionAction}><input name="connection_id" type="hidden" value={routeConnectionId} /><IcButton size="sm" type="submit" variant={statusAction.filled ? "default" : "ghost"}>Continue setup</IcButton></form>;
@@ -1275,11 +1279,7 @@ function ConnectorPrimaryHeaderAction({
         initialRunning={running}
         variant={statusAction.filled ? "default" : "outline"}
       />
-    ) : (
-      <Link className={buttonVariants({ size: "sm", variant: statusAction.filled ? "default" : "ghost" })} href={`/sources/${encodeURIComponent(routeConnectionId)}`}>
-        {statusAction.label}
-      </Link>
-    );
+    ) : null;
   }
   // During a source-pressure cooldown the ordinary sync waits; the page keeps
   // only the named "Force run anyway" override in Sync options.
@@ -1653,11 +1653,13 @@ function RecentRunsSection({
   activeRunHref,
   autoPausedBanner,
   connectorId,
+  hasSyncHistory,
   recentRuns,
 }: {
   activeRunHref: string | null;
   autoPausedBanner: AutoPausedBanner | null;
   connectorId: string;
+  hasSyncHistory: boolean;
   recentRuns: RunSummary[];
 }) {
   return (
@@ -1671,7 +1673,11 @@ function RecentRunsSection({
       title="Latest syncs"
     >
       {recentRuns.length === 0 ? (
-        <p className="pdpp-caption text-muted-foreground italic">No syncs are listed for this data source yet.</p>
+        hasSyncHistory ? (
+          <p className="pdpp-caption text-muted-foreground">
+            See every sync in <Link className="text-primary hover:underline" href="/syncs">Sync history</Link>.
+          </p>
+        ) : <p className="pdpp-caption text-muted-foreground">No syncs yet.</p>
       ) : (
         <DataList>
           {autoPausedBanner ? (
@@ -1852,7 +1858,7 @@ function ConnectionIdentityLine({
  */
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
-    <div className="flex flex-col items-start gap-2">
+    <div className="mt-6 flex flex-col items-start gap-2">
       <p className="pdpp-caption text-muted-foreground">Stop syncing for now. Your records, schedule, and sign-in are kept.</p>
       <form action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
@@ -1979,7 +1985,7 @@ function ScheduleSummary({ schedule }: { schedule: RefSchedule | null }) {
 
 function SourceVersion({ version }: { version: string | null }) {
   return version ? (
-    <Section title="Version"><p className="text-sm text-muted-foreground">{version}, the newest.</p></Section>
+    <Section title="Version"><p className="text-sm text-muted-foreground">Version {version}.</p></Section>
   ) : null;
 }
 

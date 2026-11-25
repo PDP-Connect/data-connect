@@ -265,11 +265,16 @@ function formatComing(value: string | null | undefined, now: Date): string | nul
 
 export interface SourceStateSentenceOptions extends SourceStatusOptions {
   name: string;
+  pendingDetails?: boolean;
 }
+
+const PENDING_DETAILS_SENTENCE = "Some details are still being fetched.";
 
 export function sourceStateSentence(source: RefConnectorSummary, options: SourceStateSentenceOptions): SourceStateSentence {
   const { text, slot = null } = matchStateSentence(source, options);
-  return { text, slot };
+  // Rows 19-20 replace their sentence; every other row keeps it and adds the pending note.
+  const pending = options.pendingDetails && !text.endsWith(PENDING_DETAILS_SENTENCE) ? ` ${PENDING_DETAILS_SENTENCE}` : "";
+  return { text: `${text}${pending}`, slot };
 }
 
 function matchStateSentence(
@@ -280,6 +285,10 @@ function matchStateSentence(
   const when = formatWhen(lastSuccessfulSync(source), options.now);
   const withLastSync = (prefix: string) => when ? `${prefix} Last synced ${when}.` : `${prefix}.`;
   const wordsWithoutWhen = () => when ? status.words.replace(` · last synced ${when}`, "") : status.words;
+
+  if (options.pendingDetails && (status.row === 19 || status.row === 20)) {
+    return { text: `Synced${when ? ` ${when}` : ""}. ${PENDING_DETAILS_SENTENCE}` };
+  }
 
   switch (status.row) {
     case 1: return { text: "Archived. It no longer syncs." };
@@ -349,7 +358,7 @@ function matchStateSentence(
         : "";
       return { text: `Synced${when ? ` ${when}` : ""}.${late}${unchecked}` };
     }
-    case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not yet checked this for gaps.` };
+    case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked for missing records.` };
     case 22: return { text: `${status.words}.` };
     case 23: {
       const label = source.rendered_verdict?.pill.label;
@@ -359,7 +368,7 @@ function matchStateSentence(
       if (label === "Needs refresh") {
         return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}${source.schedule?.effective_mode === "manual" ? " This one syncs only when you ask." : ""}` };
       }
-      if (label === "Not measured") return { text: lastSuccessfulSync(source) ? `Synced${when ? ` ${when}` : ""}. DataConnect has not yet checked this for gaps.` : "Not synced yet." };
+      if (label === "Not measured") return { text: lastSuccessfulSync(source) ? `Synced${when ? ` ${when}` : ""}. DataConnect has not checked for missing records.` : "Not synced yet." };
       if (label === "Collected, not independently checked") return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked this against the source.` };
       if (label === "Missing optional data" || label === "Some records stuck" || label === "Missing data" || label === "Can't collect") {
         const willRetry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";

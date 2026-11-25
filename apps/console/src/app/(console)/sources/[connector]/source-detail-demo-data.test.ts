@@ -59,9 +59,9 @@ test("pending details replace up-to-date wording on rows 19 and 20", () => {
   for (const row of [19, 20] as const) {
     const model = buildRecoveryDemoModel(row, true);
     const status = sourceStatusWords(model.source, { now: NOW });
-    const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName });
+    const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName, pendingDetails: true });
     const html = renderToStaticMarkup(
-      createElement(SourceStateSentenceText, { connectionId: model.connectionId, pendingDetails: true, sentence, status })
+      createElement(SourceStateSentenceText, { connectionId: model.connectionId, sentence, status })
     );
     const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 

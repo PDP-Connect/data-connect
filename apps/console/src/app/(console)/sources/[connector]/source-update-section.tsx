@@ -112,7 +112,7 @@ function SourceUpdateSection({ displayName, model }: { displayName: string; mode
 
 function SourceVersion({ version }: { version: string | null }) {
   return version ? (
-    <Section title="Version"><p className="text-sm text-muted-foreground">{version}, the newest.</p></Section>
+    <Section title="Version"><p className="text-sm text-muted-foreground">Version {version}.</p></Section>
   ) : null;
 }
 
