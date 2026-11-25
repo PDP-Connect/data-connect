@@ -13,10 +13,14 @@ export function recordTitlePreview(
   kind: PreviewKind,
   streamName: string
 ): RecordPreview {
+  const title = exploreRecordTitle({ preview: preview ?? undefined, stream: streamName });
+  // The header shows one line. Where the row rule falls to the kind name, a
+  // payment's amount says more about this record than "Transactions" does.
+  const amount = preview?.amount?.trim();
   return {
     ...preview,
     kind,
-    title: exploreRecordTitle({ preview: preview ?? undefined, stream: streamName }),
+    title: title === humanizeFieldLabel(streamName) && amount ? amount : title,
   };
 }
 
