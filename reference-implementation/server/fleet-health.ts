@@ -385,11 +385,18 @@ function reconcileFleetScope(
     }
     // Do not let input order decide which report represents an ambiguous connection.
     // Every candidate is surfaced as unassessed in the summary pass below.
-    if (ambiguousSummaryIds.has(connection.connectorInstanceId)) {
+    if (ambiguousSummaryIds.has(ref.connection_id)) {
       continue;
     }
-    const summary = summariesByConnectionId.get(connection.connectorInstanceId);
-    if (scope !== "operational" || !summary) {
+    // A summary assesses a connection only when it names the same connector
+    // and instance, not just the same connection id.
+    const summary = summariesByConnectionId.get(ref.connection_id);
+    if (
+      scope !== "operational" ||
+      !summary ||
+      summary.connector_instance_id !== ref.connector_instance_id ||
+      summary.connector_id !== ref.connector_id
+    ) {
       unassessed.push(ref);
       continue;
     }

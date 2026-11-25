@@ -692,6 +692,16 @@ test("a foreign summary cannot assess an inventory connection", () => {
   assert.equal(result.state, "indeterminate");
 });
 
+for (const mismatch of [{ connector_instance_id: "other-instance" }, { connector_id: "other" }] as const) {
+  test(`a summary with a different ${Object.keys(mismatch)[0]} cannot assess the connection`, () => {
+    const id = "configured-fixture";
+    const result = compose([inventory(id)], [summary(id, mismatch)]);
+    assert.deepEqual(result.scope.assessed, []);
+    assert.deepEqual(result.scope.unassessed.map((item) => item.connection_id), [id]);
+    assert.equal(result.state, "indeterminate");
+  });
+}
+
 test("retryable recovery and stalled work each prevent fleet health", () => {
   const retryable = summary("retry-a", {
     connection_health: {
