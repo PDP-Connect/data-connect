@@ -55,7 +55,8 @@ test("desktop password copy describes local storage without naming a storage mec
   assert.match(html, /stores this password on this computer for signing in\s+on other devices/)
   assert.match(html, /Reveal password/)
   assert.match(html, /Change password/)
-  assert.match(html, /signs out other browser sessions and\s+command-line tokens/)
+  // RAISE-RULES.md 4: use plain words for the access this password ends.
+  assert.match(html, /signs out other browser sessions and\s+access tokens/)
   assert.match(html, /Make sure no one else can see your screen/)
   assert.doesNotMatch(html, /keychain/)
   assert.equal((html.match(/signing in\s+on other devices/g) ?? []).length, 1)
@@ -80,18 +81,22 @@ test("the desktop copy omits the Linux OS prompt message and change stays availa
 
 test("an operator's PDPP_OWNER_PASSWORD keeps the env copy", async () => {
   const html = await render({ source: "env" })
+  // DIRECTION.md Values: keep monospace environment names inside folded Details.
+  assert.match(html, /Change this password in the server environment, then restart the server\./)
+  assert.match(html, /<details>[\s\S]*<code>PDPP_OWNER_PASSWORD<\/code>[\s\S]*<\/details>/)
   assert.match(
     html,
-    /Password change is disabled because this install uses\s+<code>PDPP_OWNER_PASSWORD<\/code>/
+    /Password changes are disabled while\s+<code>PDPP_OWNER_PASSWORD<\/code> is set\./
   )
-  assert.match(html, /restart the server/)
 })
 
 test("a desktop started with an owner password env var names both variables and DataConnect", async () => {
   const html = await render({ managedDesktop: true, source: "env" })
+  // RAISE-RULES.md 2 and DIRECTION.md Values: show one plain instruction and fold technical names.
+  assert.match(html, /Change this password in the server environment, then restart DataConnect\./)
+  assert.match(html, /<details>[\s\S]*DATACONNECT_OWNER_PASSWORD[\s\S]*PDPP_OWNER_PASSWORD[\s\S]*<\/details>/)
   assert.match(html, /DATACONNECT_OWNER_PASSWORD/)
   assert.match(html, /restart DataConnect/)
-  assert.doesNotMatch(html, /restart the server/)
 })
 
 test("the desktop button says Set password until the owner has set one, then Change password", async () => {

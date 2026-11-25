@@ -24,7 +24,7 @@ const VALUE_INPUT_NO_DEFAULT_RE = /<IcInput[\s\S]*?name=\{`field_\$\{field\.logi
 const DEFAULT_VALUE_ATTR_RE = /defaultValue/;
 const ONE_FORM_PER_GROUP_RE = /export function GroupForm/;
 const ONE_SAVE_PER_FIELD_RE = /function FieldRow/;
-const RESPONSIVE_GRID_RE = /sm:grid-cols-2/;
+const ROW_LAYOUT_RE = /divide-y divide-border\/70/;
 
 test("group form renders manifest-declared field labels, not logical/env keys", async () => {
   const src = await readFile(GROUP_FORM_FILE, "utf8");
@@ -49,7 +49,8 @@ test("group form submits one form per identity group, not one save per field", a
   assert.doesNotMatch(src, ONE_SAVE_PER_FIELD_RE);
 });
 
-test("group form wraps fields to a responsive grid instead of a fixed-width row", async () => {
+test("group form lays fields out as rows with hairlines", async () => {
   const src = await readFile(GROUP_FORM_FILE, "utf8");
-  assert.match(src, RESPONSIVE_GRID_RE);
+  // RAISE-RULES.md 3 and 7: rows replace cards and remain usable on a phone.
+  assert.match(src, ROW_LAYOUT_RE);
 });

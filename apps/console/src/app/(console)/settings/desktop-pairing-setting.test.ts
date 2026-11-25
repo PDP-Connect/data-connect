@@ -46,9 +46,10 @@ test("before a code exists the section offers only the button and the one-line r
   const { DesktopPairingSetting } = await loadSetting()
   const html = renderToStaticMarkup(createElement(DesktopPairingSetting))
   assert.match(html, /Create pairing code/)
+  // Brief settings-pages, decision 1: paired computers appear under Signed-in devices.
   assert.match(
     html,
-    /A code works once and expires in 10 minutes\. Paired computers appear\s+under Owner sessions and can be signed out there\./
+    /A code works once and expires in 10 minutes\. Paired computers appear\s+under Signed-in devices and can be signed out there\./
   )
   assert.doesNotMatch(html, /Expires in/)
   assert.doesNotMatch(html, /vana:\/\//)
@@ -63,6 +64,8 @@ test("a live code shows the address, code, Server ID and link, three copy button
   assert.ok(html.includes(`value="${ORIGIN}"`))
   assert.ok(html.includes(FINGERPRINT))
   assert.match(html, /Server ID/)
+  // RAISE-RULES.md 4: the raw server ID stays inside the folded Details section.
+  assert.match(html, /<details>[\s\S]*?<summary[^>]*>Details<\/summary>[\s\S]*?Server ID/)
   assert.match(html, /Expires in 9:42/)
   assert.match(html, /readOnly|readonly/)
   assert.ok(html.includes(`value="${LINK.replaceAll("&", "&amp;")}"`))
@@ -92,15 +95,13 @@ test("at zero the code and link are gone and the panel says to make a new one", 
 test("the settings page shows the section whenever owner sessions are shown", async () => {
   const page = await readFile(`${HERE}page.tsx`, "utf8")
   const sessions = page.indexOf("{ownerSessions.enabled ? (")
-  const pairing = page.indexOf('title="Attach a desktop app"')
+  const pairing = page.indexOf(">Attach a desktop app</h3>")
   assert.ok(sessions >= 0 && pairing > sessions)
   const gate = page.slice(page.lastIndexOf("{ownerSessions.enabled ? (", pairing), pairing)
   assert.match(gate, /ownerSessions\.enabled/)
   assert.match(page, /<DesktopPairingSetting \/>/)
-  assert.match(
-    page,
-    /Pair the DataConnect desktop app with this server\. The desktop shows this server's console and signs in as you\./
-  )
+  // Brief settings-pages, decision 1: desktop pairing stays within the Sign-in section.
+  assert.match(page, /<Section title="Sign-in">[\s\S]*?Attach a desktop app/)
 })
 
 test("the pairing action stays a server-only module and the setting a client module", async () => {

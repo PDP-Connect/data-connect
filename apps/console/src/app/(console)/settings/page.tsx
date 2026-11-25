@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Text } from "@pdpp/brand-react"
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
@@ -39,55 +40,47 @@ export default async function SettingsPage() {
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Settings" />
         <Section
-          description="Reveal connector surfaces intended for local development and connector testing."
-          title="Developer mode"
-        >
-          <DeveloperModeSetting />
-        </Section>
-        <Section
           id="remote-access"
-          description="Use DataConnect from your phone, or let AI apps like ChatGPT reach it."
           title="Remote access"
         >
           <RemoteAccessSetting appVersion={identity.version} />
         </Section>
-        {ownerPasswordSource ? (
-          <Section
-            id="owner-password"
-            description={
-              ownerPasswordSource === "env"
-                ? "Change the password used to sign in to this Personal Server."
-                : undefined
-            }
-            title="Owner password"
+        <Section title="Sign-in">
+          {ownerPasswordSource ? (
+            <div className="border-b border-border/70 pb-5" id="owner-password">
+              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Owner password</h3>
+              <OwnerPasswordSetting
+                canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
+                managedDesktop={managedDesktopHost}
+                passwordSet={ownerPasswordSet}
+                source={ownerPasswordSource}
+              />
+            </div>
+          ) : null}
+          {ownerSessions.enabled ? (
+            <div className="border-b border-border/70 py-5">
+              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Signed-in devices</h3>
+              <OwnerSessionsSetting
+                bearers={ownerSessions.bearers}
+                sessions={ownerSessions.sessions}
+              />
+            </div>
+          ) : null}
+          <Text
+            as="a"
+            className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            href="/deployment/tokens"
           >
-            <OwnerPasswordSetting
-              canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              managedDesktop={managedDesktopHost}
-              passwordSet={ownerPasswordSet}
-              source={ownerPasswordSource}
-            />
-          </Section>
-        ) : null}
-        {ownerSessions.enabled ? (
-          <Section
-            description="Review signed-in devices and command-line tokens. Signing one out blocks its next request."
-            title="Owner sessions"
-          >
-            <OwnerSessionsSetting
-              bearers={ownerSessions.bearers}
-              sessions={ownerSessions.sessions}
-            />
-          </Section>
-        ) : null}
-        {ownerSessions.enabled ? (
-          <Section
-            description="Pair the DataConnect desktop app with this server. The desktop shows this server's console and signs in as you."
-            title="Attach a desktop app"
-          >
-            <DesktopPairingSetting />
-          </Section>
-        ) : null}
+            <span>Access tokens</span>
+            <span aria-hidden="true" className="text-muted-foreground">→</span>
+          </Text>
+          {ownerSessions.enabled ? (
+            <div className="py-5">
+              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Attach a desktop app</h3>
+              <DesktopPairingSetting />
+            </div>
+          ) : null}
+        </Section>
         {managedDesktopHost ? (
           <>
         {/* Shown in any signed-in browser, not only the desktop window: the
@@ -107,6 +100,9 @@ export default async function SettingsPage() {
         </Section>
           </>
         ) : null}
+        <Section title="Developer mode">
+          <DeveloperModeSetting />
+        </Section>
         <AboutSection identity={identity} />
       </main>
     </RecordroomShellWithPalette>

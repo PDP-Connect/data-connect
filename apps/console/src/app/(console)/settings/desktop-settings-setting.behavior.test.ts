@@ -142,6 +142,27 @@ async function mounted(run: (rig: Rig) => Promise<void>) {
 
 const IDS = ["autostart-enabled", "start-minimized", "close-to-tray"]
 
+test("desktop settings render as hairline rows without card boxes", async () => {
+  await mounted(async rig => {
+    const autostartRead = rig.autostartRead[0]
+    const appConfigRead = rig.appConfigRead[0]
+    assert.ok(autostartRead && appConfigRead)
+    autostartRead.resolve({ enabled: true, pending: false })
+    appConfigRead.resolve({ closeToTray: true, startMinimized: false })
+    await rig.settle()
+
+    for (const id of IDS) {
+      const label = rig.checkbox(id).closest("label")
+      assert.ok(label, `expected label for #${id}`)
+      const row = label.parentElement
+      assert.ok(row, `expected row wrapper for #${id}`)
+      // RAISE-RULES.md 3: rows use hairlines instead of bordered cards.
+      assert.match(row.className, /border-b/)
+      assert.doesNotMatch(row.className, /rounded|bg-muted/)
+    }
+  })
+})
+
 function assertNothingActionable(rig: Rig, why: string) {
   for (const id of IDS) {
     assert.equal(rig.checkbox(id).disabled, true, `${id} must be disabled ${why}`)

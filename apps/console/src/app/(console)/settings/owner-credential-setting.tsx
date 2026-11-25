@@ -84,12 +84,12 @@ export function OwnerCredentialSetting({
               This Linux build allows local-only reveal without an OS prompt until polkit is verified.
             </p>
           ) : null}
-          <pre className="select-all overflow-x-auto rounded-md border border-border/70 bg-muted/10 px-3 py-2 font-mono text-sm text-foreground">
+          <pre className="select-all break-all rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-[15px] text-foreground">
             {password}
           </pre>
           <div className="flex flex-wrap items-center gap-2">
             <button
-              className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+              className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={copyPassword}
               type="button"
             >
@@ -105,7 +105,7 @@ export function OwnerCredentialSetting({
       ) : null}
 
       <button
-        className="justify-self-start rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+        className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         disabled={busy}
         onClick={runReveal}
         type="button"

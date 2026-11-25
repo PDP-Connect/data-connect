@@ -32,9 +32,22 @@ test("deployment page does not repeat the connect-an-AI-app card", async () => {
 });
 
 test("deployment page links to the tokens issuance surface", async () => {
-  // The Tokens link in the page header is how an operator navigates from
-  // deployment diagnostics to the owner-token issuance flow (the path for
-  // trusted local agents).
+  // Brief settings-pages, decision 3: the server page keeps a route to Access tokens.
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, TOKENS_LINK_RE);
+});
+
+test("server page leads with reachability and folds diagnostics under Details", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // Brief settings-pages, decision 2: plain server status comes before the checks and technical details.
+  assert.match(src, /title="Server"/);
+  assert.match(src, /The server is reachable\./);
+  assert.match(src, /<summary[^>]*>Details<\/summary>/);
+});
+
+test("the Details fold opens when the rebuild action returns, so its result is seen", async () => {
+  // RAISE-RULES.md 6: a failed action shows its sentence; the rebuild notice and
+  // error render inside Details, so the fold must open on ?notice= / ?error=.
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /open=\{Boolean\(params\.error\) \|\| params\.notice === "dataset_summary_rebuilt"\}/);
 });

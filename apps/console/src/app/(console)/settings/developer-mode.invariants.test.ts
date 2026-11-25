@@ -45,7 +45,7 @@ test("developer mode is off by default and persists with the existing local-stor
   assert.equal(readDeveloperMode(storage), false)
 })
 
-test("developer-only connector surfaces share one settings gate", async () => {
+test("developer-only data sources share one settings gate", async () => {
   const [catalog, panel, setting, page, shell] = await Promise.all([
     readFile(CATALOG_FILE, "utf8"),
     readFile(PANEL_FILE, "utf8"),
@@ -57,6 +57,9 @@ test("developer-only connector surfaces share one settings gate", async () => {
   assert.match(catalog, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/)
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
+  // RAISE-RULES.md 4: visible copy uses plain words for development data sources.
+  assert.match(setting, /Enable developer data sources/)
+  assert.match(setting, /in-development data sources/)
   assert.match(page, /<DeveloperModeSetting \/>/)
   // DIRECTION.md "The frame and the menu": Settings is a menu item with an icon and children.
   assert.match(shell, /label: "Settings",\s+href: "\/settings"/)

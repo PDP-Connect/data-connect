@@ -32,7 +32,8 @@ const REVALIDATE_PATH_RE = /revalidatePath\(PAGE_PATH\)/;
 const DASHBOARD_ACCESS_RE = /requireDashboardAccess\(PAGE_PATH\)/;
 const PROVIDER_APP_CONFIG_FIELD_INTERFACE_RE = /export interface ProviderAppConfigField \{[\s\S]*?\n\}/;
 const PROVIDER_APP_CONFIG_GROUP_LABEL_RE = /provider_identity_label: string/;
-const PLAIN_LANGUAGE_TITLE_RE = /title="Set up provider access"/;
+// Brief settings-pages, decision 4: use the page's job in plain words.
+const PLAIN_LANGUAGE_TITLE_RE = /title="Sign-in apps for data sources"/;
 const NO_INTERNAL_PROVIDER_APPS_COPY_RE = /Provider apps/;
 const NO_AUTHORIZE_ON_BEHALF_COPY_RE = /authorize on this deployment's behalf/;
 
@@ -77,4 +78,11 @@ test("provider-app config page uses plain external copy, not internal 'provider 
   assert.match(src, PLAIN_LANGUAGE_TITLE_RE);
   assert.doesNotMatch(src, NO_INTERNAL_PROVIDER_APPS_COPY_RE);
   assert.doesNotMatch(src, NO_AUTHORIZE_ON_BEHALF_COPY_RE);
+});
+
+test("provider-app config page names its way back the menu's word, Server", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES.md 2 and 4: /deployment is "Server" in the menu and breadcrumb; no "Deployment overview".
+  assert.doesNotMatch(src, /Deployment overview/);
+  assert.match(src, /href="\/deployment">\s*Server\s*</);
 });

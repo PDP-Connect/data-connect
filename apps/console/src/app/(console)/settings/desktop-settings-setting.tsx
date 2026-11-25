@@ -146,12 +146,12 @@ export function DesktopSettingsSetting({
   return (
     <div className="grid gap-3">
       {loadState === "loading" ? (
-        <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+        <p className="pdpp-caption text-muted-foreground">
           Reading the current desktop settings…
         </p>
       ) : null}
       {loadState === "failed" ? (
-        <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+        <p className="pdpp-caption text-muted-foreground">
           Desktop settings could not be read.
         </p>
       ) : null}
@@ -159,11 +159,11 @@ export function DesktopSettingsSetting({
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
-        <label className="flex items-start gap-2" htmlFor="autostart-enabled">
+        <label className="flex min-h-11 items-start gap-3" htmlFor="autostart-enabled">
           <input
             checked={stateIsKnown && autostartEnabled}
             disabled={autostartMutation.isPending || desktopUnavailable}
@@ -193,12 +193,12 @@ export function DesktopSettingsSetting({
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
         <label
-          className="flex items-start gap-2"
+          className="flex min-h-11 items-start gap-3"
           htmlFor="start-minimized"
         >
           <input
@@ -224,11 +224,11 @@ export function DesktopSettingsSetting({
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
-        <label className="flex items-start gap-2" htmlFor="close-to-tray">
+        <label className="flex min-h-11 items-start gap-3" htmlFor="close-to-tray">
           <input
             checked={stateIsKnown && closeToTray}
             disabled={busyCloseToTray || desktopUnavailable}
@@ -242,7 +242,7 @@ export function DesktopSettingsSetting({
             </span>
             <span className="pdpp-caption text-muted-foreground">
               Closing the window hides it to the tray instead of quitting.
-              DataConnect and its background connectors keep running; quit
+              DataConnect and its data sources stay active; quit
               from the tray menu to stop them. On by default.
             </span>
           </span>
@@ -251,7 +251,7 @@ export function DesktopSettingsSetting({
 
       {error ? (
         <p
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          className="text-[13px] text-destructive"
           role="alert"
         >
           {error}

@@ -113,11 +113,20 @@ export function OwnerPasswordSetting({
 
   if (source === "env" && managedDesktop) {
     return (
-      <p className="pdpp-caption text-muted-foreground">
-        This password comes from <code>DATACONNECT_OWNER_PASSWORD</code> or{" "}
-        <code>PDPP_OWNER_PASSWORD</code> in the environment DataConnect started
-        with. Change it there, then restart DataConnect.
-      </p>
+      <div className="grid gap-2">
+        <p className="pdpp-caption text-muted-foreground">
+          Change this password in the server environment, then restart DataConnect.
+        </p>
+        <details>
+          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Details
+          </summary>
+          <p className="pdpp-caption text-muted-foreground">
+            This password comes from <code>DATACONNECT_OWNER_PASSWORD</code> or{" "}
+            <code>PDPP_OWNER_PASSWORD</code> in the environment DataConnect started with.
+          </p>
+        </details>
+      </div>
     )
   }
 
@@ -132,13 +141,16 @@ export function OwnerPasswordSetting({
           Change password
         </button>
         <p className="pdpp-caption text-muted-foreground">
-          Password change is disabled because this install uses{" "}
-          <code>PDPP_OWNER_PASSWORD</code>.
+          Change this password in the server environment, then restart the server.
         </p>
-        <p className="pdpp-caption text-muted-foreground">
-          Change that environment variable, then restart the server. The
-          environment value stays authoritative while it is set.
-        </p>
+        <details>
+          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Details
+          </summary>
+          <p className="pdpp-caption text-muted-foreground">
+            Password changes are disabled while <code>PDPP_OWNER_PASSWORD</code> is set. The environment value stays authoritative.
+          </p>
+        </details>
       </div>
     )
   }
@@ -149,7 +161,7 @@ export function OwnerPasswordSetting({
         <p className="pdpp-caption text-muted-foreground">
           DataConnect stores this password on this computer for signing in on
           other devices. Changing it signs out other browser sessions and
-          command-line tokens and restarts the server.
+          access tokens and restarts the server.
         </p>
         {canReveal ? <OwnerCredentialSetting /> : null}
         {message ? (

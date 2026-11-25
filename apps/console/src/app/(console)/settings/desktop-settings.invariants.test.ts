@@ -59,3 +59,4 @@ test("close-to-tray copy states it is on by default, not off", async () => {
 
   assert.match(setting, /On by default\./)
 })
+

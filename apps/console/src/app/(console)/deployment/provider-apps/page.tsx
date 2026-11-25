@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants } from "@pdpp/brand-react";
-import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
@@ -19,19 +19,11 @@ interface PageParams {
 }
 
 function InlineError({ message }: { message: string }) {
-  return (
-    <div className="pdpp-caption mb-6 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive">
-      {message}
-    </div>
-  );
+  return <p className="mb-4 text-[13px] text-destructive">{message}</p>;
 }
 
 function InlineNotice({ message }: { message: string }) {
-  return (
-    <div className="pdpp-caption mb-6 rounded-md border border-border bg-muted/40 px-4 py-2.5 text-foreground">
-      {message}
-    </div>
-  );
+  return <p className="mb-4 text-[13px] text-muted-foreground">{message}</p>;
 }
 
 export default async function ProviderAppConfigPage({ searchParams }: { searchParams: Promise<PageParams> }) {
@@ -44,7 +36,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Provider authorization" />
+          <PageHeader title="Sign-in apps for data sources" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -57,26 +49,29 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
       <PageHeader
         actions={
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
-            Deployment overview
+            Server
           </Link>
         }
-        breadcrumbs={[{ href: "/deployment", label: "Deployment" }, { label: "Provider authorization" }]}
-        description="Credentials that let this DataConnect instance start a provider's consent flow on the owner's behalf. Values are encrypted at rest and never displayed again once saved."
-        title="Set up provider access"
+        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Sign-in apps for data sources" }]}
+        description="These details let data sources start a sign-in with their provider."
+        title="Sign-in apps for data sources"
       />
 
-      {params.error ? <InlineError message={params.error} /> : null}
+      {params.error ? (
+        <div className="mb-4">
+          <InlineError message="This could not be saved. Try again." />
+          <details className="mt-2">
+            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground">Details</summary>
+            <p className="break-words font-mono text-[12px] text-muted-foreground">{params.error}</p>
+          </details>
+        </div>
+      ) : null}
       {params.notice === "saved" ? <InlineNotice message="Saved." /> : null}
 
       {groups.length === 0 ? (
-        <Section
-          description="No connector on this deployment currently needs a shared provider credential."
-          title="Nothing to configure"
-        >
-          <p className="pdpp-caption text-muted-foreground">
-            This page lists a form per credential once a registered connector requires one.
-          </p>
-        </Section>
+        <p className="border-y border-border/70 py-4 text-[15px] text-muted-foreground">
+          No data source needs shared sign-in details right now.
+        </p>
       ) : (
         <div className="grid gap-6">
           {groups.map((group) => (

@@ -64,14 +64,14 @@ export function DesktopPairingDisplay({
           <div className="flex max-w-xl flex-wrap items-center gap-2">
             <input
               aria-label="Server address"
-              className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+              className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-border bg-background px-3 text-[13px]"
               onFocus={event => event.currentTarget.select()}
               readOnly
               value={serverOrigin}
             />
             <button
               aria-label="Copy server address"
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(serverOrigin, "Address")}
               type="button"
             >
@@ -79,36 +79,29 @@ export function DesktopPairingDisplay({
             </button>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <p className="w-fit rounded-md border border-border/70 bg-muted px-3 py-2 font-mono text-lg tracking-widest text-foreground">
+            <p className="w-fit rounded-md border border-border/70 bg-muted px-3 py-2 text-lg tracking-widest text-foreground">
               {code}
             </p>
             <button
               aria-label="Copy pairing code"
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(code, "Code")}
               type="button"
             >
               Copy
             </button>
           </div>
-          <p className="pdpp-caption text-muted-foreground">
-            Server ID{" "}
-            <span className="font-mono text-foreground">
-              {serverFingerprint}
-            </span>
-            . The desktop app shows the same ID when it connects.
-          </p>
           <div className="flex max-w-xl flex-wrap items-center gap-2">
             <input
               aria-label="Pairing link"
-              className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+              className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-border bg-background px-3 text-[13px]"
               onFocus={event => event.currentTarget.select()}
               readOnly
               value={link}
             />
             <button
               aria-label="Copy pairing link"
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(link, "Link")}
               type="button"
             >
@@ -120,6 +113,12 @@ export function DesktopPairingDisplay({
               {copyMessage}
             </p>
           ) : null}
+          <details>
+            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+            <p className="pdpp-caption text-muted-foreground">
+              Server ID <span className="text-foreground">{serverFingerprint}</span>. The desktop app shows the same ID when it connects.
+            </p>
+          </details>
           <p className="text-sm text-foreground">
             In the DataConnect desktop app choose Connect to a server, then
             paste the link (or the address and the code).
@@ -200,7 +199,7 @@ export function DesktopPairingSetting() {
       ) : null}
       <div>
         <button
-          className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+          className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           disabled={busy}
           onClick={() => void create()}
           type="button"
@@ -219,7 +218,7 @@ export function DesktopPairingSetting() {
       ) : null}
       <p className="pdpp-caption text-muted-foreground">
         A code works once and expires in 10 minutes. Paired computers appear
-        under Owner sessions and can be signed out there.
+        under Signed-in devices and can be signed out there.
       </p>
     </div>
   )

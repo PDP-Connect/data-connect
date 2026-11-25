@@ -20,7 +20,7 @@ const SUPPORT_URL = `${PROJECT_URL}/issues`
 export function AboutSection({ identity }: { identity: ProductIdentity }) {
   return (
     <Section
-      description={`${identity.protocolName} is the protocol ${identity.name} uses to grant apps access to your data without giving up control of it.`}
+      description={`The ${identity.protocolName} protocol lets apps read your data while you stay in control.`}
       title="About"
     >
       <KV>

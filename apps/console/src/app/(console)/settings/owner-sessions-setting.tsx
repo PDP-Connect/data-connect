@@ -5,6 +5,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { formatRelative } from "@pdpp/display";
 import {
   revokeAllOwnerSessionsAction,
   revokeOtherOwnerSessionsAction,
@@ -21,13 +22,14 @@ interface OwnerSessionsSettingProps {
 function formatTimestamp(value: number | string): string {
   const milliseconds = typeof value === "number" ? value * 1000 : Date.parse(value);
   if (!Number.isFinite(milliseconds)) return "Unknown time";
-  return `${new Date(milliseconds).toISOString().replace("T", " ").slice(0, 16)} UTC`;
+  return formatRelative(new Date(milliseconds), Date.now());
 }
 
 export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSettingProps) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingAction, setConfirmingAction] = useState<string | null>(null);
   const otherSessionCount = sessions.filter(session => !session.current).length;
 
   const runAction = async (action: () => Promise<{ ok: boolean; message?: string }>) => {
@@ -49,25 +51,25 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
 
   return (
     <div className="grid gap-6">
-      <p className="pdpp-caption text-muted-foreground">
-        These devices and command-line tools can access this Personal Server. Signing one out takes effect immediately.
-      </p>
-
       {error ? (
-        <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
-          {error}
-        </p>
+        <div role="alert">
+          <p className="text-[13px] text-destructive">This could not be done. Try again.</p>
+          <details className="mt-2">
+            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground">Details</summary>
+            <p className="break-words font-mono text-[12px] text-muted-foreground">{error}</p>
+          </details>
+        </div>
       ) : null}
 
-      <div className="grid gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-sm font-medium text-foreground">Devices and browsers</h3>
+      <div className="grid gap-1">
+        <div className="flex flex-wrap items-center justify-between gap-3 py-2">
+          <h3 className="text-[13px] font-medium text-muted-foreground">Devices and browsers</h3>
           <div className="flex flex-wrap gap-2">
             {otherSessionCount > 0 ? (
               <button
-                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+                className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 disabled={busy}
-                onClick={() => void runAction(revokeOtherOwnerSessionsAction)}
+                onClick={() => setConfirmingAction("others")}
                 type="button"
               >
                 Sign out other devices
@@ -75,9 +77,9 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
             ) : null}
             {sessions.length > 0 ? (
               <button
-                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+                className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 disabled={busy}
-                onClick={() => void runAction(revokeAllOwnerSessionsAction)}
+                onClick={() => setConfirmingAction("all")}
                 type="button"
               >
                 Sign out all devices
@@ -85,51 +87,89 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
             ) : null}
           </div>
         </div>
+        {confirmingAction === "others" || confirmingAction === "all" ? (
+          <div aria-labelledby="session-confirmation" className="grid gap-2 border-b border-border/70 py-3" role="alertdialog">
+            <p className="text-[13px] text-foreground" id="session-confirmation">
+              {confirmingAction === "others"
+                ? "Sign out the other devices? They will need to sign in again."
+                : "Sign out all devices, including this one? You will need to sign in again."}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button className="min-h-11 rounded-[6px] px-3 text-[13px] text-destructive hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => void runAction(confirmingAction === "others" ? revokeOtherOwnerSessionsAction : revokeAllOwnerSessionsAction)} type="button">
+                Confirm sign out
+              </button>
+              <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setConfirmingAction(null)} type="button">
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
         {sessions.length === 0 ? <p className="pdpp-caption text-muted-foreground">No devices are signed in.</p> : null}
         {sessions.map(session => (
-          <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-3" key={session.id}>
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 border-b border-border/70 py-3" key={session.id}>
             <div className="grid min-w-0 gap-1">
-              <p className="text-sm font-medium text-foreground">
+              <p className="text-[15px] font-medium text-foreground">
                 {session.label}
-                {session.current ? <span className="ml-2 text-xs font-normal text-muted-foreground">Current session</span> : null}
+                {session.current ? <span className="ml-2 text-[13px] font-normal text-muted-foreground">Current</span> : null}
               </p>
-              <p className="pdpp-caption text-muted-foreground">
-                Started {formatTimestamp(session.createdAt)} · Last seen {formatTimestamp(session.lastSeenAt)}
+              <p className="text-[13px] text-muted-foreground">
+                Last seen {formatTimestamp(session.lastSeenAt)}
               </p>
-              <p className="pdpp-caption text-muted-foreground">IP address: {session.ipAddress ?? "Unavailable"}</p>
+              <details className="text-[13px] text-muted-foreground">
+                <summary className="min-h-11 cursor-pointer">Details</summary>
+                <p>Started {formatTimestamp(session.createdAt)} · IP address: {session.ipAddress ?? "Unavailable"}</p>
+              </details>
             </div>
             <button
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              className="min-h-11 self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               disabled={busy}
-              onClick={() => void runAction(() => revokeOwnerSessionAction(session.id))}
+              onClick={() => setConfirmingAction(`session:${session.id}`)}
               type="button"
             >
               Sign out
             </button>
+            {confirmingAction === `session:${session.id}` ? (
+              <div aria-labelledby={`session-confirmation-${session.id}`} className="col-span-full grid gap-2 border-t border-border/70 pt-3" role="alertdialog">
+                <p className="text-[13px] text-foreground" id={`session-confirmation-${session.id}`}>Sign out this device? It will need to sign in again.</p>
+                <div className="flex flex-wrap gap-2">
+                  <button className="min-h-11 rounded-[6px] px-3 text-[13px] text-destructive hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => void runAction(() => revokeOwnerSessionAction(session.id))} type="button">Confirm sign out</button>
+                  <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setConfirmingAction(null)} type="button">Cancel</button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
 
-      <div className="grid gap-3">
-        <h3 className="text-sm font-medium text-foreground">Command-line access</h3>
-        {bearers.length === 0 ? <p className="pdpp-caption text-muted-foreground">No owner tokens are active.</p> : null}
+      <div className="grid gap-1">
+        <h3 className="py-2 text-[13px] font-medium text-muted-foreground">Access tokens</h3>
+        {bearers.length === 0 ? <p className="py-2 text-[13px] text-muted-foreground">No access tokens are active.</p> : null}
         {bearers.map(bearer => (
-          <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-3" key={bearer.id}>
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 border-b border-border/70 py-3" key={bearer.id}>
             <div className="grid min-w-0 gap-1">
-              <p className="text-sm font-medium text-foreground">{bearer.label}</p>
-              <p className="pdpp-caption text-muted-foreground">Created {formatTimestamp(bearer.createdAt)}</p>
-              <p className="pdpp-caption text-muted-foreground">
+              <p className="text-[15px] font-medium text-foreground">{bearer.label}</p>
+              <p className="text-[13px] text-muted-foreground">Created {formatTimestamp(bearer.createdAt)}</p>
+              <p className="text-[13px] text-muted-foreground">
                 Expires {bearer.expiresAt ? formatTimestamp(bearer.expiresAt) : "Never"}
               </p>
             </div>
             <button
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              className="min-h-11 self-start rounded-[6px] border border-border px-3 text-[13px] text-destructive hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               disabled={busy}
-              onClick={() => void runAction(() => revokeOwnerBearerAction(bearer.id))}
+              onClick={() => setConfirmingAction(`bearer:${bearer.id}`)}
               type="button"
             >
-              Revoke token
+              Revoke access token
             </button>
+            {confirmingAction === `bearer:${bearer.id}` ? (
+              <div aria-labelledby={`bearer-confirmation-${bearer.id}`} className="col-span-full grid gap-2 border-t border-border/70 pt-3" role="alertdialog">
+                <p className="text-[13px] text-foreground" id={`bearer-confirmation-${bearer.id}`}>Revoke this access token? It will stop working.</p>
+                <div className="flex flex-wrap gap-2">
+                  <button className="min-h-11 rounded-[6px] px-3 text-[13px] text-destructive hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => void runAction(() => revokeOwnerBearerAction(bearer.id))} type="button">Confirm revoke</button>
+                  <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setConfirmingAction(null)} type="button">Cancel</button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ))}
       </div>

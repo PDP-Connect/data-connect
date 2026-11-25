@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcInput, IcTimestamp } from "@pdpp/brand-react";
+import { formatRelative } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { Callout, PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
@@ -19,9 +20,8 @@ import {
   introspectOwnerTokenFlowAction,
   issueOwnerTokenAction,
   renameOwnerTokenAction,
-  revokeOwnerClientTokenAction,
-  revokeOwnerTokenAction,
 } from "./actions.ts";
+import { ConfirmTokenRevoke, TokenAccessList, type AccessTokenRow } from "./token-access-list.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -38,9 +38,9 @@ type ReproduceFormat = "curl" | "cli";
 
 function InlineError({ prefix, message }: { message: string; prefix: string }) {
   return (
-    <div className="pdpp-caption mb-6 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5">
+    <p className="pdpp-caption mb-4 text-destructive">
       <span className="font-medium text-destructive">{prefix}:</span> <span>{message}</span>
-    </div>
+    </p>
   );
 }
 
@@ -64,13 +64,10 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
     shellQuote("local assistant"),
   ].join(" ");
   return (
-    <section
-      className="mb-6 rounded-md border border-[color:var(--human)]/30 bg-[color:var(--human-wash)]/30 p-5"
-      data-surface="human"
-    >
+    <section className="mb-6 border-b border-border/70 pb-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 max-w-3xl">
-          <p className="pdpp-eyebrow text-[color:var(--human)]">Recommended owner-agent path</p>
+          <p className="pdpp-eyebrow text-muted-foreground">Recommended owner-agent path</p>
           <h2 className="pdpp-title mt-1 text-foreground">Let the local agent complete onboarding</h2>
           <p className="pdpp-caption mt-2 text-muted-foreground">
             Use this for a trusted local agent. The agent starts from the public entrypoint, opens the
@@ -105,63 +102,46 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
  */
 function IssueCard({ flow }: { flow: FlowState | null }) {
   return (
-    <div className="rounded-md border border-border/80 p-5" data-surface="human">
-      <div className="mb-4">
-        <p className="pdpp-eyebrow">Manual/debug bearer</p>
-        <p className="pdpp-caption mt-1 text-muted-foreground">
-          Use this fallback for debugging a script you control or inspecting the wire flow. For a trusted local agent,
-          prefer the
-          owner-agent command above so the credential lands in the right local file.
-        </p>
-      </div>
+    <section className="mb-6 border-b border-border/70 pb-5">
       <form action={issueOwnerTokenAction} className="flex flex-col gap-2">
         <label className="flex min-w-0 flex-col gap-1" htmlFor="token-name">
-          <span className="pdpp-eyebrow">Debug credential name</span>
+          <span className="text-[13px] font-medium text-foreground">Name</span>
         </label>
-        <div className="flex min-w-0 gap-2">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
           <IcInput
-            className="flex-1"
+            className="min-h-11 min-w-0 flex-1"
             defaultValue=""
             id="token-name"
             name="name"
-            placeholder="e.g. local-debug"
+            placeholder="e.g. Backup script"
             type="text"
           />
-          <IcButton size="sm" type="submit" variant="ghost">
-            Issue debug bearer
+          <IcButton className="min-h-11 w-full sm:w-auto" size="sm" type="submit" variant="default">
+            Create access token
           </IcButton>
         </div>
       </form>
 
       {flow?.token ? (
-        <div className="mt-5 border-border/60 border-t pt-5">
-          <div className="pdpp-eyebrow mb-2 inline-flex items-baseline gap-2">
+        <div className="mt-4 border-border/60 border-t pt-4">
+          <div className="mb-2 text-[13px] font-medium text-foreground">
             <span>{flow.name ?? "Unnamed token"}</span>
-            {flow.tokenIssuedAt ? (
-              <span className="text-muted-foreground">
-                · issued <IcTimestamp value={flow.tokenIssuedAt} />
-              </span>
-            ) : null}
           </div>
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
-              <CodeBlock>{flow.token}</CodeBlock>
+              <pre className="break-all rounded-md border border-border/80 bg-muted/30 p-3 text-[13px] text-foreground">{flow.token}</pre>
             </div>
-            <CopyButton ariaLabel="Copy bearer token" value={flow.token} />
+            <CopyButton ariaLabel="Copy access token" value={flow.token} />
           </div>
-          <p className="pdpp-caption mt-2 text-muted-foreground">
-            Manual bearer issued. Copy it now if you are debugging a local script — the dashboard does not store it.
-            Send as <code className="font-mono">Authorization: Bearer …</code> to{" "}
-            <code className="font-mono">/v1/*</code>.
+          {/* The flow store (lib/operator-bootstrap.ts) keeps the issued token in
+              process memory with no eviction, so this address shows it again
+              until the console restarts; do not promise a one-time view. */}
+          <p className="mt-2 text-[13px] text-muted-foreground">
+            Copy it now. This page shows it only until DataConnect restarts.
           </p>
         </div>
       ) : null}
-
-      <p className="pdpp-caption mt-4 text-muted-foreground">
-        Each token is a freshly-registered OAuth client (RFC 7591), bound to your signed-in subject. Revoke with one
-        click — that deletes the client (RFC 7592) and cascade-revokes its bearer.
-      </p>
-    </div>
+    </section>
   );
 }
 
@@ -271,11 +251,7 @@ function ReproduceBlock({ examples, format }: { examples: FlowExamples; format: 
 }
 
 function InlineNotice({ message }: { message: string }) {
-  return (
-    <div className="pdpp-caption mb-6 rounded-md border border-border bg-muted/40 px-4 py-2.5 text-foreground">
-      {message}
-    </div>
-  );
+  return <p className="pdpp-caption mb-4 text-muted-foreground">{message}</p>;
 }
 
 // Owner bearers and the routine MCP scoped-grant flow are two separate paths
@@ -342,13 +318,7 @@ function TokenDrilldown({ clientId, tokens }: { clientId: string; tokens: OwnerC
                 <code className="font-mono text-xs">{token.token_id_public}</code>
               </div>
             </div>
-            <form action={revokeOwnerClientTokenAction}>
-              <input name="client_id" type="hidden" value={clientId} />
-              <input name="token_id_public" type="hidden" value={token.token_id_public} />
-              <IcButton size="sm" type="submit" variant="ghost">
-                Revoke this token
-              </IcButton>
-            </form>
+            <ConfirmTokenRevoke clientId={clientId} tokenIdPublic={token.token_id_public} />
           </li>
         ))}
       </ul>
@@ -359,78 +329,49 @@ function TokenDrilldown({ clientId, tokens }: { clientId: string; tokens: OwnerC
 function TokensListSection({
   tokens,
   tokenDetailsByClient,
-  highlightClientId,
 }: {
   tokens: OwnerIssuedClient[];
   tokenDetailsByClient: Map<string, OwnerClientToken[]>;
-  highlightClientId: string | null;
 }) {
-  if (tokens.length === 0) {
-    return null;
-  }
-  return (
-    <div className="rounded-md border border-border" data-surface="human">
-      <div className="border-border/70 border-b px-5 py-3">
-        <h2 className="pdpp-eyebrow">Owner credentials</h2>
-        <p className="pdpp-caption mt-0.5 text-muted-foreground">
-          One row per approved owner-agent or manual credential. Rename the label in place, or revoke to delete the
-          OAuth client (RFC 7592) and cascade-revoke its bearers. Clients with more than one active token expand to
-          per-token details.
-        </p>
-      </div>
-      <ul className="divide-y divide-border/70">
-        {tokens.map((token) => {
-          const isHighlight = highlightClientId === token.client_id;
-          const detailTokens = tokenDetailsByClient.get(token.client_id) ?? [];
-          const showDrilldown = token.active_token_count > 1 && detailTokens.length > 0;
-          return (
-            <li className={`flex flex-col gap-2 px-5 py-3 ${isHighlight ? "bg-muted/30" : ""}`} key={token.client_id}>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <div className="pdpp-body font-medium">{token.client_name ?? "Unnamed token"}</div>
-                  <div className="pdpp-caption mt-0.5 inline-flex flex-wrap items-baseline gap-x-2 text-muted-foreground">
-                    <span>
-                      {token.active_token_count > 1 ? "first issued " : "issued "}
-                      <IcTimestamp value={token.created_at} />
-                    </span>
-                    <span aria-hidden>·</span>
-                    <span>
-                      {token.active_token_count} active token{token.active_token_count === 1 ? "" : "s"}
-                    </span>
-                    <span aria-hidden>·</span>
-                    <code className="font-mono text-xs">{token.client_id}</code>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <form action={renameOwnerTokenAction} className="flex items-center gap-2">
-                    <input name="client_id" type="hidden" value={token.client_id} />
-                    <IcInput
-                      aria-label={`Rename ${token.client_name ?? "credential"}`}
-                      className="h-8 w-40"
-                      defaultValue={token.client_name ?? ""}
-                      name="client_name"
-                      placeholder="Credential name"
-                      type="text"
-                    />
-                    <IcButton size="sm" type="submit" variant="ghost">
-                      Rename
-                    </IcButton>
-                  </form>
-                  <form action={revokeOwnerTokenAction}>
-                    <input name="client_id" type="hidden" value={token.client_id} />
-                    <IcButton size="sm" type="submit" variant="destructive">
-                      Revoke
-                    </IcButton>
-                  </form>
-                </div>
-              </div>
-              {showDrilldown ? <TokenDrilldown clientId={token.client_id} tokens={detailTokens} /> : null}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
+  const rows: AccessTokenRow[] = tokens.map((token) => {
+    const detailTokens = tokenDetailsByClient.get(token.client_id) ?? [];
+    const showDrilldown = token.active_token_count > 1 && detailTokens.length > 0;
+    return {
+      ...token,
+      createdLabel: formatTokenTime(token.created_at),
+      lastUsedLabel: "Not available",
+      details: (
+        <details className="mt-2 min-w-0 rounded-[6px] border border-border p-3">
+          <summary className="min-h-11 cursor-pointer select-none text-[13px] text-muted-foreground">
+            Details
+          </summary>
+          <div className="grid gap-3 border-t border-border/70 pt-3">
+            <p className="break-all font-mono text-[12px] text-muted-foreground">{token.client_id}</p>
+            <p className="text-[13px] text-muted-foreground">{token.active_token_count} active token{token.active_token_count === 1 ? "" : "s"}</p>
+            <form action={renameOwnerTokenAction} className="flex flex-wrap items-center gap-2">
+              <input name="client_id" type="hidden" value={token.client_id} />
+              <IcInput
+                aria-label={`Rename ${token.client_name ?? "access token"}`}
+                className="min-h-11 min-w-0 flex-1"
+                defaultValue={token.client_name ?? ""}
+                name="client_name"
+                placeholder="Access token name"
+                type="text"
+              />
+              <IcButton size="sm" type="submit" variant="ghost">Rename</IcButton>
+            </form>
+            {showDrilldown ? <TokenDrilldown clientId={token.client_id} tokens={detailTokens} /> : null}
+          </div>
+        </details>
+      ),
+    };
+  });
+  return <TokenAccessList tokens={rows} />;
+}
+
+function formatTokenTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not available" : formatRelative(date, Date.now());
 }
 
 function FlowInspector({
@@ -509,7 +450,7 @@ export default async function DeploymentTokensPage({ searchParams }: { searchPar
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Tokens" />
+          <PageHeader title="Access tokens" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -520,37 +461,48 @@ export default async function DeploymentTokensPage({ searchParams }: { searchPar
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
-            Deployment overview
-          </Link>
-        }
-        breadcrumbs={[{ href: "/deployment", label: "Deployment" }, { label: "Tokens" }]}
-        description="Set up trusted local owner automation without pasting bearer material. Manual owner bearers stay available below for debugging."
-        title="Owner tokens"
+        actions={<Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">Server</Link>}
+        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Access tokens" }]}
+        description="For scripts and tools that read your data without signing in."
+        title="Access tokens"
       />
 
-      <OwnerAgentOnboardingCard entrypoint={entrypoint} />
-
-      <OwnerScopeCallout />
-
-      {error ? <InlineError message={error} prefix="Action failed" /> : null}
-      {notice === "revoked" ? <InlineNotice message="Credential revoked. Its bearers no longer work." /> : null}
-      {notice === "token_revoked" ? (
-        <InlineNotice message="Token revoked. That one bearer no longer works; the credential's other tokens are unaffected." />
+      {error ? (
+        <div className="mb-4">
+          <p className="text-[13px] text-destructive">This could not be done. Try again.</p>
+          <details className="mt-2">
+            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground">Details</summary>
+            <p className="break-all font-mono text-[12px] text-muted-foreground">{error}</p>
+          </details>
+        </div>
       ) : null}
-      {notice === "renamed" ? <InlineNotice message="Credential renamed." /> : null}
+      {notice === "revoked" ? <InlineNotice message="Access token revoked." /> : null}
+      {notice === "token_revoked" ? (
+        <InlineNotice message="Access token revoked. The other access tokens still work." />
+      ) : null}
+      {notice === "renamed" ? <InlineNotice message="Access token renamed." /> : null}
 
       <IssueCard flow={flow} />
 
       <TokensListSection
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-        highlightClientId={flow?.clientId ?? null}
         tokenDetailsByClient={tokenDetailsByClient}
         tokens={tokens}
       />
 
-      {flow ? <FlowInspector examples={examples} flow={flow} format={format} /> : null}
+      <details className="mt-6 border-t border-border/70 pt-4">
+        <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground">Details</summary>
+        <div className="grid gap-5 border-b border-border/70 pb-5">
+          <OwnerAgentOnboardingCard entrypoint={entrypoint} />
+          <OwnerScopeCallout />
+          <section>
+            <h3 className="pdpp-eyebrow mb-2">Manual/debug bearer</h3>
+            <p className="pdpp-caption text-muted-foreground">
+              Use this for debugging a script you control or inspecting the sign-in steps. Each access token is a freshly registered OAuth client. Revoke it to remove that client and its active credentials.
+            </p>
+          </section>
+          {flow ? <FlowInspector examples={examples} flow={flow} format={format} /> : null}
+        </div>
+      </details>
     </RecordroomShellWithPalette>
   );
 }

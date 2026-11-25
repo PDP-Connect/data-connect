@@ -7,7 +7,6 @@ import { redirect } from "next/navigation";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
 import {
   approveOwnerBootstrapFlow,
-  denyOwnerBootstrapFlow,
   exchangeOwnerBootstrapToken,
   introspectOwnerBootstrapToken,
   setOwnerBootstrapFlowError,
@@ -34,24 +33,10 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Unexpected operator action failure";
 }
 
-export async function startOwnerTokenFlowAction(formData: FormData) {
-  await requireDashboardAccess("/deployment/tokens");
-  const name = asString(formData.get("name"));
-  let target: string;
-  try {
-    const flow = await startOwnerBootstrapFlow(undefined, name);
-    target = flowHref(flow.flowId);
-  } catch (err) {
-    target = errorHref(errorMessage(err));
-  }
-  redirect(target);
-}
-
 /**
  * Operator-shaped composite action: start → approve → exchange in one click,
- * landing the user on a flow page with the bearer issued and visible. The
- * per-step actions below stay exported so the inspector disclosure can replay
- * the device flow step-by-step for an evaluator who wants to see the wire.
+ * landing the user on a flow page with the issued token visible. The inspector
+ * shows the completed steps and keeps introspection available on demand.
  */
 export async function issueOwnerTokenAction(formData: FormData) {
   await requireDashboardAccess("/deployment/tokens");
@@ -77,41 +62,6 @@ export async function issueOwnerTokenAction(formData: FormData) {
     target = errorHref(errorMessage(err));
   }
   redirect(target);
-}
-
-export async function approveOwnerTokenFlowAction(formData: FormData) {
-  const flowId = asString(formData.get("flow_id"));
-  await requireDashboardAccess(flowHref(flowId));
-  const subjectId = asString(formData.get("subject_id")) || "owner_local";
-  try {
-    await approveOwnerBootstrapFlow(flowId, subjectId);
-  } catch (err) {
-    setOwnerBootstrapFlowError(flowId, errorMessage(err));
-  }
-  redirect(flowHref(flowId));
-}
-
-export async function denyOwnerTokenFlowAction(formData: FormData) {
-  const flowId = asString(formData.get("flow_id"));
-  await requireDashboardAccess(flowHref(flowId));
-  const subjectId = asString(formData.get("subject_id")) || "owner_local";
-  try {
-    await denyOwnerBootstrapFlow(flowId, subjectId);
-  } catch (err) {
-    setOwnerBootstrapFlowError(flowId, errorMessage(err));
-  }
-  redirect(flowHref(flowId));
-}
-
-export async function exchangeOwnerTokenFlowAction(formData: FormData) {
-  const flowId = asString(formData.get("flow_id"));
-  await requireDashboardAccess(flowHref(flowId));
-  try {
-    await exchangeOwnerBootstrapToken(flowId);
-  } catch (err) {
-    setOwnerBootstrapFlowError(flowId, errorMessage(err));
-  }
-  redirect(flowHref(flowId));
 }
 
 export async function introspectOwnerTokenFlowAction(formData: FormData) {

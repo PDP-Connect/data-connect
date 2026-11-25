@@ -2,14 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcInput } from "@pdpp/brand-react";
-import { StatusBadge } from "@pdpp/operator-ui/components/primitives";
-import type { StatusVocabulary } from "@pdpp/operator-ui/components/status-vocabularies";
 import type { ProviderAppConfigGroup } from "../../lib/ref-client.ts";
-
-const FIELD_STATUS_VOCABULARY: StatusVocabulary = {
-  configured: { label: "Configured", tone: "success" },
-  missing: { label: "Missing", tone: "warning" },
-};
 
 // One field within a group's single form. Only `label` is ever rendered — the
 // field's underlying logical key travels as part of the input `name` so the
@@ -22,13 +15,15 @@ const FIELD_STATUS_VOCABULARY: StatusVocabulary = {
 function FieldInput({ field }: { field: ProviderAppConfigGroup["fields"][number] }) {
   return (
     <label className="grid min-w-0 gap-1" htmlFor={`field-${field.logical_key}`}>
-      <span className="pdpp-eyebrow inline-flex flex-wrap items-baseline gap-x-2">
+      <span className="flex min-h-11 flex-wrap items-baseline gap-x-2 text-[13px] font-medium text-foreground">
         {field.label}
-        <StatusBadge inline status={field.configured ? "configured" : "missing"} vocabulary={FIELD_STATUS_VOCABULARY} />
+        <span className={field.configured ? "text-muted-foreground" : "text-attention"}>
+          {field.configured ? "Configured" : "Missing"}
+        </span>
       </span>
       <IcInput
         autoComplete="off"
-        className="w-full"
+        className="min-h-11 w-full"
         id={`field-${field.logical_key}`}
         name={`field_${field.logical_key}`}
         placeholder={field.configured ? "Leave blank to keep the current value" : "Enter value"}
@@ -65,23 +60,25 @@ export function GroupForm({
 }) {
   const allConfigured = group.fields.every((field) => field.configured);
   return (
-    <div className="rounded-md border border-border" data-surface="human">
-      <div className="border-border/70 border-b px-5 py-3">
-        <h2 className="pdpp-eyebrow">{group.provider_identity_label}</h2>
+    <section className="min-w-0 border-t border-border/70">
+      <div className="py-3">
+        <h2 className="text-[15px] font-medium text-foreground">{group.provider_identity_label}</h2>
       </div>
-      <form action={action} className="grid gap-4 p-5">
+      <form action={action} className="grid gap-3">
         <input name="identity_group" type="hidden" value={group.identity_group} />
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid divide-y divide-border/70">
           {group.fields.map((field) => (
-            <FieldInput field={field} key={field.logical_key} />
+            <div className="grid gap-2 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(16rem,1.2fr)] sm:items-center" key={field.logical_key}>
+              <FieldInput field={field} />
+            </div>
           ))}
         </div>
-        <div>
-          <IcButton size="sm" type="submit" variant={allConfigured ? "ghost" : "human"}>
+        <div className="py-2">
+          <IcButton size="sm" type="submit" variant="ghost">
             {allConfigured ? "Update" : "Save"}
           </IcButton>
         </div>
       </form>
-    </div>
+    </section>
   );
 }

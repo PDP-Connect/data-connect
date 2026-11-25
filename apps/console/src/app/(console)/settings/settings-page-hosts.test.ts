@@ -102,6 +102,18 @@ test("a browser reaching a managed desktop host over remote access still renders
   const html = await render(true, false)
   assert.match(html, /data-widget="remote-access"/)
   assert.match(html, /data-widget="desktop-settings"/)
+  // cc963a0ef8: "this computer" is false from a phone; keep "the computer that runs it".
   assert.match(html, /Control how DataConnect starts on the computer that runs it/)
   assert.match(html, /data-widget="recovery-key"/)
+})
+
+test("settings keeps the required section order and links to access tokens", async () => {
+  const html = await render(true)
+  const order = ["Remote access", "Sign-in", "Desktop", "Vault recovery code", "Developer mode", "About"]
+  // Brief settings-pages, decision 1: these sections stay in this order; Desktop remains host-gated.
+  const positions = order.map((label) => html.indexOf(label))
+  assert.ok(positions.every((position) => position >= 0))
+  assert.deepEqual(positions, [...positions].sort((left, right) => left - right))
+  // Brief settings-pages, decision 3: the Access tokens row opens the unchanged address.
+  assert.match(html, /href="\/deployment\/tokens"[\s\S]*?Access tokens/)
 })
