@@ -127,7 +127,7 @@ function decimal(value: string): Decimal | null {
   const [, sign, whole = "", fraction = "", exp = "0"] = match;
   let digits = (whole + fraction).replace(LEADING_ZEROES, "");
   if (!digits) {
-    return { digits: "0", exponent: 0n, negative: false };
+    return { digits: "0", exponent: BigInt(0), negative: false };
   }
   let exponent = BigInt(exp) - BigInt(fraction.length);
   const trimmed = digits.replace(TRAILING_ZEROES, "");
@@ -192,7 +192,7 @@ function instant(value: string): Decimal | null {
   }
   const priorLeaps = LEAP_BOUNDARIES.filter((boundary) => milliseconds > boundary).length;
   // Shift the epoch before year zero so fractional seconds have a positive coefficient.
-  const seconds = BigInt(milliseconds / 1000) + 62_167_219_200n + BigInt(priorLeaps) + BigInt(leap);
+  const seconds = BigInt(milliseconds / 1000) + BigInt(62_167_219_200) + BigInt(priorLeaps) + BigInt(leap);
   return decimal(`${seconds}.${fraction || "0"}`);
 }
 
@@ -210,7 +210,7 @@ function validValue(type: FilterField["type"], value: string): boolean {
     return instant(value) !== null;
   }
   const parsed = decimal(value);
-  return parsed !== null && (type !== "integer" || parsed.exponent >= 0n);
+  return parsed !== null && (type !== "integer" || parsed.exponent >= BigInt(0));
 }
 
 export function compileClientRequestFilters(
