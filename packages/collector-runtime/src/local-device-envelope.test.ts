@@ -206,3 +206,32 @@ test("local-device builders keep a valid source identity byte-for-byte, includin
   assert.equal(batch.source_instance_id, spaced);
   assert.equal(batch.body_hash, hashCanonicalJson([{ ...plain, source_instance_id: spaced }]));
 });
+
+test("local-device batch commits to envelope order and preserves that order on the wire", () => {
+  const first = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
+  const second = buildLocalDeviceRecordEnvelope({
+    ...envelopeFixture,
+    sourceInstanceId: fixtureSource,
+    record: { ...envelopeFixture.record, key: "second" },
+  });
+  const build = (records: readonly typeof first[]) =>
+    buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records });
+  const forward = build([first, second]);
+  const reverse = build([second, first]);
+  assert.deepEqual(forward.records.map((record) => record.record_key), [first.record_key, "second"]);
+  assert.deepEqual(reverse.records.map((record) => record.record_key), ["second", first.record_key]);
+  assert.notEqual(forward.body_hash, reverse.body_hash);
+});
+
+test("envelope-only metadata changes the batch hash without leaking into records", () => {
+  const envelope = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
+  const original = buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records: [envelope] });
+  const changed = buildLocalDeviceIngestBatchRequest({
+    ...envelopeFixture,
+    sourceInstanceId: fixtureSource,
+    records: [{ ...envelope, batch_seq: envelope.batch_seq + 1 }],
+  });
+  assert.deepEqual(changed.records, original.records);
+  assert.equal(changed.batch_seq, original.batch_seq);
+  assert.notEqual(changed.body_hash, original.body_hash);
+});
