@@ -680,28 +680,30 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 }
 
 .hosted-ui-access-mode {
+  min-width: 0;
   display: grid;
   gap: 0.375rem;
-  margin: 0 0 1rem;
-  padding: 0.625rem 0.875rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
+  margin: 0;
+  padding: 0.75rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
 }
 .hosted-ui-access-mode-legend {
-  padding: 0 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  letter-spacing: 0.025em;
-  text-transform: uppercase;
-  color: var(--muted-foreground);
+  padding: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--foreground);
 }
 .hosted-ui-access-mode-option {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 0.625rem;
   align-items: start;
-  padding: 0.375rem 0.25rem;
+  padding: 0.5rem 0;
   cursor: pointer;
   font-size: 0.8125rem;
 }
@@ -727,6 +729,42 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   margin: 0.5rem 0 0;
   font-size: 0.8125rem;
   color: var(--muted-foreground);
+}
+.hosted-ui-expiry {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0.75rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+.hosted-ui-expiry-legend {
+  padding: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.hosted-ui-expiry-hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.hosted-ui-expiry-option {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.625rem;
+  align-items: center;
+  padding: 0.375rem 0;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+.hosted-ui-expiry-option input {
+  margin: 0;
+  accent-color: var(--primary);
 }
 
 .hosted-ui-actions {
@@ -952,17 +990,20 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   .hosted-ui-button,
   .hosted-ui-option,
   .hosted-ui-stream-option,
-  .hosted-ui-access-mode-option {
+  .hosted-ui-access-mode-option,
+  .hosted-ui-expiry-option {
     min-height: 44px;
   }
   .hosted-ui-option,
   .hosted-ui-stream-option,
-  .hosted-ui-access-mode-option {
+  .hosted-ui-access-mode-option,
+  .hosted-ui-expiry-option {
     align-items: center;
   }
   .hosted-ui-option input,
   .hosted-ui-stream-option input,
-  .hosted-ui-access-mode-option input {
+  .hosted-ui-access-mode-option input,
+  .hosted-ui-expiry-option input {
     width: 20px;
     height: 20px;
     margin: 0;
@@ -1464,12 +1505,13 @@ export function renderResultState({ tone = "neutral", glyph, title, body, footno
   const safeGlyph = escapeHtml(glyph ?? defaultGlyph);
   const safeTone = escapeHtml(tone);
   const safeTitle = escapeHtml(title ?? "");
+  const titleMarkup = safeTitle ? `<span class="pdpp-heading">${safeTitle}</span>` : "";
   const safeBody = body ? `<p class="pdpp-body">${escapeHtml(body)}</p>` : "";
   const safeFoot = footnote ? `<p class="hosted-ui-footnote">${escapeHtml(footnote)}</p>` : "";
   return `<div class="hosted-ui-result">
   <span class="hosted-ui-result-mark" data-tone="${safeTone}" aria-hidden="true">${safeGlyph}</span>
   <div class="hosted-ui-result-body">
-    <span class="pdpp-heading">${safeTitle}</span>
+    ${titleMarkup}
     ${safeBody}
     ${safeFoot}
   </div>

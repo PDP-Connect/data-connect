@@ -389,6 +389,7 @@ import {
 } from "./routes/as-agent-connect.ts";
 import { mountAsAuthorize } from "./routes/as-authorize.ts";
 import { mountAsConsent } from "./routes/as-consent.ts";
+import { createConsentSourceNameLookup, type ConsentPickerCapabilities } from "./routes/as-consent-ui-helpers.ts";
 import { mountAsDcr } from "./routes/as-dcr.ts";
 import { mountAsDeviceUi } from "./routes/as-device-ui.ts";
 import { buildApplyGrantRevokeSideEffects, mountAsGrantRevoke } from "./routes/as-grant-revoke.ts";
@@ -6796,6 +6797,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     resolveIssuer: resolveAsIssuer,
+    resolveSourceName: createConsentSourceNameLookup(
+      consentPickerCaps as unknown as ConsentPickerCapabilities,
+      ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID
+    ),
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 

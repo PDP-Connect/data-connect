@@ -688,7 +688,16 @@ test("batch consent gate: HTML approval hands off the package token durably", as
     );
     const approval = await approveBatchHtml(asUrl, staged.request_uri || "", [0, 1]);
     assert.equal(approval.status, 200);
-    const code = (await approval.text()).match(CONSENT_EXCHANGE_CODE_RE)?.[0];
+    const approvalHtml = await approval.text();
+    // server-consent-r4 P3: package approval keeps one heading and one sentence.
+    assert.equal((approvalHtml.match(/<h1\b/g) || []).length, 1);
+    assert.match(approvalHtml, /<h1[^>]*>Access approved<\/h1>/);
+    assert.doesNotMatch(approvalHtml, /You allowed this app to read your data/);
+    assert.match(
+      approvalHtml,
+      /<p class="pdpp-body">Access is ready; you can close this page and go back to the app, or stop this app reading your data later in DataConnect\.<\/p>/
+    );
+    const code = approvalHtml.match(CONSENT_EXCHANGE_CODE_RE)?.[0];
     assert.ok(code);
     const exchange = await fetch(`${asUrl}/consent/exchange`, {
       body: JSON.stringify({ code }),

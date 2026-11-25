@@ -214,7 +214,8 @@ test("hosted-ui: /consent uses the shared hosted-UI layer", async () => {
     assert.match(html, /data-surface="human"/, "frames consent as a human surface");
     // server-consent.md #1 and #2: first-look copy follows the shared title and plain summary.
     assert.match(html, /Longview wants to read your data/);
-    assert.match(html, /It will read 1 kind of record from this data source\./);
+    // server-consent-r4 P1: a known connection is named on the consent screen.
+    assert.match(html, /It will read 1 kind of record from Spotify\./);
     // RAISE-RULES 7: Allow and Don't allow are the two equal cells of one pair, not one cell of a nested pair.
     assert.doesNotMatch(html, /<div class="hosted-ui-consent-pair">\s*<div class="hosted-ui-consent-pair">/);
     assert.doesNotMatch(
@@ -326,11 +327,16 @@ test("hosted-ui: /consent/approve result page uses the shared hosted-UI layer", 
     assert.equal(resp.status, 200);
     const html = await resp.text();
     assertHostedShell(html);
-    assert.match(html, /Access approved/, "shows approval result");
+    // server-consent-r4 P3: one heading and one sentence keep the approved page concise.
+    assert.equal((html.match(/<h1\b/g) || []).length, 1);
+    assert.match(html, /<h1[^>]*>Access approved<\/h1>/, "shows one approval heading");
+    assert.doesNotMatch(html, /You allowed this app to read your data/);
+    assert.match(
+      html,
+      /<p class="pdpp-body">Access is ready; you can close this page and go back to the app, or stop this app reading your data later in DataConnect\.<\/p>/
+    );
     assert.match(html, /data-surface="protocol"/, "technical details use protocol surface");
     assert.match(html, /Grant ID/, "includes grant id label");
-    // server-consent-r3 P2: approval keeps the picker's access-stop reminder.
-    assert.match(html, /You can stop this app reading your data later in DataConnect\./);
   });
 });
 

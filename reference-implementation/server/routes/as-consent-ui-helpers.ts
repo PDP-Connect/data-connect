@@ -1147,6 +1147,42 @@ function ownerFacingConnectionName(
   }
 }
 
+/** Builds the consent route lookup from the same manifest and binding reads as the picker. */
+export function createConsentSourceNameLookup(
+  caps: ConsentPickerCapabilities,
+  ownerSubjectId: string
+): ConsentSourceNameLookup {
+  return async ({ connectorId, connectionId }) => {
+    const manifest = await caps.getConnectorManifest(connectorId).catch(() => null);
+    if (!manifest) return null;
+
+    const connectorKey = ownerFacingConnectorKey(connectorId, caps);
+    const connectorLabel = ownerFacingConnectorLabel(manifest.display_name || manifest.name, connectorKey);
+    if (connectionId) {
+      try {
+        const bindings = await caps.listActiveBindingsForGrant({ connectorId, ownerSubjectId });
+        const binding = bindings.find((candidate) => {
+          const projected = caps.projectBindingForWire(candidate);
+          return (projected?.connection_id || candidate.connectorInstanceId || null) === connectionId;
+        });
+        if (binding) {
+          const projected = caps.projectBindingForWire(binding);
+          const connectionName = ownerFacingConnectionName(projected?.display_name, {
+            connectorId,
+            connectorKey,
+            connectorLabel,
+          });
+          // Like the picker row, keep the service beside the owner's connection name.
+          if (connectionName) return `${connectorLabel} · ${connectionName}`;
+        }
+      } catch {
+        // A failed connection-name read falls back to the known connector label.
+      }
+    }
+    return connectorLabel || null;
+  };
+}
+
 function normalizeConnectorLabel(value: string): string {
   return value
     .trim()
@@ -1545,6 +1581,46 @@ export interface PendingGrant {
   softCap?: number;
   softCapWarning?: boolean;
   userCode?: string | null;
+}
+
+export type ConsentSourceNameLookup = (source: {
+  connectorId: string;
+  connectionId: string | null;
+}) => Promise<string | null>;
+
+/** Resolves owner-facing names from the source and connection ids on a pending request. */
+export async function resolvePendingSourceNames(
+  pending: PendingGrant,
+  resolve: ConsentSourceNameLookup
+): Promise<Array<string | null>> {
+  const resolveSource = async (
+    source: { id?: string | null } | null | undefined,
+    streams: Array<{ instance_ids?: string[] | null }> | null | undefined
+  ): Promise<string | null> => {
+    const connectorId = typeof source?.id === "string" ? source.id : "";
+    if (!connectorId) return null;
+    const connectionIds = [...new Set((streams ?? []).flatMap((stream) =>
+      Array.isArray(stream.instance_ids)
+        ? stream.instance_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+        : []
+    ))];
+    try {
+      return await resolve({ connectorId, connectionId: connectionIds.length === 1 ? connectionIds[0] as string : null });
+    } catch {
+      return null;
+    }
+  };
+
+  if (pending.review?.version === "reference.batch-approval-review.v1") {
+    return Promise.all(pending.review.sources.map((entry) => resolveSource(entry.source, entry.resolved_streams)));
+  }
+  if (pending.review?.version === "reference.approval-review.v1") {
+    return [await resolveSource(pending.review.source, pending.review.resolved_streams)];
+  }
+  if (pending.batch) {
+    return Promise.all((pending.cards ?? []).map((card) => resolveSource(card.source, card.resolvedStreams)));
+  }
+  return [await resolveSource(pending.request.source_binding, pending.request.selection?.streams)];
 }
 
 type StreamItem = NonNullable<NonNullable<PendingGrantRequest["selection"]>["streams"]>[number];
@@ -2000,11 +2076,20 @@ ${ui.renderKeyValueList(items)}`,
   });
 }
 
-function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRenderer, selectionFormId?: string): string {
+function sourceNameOrFallback(sourceNames: Array<string | null> | undefined, index: number, fallback: string): string {
+  return sourceNames?.[index]?.trim() || fallback;
+}
+
+function buildBatchSourceCards(
+  cards: PendingConsentCard[],
+  ui: ConsentUiRenderer,
+  selectionFormId?: string,
+  sourceNames?: Array<string | null>
+): string {
   return cards
-    .map((card) => {
+    .map((card, position) => {
       const sourceLabel = card.source?.id || `source ${card.index + 1}`;
-      const rowLabel = `Data source ${card.index + 1}`;
+      const rowLabel = sourceNameOrFallback(sourceNames, position, `Data source ${card.index + 1}`);
       const streams = Array.isArray(card.resolvedStreams) ? card.resolvedStreams : [];
       const sourceCheckbox = selectionFormId
         ? `<label class="hosted-ui-consent-source"><input type="checkbox" name="approved_source_indexes" value="${ui.escapeHtml(
@@ -2045,7 +2130,7 @@ function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRendere
       const details = ui.renderSurface({
         ariaLabel: `Source ${card.index + 1}`,
         children: `<h3 class="pdpp-title">${ui.escapeHtml(
-          sourceLabel
+          rowLabel
         )}</h3>${clientPurposeBlock}${clientClaimsBlock}${manifestBlock}${protocolBlock}${selectionDetails}`,
         surface: "human",
       });
@@ -2146,12 +2231,13 @@ function buildApproveAllForm(
   requestUri: string,
   csrfToken: string | null,
   csrfFieldName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   const csrfInput = csrfToken
     ? `<input type="hidden" name="${ui.escapeHtml(csrfFieldName)}" value="${ui.escapeHtml(csrfToken)}" />`
     : "";
-  const sourceList = cards.map((_, index) => `data source ${index + 1}`).join(", ");
+  const sourceList = cards.map((_, index) => sourceNameOrFallback(sourceNames, index, `data source ${index + 1}`)).join(", ");
   return `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Allow every data source">
   ${csrfInput}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
 <label class="hosted-ui-source-toggle"><input type="checkbox" name="confirm_approve_all" value="1" required /> I confirm allowing all ${cards.length} data sources: ${sourceList}</label>
@@ -2192,13 +2278,14 @@ function buildFinalBatchReviewForm(
   reviewRevision: string,
   csrfToken: string | null,
   csrfFieldName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   const csrfInput = csrfToken
     ? `<input type="hidden" name="${ui.escapeHtml(csrfFieldName)}" value="${ui.escapeHtml(csrfToken)}" />`
     : "";
   const sourceList = cards
-    .map((card, index) => `<li>Data source ${index + 1} <code>${ui.escapeHtml(card.source?.id || `source ${index + 1}`)}</code></li>`)
+    .map((card, index) => `<li>${ui.escapeHtml(sourceNameOrFallback(sourceNames, index, `Data source ${index + 1}`))} <code>${ui.escapeHtml(card.source?.id || `source ${index + 1}`)}</code></li>`)
     .join("");
   return `<form class="hosted-ui-form" method="POST" action="/consent/approve" aria-label="Confirm reviewed batch decision">
   ${csrfInput}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
@@ -2216,7 +2303,8 @@ function renderReviewedBatchConsentHtml(
   csrfToken: string | null,
   csrfFieldName: string,
   providerName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   if (!pending.reviewRevision) {
     throw new Error("Reviewed batch consent is missing its approval revision");
@@ -2245,7 +2333,7 @@ function renderReviewedBatchConsentHtml(
       ui.renderSurface({
         ariaLabel: `Reviewed source ${source.index + 1}`,
         children: [
-          `<h3 class="pdpp-heading">${ui.escapeHtml(source.source.id)}</h3>`,
+          `<h3 class="pdpp-heading">${ui.escapeHtml(sourceNameOrFallback(sourceNames, order, `Data source ${order + 1}`))}</h3>`,
           ui.renderKeyValueList([
             { label: "Approval order", value: order + 1 },
             { label: "Staged source index", value: source.index },
@@ -2261,17 +2349,19 @@ function renderReviewedBatchConsentHtml(
     )
     .join("\n");
   const clientDisplay = buildConsentClientDisplay(review.client, ui);
-  const sourceNames = review.sources.map((_, index) => `Data source ${index + 1}`);
+  const summarySourceNames = review.sources.map((_, index) =>
+    sourceNameOrFallback(sourceNames, index, `Data source ${index + 1}`)
+  );
   const recordCount = review.sources.reduce((count, source) => count + source.resolved_streams.length, 0);
   const actions = [
-    buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision, csrfToken, csrfFieldName, ui),
+    buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision, csrfToken, csrfFieldName, ui, sourceNames),
     denyForm,
   ].join("\n");
   const body = [
     ui.renderPageIntro({
       title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    renderConsentSummary(clientDisplay, sourceNames, recordCount, ui),
+    renderConsentSummary(clientDisplay, summarySourceNames, recordCount, ui),
     renderConsentDetails(ui.renderSurface({
       ariaLabel: "Reviewed batch decision",
       children: ui.renderKeyValueList([
@@ -2301,7 +2391,8 @@ function renderBatchConsentHtml(
   csrfToken: string | null,
   csrfFieldName: string,
   providerName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   if (pending.review?.version === "reference.batch-approval-review.v1") {
     return renderReviewedBatchConsentHtml(
@@ -2311,7 +2402,8 @@ function renderBatchConsentHtml(
       csrfToken,
       csrfFieldName,
       providerName,
-      ui
+      ui,
+      sourceNames
     );
   }
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
@@ -2360,19 +2452,21 @@ function renderBatchConsentHtml(
   const perSourceForm = sourceFormId
     ? buildPerSourceConfirmForm(requestUri, null, csrfToken, csrfFieldName, ui)
     : "";
-  const sourceCards = buildBatchSourceCards(cards, ui, sourceFormId ?? undefined);
+  const sourceCards = buildBatchSourceCards(cards, ui, sourceFormId ?? undefined, sourceNames);
   const allowButton = sourceFormId
     ? `<button type="submit" form="${ui.escapeHtml(sourceFormId)}" class="hosted-ui-button" data-variant="primary">Allow</button>`
     : "";
   const actions = hasReviewedDecision
     ? renderConsentActionPair(
-        [buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision as string, csrfToken, csrfFieldName, ui), denyForm]
+        [buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision as string, csrfToken, csrfFieldName, ui, sourceNames), denyForm]
           .filter(Boolean)
           .join("\n")
       )
     : renderConsentActionPair([allowButton, denyForm].filter(Boolean).join("\n"));
 
-  const sourceNames = cards.map((_, index) => `Data source ${index + 1}`);
+  const summarySourceNames = cards.map((_, index) =>
+    sourceNameOrFallback(sourceNames, index, `Data source ${index + 1}`)
+  );
   const recordCount = cards.reduce((count, card) => count + (Array.isArray(card.resolvedStreams) ? card.resolvedStreams.length : 0), 0);
   const sourceSelection = sourceFormId
     ? `<section class="hosted-ui-batch-sources" aria-label="Data sources">
@@ -2381,7 +2475,7 @@ function renderBatchConsentHtml(
         ${perSourceForm}${sourceCards}
       </section>`
     : "";
-  const summary = renderConsentSummary(clientDisplay, sourceNames, recordCount, ui, {
+  const summary = renderConsentSummary(clientDisplay, summarySourceNames, recordCount, ui, {
     includeSourceRows: !sourceFormId,
     includeTrustLine: !sourceFormId,
   });
@@ -2411,7 +2505,7 @@ function renderBatchConsentHtml(
     suppressionNote,
     hasReviewedDecision ? sourceCards : "",
     sourceFormId && !approveAllSuppressed
-      ? buildApproveAllForm(cards, requestUri, csrfToken, csrfFieldName, ui)
+      ? buildApproveAllForm(cards, requestUri, csrfToken, csrfFieldName, ui, sourceNames)
       : "",
   ]
     .filter(Boolean)
@@ -2500,7 +2594,8 @@ function renderReviewedSingleConsentHtml(
   csrfToken: string | null,
   csrfFieldName: string,
   providerName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   const actions = buildSingleConsentActions({
     csrfFieldName,
@@ -2516,7 +2611,7 @@ function renderReviewedSingleConsentHtml(
     ui.renderPageIntro({
       title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    renderConsentSummary(clientDisplay, ["this data source"], recordCount, ui),
+    renderConsentSummary(clientDisplay, [sourceNameOrFallback(sourceNames, 0, "this data source")], recordCount, ui),
     renderConsentDetails(ui.renderSurface({
       ariaLabel: "Reviewed consent decision",
       children: [
@@ -2578,10 +2673,11 @@ export function renderPendingGrantConsentHtml(
   csrfToken: string | null,
   csrfFieldName: string,
   providerName: string,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  sourceNames?: Array<string | null>
 ): string {
   if (pending.batch) {
-    return renderBatchConsentHtml(pending, requestUri, csrfToken, csrfFieldName, providerName, ui);
+    return renderBatchConsentHtml(pending, requestUri, csrfToken, csrfFieldName, providerName, ui, sourceNames);
   }
   if (pending.review?.version === "reference.approval-review.v1") {
     return renderReviewedSingleConsentHtml(
@@ -2591,7 +2687,8 @@ export function renderPendingGrantConsentHtml(
       csrfToken,
       csrfFieldName,
       providerName,
-      ui
+      ui,
+      sourceNames
     );
   }
 
@@ -2684,7 +2781,7 @@ export function renderPendingGrantConsentHtml(
     ui.renderPageIntro({
       title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    renderConsentSummary(clientDisplay, ["this data source"], recordCount, ui),
+    renderConsentSummary(clientDisplay, [sourceNameOrFallback(sourceNames, 0, "this data source")], recordCount, ui),
     renderConsentDetails(ui.renderSurface({
       ariaLabel: "Consent request",
       children: [

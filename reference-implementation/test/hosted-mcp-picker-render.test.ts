@@ -35,13 +35,24 @@ import {
   encodeHostedMcpStreamSelection,
   hostedMcpSourceKey,
 } from "../server/hosted-mcp-selection.ts";
-import { HOSTED_UI_CSS, escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
+import {
+  HOSTED_UI_CSS,
+  escapeHtml,
+  renderActionRow,
+  renderHostedDocument,
+  renderKeyValueList,
+  renderPageIntro,
+  renderResultState,
+  renderSurface,
+} from "../server/hosted-ui.ts";
 import {
   ActiveBindingLookupError,
   type ConsentPickerBinding,
   type ConsentPickerCapabilities,
   type ConsentUiRenderer,
+  createConsentSourceNameLookup,
   listHostedMcpPickerRows,
+  resolvePendingSourceNames,
   renderHostedMcpSourceSelection,
   renderPendingGrantConsentHtml,
 } from "../server/routes/as-consent-ui-helpers.ts";
@@ -767,6 +778,15 @@ test("source choices render as plain rows, with monospace reserved for Details",
   assert.doesNotMatch(html, /\.hosted-ui-option-preview\s*\{[^}]*font-family:\s*var\(--font-mono\)/);
 });
 
+test("access mode and expiry controls render as plain rows with touch-sized options", () => {
+  // PAGE-RULES 3 and 7: these controls use hairline rows and 44px touch targets.
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-access-mode\s*\{[^}]*border:\s*0;[^}]*border-bottom:\s*1px solid var\(--border\);[^}]*background:\s*transparent;/);
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-access-mode-legend\s*\{[^}]*text-transform:\s*none;/);
+  assert.doesNotMatch(HOSTED_UI_CSS, /\.hosted-ui-access-mode-legend\s*\{[^}]*text-transform:\s*uppercase/);
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-expiry\s*\{[^}]*border:\s*0;[^}]*border-bottom:\s*1px solid var\(--border\);[^}]*background:\s*transparent;/);
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-expiry-option\s*\{[^}]*min-height:\s*44px/);
+});
+
 // ── The H1 names the requester and the verb; the URL is not headline material ──
 
 test("H1 uses the resolved display name, never the client_id URL", async () => {
@@ -1147,4 +1167,226 @@ test("the decision summary updates from the selected records", async () => {
   const script = /<script>([\s\S]*)<\/script>/.exec(html);
   assert.ok(script, "picker behavior script must render");
   assert.match(script[1] ?? "", /reviewScope\.textContent = hasSelection[\s\S]*It will read /, "selection changes rewrite the decision summary");
+});
+
+test("consent source names resolve from their single connection id and fall back safely", async () => {
+  const pending = {
+    batch: true,
+    cards: [
+      {
+        index: 0,
+        source: { id: SPOTIFY_ID },
+        resolvedStreams: [
+          { name: "saved_tracks", instance_ids: ["cin_spotify_1"] },
+          { name: "top_artists", instance_ids: ["cin_spotify_1"] },
+        ],
+      },
+      {
+        index: 1,
+        source: { id: GITHUB_ID },
+        resolvedStreams: [
+          { name: "repositories", instance_ids: ["one"] },
+          { name: "issues", instance_ids: ["two"] },
+        ],
+      },
+      { index: 2, source: { id: GITHUB_ID }, resolvedStreams: [{ name: "issues" }] },
+    ],
+    request: {},
+  } as Parameters<typeof resolvePendingSourceNames>[0];
+  const seen: Array<{ connectorId: string; connectionId: string | null }> = [];
+  const names = await resolvePendingSourceNames(pending, async (source) => {
+    seen.push(source);
+    return source.connectorId === SPOTIFY_ID && source.connectionId === "cin_spotify_1" ? "Spotify · Personal listening" : "GitHub";
+  });
+  assert.deepEqual(seen, [
+    { connectorId: SPOTIFY_ID, connectionId: "cin_spotify_1" },
+    { connectorId: GITHUB_ID, connectionId: null },
+    { connectorId: GITHUB_ID, connectionId: null },
+  ]);
+  assert.deepEqual(names, ["Spotify · Personal listening", "GitHub", "GitHub"]);
+
+  const reviewedPending = {
+    review: {
+      sources: [{
+        source: { id: SPOTIFY_ID },
+        resolved_streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }],
+      }],
+      version: "reference.batch-approval-review.v1",
+    },
+    request: {},
+  } as Parameters<typeof resolvePendingSourceNames>[0];
+  assert.deepEqual(
+    await resolvePendingSourceNames(reviewedPending, async ({ connectorId, connectionId }) =>
+      connectorId === SPOTIFY_ID && connectionId === "cin_spotify_1" ? "Spotify · Personal listening" : null
+    ),
+    ["Spotify · Personal listening"]
+  );
+
+  const lookup = createConsentSourceNameLookup(makeCaps(), "owner_local");
+  assert.equal(await lookup({ connectorId: SPOTIFY_ID, connectionId: "cin_spotify_1" }), "Spotify · Personal listening");
+  assert.equal(await lookup({ connectorId: SPOTIFY_ID, connectionId: "unknown" }), "Spotify");
+  assert.equal(await lookup({ connectorId: "unknown-connector", connectionId: null }), null);
+});
+
+test("batch consent renders both source names and keeps unresolved sources neutral", () => {
+  const pending = {
+    batch: true,
+    cards: [
+      { index: 0, source: { id: SPOTIFY_ID }, resolvedStreams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }] },
+      { index: 1, source: { id: GITHUB_ID }, resolvedStreams: [{ name: "repositories", instance_ids: ["cin_github_url"] }] },
+    ],
+    request: { client: PREREGISTERED_CLIENT },
+  } as Parameters<typeof renderPendingGrantConsentHtml>[0];
+  const html = renderPendingGrantConsentHtml(pending, "request-uri", "csrf", "_csrf", "PDPP", ui, ["Spotify · Personal listening", null]);
+  assert.match(html, /Spotify · Personal listening/);
+  assert.match(html, /Data source 2/);
+});
+
+test("consent names do not change hidden form fields or the approval review artifact", () => {
+  const review = {
+    approved_source_indexes: [0],
+    access_mode: "one_time",
+    client: { client_id: "example-client", registration_mode: "pre_registered" },
+    expires_at: null,
+    parent_package_id: null,
+    source_narrowing: {},
+    sources: [{
+      access_mode: "one_time",
+      client_claims: null,
+      index: 0,
+      purpose_code: "data_access",
+      purpose_description: null,
+      resolved_streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"], fields: [] }],
+      retention: null,
+      selection_preset: null,
+      source: { id: SPOTIFY_ID, kind: "connector" },
+      source_declaration: { digest: "source-digest", version: "v1" },
+    }],
+    subject: { id: "owner_local" },
+    version: "reference.batch-approval-review.v1",
+  };
+  const pending = {
+    batch: true,
+    cards: [],
+    review,
+    reviewRevision: "review-revision",
+    request: { client: PREREGISTERED_CLIENT },
+  } as Parameters<typeof renderPendingGrantConsentHtml>[0];
+  const unnamed = renderPendingGrantConsentHtml(pending, "request-uri", "csrf", "_csrf", "PDPP", ui);
+  const named = renderPendingGrantConsentHtml(pending, "request-uri", "csrf", "_csrf", "PDPP", ui, ["Spotify · Personal listening"]);
+  const hiddenFields = (html: string) => [...html.matchAll(/<input type="hidden"[^>]*\/>/g)].map(([field]) => field);
+
+  assert.match(named, /Spotify · Personal listening/);
+  assert.match(unnamed, /Data source 1/);
+  assert.deepEqual(hiddenFields(named), hiddenFields(unnamed));
+  assert.equal(JSON.stringify(pending.review), JSON.stringify(review));
+});
+
+test("single consent names its source and uses neutral wording when unresolved", () => {
+  const pending = {
+    request: {
+      client: PREREGISTERED_CLIENT,
+      selection: { streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }] },
+      source_binding: { id: SPOTIFY_ID, kind: "connector" },
+    },
+  } as Parameters<typeof renderPendingGrantConsentHtml>[0];
+  const unnamed = renderPendingGrantConsentHtml(pending, "request-uri", null, "_csrf", "PDPP", ui);
+  const named = renderPendingGrantConsentHtml(pending, "request-uri", null, "_csrf", "PDPP", ui, ["Spotify · Personal listening"]);
+
+  assert.match(named, /Spotify · Personal listening/);
+  assert.match(unnamed, /this data source/);
+});
+
+test("consent names leave every form, action, method, field name and posted value unchanged on all four screens", () => {
+  // Real hosted-UI renderers, so the hidden fields of Allow / Don't allow rows are in the HTML.
+  const realUi: ConsentUiRenderer = {
+    escapeHtml,
+    renderActionRow,
+    renderHostedDocument,
+    renderKeyValueList,
+    renderPageIntro,
+    // Result pages are not part of these screens; only the tone's string type differs.
+    renderResultState: (opts) => renderResultState(opts as Parameters<typeof renderResultState>[0]),
+    renderSurface,
+  };
+  const attr = (tag: string, name: string) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1] ?? null;
+  const formContract = (html: string) =>
+    [...html.matchAll(/<(form|input|button|select|textarea|option)\b[^>]*>/g)].map(([tag, kind]) =>
+      [kind, ...["action", "method", "name", "value", "type", "form", "formaction", "formmethod", "required", "checked"].map((n) => `${n}=${attr(tag, n)}`)].join(" ")
+    );
+  const reviewedSource = {
+    access_mode: "one_time",
+    client_claims: null,
+    index: 0,
+    purpose_code: "data_access",
+    purpose_description: null,
+    resolved_streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"], fields: [] }],
+    retention: null,
+    selection_preset: null,
+    source: { id: SPOTIFY_ID, kind: "connector" },
+    source_declaration: { digest: "source-digest", version: "v1" },
+  };
+  const screens = {
+    batch: {
+      batch: true,
+      cards: [
+        { index: 0, source: { id: SPOTIFY_ID }, resolvedStreams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }] },
+        { index: 1, source: { id: GITHUB_ID }, resolvedStreams: [{ name: "repositories", instance_ids: ["cin_github_url"] }] },
+      ],
+      request: { client: PREREGISTERED_CLIENT },
+    },
+    reviewedBatch: {
+      batch: true,
+      cards: [],
+      review: {
+        access_mode: "one_time",
+        approved_source_indexes: [0],
+        client: { client_id: "client_demo", registration_mode: "pre_registered" },
+        expires_at: null,
+        parent_package_id: null,
+        source_narrowing: {},
+        sources: [reviewedSource],
+        subject: { id: "owner_local" },
+        version: "reference.batch-approval-review.v1",
+      },
+      reviewRevision: "review-revision",
+      request: { client: PREREGISTERED_CLIENT },
+    },
+    single: {
+      request: {
+        client: PREREGISTERED_CLIENT,
+        selection: { streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }] },
+        source_binding: { id: SPOTIFY_ID, kind: "connector" },
+      },
+    },
+    reviewedSingle: {
+      review: {
+        ...reviewedSource,
+        ai_training_consented: null,
+        client: { client_id: "client_demo", registration_mode: "pre_registered" },
+        expires_at: null,
+        subject: { id: "owner_local" },
+        version: "reference.approval-review.v1",
+      },
+      reviewRevision: "review-revision",
+      request: {
+        client: PREREGISTERED_CLIENT,
+        selection: { streams: [{ name: "saved_tracks", instance_ids: ["cin_spotify_1"] }] },
+        source_binding: { id: SPOTIFY_ID, kind: "connector" },
+      },
+    },
+  };
+  for (const [screen, fixture] of Object.entries(screens)) {
+    const pending = fixture as unknown as Parameters<typeof renderPendingGrantConsentHtml>[0];
+    const before = JSON.stringify(pending);
+    const unnamed = renderPendingGrantConsentHtml(pending, "request-uri", "csrf", "_csrf", "PDPP", realUi);
+    const named = renderPendingGrantConsentHtml(pending, "request-uri", "csrf", "_csrf", "PDPP", realUi, [
+      "Spotify · Personal listening",
+      "GitHub · Work",
+    ]);
+    assert.match(named, /Spotify · Personal listening/, `${screen}: the name is shown`);
+    assert.ok(formContract(unnamed).some((line) => line.includes("name=_csrf")), `${screen}: the contract sees hidden fields`);
+    assert.deepEqual(formContract(named), formContract(unnamed), `${screen}: form contract unchanged`);
+    assert.equal(JSON.stringify(pending), before, `${screen}: the pending request and its review stay untouched`);
+  }
 });

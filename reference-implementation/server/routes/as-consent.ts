@@ -36,11 +36,12 @@ import { buildAuthorizationResponseUrl } from "../authorization-response.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
-import type { ConsentUiRenderer, PendingGrant } from "./as-consent-ui-helpers.ts";
+import type { ConsentSourceNameLookup, ConsentUiRenderer, PendingGrant } from "./as-consent-ui-helpers.ts";
 import {
   HOSTED_DENIAL_COPY,
   renderPendingConsentNotFoundHtml,
   renderPendingGrantConsentHtml,
+  resolvePendingSourceNames,
 } from "./as-consent-ui-helpers.ts";
 
 // ─── Local structural types ───────────────────────────────────────────────────
@@ -148,6 +149,7 @@ export interface MountAsConsentContext {
   pdppError: PdppErrorFn;
   providerName: string;
   resolveBaseUrl: (req: RouteRequest) => string;
+  resolveSourceName?: ConsentSourceNameLookup;
   /**
    * The RFC 9207 `iss` for authorization responses on this request. Must be
    * the same value `/.well-known/oauth-authorization-server` reports as
@@ -172,8 +174,8 @@ async function renderApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "Access is ready. You can close this page and go back to the app. You can stop this app reading your data later in DataConnect.",
-          title: "You allowed this app to read your data",
+          body: "Access is ready; you can close this page and go back to the app, or stop this app reading your data later in DataConnect.",
+          title: "",
           tone: "neutral",
         }),
         surface: "human",
@@ -219,8 +221,8 @@ async function renderPackageApproveHtml(
           // `/grants/packages/:packageId`. Reversibility is what makes "yes"
           // feel safe, so promising a granularity the owner cannot reach is
           // worse than saying less.
-          body: "Access is ready. You can close this page and go back to the app. You can stop this app reading your data later in DataConnect.",
-          title: "You allowed this app to read your data",
+          body: "Access is ready; you can close this page and go back to the app, or stop this app reading your data later in DataConnect.",
+          title: "",
           tone: "neutral",
         }),
         surface: "human",
@@ -600,6 +602,10 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
     return { deviceCode, pending };
   }
 
+  function resolveSourceNames(pending: PendingGrant): Promise<Array<string | null> | undefined> {
+    return ctx.resolveSourceName ? resolvePendingSourceNames(pending, ctx.resolveSourceName) : Promise.resolve(undefined);
+  }
+
   function buildConsentDecisionDeps(req: RouteRequest): AsConsentDecisionDependencies {
     const baseUrl = resolveBaseUrlForRequest(req);
     return {
@@ -714,6 +720,7 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           res.status(404).send(renderPendingConsentNotFoundHtml(ctx.providerName, ctx.consentUi));
           return;
         }
+        const sourceNames = await resolveSourceNames(pending);
         const csrfToken = ctx.ownerAuth.ensureCsrfToken(req, res);
         res.send(
           renderPendingGrantConsentHtml(
@@ -722,7 +729,8 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
             csrfToken,
             ctx.ownerAuth.csrfFieldName,
             ctx.providerName,
-            ctx.consentUi
+            ctx.consentUi,
+            sourceNames
           )
         );
       } catch (err) {
@@ -782,6 +790,7 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           });
           return;
         }
+        const sourceNames = await resolveSourceNames(pending);
         const csrfToken = ctx.ownerAuth.ensureCsrfToken(req, res);
         res.send(
           renderPendingGrantConsentHtml(
@@ -790,7 +799,8 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
             csrfToken,
             ctx.ownerAuth.csrfFieldName,
             ctx.providerName,
-            ctx.consentUi
+            ctx.consentUi,
+            sourceNames
           )
         );
       } catch (err) {
