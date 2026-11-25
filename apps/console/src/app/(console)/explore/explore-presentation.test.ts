@@ -67,6 +67,17 @@ test("Explore titles prefer a title, then human text, then the kind", () => {
   assert.equal(exploreRecordTitle(entry({ kind: "generic", fields: [{ label: "Is self", name: "is_self", value: "true" }, { label: "Count", name: "count", value: "145" }] })), "Top artists");
 });
 
+test("Explore titles skip raw lists and objects, whatever the field order", () => {
+  const fields = [
+    { label: "Followers", name: "followers", value: "1200" },
+    { label: "Genres", name: "genres", value: '["pop","country pop"]' },
+    { label: "Images", name: "images", value: '{"url":"https://example.test/a.jpg"}' },
+    { label: "Name", name: "name", value: "Taylor Swift" },
+  ];
+  assert.equal(exploreRecordTitle(entry({ kind: "generic", fields })), "Taylor Swift");
+  assert.equal(exploreRecordTitle(entry({ kind: "generic", fields: fields.slice(0, 3) })), "Top artists");
+});
+
 test("Explore rows show one title, a human kind and data-source name, and a relative time", () => {
   const now = Date.UTC(2026, 10, 25, 18);
   const sourceEntry = {

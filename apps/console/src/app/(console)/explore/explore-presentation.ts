@@ -12,10 +12,12 @@ export const EXPLORE_FAILED_MESSAGE = "This could not be loaded.";
 
 const NUMBER_ONLY_RE = /^[-+]?\d+(?:[.,]\d+)?%?$/;
 const BOOLEAN_ONLY_RE = /^(?:true|false)$/i;
+// A serialized list or object (for example `["pop","rock"]`) is data, not words a person would title a record with.
+const STRUCTURED_VALUE_RE = /^[[{]/;
 
 function humanText(value: string | undefined): string | undefined {
   const text = value?.replace(/\s+/g, " ").trim();
-  if (!text || NUMBER_ONLY_RE.test(text) || BOOLEAN_ONLY_RE.test(text)) {
+  if (!text || NUMBER_ONLY_RE.test(text) || BOOLEAN_ONLY_RE.test(text) || STRUCTURED_VALUE_RE.test(text)) {
     return undefined;
   }
   return text;
