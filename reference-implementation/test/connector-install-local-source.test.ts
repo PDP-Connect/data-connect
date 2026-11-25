@@ -8,6 +8,7 @@ import {
   rmSync,
   writeFileSync,
   existsSync,
+  readFileSync,
 } from "node:fs"
 import { join } from "node:path"
 import { afterEach, test } from "node:test"
@@ -113,6 +114,14 @@ test("reload refreshes hashes and drift blocks a selected local run until reload
   assert.equal(drifted.status, "invalid")
   const reloaded = await store.reload(source.sourceId)
   assert.notEqual(reloaded.entrypointSha256, source.entrypointSha256)
+  const addedAgain = await store.add(sourcePath)
+  assert.equal(addedAgain.sourceId, source.sourceId)
+  assert.equal(addedAgain.selected, true)
+  assert.equal(addedAgain.entrypointSha256, reloaded.entrypointSha256)
+  assert.equal(
+    (await store.getSelectedForConnector(source.connectorKey))?.sourceId,
+    source.sourceId
+  )
   assert.equal(
     (await inspectActiveLocalConnectorSource(store, source.connectorId)).status,
     "active"
@@ -127,4 +136,19 @@ test("local admission rejects unsupported runtime bindings", async () => {
     () => store.add(fixture({ key: "bad-binding", binding: "usb" })),
     /unsupported runtime binding/
   )
+})
+
+test("re-adding a source whose profile changed connector key is rejected", async () => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const root = fixture({ key: "first-fixture" })
+  const store = createFileLocalConnectorSourceStore(dataDir)
+  const source = await store.add(root)
+  const changed = fixture({ key: "second-fixture" })
+  writeFileSync(
+    join(root, "profile", "collection-profile.json"),
+    readFileSync(join(changed, "profile", "collection-profile.json"))
+  )
+  await assert.rejects(store.add(root), /changed connector identity/)
+  assert.equal((await store.list()).find((item) => item.sourceId === source.sourceId)?.connectorKey, "first-fixture")
 })
