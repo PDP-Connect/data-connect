@@ -59,11 +59,18 @@ export interface ExistingSourceSetupLink {
   totalRecordsState?: RefCountState;
 }
 
+export interface UncataloguedSourceSetupLink {
+  connectorId: string;
+  connectionId: string;
+  displayName: string;
+}
+
 export type SourceSetupMaturity = "ready" | "testing" | "development";
 
 export interface SourceSummaryRead {
   byConnector: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
   truncated: boolean;
+  uncataloguedSources?: readonly UncataloguedSourceSetupLink[];
 }
 
 export type SourceSummaryReadResult = { ok: true; value: SourceSummaryRead } | { ok: false };
@@ -91,11 +98,12 @@ export const DEFAULT_SOURCE_MATURITIES: ReadonlySet<SourceSetupMaturity> = new S
 export function filterSourceCatalog(
   catalog: readonly ConnectorCatalogEntry[],
   query: string,
-  maturities: ReadonlySet<SourceSetupMaturity>
+  maturities: ReadonlySet<SourceSetupMaturity>,
+  isInstalled: (entry: ConnectorCatalogEntry) => boolean = () => false
 ): ConnectorCatalogEntry[] {
   const needle = query.trim().toLowerCase();
   return sortSourceCatalog(catalog).filter((entry) => {
-    if (!maturities.has(maturityFor(entry))) return false;
+    if (!isInstalled(entry) && !maturities.has(maturityFor(entry))) return false;
     return !needle || [entry.displayName, entry.connectorKey, entry.disposition, entry.setupModality, entry.supportState]
       .join(" ")
       .toLowerCase()
@@ -692,6 +700,7 @@ function SourceSetupCardList({
 interface SourceSetupGroupsProps {
   catalog: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  uncataloguedSources?: readonly UncataloguedSourceSetupLink[];
   installCatalogTransientlyUnavailable: boolean;
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   updatesReady?: Promise<UpdatesReadyModel | null>;
@@ -702,6 +711,7 @@ interface SourceSetupGroupsProps {
 function SourceSetupGroupsContent({
   catalog,
   existingSourcesByConnector,
+  uncataloguedSources = [],
   installCatalogTransientlyUnavailable,
   installLifecycleByConnector,
   updatesReady,
@@ -709,7 +719,9 @@ function SourceSetupGroupsContent({
   maturities,
   checkingSources = false,
 }: SourceSetupGroupsProps & { checkingSources?: boolean }) {
-  const entries = filterSourceCatalog(catalog, query, maturities);
+  const entries = filterSourceCatalog(catalog, query, maturities, (entry) =>
+    sourceIsInstalled(entry, installLifecycleFor(entry, installLifecycleByConnector), existingSourcesByConnector)
+  );
   const installedEntries: ConnectorCatalogEntry[] = [];
   const availableEntries: ConnectorCatalogEntry[] = [];
   const unavailableEntries: ConnectorCatalogEntry[] = [];
@@ -726,7 +738,12 @@ function SourceSetupGroupsContent({
     (unavailable ? unavailableEntries : availableEntries).push(entry);
   }
 
-  const hasVisible = installedEntries.length > 0 || availableEntries.length > 0 || unavailableEntries.length > 0;
+  const search = query.trim().toLowerCase();
+  const visibleUncataloguedSources = uncataloguedSources.filter((source) =>
+    !search || `${source.displayName} ${source.connectorId}`.toLowerCase().includes(search)
+  );
+
+  const hasVisible = installedEntries.length > 0 || visibleUncataloguedSources.length > 0 || availableEntries.length > 0 || unavailableEntries.length > 0;
   if (!hasVisible) {
     return (
       <p className="pdpp-caption py-3 text-muted-foreground" data-testid="source-catalog-empty">
@@ -751,7 +768,27 @@ function SourceSetupGroupsContent({
             installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
             installLifecycleByConnector={installLifecycleByConnector}
           />
-        ) : <p className="pdpp-caption py-2 text-muted-foreground">{checkingSources ? "Checking data sources…" : "No installed data sources."}</p>}
+        ) : null}
+        {visibleUncataloguedSources.length ? (
+          <ul className="grid gap-3" data-testid="uncatalogued-installed-sources">
+            {visibleUncataloguedSources.map((source) => (
+              <li className="flex min-w-0 items-center gap-2 border-b border-border py-4" key={source.connectionId}>
+                <ConnectorMark connectorId={source.connectorId} name={source.displayName} />
+                <Link
+                  className="min-w-0 text-foreground underline underline-offset-2"
+                  href={sourceDetailHref(source.connectorId, source.connectionId)}
+                >
+                  {source.displayName}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {!installedEntries.length && !visibleUncataloguedSources.length ? (
+          <p className="pdpp-caption py-2 text-muted-foreground">
+            {checkingSources ? "Checking data sources…" : "No installed data sources."}
+          </p>
+        ) : null}
       </section>
       <section aria-label="Available" data-testid="available-sources">
         <h2 className="pdpp-eyebrow mb-1 text-muted-foreground">Available</h2>
@@ -789,6 +826,7 @@ function ResolvedSourceSetupGroups({ read, ...props }: SourceSetupGroupsProps & 
     <SourceSetupGroupsContent
       {...props}
       existingSourcesByConnector={result.ok ? result.value.byConnector : props.existingSourcesByConnector}
+      uncataloguedSources={result.ok ? result.value.uncataloguedSources : props.uncataloguedSources}
     />
   );
 }
@@ -796,6 +834,7 @@ function ResolvedSourceSetupGroups({ read, ...props }: SourceSetupGroupsProps & 
 export function SourceSetupCatalog({
   catalog,
   existingSourcesByConnector,
+  uncataloguedSources,
   existingSourcesRead,
   installCatalogBusySnapshotId = null,
   installCatalogTransientlyUnavailable = false,
@@ -813,6 +852,7 @@ export function SourceSetupCatalog({
    * connector's existing-sources list is exact by construction.
    */
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  uncataloguedSources?: readonly UncataloguedSourceSetupLink[];
   existingSourcesRead?: Promise<SourceSummaryReadResult>;
   installCatalogBusySnapshotId?: string | null;
   installCatalogTransientlyUnavailable?: boolean;
@@ -845,7 +885,10 @@ export function SourceSetupCatalog({
   // The maturity filter controls which tier is shown here. Developer mode
   // continues to gate local-source controls; selecting In development is
   // enough to reveal development entries in this catalog.
-  const includeDevelopment = developerMode || maturities.has("development");
+  const hasInstalledDevelopment = catalog.some(
+    (entry) => entry.publicTier === "development" && sourceIsInstalled(entry, installLifecycleFor(entry, installLifecycleByConnector), existingSourcesByConnector)
+  );
+  const includeDevelopment = developerMode || maturities.has("development") || hasInstalledDevelopment || Boolean(existingSourcesRead);
   const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, includeDevelopment);
   return (
     <Section>
@@ -879,6 +922,7 @@ export function SourceSetupCatalog({
             installLifecycleByConnector={installLifecycleByConnector}
             query={searchText}
             maturities={maturities}
+            uncataloguedSources={uncataloguedSources}
             checkingSources
             updatesReady={updatesReady}
           />
@@ -889,6 +933,7 @@ export function SourceSetupCatalog({
             installLifecycleByConnector={installLifecycleByConnector}
             query={searchText}
             maturities={maturities}
+            uncataloguedSources={uncataloguedSources}
             read={existingSourcesRead}
             updatesReady={updatesReady}
           />
@@ -897,6 +942,7 @@ export function SourceSetupCatalog({
         <SourceSetupGroupsContent
           catalog={visibleCatalog}
           existingSourcesByConnector={existingSourcesByConnector}
+          uncataloguedSources={uncataloguedSources}
           installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
           installLifecycleByConnector={installLifecycleByConnector}
           query={searchText}

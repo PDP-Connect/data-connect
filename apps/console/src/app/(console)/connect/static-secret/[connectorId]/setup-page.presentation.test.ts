@@ -22,6 +22,7 @@ test("static-secret setup preserves the fields and uses matching connect and rec
   assert.match(page, /<summary className="inline-flex min-h-11 cursor-pointer items-center">Details<\/summary>/);
   assert.match(page, /Set <code>\{blocker\.key\}<\/code>/);
   assert.equal((page.match(/Back to Data sources/g) ?? []).length, 1);
+  assert.match(page, /isReplaceMode \? `Back to \$\{setup\.display_name\}` : "Back to Data sources"/);
 });
 
 test("static-secret copy samples avoid banned words outside Details", () => {

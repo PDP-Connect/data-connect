@@ -103,12 +103,8 @@ export interface SyncGroup {
    * Shown once in the group header rather than repeated on every stream row.
    */
   lastRunAt: string | null;
-  /**
-   * Connection-level last-run delta phrase moved here from per-row. True for
-   * all streams in the group (it is derived from event_count, a cross-stream
-   * total). Null when there is no terminal run on record.
-   */
-  lastRunDelta: string | null;
+  /** Outcome phrase for the latest run, or null when the source has no run. */
+  lastRunOutcome: string | null;
   /**
    * Connection-level last-run duration phrase moved here from per-row.
    * Null when unknown.
@@ -227,8 +223,6 @@ export interface RecentSyncEntry {
   connectorId: string | null;
   /** Short duration phrase ("6 s", "2 m 4 s"), or null when unknown. */
   duration: string | null;
-  /** Records collected by this run. Null when the feed does not report a count. */
-  eventCount: number | null;
   /** Deep link to the run detail route. */
   href: string;
   /** True while the run has not reached a terminal status. */
@@ -485,7 +479,6 @@ export function buildRecentSyncs(input: {
       connectorId,
       connectionName: matched?.display_name ?? connectorId ?? run.run_id,
       duration: describeDuration(run.first_at, run.last_at),
-      eventCount: Number.isFinite(run.event_count) ? run.event_count : null,
       href: `/syncs/${encodeURIComponent(run.run_id)}`,
       live: !isTerminalRunStatus(run.status),
       outcome,
@@ -561,19 +554,21 @@ export function describeCadence(schedule: RefSchedule | null | undefined): strin
   return `every ${days} d`;
 }
 
-/** Format an event-count delta into a row phrase. */
-export function describeDelta(input: { failed: boolean; eventCount: number | null }): string {
-  if (input.failed) {
-    return "sync failed";
+/** The run list's event count is not a record count, so its row shows outcome only. */
+export function describeLastRunOutcome(input: { failed: boolean; status: string }): string {
+  if (input.failed) return "sync failed";
+  switch (recentSyncOutcome(input.status)) {
+    case "failed":
+      return "sync failed";
+    case "partial":
+      return "Sync finished with gaps";
+    case "running":
+      return "Syncing now";
+    case "ok":
+      return "Sync finished";
+    case "unknown":
+      return "Status not available";
   }
-  const count = input.eventCount;
-  if (count === null) {
-    return "no recent run";
-  }
-  if (count <= 0) {
-    return "no change";
-  }
-  return `+${count.toLocaleString()} record${count === 1 ? "" : "s"}`;
 }
 
 /**
@@ -877,8 +872,9 @@ function projectSyncProjection(input: {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
   const lastAt = lastRun?.last_at ?? connector.last_run?.last_at ?? connector.last_successful_run?.last_at ?? null;
   const lastAtMs = lastAt ? Date.parse(lastAt) : 0;
-  const eventCount = lastRun ? lastRun.event_count : null;
-  const lastRunDelta = lastRun === null ? null : describeDelta({ eventCount, failed: lastFailed });
+  const lastRunOutcome = lastRun === null
+    ? null
+    : describeLastRunOutcome({ failed: lastFailed, status: lastRun.status });
   // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
   const lastRunDuration = describeDuration(lastRun?.first_at ?? null, lastRun?.last_at ?? null);
   const lastRunRhythm = deriveConnectionRhythm(connectionRuns);
@@ -899,7 +895,7 @@ function projectSyncProjection(input: {
       connectorId: connector.connector_id,
       health: failing ? "failing" : "ok",
       lastRunAt: lastAt,
-      lastRunDelta,
+      lastRunOutcome,
       lastRunDuration,
       lastRunRhythm,
       name: connector.display_name,

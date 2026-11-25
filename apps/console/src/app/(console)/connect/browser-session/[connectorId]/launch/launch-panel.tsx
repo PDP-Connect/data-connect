@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 
 interface LaunchState {
   error: string | null;
+  networkLost: boolean;
   starting: boolean;
 }
 
@@ -114,17 +115,17 @@ export function BrowserSessionLaunchPanel({
   displayName: string;
   draft: boolean;
 }) {
-  const [state, setState] = useState<LaunchState>({ error: null, starting: true });
+  const [state, setState] = useState<LaunchState>({ error: null, networkLost: false, starting: true });
   const startedRef = useRef(false);
 
   function start() {
-    setState({ error: null, starting: true });
+    setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
         window.location.assign(href);
       })
       .catch((err) => {
-        setState({ error: launchErrorMessage(err), starting: false });
+        setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
       });
   }
 
@@ -133,20 +134,28 @@ export function BrowserSessionLaunchPanel({
       return;
     }
     startedRef.current = true;
-    setState({ error: null, starting: true });
+    setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
         window.location.assign(href);
       })
       .catch((err) => {
-        setState({ error: launchErrorMessage(err), starting: false });
+        setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
       });
   }, [connectionId, connectorId, draft]);
 
   return (
     <section className="grid gap-4">
       <p className="pdpp-body text-muted-foreground">
-        {state.starting ? `DataConnect is opening the browser for ${displayName}. Keep this page open.` : "The browser could not open. Try again."}
+        {state.starting ? (
+          `DataConnect is opening the browser for ${displayName}. Keep this page open.`
+        ) : state.networkLost ? (
+          <>
+            This page lost contact with DataConnect. Check <Link href="/syncs">sync history</Link> before trying again.
+          </>
+        ) : (
+          "The browser could not open. Try again."
+        )}
       </p>
 
       {state.error ? (

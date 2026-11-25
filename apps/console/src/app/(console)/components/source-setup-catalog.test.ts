@@ -185,6 +185,31 @@ test("an in-testing source with an existing data source shows in the default vie
   assert.match(installed, />In testing</);
 });
 
+test("an installed development source stays under Installed when its maturity filter is off", async () => {
+  const development = { ...reddit, publicTier: "development" as const };
+  const html = await render(false, development, undefined, 0, {
+    reddit: [{ connectionId: "c1", displayName: "My Reddit", latestImportFile: null, latestImportStatus: null, status: null, totalRecords: 3 }],
+  });
+  const installed = html.slice(html.indexOf('data-testid="installed-sources"'), html.indexOf('data-testid="available-sources"'));
+  assert.ok(installed.includes(">My Reddit"));
+  assert.ok(installed.includes(">Reddit"));
+});
+
+test("an existing source whose connector is absent from the catalog appears by its display name", async () => {
+  const { SourceSetupCatalog } = await catalogModule;
+  const html = renderToStaticMarkup(createElement(SourceSetupCatalog, {
+    catalog: [],
+    existingSourcesByConnector: {},
+    uncataloguedSources: [{ connectorId: "seed-reddit", connectionId: "c9", displayName: "My Reddit archive" }],
+    installCatalogTransientlyUnavailable: false,
+    installLifecycleByConnector: {},
+    query: "",
+  }));
+  const installed = html.slice(html.indexOf('data-testid="installed-sources"'), html.indexOf('data-testid="available-sources"'));
+  assert.ok(installed.includes(">My Reddit archive"));
+  assert.ok(installed.includes('href="/sources/seed-reddit?connection_id=c9"'));
+});
+
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
   const empty = await render(false);
   assert.doesNotMatch(empty, />Reddit</);

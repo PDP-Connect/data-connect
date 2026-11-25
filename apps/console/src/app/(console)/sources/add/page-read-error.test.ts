@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
 const CATALOG_FILE = fileURLToPath(new URL("../../components/source-setup-catalog.tsx", import.meta.url));
+const INSTALLED_SOURCES_FILE = fileURLToPath(new URL("./installed-source-catalog.ts", import.meta.url));
 const HANDLES_DETERMINISTIC_REQUEST_RE = /if \(isDeterministicSourcesReadError\(err\)\)/;
 // RAISE-RULES 6: the failed sentence ends in one "Try again" link, not the words twice.
 const RENDERS_FIXED_FAILURE_RE = /Couldn't load data sources\. <Link className="underline underline-offset-2" href="\/sources\/add">Try again<\/Link>\./;
@@ -21,8 +22,12 @@ const PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE =
   /installCatalogTransientlyUnavailable=\{installCatalogTransientlyUnavailable\}/;
 const PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
   /installCatalogBusySnapshotId=\{installCatalogBusySnapshotId\}/;
-const STARTS_SUMMARY_READ_AFTER_CATALOG_RE = /const sourceRead = existingSourcesByConnectorCatalog\(catalog\.map/;
+const STARTS_SUMMARY_READ_AFTER_CATALOG_RE = /const sourceRead = readInstalledSourceCatalog\(catalog\.map/;
 const PASSES_SUMMARY_READ_TO_PAGE_RE = /existingSourcesRead=\{existingSourcesRead\}/;
+const RETURNS_READ_FAILURE_RE = /\(\): SourceSummaryReadResult => \(\{ ok: false \}\)/;
+const CONTINUATION_REFUSAL_RE = /if \(cursor && isContinuationRefusal\(err\)\)/;
+const RETURNS_PARTIAL_RESULT_RE = /return \{ \.\.\.partial, truncated: true \}/;
+const SHOWS_PARTIAL_RESULT_WARNING_RE = /Some data sources could not be loaded/;
 
 test("Add Source renders a fixed deterministic read failure before it reaches Next's error boundary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -50,12 +55,15 @@ test("Add Source preserves transient connector catalog-busy state for package pr
 test("Add Source warns that existing sources are missing when the lookup was refused part way", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const catalog = await readFile(CATALOG_FILE, "utf8");
+  const installedSources = await readFile(INSTALLED_SOURCES_FILE, "utf8");
   // Brief decision 8: the catalog draws before the existing-source summary resolves.
   assert.match(src, STARTS_SUMMARY_READ_AFTER_CATALOG_RE);
   assert.match(src, PASSES_SUMMARY_READ_TO_PAGE_RE);
   // Brief decision 8: a rejected summary read resolves to a fixed visible failure instead of rejecting the page.
-  assert.match(src, /\(\): SourceSummaryReadResult => \(\{ ok: false \}\)/);
+  assert.match(src, RETURNS_READ_FAILURE_RE);
+  assert.match(installedSources, CONTINUATION_REFUSAL_RE);
+  assert.match(installedSources, RETURNS_PARTIAL_RESULT_RE);
   assert.match(catalog, /if \(!result\.ok\)[\s\S]*?Couldn't load data sources\. Try again\./);
   assert.match(catalog, /result\.value\.truncated/);
-  assert.match(catalog, /Some data sources could not be loaded/);
+  assert.match(catalog, SHOWS_PARTIAL_RESULT_WARNING_RE);
 });

@@ -147,13 +147,14 @@ export default async function StaticSecretConnectPage({
   );
   const backHref =
     isReplaceMode && pageParams.connectionId ? `/sources/${encodeURIComponent(pageParams.connectionId)}` : "/sources";
+  const backLabel = isReplaceMode ? `Back to ${setup.display_name}` : "Back to Data sources";
 
   return (
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
           <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href={backHref}>
-            Back to Data sources
+            {backLabel}
           </Link>
         }
         description={

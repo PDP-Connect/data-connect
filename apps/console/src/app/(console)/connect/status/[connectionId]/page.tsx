@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants } from "@pdpp/brand-react";
-import { deriveSourceDisplayNameFallback } from "@pdpp/display";
 import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -17,7 +16,7 @@ import {
 } from "../../../lib/ref-client.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
-import { setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
+import { connectionSetupDisplayName, setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -642,17 +641,6 @@ function ImportProgressCard({ phases }: { phases: readonly ImportPhase[] }) {
   );
 }
 
-function deriveSetupStatusDisplayName(status: ConnectionSetupStatus): string {
-  if (status.display_name) {
-    return status.display_name;
-  }
-  return deriveSourceDisplayNameFallback({
-    connectorId: status.connector_id,
-    displayName: null,
-    name: null,
-  });
-}
-
 function CoverageReceiptCard({ receipt }: { receipt: ImportReceipt }) {
   const warning = formatWarnings(receipt.warnings);
   return (
@@ -705,8 +693,9 @@ export default async function ConnectionSetupStatusPage({
   const accountIdentity = status.account_identity ?? pageParams.identity ?? null;
   const described = describeState(status);
   const importPhases = importPhaseProgress(status);
-  const displayName = deriveSetupStatusDisplayName(status);
-  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id)?.icon;
+  const connectorManifest = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id);
+  const displayName = connectionSetupDisplayName(status.display_name, connectorManifest?.display_name, status.connector_id);
+  const connectorIcon = connectorManifest?.icon;
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={status.pending} />

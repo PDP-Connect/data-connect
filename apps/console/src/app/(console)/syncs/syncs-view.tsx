@@ -338,14 +338,10 @@ function DuplicateSyncGroupPanel({ group, connectorIcons }: { group: DuplicateSy
 export function recentSyncPhrase(entry: RecentSyncEntry, needsYou: boolean): string {
   if (needsYou) return "Needs you";
   if (entry.outcome === "ok") {
-    return entry.eventCount === null
-      ? "Collected records"
-      : `Collected ${entry.eventCount.toLocaleString()} records`;
+    return "Sync finished";
   }
   if (entry.outcome === "partial") {
-    return entry.eventCount === null
-      ? "Collected records with gaps"
-      : `Collected ${entry.eventCount.toLocaleString()} records with gaps`;
+    return "Sync finished with gaps";
   }
   if (entry.outcome === "failed") return "Failed";
   if (entry.outcome === "running") return "Syncing now";
@@ -670,12 +666,12 @@ function SyncTableRow({ row }: { row: SyncRow }) {
 // ─── Sync group (one connection) ──────────────────────────────────────────────
 
 function SyncGroupLastRun({
-  delta,
+  outcome,
   duration,
   lastRunAt,
   rhythm,
 }: {
-  delta: string | null;
+  outcome: string | null;
   duration: string | null;
   lastRunAt: string | null;
   rhythm: SyncRhythmTick[];
@@ -683,7 +679,7 @@ function SyncGroupLastRun({
   return (
     <div className="rr-sync-group__last-run">
       {rhythm.length > 0 ? <Rhythm ticks={rhythm} /> : null}
-      {delta === null ? null : <span className="rr-sync-group__delta">{delta}</span>}
+      {outcome === null ? null : <span className="rr-sync-group__delta">{outcome}</span>}
       {duration === null ? null : <span className="rr-sync-group__duration">{duration}</span>}
       {lastRunAt === null ? null : (
         <span className="rr-sync-group__when">
@@ -742,7 +738,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
           {group.streams.length} {group.streams.length === 1 ? "stream" : "streams"}
         </span>
         <SyncGroupLastRun
-          delta={group.lastRunDelta}
+          outcome={group.lastRunOutcome}
           duration={group.lastRunDuration}
           lastRunAt={group.lastRunAt}
           rhythm={group.lastRunRhythm}

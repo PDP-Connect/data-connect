@@ -44,9 +44,9 @@ import { OpenExternalLink } from "@/app/(console)/components/open-external-link.
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { formatRelative } from "@pdpp/display";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
-import { getTraceTimeline, type SpineEvent, type TimelineEnvelope } from "../../lib/ref-client.ts";
+import { getTraceTimeline, refSearch, type SpineEvent, type TimelineEnvelope, type TraceSummary } from "../../lib/ref-client.ts";
 import { eventEndorseStatus, traceOverall } from "../trace-timeline-status.ts";
-import { traceEntryReadFacts, traceEntryTitle } from "../trace-entry-title.ts";
+import { traceAppName, traceEntryReadFacts, traceEntryTitle } from "../trace-entry-title.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +58,15 @@ function getCursor(searchParams: { cursor?: string | string[] }): string | null 
 
 function traceTimelineHref(traceId: string, cursor: string): string {
   return `/audit/${encodeURIComponent(traceId)}?${new URLSearchParams({ cursor }).toString()}`;
+}
+
+async function findTraceSummary(traceId: string): Promise<TraceSummary | null> {
+  try {
+    const search = await refSearch(traceId);
+    return search.traces.find((trace) => trace.trace_id === traceId) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Event status → Endorse variant ──────────────────────────────────────────
@@ -284,8 +293,11 @@ export default async function TraceDetailPage({
   const rsUrl = `${getAsInternalUrl()}/_ref/traces/${encodeURIComponent(traceId)}`;
 
   let envelope: TimelineEnvelope | null;
+  let matchedTrace: TraceSummary | null = null;
   try {
-    envelope = await getTraceTimeline(traceId, { cursor });
+    const [timeline, traceSummary] = await Promise.all([getTraceTimeline(traceId, { cursor }), findTraceSummary(traceId)]);
+    envelope = timeline;
+    matchedTrace = traceSummary;
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -311,7 +323,11 @@ export default async function TraceDetailPage({
 
   const overall = traceOverall(events);
   const readFacts = traceEntryReadFacts(events, !(cursor || envelope.truncated));
-  const { actor: appWord, kind: firstKind, title } = traceEntryTitle(first, readFacts);
+  const { actor: appWord, kind: firstKind, title } = traceEntryTitle(
+    first,
+    readFacts,
+    traceAppName(matchedTrace)
+  );
   const what = firstKind === "Data read" ? readFacts ?? "Data read" : firstKind;
 
   // Load-more

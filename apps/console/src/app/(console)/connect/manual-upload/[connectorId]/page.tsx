@@ -14,6 +14,7 @@ import { findManifestForConnectorId } from "../../../sources/lib/relationships.t
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { formatTotalRecordsLabel } from "../../../lib/total-records-label.ts";
 import { ManualUploadForm } from "./manual-upload-form.tsx";
+import { isMissingManualUploadSetup } from "./manual-upload-setup-read.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -89,7 +90,7 @@ export default async function ManualUploadConnectPage({
   const connectorId = decodeURIComponent(rawConnectorId);
   const resolvedSearchParams = await searchParams;
   const setup = await getManualUploadSetup(connectorId).catch((err) => {
-    if (err instanceof RefNotFoundError) {
+    if (err instanceof RefNotFoundError || isMissingManualUploadSetup(err)) {
       notFound();
     }
     throw err;
@@ -126,7 +127,7 @@ export default async function ManualUploadConnectPage({
         title={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
-            Connect {setup.display_name}
+            {targetConnectionId ? `Import another ${setup.display_name} file` : `Connect ${setup.display_name}`}
           </span>
         }
       />

@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { classifyBrowserSessionLaunchResult } from "./[connectorId]/launch/launch-result.ts";
+
+const LAUNCH_PANEL_FILE = fileURLToPath(new URL("./[connectorId]/launch/launch-panel.tsx", import.meta.url));
 
 const BROWSER_READY_FAILURE_RE = /could not get the secure browser ready/i;
 const NO_RUN_ID_RE = /no run id/i;
@@ -72,4 +76,11 @@ test("browser-session launch fails closed when the controller returns no run id"
   assert.equal(result.ok, false);
   assert.equal(result.status, 502);
   assert.match(result.message, NO_RUN_ID_RE);
+});
+
+test("a lost network connection points to sync history without claiming the browser failed to open", async () => {
+  const panel = await readFile(LAUNCH_PANEL_FILE, "utf8");
+  assert.match(panel, /state\.networkLost \? \([\s\S]*This page lost contact with DataConnect/);
+  assert.match(panel, /<Link href="\/syncs">sync history<\/Link>/);
+  assert.match(panel, /networkLost: isLostTransportError\(err\)/);
 });

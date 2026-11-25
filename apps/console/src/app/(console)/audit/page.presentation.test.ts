@@ -36,9 +36,12 @@ test("activity uses the requested sentence and keeps technical row facts folded"
 
 test("the Activity entry names disclosed source, kind and count when present", async () => {
   const src = await readFile(ENTRY_PAGE, "utf8");
+  const list = await readFile(PAGE, "utf8");
   // Brief item 1: the entry uses disclosure facts when the event provides them.
   assert.ok(src.includes("traceEntryReadFacts(events, !(cursor || envelope.truncated))"));
   assert.ok(src.includes('firstKind === "Data read" ? readFacts ?? "Data read" : firstKind'));
+  assert.ok(src.includes("traceAppName(matchedTrace)"));
+  assert.ok(list.includes("traceAppName(trace)"));
 });
 
 test("desktop peek shows the entry facts and links to its full entry", async () => {

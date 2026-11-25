@@ -15,7 +15,8 @@ import type { ConnectorInstallLifecycle } from "../../lib/connector-install-pres
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
-import { existingSourcesByConnectorCatalog, getConnectorInstallSnapshot } from "../connector-updates-read.ts";
+import { getConnectorInstallSnapshot } from "../connector-updates-read.ts";
+import { readInstalledSourceCatalog } from "./installed-source-catalog.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
 import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
 import { setupErrorCopy } from "./setup-error-copy.ts";
@@ -81,7 +82,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
       localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
       // Start the slower owner summary read after the catalog is ready. Both the
       // account links and the shared update line consume this same result.
-      const sourceRead = existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey));
+      const sourceRead = readInstalledSourceCatalog(catalog.map((entry) => entry.connectorKey));
       existingSourcesRead = sourceRead.then(
         (value): SourceSummaryReadResult => ({ ok: true, value }),
         (): SourceSummaryReadResult => ({ ok: false }),

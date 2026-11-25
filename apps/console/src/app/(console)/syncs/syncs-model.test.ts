@@ -18,7 +18,7 @@ import {
   buildSyncsViewModel,
   deriveConnectionRhythm,
   describeCadence,
-  describeDelta,
+  describeLastRunOutcome,
   describeDuration,
   describeRecentSyncOutcome,
   recentSyncOutcome,
@@ -356,7 +356,7 @@ test("connector-wide runs are not attributed to every same-type connection", () 
   });
 
   assert.deepEqual(
-    model.groups.map((group) => group.lastRunDelta),
+    model.groups.map((group) => group.lastRunOutcome),
     [null, null],
     "a connector-keyed run without exact connection identity must not paint either source"
   );
@@ -392,7 +392,7 @@ test("schedule.active_run_id wins over a live last_run on the same connection", 
 
   const byConnection = new Map(model.groups.map((group) => [group.connectionId, group]));
   assert.equal(byConnection.get("cin_heb_scheduled")?.activeRunId, "run_1784089918638");
-  assert.equal(byConnection.get("cin_heb_scheduled")?.lastRunDelta, "+12 records");
+  assert.equal(byConnection.get("cin_heb_scheduled")?.lastRunOutcome, "Sync finished");
 });
 
 test("a genuinely active last_run backfills the exact sync link when schedule is null", () => {
@@ -539,9 +539,9 @@ test("browser surface profile keys attribute a run only to the matching connecti
   });
 
   const byConnection = new Map(model.groups.map((group) => [group.connectionId, group]));
-  assert.equal(byConnection.get("cin_chase_a")?.lastRunDelta, null);
+  assert.equal(byConnection.get("cin_chase_a")?.lastRunOutcome, null);
   assert.equal(byConnection.get("cin_chase_a")?.streams[0]?.failed, false);
-  assert.equal(byConnection.get("cin_chase_b")?.lastRunDelta, "sync failed");
+  assert.equal(byConnection.get("cin_chase_b")?.lastRunOutcome, "sync failed");
   assert.equal(byConnection.get("cin_chase_b")?.streams[0]?.failed, true);
 });
 
@@ -558,7 +558,7 @@ test("connection summary last_run remains available without connector-wide run a
     runs: [],
   });
 
-  assert.equal(model.groups[0]?.lastRunDelta, "+42 records");
+  assert.equal(model.groups[0]?.lastRunOutcome, "Sync finished");
   assert.deepEqual(model.groups[0]?.lastRunRhythm, ["ok"]);
 });
 
@@ -718,11 +718,12 @@ test("syncs carries a durable auto-enrollment skip reason for an unscheduled sou
   assert.equal(model.groups[0]?.scheduleReason, "public_listing.tier=preview");
 });
 
-test("describeDelta reads records, no change, and failure honestly", () => {
-  assert.equal(describeDelta({ eventCount: 38, failed: false }), "+38 records");
-  assert.equal(describeDelta({ eventCount: 1, failed: false }), "+1 record");
-  assert.equal(describeDelta({ eventCount: 0, failed: false }), "no change");
-  assert.equal(describeDelta({ eventCount: 5, failed: true }), "sync failed");
+test("describeLastRunOutcome reports run status without presenting event count as records", () => {
+  assert.equal(describeLastRunOutcome({ failed: false, status: "succeeded" }), "Sync finished");
+  assert.equal(describeLastRunOutcome({ failed: false, status: "in_progress" }), "Syncing now");
+  assert.equal(describeLastRunOutcome({ failed: false, status: "succeeded_with_gaps" }), "Sync finished with gaps");
+  assert.equal(describeLastRunOutcome({ failed: false, status: "deferred" }), "Status not available");
+  assert.equal(describeLastRunOutcome({ failed: true, status: "failed" }), "sync failed");
 });
 
 test("describeDuration formats sub-minute and minute spans", () => {
@@ -741,7 +742,7 @@ test("a failing connection holds its next and marks rows failed", () => {
   assert.equal(group?.health, "failing");
   assert.equal(group?.streams[0]?.failed, true);
   assert.equal(group?.next, "held");
-  assert.equal(group?.lastRunDelta, "sync failed");
+  assert.equal(group?.lastRunOutcome, "sync failed");
 });
 
 test("a broken connector does not rewrite a successful last run into sync failed", () => {
@@ -778,7 +779,7 @@ test("a broken connector does not rewrite a successful last run into sync failed
 
   const [group] = model.groups;
   assert.equal(group?.health, "failing", "the group still shows the current connector state");
-  assert.equal(group?.lastRunDelta, "+52 records", "last result remains the successful run fact");
+  assert.equal(group?.lastRunOutcome, "Sync finished", "the run feed event count is not shown as a record count");
   assert.equal(
     group?.streams[0]?.failed,
     false,
@@ -1566,7 +1567,7 @@ test("connection-level last-run facts live on the group, not on each stream row"
   assert.ok(group, "group must exist");
 
   // Connection-level facts on the group header.
-  assert.equal(group.lastRunDelta, "+99 records", "delta is on the group");
+  assert.equal(group.lastRunOutcome, "Sync finished", "the run feed event count is not shown as a record count");
   assert.equal(group.lastRunDuration, "6 s", "duration is on the group");
   assert.ok(group.lastRunAt, "lastRunAt is on the group");
   assert.ok(group.lastRunRhythm.length > 0, "rhythm ticks are on the group");
@@ -1612,10 +1613,10 @@ test("honest empty state when collection_report is absent — no fabricated conn
   assert.equal(row.coverageCondition, null, "coverageCondition is null when collection_report absent");
   assert.equal(row.streamSkipped, false, "streamSkipped is false when collection_report absent");
 
-  // The connection-level event_count (55) must NOT appear on the stream row.
+  // The connection-level event_count must NOT appear on the stream row.
   assert.notEqual(
     (row as unknown as { delta?: string }).delta,
-    "+55 records",
+    "Sync finished",
     "the connection total must not be fabricated on the stream row"
   );
 });
@@ -1802,13 +1803,13 @@ test("recent syncs dedupe repeated run ids from the feed", () => {
   assert.equal(model.recentSyncs.length, 1);
 });
 
-test("recent syncs never fabricate a record count when the feed omits one", () => {
+test("recent syncs do not carry the feed event count as a record count", () => {
   const model = buildSyncsViewModel({
     connectors: [connector({ connection_id: "cin_a" })],
     runs: [run({ connection_id: "cin_a", event_count: Number.NaN, run_id: "run_x" })],
   });
 
-  assert.equal(model.recentSyncs[0]?.eventCount, null);
+  assert.equal(Object.hasOwn(model.recentSyncs[0] ?? {}, "eventCount"), false);
 });
 
 test("recent syncs render every run the caller passes in — no hidden re-truncation of an already-paginated page", () => {

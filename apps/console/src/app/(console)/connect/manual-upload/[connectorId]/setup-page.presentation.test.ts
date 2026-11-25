@@ -11,7 +11,7 @@ const FORM_FILE = fileURLToPath(new URL("./manual-upload-form.tsx", import.meta.
 
 test("manual upload has three plain steps and no dead error query", async () => {
   const [page, form] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(FORM_FILE, "utf8")]);
-  assert.match(page, /Connect \{setup\.display_name\}/);
+  assert.match(page, /targetConnectionId \? `Import another \$\{setup\.display_name\} file` : `Connect \$\{setup\.display_name\}`/);
   assert.match(page, /Upload the export file from \{setup\.display_name\}\./);
   assert.match(page, /Export your data from \{setup\.display_name\}\./);
   assert.match(page, /Choose the export file\./);

@@ -3,8 +3,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SpineEvent } from "../lib/ref-client.ts";
-import { traceEntryReadFacts, traceEntryTitle } from "./trace-entry-title.ts";
+import type { SpineEvent, TraceSummary } from "../lib/ref-client.ts";
+import { traceAppName, traceEntryReadFacts, traceEntryTitle } from "./trace-entry-title.ts";
 
 test("an app's read titles the entry as an app read, also when the server records the owner as actor", () => {
   // Seen on a live instance: owner-session reads through the console carry actor_type "subject" and a client_id.
@@ -16,6 +16,32 @@ test("an app's read titles the entry as an app read, also when the server record
   assert.equal(
     traceEntryTitle({ actor_type: "client", client_id: null, event_type: "disclosure.served" }).title,
     "An app read your data"
+  );
+});
+
+test("an Activity entry uses the same app name as the Activity list when available", () => {
+  const summary = {
+    actor_id: null,
+    actor_type: null,
+    client: { client_id: "dataconnect-console", client_name: "DataConnect console", registration_mode: null },
+    client_id: "dataconnect-console",
+    event_count: 1,
+    failure: null,
+    first_at: "2026-11-25T00:00:00Z",
+    grant_id: null,
+    kinds: [],
+    last_at: "2026-11-25T00:00:00Z",
+    object: "trace_summary",
+    request_id: null,
+    run_id: null,
+    status: "succeeded",
+    trace_id: "trace-1",
+  } satisfies TraceSummary;
+  const appName = traceAppName(summary);
+  assert.equal(appName, "DataConnect console");
+  assert.equal(
+    traceEntryTitle({ actor_type: "subject", client_id: "dataconnect-console", event_type: "query.received" }, null, appName).title,
+    "DataConnect console read your data"
   );
 });
 
@@ -45,6 +71,7 @@ test("read facts name the source, kind, and count only when each is present", ()
     stream_id: "top_artists",
   } as unknown as SpineEvent;
   assert.equal(traceEntryReadFacts([full], true), "120 Spotify top artists");
+  assert.equal(traceEntryReadFacts([{ ...full, data: { ...full.data, record_count: 1 } }], true), "1 record of Spotify top artists");
 
   // Missing source: the kind and count stay, no data source is named.
   const noSource = { ...full, data: { record_count: 7 } } as SpineEvent;
@@ -53,6 +80,12 @@ test("read facts name the source, kind, and count only when each is present", ()
   const partial = { ...full, data: { record_count: 4 }, stream_id: null } as SpineEvent;
   assert.equal(traceEntryReadFacts([partial], true), "4 records");
   assert.equal(traceEntryTitle(full, traceEntryReadFacts([full], true)).title, "An app read 120 Spotify top artists");
+  const oneRedditComment = {
+    ...full,
+    data: { record_count: 1, source: { id: "reddit", kind: "connector" } },
+    stream_id: "comments",
+  } as SpineEvent;
+  assert.equal(traceEntryReadFacts([oneRedditComment], true), "1 record of Reddit comments");
   assert.equal(
     traceEntryTitle({ ...full, actor_type: "runtime", client_id: null }, traceEntryReadFacts([full], true)).title,
     "Read 120 Spotify top artists"

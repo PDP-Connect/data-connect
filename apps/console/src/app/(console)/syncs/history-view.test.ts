@@ -49,8 +49,8 @@ function visibleHistoryText(model: typeof DEMO_SYNCS_MODEL, pagingState: RecentS
 test("history rows use one plain phrase for the result", () => {
   // DIRECTION.md, Values: each row uses a short phrase and words for its time.
   assert.equal(
-    recentSyncPhrase({ eventCount: 120, outcome: "ok", status: "succeeded" } as RecentSyncEntry, false),
-    "Collected 120 records"
+    recentSyncPhrase({ outcome: "ok", status: "succeeded" } as RecentSyncEntry, false),
+    "Sync finished"
   );
   assert.equal(recentSyncPhrase({ outcome: "failed", status: "failed" } as RecentSyncEntry, false), "Failed");
   assert.equal(recentSyncPhrase({ outcome: "ok", status: "succeeded" } as RecentSyncEntry, true), "Needs you");

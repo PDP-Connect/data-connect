@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { SpineEvent } from "../lib/ref-client.ts";
-import { humanizeFieldLabel } from "@pdpp/display";
+import { humanizeFieldLabel, traceRowLabel } from "@pdpp/display";
+import type { TraceSummary } from "../lib/ref-client.ts";
 import { traceKindLabel } from "./trace-kind-label.ts";
 
 export interface TraceEntryTitle {
@@ -11,6 +12,15 @@ export interface TraceEntryTitle {
   /** Plain label of the first event's kind ("Data read", "App connection", …). */
   kind: string;
   title: string;
+}
+
+export function traceAppName(trace: TraceSummary | null): string {
+  if (!trace) return "An app";
+  if (trace.client?.client_name) {
+    return trace.client.client_name;
+  }
+  const label = traceRowLabel(trace);
+  return label.startsWith("client ") || label.startsWith("provider ") ? "App" : label;
 }
 
 /**
@@ -24,14 +34,15 @@ export interface TraceEntryTitle {
  */
 export function traceEntryTitle(
   first: Pick<SpineEvent, "actor_type" | "client_id" | "event_type"> | null,
-  readFacts?: string | null
+  readFacts?: string | null,
+  clientName?: string | null
 ): TraceEntryTitle {
   const kind = first ? traceKindLabel([first.event_type]) : "Activity";
   let actor: string | null = null;
   if (first?.actor_type === "device") {
     actor = "A device";
   } else if (first?.actor_type === "client" || first?.client_id) {
-    actor = "An app";
+    actor = clientName || "An app";
   }
   if (kind === "Data read") {
     if (readFacts) {
@@ -78,7 +89,17 @@ export function traceEntryReadFacts(events: readonly SpineEvent[], complete: boo
   const streamLabel = typeof event.stream_id === "string" && event.stream_id ? humanizeFieldLabel(event.stream_id) : null;
   const stream = streamLabel ? `${streamLabel.charAt(0).toLowerCase()}${streamLabel.slice(1)}` : null;
 
-  if (!source && !stream) {
+  if (count === 1 && source && stream) {
+    return `1 record of ${source} ${stream}`;
+  }
+  if (count === 1 && stream) {
+    return `1 record of ${stream}`;
+  }
+  if (count === 1 && source) {
+    return `1 record from ${source}`;
+  }
+
+  if (!(source || stream)) {
     return `${count.toLocaleString()} ${count === 1 ? "record" : "records"}`;
   }
   return [count.toLocaleString(), source, stream ?? "records"].filter(Boolean).join(" ");

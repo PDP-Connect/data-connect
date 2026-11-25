@@ -41,7 +41,7 @@ import {
   Tag,
   TypedSm,
 } from "@pdpp/brand-react";
-import { formatRelative, traceRowLabel } from "@pdpp/display";
+import { formatRelative } from "@pdpp/display";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
@@ -55,7 +55,7 @@ import {
   type TraceSummary,
 } from "../lib/ref-client.ts";
 import { traceEndorseStatus } from "./trace-endorse-status.ts";
-import { traceEntryReadFacts, traceEntryTitle } from "./trace-entry-title.ts";
+import { traceAppName, traceEntryReadFacts, traceEntryTitle } from "./trace-entry-title.ts";
 import { traceKindLabel } from "./trace-kind-label.ts";
 
 export const dynamic = "force-dynamic";
@@ -88,14 +88,6 @@ function traceListFilters(params: Params) {
     q: params.q,
     status: params.status,
   };
-}
-
-function traceAppName(trace: TraceSummary): string {
-  if (trace.client?.client_name) {
-    return trace.client.client_name;
-  }
-  const label = traceRowLabel(trace);
-  return label.startsWith("client ") || label.startsWith("provider ") ? "App" : label;
 }
 
 function traceWhatRead(trace: TraceSummary): string {
