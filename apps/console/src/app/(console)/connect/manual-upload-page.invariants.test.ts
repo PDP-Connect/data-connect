@@ -12,7 +12,8 @@ const BODIES_FILE = fileURLToPath(new URL("../sources/add/connect-bodies.tsx", i
 const FORM_FILE = fileURLToPath(new URL("./manual-upload/[connectorId]/manual-upload-form.tsx", import.meta.url));
 
 const GET_SETUP = /getManualUploadSetup\(connectorId\)/;
-const FORM_COMPONENT = /<ManualUploadForm\s+existingSources=\{existingSources\}\s+name=\{name\}\s+setup=\{setup\}/;
+// Design "File services" (repair round 1): the form also receives the "new here" note that sits above its buttons.
+const FORM_COMPONENT = /<ManualUploadForm\s+existingSources=\{existingSources\}\s+name=\{name\}\s+note=\{<NewServiceNote[^>]*\/>\}\s+setup=\{setup\}/;
 const CLIENT_SUBMIT = /onSubmit=\{handleSubmit\}/;
 const RAW_XHR_UPLOAD = /new XMLHttpRequest\(\)/;
 const REF_UPLOAD_ENDPOINT = /\/_ref\/connectors\/.*manual-upload-staged-artifact/;

@@ -32,7 +32,7 @@ const lifecycles = {
 const model = buildAddSourceList({
   catalog: ALL_ENTRIES,
   catalogTransientlyUnavailable: false,
-  existingConnectionCounts: { amazon: 1 },
+  existingConnectionIds: { amazon: ["cin_a"] },
   lifecycleFor: (entry) => lifecycles[connectorLookupKey(entry.connectorKey) as keyof typeof lifecycles] ?? { catalog: null, installed: null },
 });
 
@@ -62,6 +62,16 @@ test("a row shows the name once and Added only for a service that has an account
   assert.equal((html.match(/>Amazon</g) ?? []).length, 1);
   assert.doesNotMatch(html, />WHOOP</);
   assert.doesNotMatch(html, /<button/);
+});
+
+// Design "Page 1": no match and can't-be-added are followed by one "Show all services".
+test("the empty search answers each carry one Show all services action", async () => {
+  const { AddSourceList } = await listModule;
+  for (const query of ["zzz", "whoop"]) {
+    const html = renderToStaticMarkup(createElement(AddSourceList, { model, query }));
+    assert.equal((html.match(/Show all services/g) ?? []).length, 1, query);
+    assertClean(html, `empty: ${query}`);
+  }
 });
 
 test("the checker itself catches a fold, a badge and a banned word", () => {
@@ -162,6 +172,9 @@ test("the key page, in every state, uses none of the banned words, badges or fol
   const notReady = visibleText(renderToStaticMarkup(createElement(KeyConnectBody, { ...base, storageReady: false }))).replace(/\s+/g, " ");
   assert.match(notReady, /This server is not set up to store keys yet\./);
   assert.doesNotMatch(notReady, /YNAB personal access token/);
+  // Design "Key services": storage not ready shows the heading and the blocked text, no lead or help link.
+  assert.doesNotMatch(notReady, /gives you a key|Where to find it/);
+  assert.match(notReady, /Connect YNAB/);
   const ready = visibleText(renderToStaticMarkup(createElement(KeyConnectBody, base))).replace(/\s+/g, " ");
   assert.match(ready, /YNAB gives you a key that lets DataConnect read your data\./);
   assert.match(ready, /Where to find it/);
@@ -170,6 +183,7 @@ test("the key page, in every state, uses none of the banned words, badges or fol
 
 test("the file page, in every state, uses none of the banned words, badges or folds", async () => {
   const { FileConnectBody } = await bodiesModule;
+  const { NewServiceNote } = await partsModule;
   const { ManualUploadForm } = await uploadFormModule;
   const setup = {
     accepted_file_extensions: [".zip", ".xml"],
@@ -181,7 +195,7 @@ test("the file page, in every state, uses none of the banned words, badges or fo
   };
   const instructions = {
     links: [{ href: "https://support.apple.com/health-export", label: "Apple's own guide" }],
-    steps: ["Open the Health app.", "Tap your picture, then Export All Health Data."],
+    steps: ["Open the Health app. Tap your picture. Scroll down and tap Export All Health Data.", "Wait for the file to be made."],
   };
   const health = { ...service(), connectorKey: "apple-health", name: "Apple Health" };
   const cases: Array<[string, boolean, typeof health, typeof setup]> = [
@@ -194,6 +208,7 @@ test("the file page, in every state, uses none of the banned words, badges or fo
     const form = createElement(ManualUploadForm, {
       existingSources: hasExisting ? [{ connection_id: "cin_0123456789abcdef01234567", detail: "", display_name: "Apple Health" }] : [],
       name: "Apple Health",
+      note: createElement(NewServiceNote, { name: "Apple Health", tier: svc.tier }),
       setup: setupFacts,
     });
     const html = renderToStaticMarkup(createElement(FileConnectBody, { form, instructions, service: svc }));
@@ -204,6 +219,15 @@ test("the file page, in every state, uses none of the banned words, badges or fo
     assert.match(text, /2\. Choose the file/);
     assert.match(text, /Accepted: \.zip, \.xml, up to 8 GB each\./);
     assert.match(text, /Import/);
+    // Design "File services": one sentence per line; the "new here" sentence sits just above the buttons.
+    const lines = [...html.matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1]);
+    assert.deepEqual(lines.slice(0, 4), ["Open the Health app.", "Tap your picture.", "Scroll down and tap Export All Health Data.", "Wait for the file to be made."], label);
+    const newHere = text.indexOf("is new here");
+    assert.equal(newHere >= 0, svc.tier === "development", label);
+    if (newHere >= 0) {
+      assert.ok(newHere > text.indexOf("Accepted:"), "after the file control");
+      assert.ok(newHere < text.lastIndexOf("Import"), "before the buttons");
+    }
     assert.equal(/Check the file first/.test(text), setupFacts.validation_expectations.length > 0, label);
     assert.equal(/Add to Apple Health/.test(text) && /Keep as a separate data source/.test(text), hasExisting, label);
     assert.equal(/Name for this account/.test(text), hasExisting, label);
@@ -222,9 +246,22 @@ test("a program you run yourself, in every state, uses none of the banned words,
     const html = renderToStaticMarkup(createElement(ProgramConnectBody, { name: "Claude Code", onRetry: noop, view }));
     assert.deepEqual(bannedCopyProblems(html, { allowWords: ["setup"] }), [], view.kind);
     assert.match(visibleText(html), /This one runs on the computer that has the data\./);
+    // Design "Programs you run yourself": terminal sentence, and Node.js only for an npx command.
+    if (view.kind === "waiting" || view.kind === "checked-in") {
+      assert.match(visibleText(html), /Open a terminal on that computer, paste this command and press Enter\. It needs Node\.js\./);
+    } else {
+      assert.doesNotMatch(visibleText(html), /Open a terminal/);
+    }
     if (view.kind === "waiting") assert.match(visibleText(html), /Waiting for it to check in…/);
     if (view.kind === "checked-in") assert.match(visibleText(html), /Claude Code checked in\./);
   }
+});
+
+test("a program whose command does not start with npx does not mention Node.js", async () => {
+  const { ProgramConnectBody } = await programModule;
+  const html = renderToStaticMarkup(createElement(ProgramConnectBody, { name: "Codex", onRetry: noop, view: { command: "pdpp-collector setup --code abc", issuedAt: "2026-11-25T00:00:00.000Z", kind: "waiting" } }));
+  assert.match(visibleText(html), /paste this command and press Enter\./);
+  assert.doesNotMatch(visibleText(html), /Node\.js/);
 });
 
 test("a service that cannot be connected shows its sentence, an acted-on reason, and one way back", async () => {

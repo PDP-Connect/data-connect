@@ -35,6 +35,12 @@ export function ProgramConnectBody({ name, onRetry, view }: { name: string; onRe
         </>
       ) : null}
       {view.kind === "waiting" || view.kind === "checked-in" ? (
+        <p className="text-foreground" data-testid="program-terminal">
+          {programCopy.terminal}
+          {view.command.trimStart().startsWith("npx") ? ` ${programCopy.needsNode}` : ""}
+        </p>
+      ) : null}
+      {view.kind === "waiting" || view.kind === "checked-in" ? (
         <div className="flex min-w-0 items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
           <code className="pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground" data-testid="program-command">
             {view.command}

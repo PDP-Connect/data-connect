@@ -64,3 +64,13 @@ test("the table uses the same update and uninstall actions as before, and Settin
   const settings = await readFile(new URL("../page.tsx", import.meta.url), "utf8");
   assert.match(settings, /href="\/settings\/packages"/);
 });
+
+// Design "Data source packages": the link sits in a section about data sources near the top of Settings.
+test("Settings carries the one-line link in a Data sources section above Remote access", async () => {
+  const settings = await readFile(new URL("../page.tsx", import.meta.url), "utf8");
+  const section = settings.indexOf('<Section title="Data sources">');
+  const link = settings.indexOf("Data source packages</span>");
+  assert.ok(section > 0 && link > section, "the link is inside the Data sources section");
+  assert.ok(settings.indexOf('title="Remote access"') > link, "the section comes before Remote access");
+  assert.equal((settings.match(/href="\/settings\/packages"/g) ?? []).length, 1);
+});

@@ -46,6 +46,8 @@ export const fileCopy = {
 
 export const programCopy = {
   lead: "This one runs on the computer that has the data.",
+  terminal: "Open a terminal on that computer, paste this command and press Enter.",
+  needsNode: "It needs Node.js.",
   waiting: "Waiting for it to check in…",
   checkedIn: (name: string) => `${name} checked in.`,
   seeData: "See your data",

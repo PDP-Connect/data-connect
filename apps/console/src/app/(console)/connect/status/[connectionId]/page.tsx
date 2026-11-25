@@ -1,8 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { LivePoller } from "../../../components/live-poller.tsx";
@@ -14,6 +12,7 @@ import {
   RefNotFoundError,
 } from "../../../lib/ref-client.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
+import { resumeConnectionAction } from "../../../sources/[connector]/actions.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { getCollectedKinds, getCollectionTerminalEvent } from "../../../syncs/[runId]/collected-kinds.ts";
 import { FirstSyncBody } from "./first-sync-body.tsx";
@@ -29,9 +28,11 @@ async function readFacts(
   status: Awaited<ReturnType<typeof getConnectionSetupStatus>>
 ): Promise<FirstSyncFacts> {
   const runId = status.run?.run_id;
+  // Same read the data source's own page makes. A failed read stays unknown
+  // (undefined); the server having no schedule is null, which the list calls "Manual".
   const [timeline, schedule] = await Promise.all([
     runId ? getRunTimeline(runId).catch(() => null) : Promise.resolve(null),
-    getConnectorSchedule(status.connector_id, { connectorInstanceId: status.connection_id }).catch(() => null),
+    getConnectorSchedule(status.connector_id, { connectorInstanceId: status.connection_id }).catch(() => undefined),
   ]);
   const kinds = timeline ? getCollectedKinds(getCollectionTerminalEvent(timeline.events)) : null;
   return { kinds, schedule };
@@ -61,12 +62,14 @@ export default async function ConnectionSetupStatusPage({
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={status.pending} />
-      <FirstSyncBody connectorId={status.connector_id} icon={manifest?.icon} name={name} outcome={outcome} />
-      <div className="mt-6">
-        <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href="/sources">
-          Back to Data sources
-        </Link>
-      </div>
+      <FirstSyncBody
+        connectionId={status.connection_id}
+        connectorId={status.connector_id}
+        icon={manifest?.icon}
+        name={name}
+        outcome={outcome}
+        resumeAction={resumeConnectionAction}
+      />
     </RecordroomShellWithPalette>
   );
 }

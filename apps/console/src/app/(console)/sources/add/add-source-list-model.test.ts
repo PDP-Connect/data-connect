@@ -18,11 +18,11 @@ const lifecycles: Record<string, ConnectorInstallLifecycle> = {
   ynab: notInstalled("ynab"),
 };
 
-function build(existing: Record<string, number> = {}, catalog: readonly ConnectorCatalogEntry[] = ALL_ENTRIES) {
+function build(existing: Record<string, readonly string[]> = {}, catalog: readonly ConnectorCatalogEntry[] = ALL_ENTRIES) {
   return buildAddSourceList({
     catalog,
     catalogTransientlyUnavailable: false,
-    existingConnectionCounts: existing,
+    existingConnectionIds: existing,
     lifecycleFor: (entry) => lifecycles[connectorLookupKey(entry.connectorKey)] ?? { catalog: null, installed: null },
   });
 }
@@ -38,9 +38,27 @@ test("the list shows only services that can be connected, A to Z", () => {
   assert.deepEqual(model.notAddable, ["WHOOP"]);
 });
 
+// Design "Page 1": a service you already have is always listed, "Added", and never "can't be added".
+test("an added service that cannot take a second account is still a row, and opens its own page", () => {
+  const model = build({ amazon: ["cin_a"], whoop: ["cin_w"] });
+  const whoopRow = model.rows.find((row) => row.connectorKey === "whoop");
+  assert.ok(whoopRow, "WHOOP has an account, so it is listed");
+  assert.equal(whoopRow.added, true);
+  assert.equal(whoopRow.href, "/sources/whoop?connection_id=cin_w");
+  assert.equal(model.notAddable.includes("WHOOP"), false);
+  assert.deepEqual(searchAddSourceList(model, "whoo").kind, "rows");
+});
+
+test("an added service that can take a second account opens the connect page", () => {
+  const amazonRow = build({ amazon: ["cin_a"] }).rows.find((row) => row.connectorKey === "amazon");
+  assert.ok(amazonRow);
+  assert.equal(amazonRow.added, true);
+  assert.equal(amazonRow.href, "/sources/add/amazon");
+});
+
 // Design item "Installed section ... A service you have stays in the list with a quiet Added".
 test("the list marks services that already have an account as Added, and no others", () => {
-  const model = build({ amazon: 1, chase: 0 });
+  const model = build({ amazon: ["cin_a"], chase: [] });
   const added = Object.fromEntries(model.rows.map((row) => [row.connectorKey, row.added]));
   assert.equal(added.amazon, true);
   assert.equal(added.chase, false);

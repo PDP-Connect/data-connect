@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton } from "@pdpp/brand-react";
-import { type SyntheticEvent, useState } from "react";
+import { type ReactNode, type SyntheticEvent, useState } from "react";
 import { accountCopy, acceptedFilesLine, fileCopy, formatBytes } from "../../../sources/add/connect-copy.ts";
 import { StartFailed } from "../../../sources/add/connect-parts.tsx";
 
@@ -633,8 +633,11 @@ export function ManualUploadForm({
   name,
   setup,
   targetConnectionId,
+  note,
 }: {
   existingSources: ExistingManualUploadSource[];
+  /** A sentence that sits just above the buttons (design "File services": the "new here" note). */
+  note?: ReactNode;
   name: string;
   setup: ManualUploadSetupForForm;
   targetConnectionId?: string | null;
@@ -749,6 +752,7 @@ export function ManualUploadForm({
       ) : null}
       {state.progress ? <ProgressCard progress={state.progress} /> : null}
       {state.preview ? <PreviewCard preview={state.preview} /> : null}
+      {note}
       <div className="flex flex-wrap gap-2">
         <IcButton className="min-h-11" disabled={pending} name="intent" type="submit" value="import">
           {pending ? "Importing…" : fileCopy.button}

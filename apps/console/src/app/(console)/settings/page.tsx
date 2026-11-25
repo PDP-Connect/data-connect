@@ -39,6 +39,16 @@ export default async function SettingsPage() {
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Settings" />
+        <Section title="Data sources">
+          <Text
+            as="a"
+            className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            href="/settings/packages"
+          >
+            <span>Data source packages</span>
+            <span aria-hidden="true" className="text-muted-foreground">→</span>
+          </Text>
+        </Section>
         <Section
           id="remote-access"
           title="Remote access"
@@ -100,14 +110,6 @@ export default async function SettingsPage() {
         </Section>
           </>
         ) : null}
-        <Text
-          as="a"
-          className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          href="/settings/packages"
-        >
-          <span>Data source packages</span>
-          <span aria-hidden="true" className="text-muted-foreground">→</span>
-        </Text>
         <Section title="Developer mode">
           <DeveloperModeSetting />
         </Section>

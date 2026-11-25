@@ -8,20 +8,28 @@
 
 import { humanizeFieldLabel } from "@pdpp/display";
 import type { ConnectionSetupStatus, RefSchedule } from "../../../lib/ref-client.ts";
+import { formatSourceRowSchedule } from "../../../sources/sources-view-model.ts";
 import { setupHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export interface CollectedKind {
   readonly count: number;
   /** The kind in the service's own words. */
   readonly label: string;
+  /** The kind's name on the server, for the link to its records. */
+  readonly stream: string;
 }
 
-export type ScheduleFacts = Pick<RefSchedule, "effective_mode" | "interval_seconds">;
+export type ScheduleFacts = Pick<RefSchedule, "effective_mode" | "enabled" | "interval_seconds">;
 
 export interface FirstSyncFacts {
   /** Kinds with counts from the finished run, or null when the run did not report them. */
   readonly kinds: readonly { count: number; kind: string }[] | null;
-  readonly schedule: ScheduleFacts | null;
+  /**
+   * The schedule the data source's own page reads. `null`: the server has none,
+   * which the Data sources list calls "Manual". `undefined`: the read failed, so
+   * no sentence is better than a wrong one.
+   */
+  readonly schedule: ScheduleFacts | null | undefined;
 }
 
 export interface OutcomeLink {
@@ -66,20 +74,17 @@ export const outcomeCopy = {
   retry: "Try again",
 } as const;
 
-/** "DataConnect checks <Name> every hour." / "... only when you ask." Null when the schedule is not known. */
-export function scheduleSentence(name: string, schedule: ScheduleFacts | null): string | null {
-  if (!schedule) return null;
-  if (schedule.effective_mode === "manual") return `DataConnect checks ${name} only when you ask.`;
-  if (schedule.effective_mode === "paused" || !schedule.interval_seconds) return null;
-  return `DataConnect checks ${name} ${everyPhrase(schedule.interval_seconds)}.`;
-}
-
-function everyPhrase(seconds: number): string {
-  if (seconds === 3600) return "every hour";
-  if (seconds === 86_400) return "every day";
-  if (seconds % 86_400 === 0) return `every ${seconds / 86_400} days`;
-  if (seconds % 3600 === 0) return `every ${seconds / 3600} hours`;
-  return `every ${Math.max(1, Math.round(seconds / 60))} minutes`;
+/**
+ * "DataConnect checks <Name> every hour." / "... only when you ask." Words come
+ * from the same derivation the Data sources list uses for its schedule column,
+ * so the two never disagree. Null when the schedule could not be read.
+ */
+export function scheduleSentence(name: string, schedule: ScheduleFacts | null | undefined): string | null {
+  if (schedule === undefined) return null;
+  const label = formatSourceRowSchedule(schedule);
+  if (label === "Manual") return `DataConnect checks ${name} only when you ask.`;
+  if (/^Every\b/.test(label)) return `DataConnect checks ${name} ${label.charAt(0).toLowerCase()}${label.slice(1)}.`;
+  return null;
 }
 
 function retryLabel(status: ConnectionSetupStatus): string {
@@ -91,7 +96,7 @@ function retryLabel(status: ConnectionSetupStatus): string {
 function collectedKinds(facts: FirstSyncFacts): CollectedKind[] {
   return (facts.kinds ?? [])
     .filter(({ count }) => count > 0)
-    .map(({ count, kind }) => ({ count, label: humanizeFieldLabel(kind) }));
+    .map(({ count, kind }) => ({ count, label: humanizeFieldLabel(kind), stream: kind }));
 }
 
 const ZERO_STATES = new Set([

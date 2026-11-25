@@ -17,6 +17,10 @@ mock.module("next/navigation", { namedExports: { ...navigation } });
 
 const bodyModule = import("./first-sync-body.tsx");
 
+function bodyProps(outcome: ReturnType<typeof firstSyncOutcome>) {
+  return { connectionId: "conn_1", connectorId: "amazon", name: "Amazon", outcome, resumeAction: () => {} };
+}
+
 function status(overrides: Partial<ConnectionSetupStatus> = {}): ConnectionSetupStatus {
   return {
     account_identity: null,
@@ -42,7 +46,7 @@ function status(overrides: Partial<ConnectionSetupStatus> = {}): ConnectionSetup
   } as ConnectionSetupStatus;
 }
 
-const hourly: FirstSyncFacts["schedule"] = { effective_mode: "automatic", interval_seconds: 3600 };
+const hourly: FirstSyncFacts["schedule"] = { effective_mode: "automatic", enabled: true, interval_seconds: 3600 };
 const withOrders: FirstSyncFacts = { kinds: [{ count: 1204, kind: "orders" }, { count: 0, kind: "returns" }], schedule: hourly };
 
 const STATES: { label: string; facts: FirstSyncFacts; status: ConnectionSetupStatus }[] = [
@@ -68,16 +72,25 @@ test("worked: kinds with counts, the schedule sentence, and the two buttons", ()
   const outcome = firstSyncOutcome(status(), "Amazon", withOrders);
   assert.equal(outcome.kind, "worked");
   if (outcome.kind !== "worked") return;
-  assert.deepEqual(outcome.collected, [{ count: 1204, label: "Orders" }]);
+  assert.deepEqual(outcome.collected, [{ count: 1204, label: "Orders", stream: "orders" }]);
   assert.equal(outcome.schedule, "DataConnect checks Amazon every hour.");
   assert.equal(outcome.primary.label, "See your Amazon data");
   assert.equal(outcome.secondary.label, "Add another data source");
 });
 
-test("schedule sentence: manual says only when you ask; unknown says nothing", () => {
-  assert.equal(scheduleSentence("Amazon", { effective_mode: "manual", interval_seconds: 3600 }), "DataConnect checks Amazon only when you ask.");
-  assert.equal(scheduleSentence("Amazon", null), null);
-  assert.equal(scheduleSentence("Amazon", { effective_mode: "paused", interval_seconds: 3600 }), null);
+// Design Page 3: the sentence reads the same schedule the Data sources list shows, word for word.
+test("schedule sentence follows the Data sources list: hourly, daily, manual, none, and unknown", () => {
+  const at = (seconds: number) => scheduleSentence("Amazon", { effective_mode: "automatic", enabled: true, interval_seconds: seconds });
+  assert.equal(at(3600), "DataConnect checks Amazon every hour.");
+  assert.equal(at(86_400), "DataConnect checks Amazon every day.");
+  assert.equal(at(7200), "DataConnect checks Amazon every 2 hours.");
+  const manual = "DataConnect checks Amazon only when you ask.";
+  assert.equal(scheduleSentence("Amazon", { effective_mode: "manual", enabled: true, interval_seconds: 3600 }), manual);
+  assert.equal(scheduleSentence("Amazon", { effective_mode: "automatic", enabled: false, interval_seconds: 3600 }), manual);
+  // The server has no schedule: the list says Manual, so the sentence does too.
+  assert.equal(scheduleSentence("Amazon", null), manual);
+  // The read failed: say nothing rather than guess.
+  assert.equal(scheduleSentence("Amazon", undefined), null);
 });
 
 // Design Page 3, "Worked, nothing came": never say "connected" with counts of zero as success.
@@ -88,7 +101,7 @@ test("a finished sync that reported zero records is the empty outcome, with Try 
 
 // Honest states: unknown counts are not "nothing came".
 test("a finished sync with no count facts is worked, not empty", () => {
-  assert.equal(firstSyncOutcome(status(), "Amazon", { kinds: null, schedule: null }).kind, "worked");
+  assert.equal(firstSyncOutcome(status(), "Amazon", { kinds: null, schedule: undefined }).kind, "worked");
 });
 
 // Design Page 3, "Failed": the right retry for the kind of service.
@@ -118,7 +131,7 @@ test("every outcome renders with none of the banned words, badges or folds", asy
   const { FirstSyncBody } = await bodyModule;
   for (const state of STATES) {
     const outcome = firstSyncOutcome(state.status, "Amazon", state.facts);
-    const html = renderToStaticMarkup(createElement(FirstSyncBody, { connectorId: "amazon", name: "Amazon", outcome }));
+    const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)));
     assert.deepEqual(bannedCopyProblems(html, { allowedFold: "What went wrong" }), [], `banned copy on "${state.label}"`);
     assert.doesNotMatch(visibleText(html), /conn_1|run_1/, state.label);
   }
@@ -129,9 +142,42 @@ test("failed shows its reason under the headline and the server message only in 
   const failedState = STATES.find((state) => state.label === "failed");
   assert.ok(failedState);
   const outcome = firstSyncOutcome(failedState.status, "Amazon", withOrders);
-  const html = renderToStaticMarkup(createElement(FirstSyncBody, { connectorId: "amazon", name: "Amazon", outcome }));
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)));
   assert.match(html, /Amazon didn&#x27;t connect\./);
   assert.match(html, /Wait a few minutes and try again\./);
   assert.match(html, /<details/);
   assert.match(html, /What went wrong/);
+});
+
+// Design Page 3: the result is the heading beside one logo; arrivals are a "What is here" style list;
+// the schedule sentence follows; at most two buttons; no "Back to Data sources".
+test("worked: heading, one logo, the arrived list, the schedule, and two buttons only", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(firstSyncOutcome(status(), "Amazon", withOrders))));
+  const text = visibleText(html).replace(/\s+/g, " ");
+  assert.match(html, /<h1[^>]*>[\s\S]*Amazon is connected\.[\s\S]*<\/h1>/);
+  assert.match(text, /Orders 1,204 records/);
+  assert.match(text, /DataConnect checks Amazon every hour\./);
+  assert.match(html, /href="\/sources\/conn_1\/orders"/);
+  assert.equal((html.match(/class="[^"]*min-h-11/g) ?? []).length, 2, "exactly the two buttons");
+  assert.doesNotMatch(text, /Back to Data sources/);
+  assert.match(text, /See your Amazon data/);
+  assert.match(text, /Add another data source/);
+});
+
+test("worked with no schedule on the server says the data source is checked only when asked", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const outcome = firstSyncOutcome(status(), "Amazon", { kinds: [{ count: 3, kind: "orders" }], schedule: null });
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)));
+  assert.match(visibleText(html), /DataConnect checks Amazon only when you ask\./);
+});
+
+// Design Page 3 "Paused": same Resume action as the Data sources list, and at most two buttons.
+test("paused: Resume posts the connection id to the resume action, beside one link", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(firstSyncOutcome(status({ setup_state: "paused" }), "Amazon", withOrders))));
+  assert.match(html, /Amazon is paused\./);
+  assert.match(html, /<form[\s\S]*name="connection_id"[^>]*value="conn_1"[\s\S]*>Resume</);
+  assert.equal((html.match(/class="[^"]*min-h-11/g) ?? []).length, 2, "Resume and one link");
+  assert.doesNotMatch(visibleText(html), /Back to Data sources/);
 });

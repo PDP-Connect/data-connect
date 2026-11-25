@@ -14,6 +14,8 @@ export interface AddSourceCatalogRead {
   readonly catalogTransientlyUnavailable: boolean;
   /** Number of accounts the person already has, by connector key. Empty when that read failed. */
   readonly existingConnectionCounts: Readonly<Record<string, number>>;
+  /** Ids of those accounts, by connector key. Empty when that read failed. */
+  readonly existingConnectionIds: Readonly<Record<string, readonly string[]>>;
   readonly lifecycleFor: (entry: ConnectorCatalogEntry) => ConnectorInstallLifecycle | null;
 }
 
@@ -45,6 +47,9 @@ export async function readAddSourceCatalog({ withAccounts = true }: { withAccoun
     catalogTransientlyUnavailable: installSnapshot?.catalogUnavailableReason === "transient_busy",
     existingConnectionCounts: Object.fromEntries(
       Object.entries(existing?.byConnector ?? {}).map(([key, links]) => [key, links.length])
+    ),
+    existingConnectionIds: Object.fromEntries(
+      Object.entries(existing?.byConnector ?? {}).map(([key, links]) => [key, links.map((link) => link.connectionId)])
     ),
     lifecycleFor: (entry) =>
       lifecycleByConnector === null

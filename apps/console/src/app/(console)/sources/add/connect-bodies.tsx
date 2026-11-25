@@ -16,6 +16,14 @@ import {
 } from "./connect-parts.tsx";
 import { CredentialFields, type CredentialFieldSpec, OptionalSignIn } from "./credential-fields.tsx";
 
+/** "Open Health. Tap your picture." becomes two lines; a sentence ends at . ! or ? before a capital or digit. */
+export function oneSentencePerLine(step: string): string[] {
+  return step
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9"'“(])/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
 /**
  * The page bodies of "Connect <Name>" for each kind of service. Pages read the
  * server and pass plain facts in; keeping the markup here lets a test render
@@ -133,6 +141,8 @@ export function KeyConnectBody({
       <ConnectHeader
         connectorKey={service.connectorKey}
         description={
+          // Storage not ready: only the heading and the blocked text (design "Key services").
+          storageReady ? (
           <span>
             {keyCopy.lead(name)}
             {helpUrl ? (
@@ -149,6 +159,7 @@ export function KeyConnectBody({
               </>
             ) : null}
           </span>
+          ) : undefined
         }
         icon={service.icon}
         name={name}
@@ -220,8 +231,9 @@ export function FileConnectBody({
           <h2 className="pdpp-section-title" id="export-step">1. {fileCopy.exportStep}</h2>
           {instructions.steps.length > 0 ? (
             <ol className="grid list-decimal gap-1 pl-5 pdpp-body text-muted-foreground" data-testid="export-steps">
-              {instructions.steps.map((step) => (
-                <li key={step}>{step.replaceAll(/PDPP/giu, "DataConnect")}</li>
+              {instructions.steps.flatMap(oneSentencePerLine).map((sentence, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: a fixed list of sentences; the same sentence may repeat.
+                <li key={`${index}-${sentence}`}>{sentence.replaceAll(/PDPP/giu, "DataConnect")}</li>
               ))}
             </ol>
           ) : null}
@@ -244,7 +256,6 @@ export function FileConnectBody({
         </section>
         <section aria-labelledby="choose-step" className="grid gap-2">
           <h2 className="pdpp-section-title" id="choose-step">2. {fileCopy.chooseStep}</h2>
-          <NewServiceNote name={name} tier={service.tier} />
           {form}
         </section>
       </div>

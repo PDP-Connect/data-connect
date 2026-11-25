@@ -4,6 +4,7 @@
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { FileConnectBody } from "../../../sources/add/connect-bodies.tsx";
+import { NewServiceNote } from "../../../sources/add/connect-parts.tsx";
 import { loadServiceContext } from "../../../sources/add/service-context.ts";
 import { existingSourcesForConnector as fetchExistingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
 import { getManualUploadSetup, RefNotFoundError } from "../../../lib/ref-client.ts";
@@ -73,6 +74,7 @@ export default async function ManualUploadConnectPage({
           <ManualUploadForm
             existingSources={existingSources}
             name={name}
+            note={<NewServiceNote name={name} tier={context.tier} />}
             setup={setup}
             targetConnectionId={targetConnectionId}
           />

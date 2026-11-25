@@ -362,7 +362,9 @@ export function formatSourceRowRecords(totalRecords: number, state?: RefCountSta
   return isTotalRecordsAuthoritative(state) ? totalRecords.toLocaleString() : "—";
 }
 
-export function formatSourceRowSchedule(schedule: RefSchedule | null): string {
+export function formatSourceRowSchedule(
+  schedule: Pick<RefSchedule, "effective_mode" | "enabled" | "interval_seconds"> | null
+): string {
   if (!schedule) return "Manual";
   const enabled = scheduleEnabled(schedule.enabled);
   if (schedule.effective_mode === "manual" || enabled === false) return "Manual";

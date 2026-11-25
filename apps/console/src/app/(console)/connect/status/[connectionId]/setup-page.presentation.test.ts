@@ -9,14 +9,17 @@ import { fileURLToPath } from "node:url";
 const PAGE_FILE = fileURLToPath(new URL("./page.tsx", import.meta.url));
 const BODY_FILE = fileURLToPath(new URL("./first-sync-body.tsx", import.meta.url));
 
-// Design "Page 3": one sentence for the outcome, the right next button, no fold except "What went wrong".
+// Design "Page 3" (repair round 1): the result is the page heading beside one logo, there is no
+// "Back to Data sources", and the schedule is read the way the data source's own page reads it.
 test("setup status shows one headline with one logo and no Details fold (design Page 3, banned list 1 and 4)", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
   const body = await readFile(BODY_FILE, "utf8");
   assert.match(page, /<FirstSyncBody/);
   assert.match(body, /headlineFor\(outcome, name\)/);
-  assert.equal((body.match(/<ConnectorMark/g) ?? []).length, 1);
+  assert.equal((body.match(/<ConnectHeader/g) ?? []).length, 1);
+  assert.doesNotMatch(body, /<ConnectorMark/);
   assert.doesNotMatch(page + body, /<details/);
-  assert.match(page, /Back to Data sources/);
-  assert.match(page, /sources\/add|getConnectorSchedule/);
+  assert.doesNotMatch(page + body, /Back to Data sources/);
+  assert.match(page, /getConnectorSchedule\(status\.connector_id, \{ connectorInstanceId: status\.connection_id \}\)/);
+  assert.match(page, /resumeConnectionAction/);
 });

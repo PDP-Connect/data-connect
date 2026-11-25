@@ -9,8 +9,11 @@ import { sourceSetupAction, sourceSetupCardModel } from "../../lib/source-setup-
 
 /**
  * The list on `/sources/add` (design "Page 1"). One row per service a person
- * can connect on this install, A to Z. A service the server says cannot be
- * connected is not a row; it only answers a search that names it.
+ * can connect on this install, A to Z, plus every service they already have.
+ * A service they have is always a row marked "Added": picking it adds a second
+ * account when that is possible and opens its own page when it is not. A
+ * service the server says cannot be connected, and that they do not have, is
+ * not a row; it only answers a search that names it.
  */
 export interface AddSourceRow {
   /** True when the person already has an account of this service. */
@@ -30,7 +33,8 @@ export interface AddSourceListModel {
 export interface AddSourceListInput {
   readonly catalog: readonly ConnectorCatalogEntry[];
   readonly catalogTransientlyUnavailable: boolean;
-  readonly existingConnectionCounts: Readonly<Record<string, number>>;
+  /** Ids of the accounts the person already has, by connector key. */
+  readonly existingConnectionIds: Readonly<Record<string, readonly string[]>>;
   /** `null` means the server has no install routes: no package facts exist. */
   readonly lifecycleFor: (entry: ConnectorCatalogEntry) => ConnectorInstallLifecycle | null;
 }
@@ -58,6 +62,11 @@ export function isConnectableEntry(
   return !sourceSetupCardModel(entry, lifecycle, catalogTransientlyUnavailable).unavailable;
 }
 
+/** The page of a data source the person already has (also where "You already have ..." links). */
+export function existingSourceHref(connectorKey: string, connectionId: string): string {
+  return `/sources/${encodeURIComponent(connectorKey)}?connection_id=${encodeURIComponent(connectionId)}`;
+}
+
 function compareByName(a: { displayName: string }, b: { displayName: string }): number {
   return a.displayName.localeCompare(b.displayName);
 }
@@ -70,12 +79,14 @@ export function buildAddSourceList(input: AddSourceListInput): AddSourceListMode
     const identity = connectorLookupKey(entry.connectorKey);
     if (seen.has(identity)) continue;
     seen.add(identity);
-    if (isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable)) {
+    const connectable = isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable);
+    const firstAccount = input.existingConnectionIds[entry.connectorKey]?.[0] ?? null;
+    if (connectable || firstAccount !== null) {
       rows.push({
-        added: (input.existingConnectionCounts[entry.connectorKey] ?? 0) > 0,
+        added: firstAccount !== null,
         connectorKey: entry.connectorKey,
         displayName: entry.displayName,
-        href: addSourceHref(entry.connectorKey),
+        href: !connectable && firstAccount !== null ? existingSourceHref(entry.connectorKey, firstAccount) : addSourceHref(entry.connectorKey),
         icon: entry.icon,
       });
     } else {
@@ -117,6 +128,7 @@ export const ADD_SOURCE_COPY = {
   loadFailed: "The list of services didn't load. Check that this computer is online.",
   lead: "Pick a service. DataConnect copies your data from it to this computer.",
   retry: "Try again",
+  showAll: "Show all services",
   searchPlaceholder: "Search for a service",
 } as const;
 

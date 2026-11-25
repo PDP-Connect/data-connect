@@ -8,7 +8,8 @@ import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import { sourceSetupCardModel } from "../../../lib/source-setup-presentation.ts";
 import { isDeterministicSourcesReadError } from "../../read-error-classification.ts";
 import { findCatalogEntry, readAddSourceCatalog } from "../add-source-catalog-read.ts";
-import { isConnectableEntry } from "../add-source-list-model.ts";
+import { existingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
+import { existingSourceHref, isConnectableEntry } from "../add-source-list-model.ts";
 import { AddSourceLoadFailed } from "../add-source-list.tsx";
 import { CannotBeAddedHere, ConnectHeader, NewServiceNote } from "../connect-parts.tsx";
 import { GettingReady } from "../getting-ready.tsx";
@@ -48,6 +49,11 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
   }
   const lifecycle = read.lifecycleFor(entry);
   if (!isConnectableEntry(entry, lifecycle, read.catalogTransientlyUnavailable)) {
+    // Design "Page 1": a service the person already has never says "can't be added";
+    // when a second account is not possible, its own page opens instead.
+    const accounts = await existingSourcesForConnector(entry.connectorKey).catch(() => []);
+    const first = accounts[0];
+    if (first) redirect(existingSourceHref(entry.connectorKey, first.connectionId));
     const hostBlock = lifecycle ? connectorInstallRowModel(entry, lifecycle).hostBlockReason : null;
     return (
       <RecordroomShellWithPalette>
