@@ -24,7 +24,6 @@ import {
   type BucketSeries,
   barsToRange,
   bucketLabel,
-  chartCaption,
   chartIsBrushable,
   rangeToSelectedBars,
 } from "./explore-over-time-chart.ts";
@@ -81,7 +80,7 @@ function fitBucketDomain(buckets: readonly Bucket[], total: number): readonly Bu
 }
 
 export function OverTimeChart({ series, since, until, descriptorKind, onSelectRange }: OverTimeChartProps) {
-  const { buckets: rawBuckets, granularity, total, partial } = series;
+  const { buckets: rawBuckets, granularity, total } = series;
   const brushable = chartIsBrushable(descriptorKind);
 
   // DOMAIN AUTO-FIT (see `fitBucketDomain`): trim leading/trailing buckets that
@@ -173,7 +172,7 @@ export function OverTimeChart({ series, since, until, descriptorKind, onSelectRa
       : `${bucketLabel(loB, granularity)} – ${bucketLabel(hiB, granularity)}`;
   }, [drag, buckets, granularity]);
 
-  if (buckets.length === 0) {
+  if (buckets.filter((bucket) => bucket.count > 0).length < 2) {
     return null;
   }
 
@@ -183,25 +182,14 @@ export function OverTimeChart({ series, since, until, descriptorKind, onSelectRa
   return (
     <div className="rr-x-chart">
       <div className="rr-x-chart__head">
-        <span className="rr-x-chart__caption">{chartCaption(descriptorKind, granularity)}</span>
-        <span className="rr-x-chart__total">
-          {partial ? (
-            <span className="rr-x-chart__partial" title="Some streams could not be counted exactly">
-              Some counts unavailable
-            </span>
-          ) : (
-            <>
-              <span className="rr-x-chart__total-num">{total.toLocaleString()}</span> records
-            </>
-          )}
-        </span>
+        <span className="rr-x-chart__caption">Records by {granularity}</span>
       </div>
       {/* The band groups the bars; each bar is a button (or a static slot when
           not brushable) carrying its day + honest count. The brush overlay is the
           focus+context band — the whole distribution stays visible. */}
       {/* biome-ignore lint/a11y/useSemanticElements: a chart band is an ARIA grouping of bars, not a form fieldset; role="group" with an aria-label is the correct semantic. */}
       <div
-        aria-label={`${chartCaption(descriptorKind, granularity)}${brushable ? ", brush to filter" : ""}`}
+        aria-label={`Records by ${granularity}${brushable ? ", brush to filter" : ""}`}
         className={["rr-x-chart__band", brushable ? "is-brushable" : ""].filter(Boolean).join(" ")}
         onPointerLeave={() => {
           setHovered(null);

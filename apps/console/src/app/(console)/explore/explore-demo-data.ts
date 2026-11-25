@@ -5,15 +5,39 @@ import type { RecordsExplorerData } from "@pdpp/operator-ui/components/views/rec
 
 const SNAPSHOT = "2026-07-01T12:10:00.000Z";
 
-export function buildExploreDemoData(): RecordsExplorerData {
+function demoBucketSeries(total: number): NonNullable<RecordsExplorerData["bucketSeries"]> {
   return {
+    buckets: [
+      {
+        count: Math.floor(total / 2),
+        endMs: Date.UTC(2026, 6, 1),
+        key: "2026-06-01",
+        startMs: Date.UTC(2026, 5, 1),
+      },
+      {
+        count: total - Math.floor(total / 2),
+        endMs: Date.UTC(2026, 7, 1),
+        key: "2026-07-01",
+        startMs: Date.UTC(2026, 6, 1),
+      },
+    ],
+    granularity: "month",
+    partial: false,
+    total,
+  };
+}
+
+export type ExploreDemoState = "results" | "empty" | "failed" | "many-sources" | "untitled";
+
+export function buildExploreDemoData(state: ExploreDemoState = "results"): RecordsExplorerData {
+  const data: RecordsExplorerData = {
     activitySummary: {
       source: "exact_window",
       text: "Records over time · by day",
       total: 4,
     },
     bucketRequest: null,
-    bucketSeries: null,
+    bucketSeries: demoBucketSeries(4),
     connectionsPageError: null,
     connectionsPageHasMore: false,
     connectionsPageIsPaged: false,
@@ -52,9 +76,9 @@ export function buildExploreDemoData(): RecordsExplorerData {
         kind: "message",
         preview: {
           author: "Owner",
-          body: "Summarize the connector health changes and flag anything that needs action.",
+          body: "Summarize the data source health changes and flag anything that needs action.",
           kind: "message",
-          title: "Owner asked about connector health",
+          title: "Owner asked about data source health",
         },
         recordId: "msg_demo_001",
         stream: "messages",
@@ -89,7 +113,7 @@ export function buildExploreDemoData(): RecordsExplorerData {
         kind: "message",
         preview: {
           author: "Assistant",
-          body: "The source actionability model should render one owner action, not three duplicate rows.",
+          body: "The data source status should show one action, not three duplicate rows.",
           kind: "message",
           title: "Assistant response",
         },
@@ -106,7 +130,7 @@ export function buildExploreDemoData(): RecordsExplorerData {
       bodyJson: JSON.stringify(
         {
           author: "Owner",
-          content: "Summarize the connector health changes and flag anything that needs action.",
+          content: "Summarize the data source health changes and flag anything that needs action.",
           conversation_id: "conv_demo_atlas",
           created_at: "2026-07-01T11:58:00.000Z",
         },
@@ -124,7 +148,7 @@ export function buildExploreDemoData(): RecordsExplorerData {
           name: "content",
           state: "visible",
           type: "string",
-          valueJson: JSON.stringify("Summarize the connector health changes and flag anything that needs action."),
+          valueJson: JSON.stringify("Summarize the data source health changes and flag anything that needs action."),
         },
         {
           name: "conversation_id",
@@ -177,7 +201,7 @@ export function buildExploreDemoData(): RecordsExplorerData {
         emittedAt: "2026-07-01T12:00:00.000Z",
         kind: "event",
         preview: {
-          body: "Review connector source-actionability packet.",
+        body: "Review the data source status guide.",
           eventTime: "4:00 PM",
           kind: "event",
           title: "Review owner console packet",
@@ -193,8 +217,85 @@ export function buildExploreDemoData(): RecordsExplorerData {
     warnings: [
       {
         code: "partial_fan_in",
-        message: "One demo source is hidden from this bounded preview; use the stream links for full-set reachability.",
+        message: "One data source is not part of this view.",
       },
     ],
   };
+
+  if (state === "empty") {
+    return {
+      ...data,
+      activitySummary: { source: "exact_window", text: "Records by month", total: 0 },
+      bucketSeries: null,
+      descriptor: { ...data.descriptor, cursor: null, has_more: false },
+      feed: [],
+      nextCursor: null,
+      truncated: false,
+      upcoming: [],
+      upcomingHasMore: false,
+      upcomingNextCursor: null,
+      upcomingTotal: 0,
+    };
+  }
+
+  if (state === "failed") {
+    return {
+      ...data,
+      bucketSeries: null,
+      feed: [],
+      upcoming: [],
+      upcomingTotal: 0,
+    };
+  }
+
+  if (state === "many-sources") {
+    const seeds = data.connections;
+    return {
+      ...data,
+      connections: Array.from({ length: 12 }, (_, index) => {
+        const seed = seeds[index % seeds.length];
+        if (seed === undefined) {
+          throw new Error("Explore demo needs at least one data source.");
+        }
+        return {
+          ...seed,
+          connectionId: `cin_demo_source_${index + 1}`,
+          displayName: `Demo data source ${index + 1}`,
+          streams: index === 0 ? seed.streams : [],
+        };
+      }),
+    };
+  }
+
+  if (state === "untitled") {
+    return {
+      ...data,
+      activitySummary: { source: "exact_window", text: "Records by month", total: 5 },
+      bucketSeries: demoBucketSeries(5),
+      feed: [
+        ...data.feed,
+        {
+          connectionDisplayName: "ChatGPT work profile",
+          connectionId: "cin_demo_chatgpt_work",
+          connectorId: "chatgpt",
+          displayAt: "2026-06-30T11:58:00.000Z",
+          displayIsSemantic: true,
+          emittedAt: "2026-06-30T11:58:01.000Z",
+          kind: "generic",
+          preview: {
+            fields: [
+              { label: "Is self", name: "is_self", value: "true" },
+              { label: "Comment count", name: "comment_count", value: "145" },
+              { label: "Score", name: "score", value: "892" },
+            ],
+            kind: "generic",
+          },
+          recordId: "post_demo_untitled",
+          stream: "posts",
+        },
+      ],
+    };
+  }
+
+  return data;
 }

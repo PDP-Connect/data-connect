@@ -232,7 +232,9 @@ test("W3: the Load-more pending indicator mounts at the BUTTON / insertion point
   const feedDaysIdx = feedBodySrc.indexOf("<FeedDays");
   const skeletonIdx = feedBodySrc.indexOf('<LoadMoreSkeleton label="Loading more records…" />');
   const spinnerIdx = feedBodySrc.indexOf('className="rr-x-loadmore__spinner"');
-  const buttonIdx = feedBodySrc.indexOf('className="rr-x-loadmore"');
+  const buttonIdx = feedBodySrc.indexOf(
+    'className="rr-x-loadmore"\n          disabled={loadMoreDisabled(isPending)}'
+  );
 
   assert.ok(feedDaysIdx >= 0, "FeedBody renders the loaded rows (FeedDays)");
   assert.ok(skeletonIdx >= 0, "FeedBody renders the insertion-point skeleton");

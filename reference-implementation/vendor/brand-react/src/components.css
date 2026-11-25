@@ -877,12 +877,6 @@
 .rr-fld:last-child {
   border-bottom: 0;
 }
-.rr-fld__id {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
 .rr-fld__label {
   font-size: 0.8rem;
   font-weight: 500;
@@ -2268,8 +2262,8 @@
   letter-spacing: 0;
   border-bottom: 1px solid var(--border-strong);
 }
-/* F4: the "N in view" magnitude badge beside a facet section eyebrow, so the
-   stream rail reads as a bounded, countable set rather than an endless wall. */
+/* F4: a loaded count beside the facet section label, so the source rail reads
+   as a bounded, countable set rather than an endless wall. */
 .rr-x-facets__count {
   font-family: var(--font-sans);
   font-size: 12px;
@@ -2454,16 +2448,16 @@
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
-/* "in view" qualifier — a facet/day count is the LOADED-window count, never a
-   claimed total (item #8 / review red line: day counts). The quiet qualifier makes
-   the bare number unmistakably "what's loaded", not "the total". */
+/* Loaded-window qualifier — a facet/day count is never a claimed total (item #8 /
+   review red line: day counts). The quiet qualifier makes the bare number
+   unmistakably "what's loaded", not "the total". */
 .rr-x-facet__inview {
   font-family: var(--font-sans);
   font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
-  /* Sidebar count contrast (verifier polish): lifted from 0.75 so the "in view"
-     qualifier is legible, not a ghost. */
+  /* Sidebar count contrast (verifier polish): lifted from 0.75 so the
+     loaded-window qualifier is legible, not a ghost. */
   opacity: 0.9;
 }
 
@@ -3354,6 +3348,39 @@
   letter-spacing: 0.04em;
   cursor: pointer;
 }
+.rr-x-inspector-details > summary {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  letter-spacing: 0;
+}
+.rr-x-inspector-details__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+.rr-x-inspector-details__fields {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.rr-x-inspector-details__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.rr-x-inspector-details__row dt,
+.rr-x-inspector-details__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.rr-x-inspector-details__body > p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
 .rr-x-raw > summary:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
@@ -3587,8 +3614,8 @@
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
-/* "in view" qualifier on the day header — the count is records LOADED for the day,
-   not a true day total (review red line: a bare number reads like a total). */
+/* Day header qualifier — the count is records LOADED for the day, not a true
+   day total (review red line: a bare number reads like a total). */
 .rr-x-day__inview {
   font-size: 12px;
   letter-spacing: 0;
@@ -3666,9 +3693,9 @@
   display: flex;
   flex-direction: column;
 }
-/* Summary line: "<count> <connection / stream> in view". LEFT-aligned and muted
-   so it reads as a quiet group label above its preview rows, never centered (the
-   F6 center-alignment defect) and never competing with the rows themselves. */
+/* Kind/source summary line. LEFT-aligned and muted so it reads as a quiet group
+   label above its preview rows, never centered (the F6 center-alignment defect)
+   and never competing with the rows themselves. */
 .rr-x-burst__head {
   display: flex;
   flex-wrap: wrap;
@@ -4775,7 +4802,7 @@ a.rr-x-row {
      phone the owner scrolls the feed, so a document-top bar is scrolled ABOVE THE
      FOLD and a filter/search/load-more gives no visible feedback. Pinning it
      `position: fixed; top: 0` anchors it to the top of the VISIBLE viewport, so the
-     "server is re-rendering" signal is always in view no matter how far down the
+     "server is re-rendering" signal remains visible no matter how far down the
      feed the owner has scrolled (the wireframe's "⟳ loading… (sticky TOP)").
      `fixed` takes it out of flow → ZERO layout shift when it appears/disappears,
      and it dims NOTHING — already-rendered records stay fully readable and

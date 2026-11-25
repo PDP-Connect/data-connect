@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { humanizeFieldLabel } from "@pdpp/display";
+
 /**
  * Pure logic for the UNIFIED Explore query input (Slice 2, design.md §4).
  *
@@ -120,7 +122,7 @@ function collectSourceSuggestions(input: TypeaheadInput, frag: string): QuerySug
         count: input.connectionCounts?.get(c.connectionId),
         id: `source:${c.connectionId}`,
         kind: "source",
-        label: `Source: ${c.displayName}`,
+        label: `Data source: ${c.displayName}`,
         operator: `con:${c.displayName}`,
         value: c.connectionId,
       });
@@ -141,7 +143,7 @@ function collectStreamSuggestions(input: TypeaheadInput, frag: string): QuerySug
         count: input.streamCounts?.get(s),
         id: `stream:${s}`,
         kind: "stream",
-        label: `Stream: ${s}`,
+        label: `Kind: ${humanizeFieldLabel(s)}`,
         operator: `stream:${s}`,
         value: s,
       });
@@ -193,8 +195,8 @@ export function buildTypeaheadSuggestions(input: TypeaheadInput): QuerySuggestio
   const streams = collectStreamSuggestions(input, frag);
   const filters = collectFilterSuggestions(input, frag);
 
-  stampSectionLabel(sources, "SOURCES");
-  stampSectionLabel(streams, "STREAMS");
+  stampSectionLabel(sources, "DATA SOURCES");
+  stampSectionLabel(streams, "KINDS");
   stampSectionLabel(filters, "FILTERS");
 
   const combined = [...sources, ...streams, ...filters];

@@ -1,0 +1,444 @@
+/* Explore's reading layout. Keep this scoped so the shared record components can
+   keep their source-page presentation. */
+.explore-page .rr-x-h1 {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
+  color: var(--foreground);
+}
+
+.explore-page > .rr-x-main > .rr-x-pulse__note {
+  margin: -10px 0 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.explore-page .rr-x-searchrow {
+  align-items: center;
+  gap: 8px;
+}
+
+.explore-page .rr-x-queryinput {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.explore-page .rr-x-search {
+  min-width: 0;
+}
+
+.explore-page .rr-x-searchrow__controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+}
+
+/* list-item keeps the disclosure triangle, so "Details" reads as something to open. */
+.explore-page .rr-x-explore-details > summary {
+  display: list-item;
+  width: max-content;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.explore-page .rr-x-explore-details__body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: center;
+  padding-top: 10px;
+}
+
+.explore-page .rr-x-toolbar-button,
+.explore-page .rr-x-datechip__chip,
+.explore-page .rr-x-options__summary {
+  min-height: 30px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.explore-page .rr-x-toolbar-button {
+  padding: 0 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.explore-page .rr-x-toolbar-button:hover,
+.explore-page .rr-x-datechip__chip:hover,
+.explore-page .rr-x-options__summary:hover {
+  background: var(--muted);
+}
+
+.explore-page .rr-x-toolbar-button:focus-visible,
+.explore-page .rr-x-datechip__trigger:focus-visible,
+.explore-page .rr-x-options__summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.explore-page .rr-x-datechip__chip {
+  min-height: 30px;
+}
+
+.explore-page .rr-x-datechip__trigger {
+  min-height: 28px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.explore-page .rr-x-datechip__popover,
+.explore-page .rr-x-options__body {
+  right: 0;
+  left: auto;
+  max-width: min(360px, calc(100vw - 24px));
+  background: var(--popover);
+}
+
+.explore-page .rr-x-options__summary {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  list-style: none;
+}
+
+.explore-page .rr-x-options__summary::-webkit-details-marker {
+  display: none;
+}
+
+.explore-page .rr-x-sort button {
+  padding: 5px 8px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--foreground);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.explore-page .rr-x-sort button.is-on {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.explore-page .rr-x-rail__toggle {
+  display: none;
+}
+
+.explore-page .rr-x-rail__scrim {
+  display: none;
+}
+
+.explore-page .rr-x-rail__body {
+  gap: 18px;
+}
+
+.explore-page .rr-x-views {
+  display: none;
+}
+
+.explore-page .rr-x-facets__label {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  text-transform: none;
+}
+
+.explore-page .rr-x-source-entry {
+  border-bottom: 1px solid var(--border);
+}
+
+.explore-page .rr-x-source-group {
+  padding: 0 0 6px 34px;
+}
+
+.explore-page .rr-x-source-group__summary {
+  justify-content: flex-start;
+  min-height: 30px;
+  padding: 4px 0;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+/* Name, count, check and the exclude button sit on one line: a row with a logo
+   must not drop its count below the name (baseline alignment did). */
+.explore-page .rr-x-facet-row,
+.explore-page .rr-x-facet {
+  align-items: center;
+}
+
+.explore-page .rr-x-facet__check {
+  min-width: 1em;
+  color: var(--foreground);
+  text-align: center;
+}
+
+.explore-page .rr-x-facet {
+  min-height: 38px;
+  padding-block: 6px;
+  border-radius: 6px;
+}
+
+.explore-page .rr-x-facet.is-on {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.explore-page .rr-x-facet__n {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.explore-page .rr-x-record-logo {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 26%;
+}
+
+.explore-page .rr-x-row,
+.explore-page .rr-x-row-wrap--desktop {
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.explore-page .rr-x-row__body {
+  gap: 1px;
+}
+
+.explore-page .rr-x-row__title {
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explore-page .rr-x-row__meta {
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explore-page .rr-x-row__time {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.explore-page .rr-x-row:hover {
+  background: var(--muted);
+}
+
+.explore-page .rr-x-day__head {
+  padding: 8px 0 4px;
+}
+
+.explore-page .rr-x-day__label {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  text-transform: none;
+}
+
+.explore-page .rr-x-days {
+  gap: 16px;
+}
+
+.explore-page .rr-x-chart__caption {
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.explore-page .rr-x-loadmore {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.explore-page .rr-x-technical-details {
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.explore-page .rr-x-technical-details > summary {
+  cursor: pointer;
+}
+
+.explore-page .rr-x-saved-views {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.explore-page .rr-x-saved-views:empty {
+  display: none;
+}
+
+.explore-page .rr-x-view-select {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.explore-page .rr-x-view-select select {
+  max-width: min(220px, 60vw);
+  height: 30px;
+  padding: 0 8px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.explore-page .rr-x-view-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.explore-page .rr-x-view-confirm button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--foreground);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.explore-page .rr-x-view-confirm button:first-of-type {
+  color: var(--destructive);
+}
+
+@media (max-width: 860px) {
+  .explore-page .rr-x-h1 {
+    font-size: 23px;
+  }
+
+  .explore-page .rr-x-searchrow {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .explore-page .rr-x-queryinput {
+    flex-basis: 100%;
+  }
+
+  .explore-page .rr-x-searchrow__controls {
+    flex-wrap: nowrap;
+    width: 100%;
+  }
+
+  .explore-page .rr-x-rail[open] {
+    position: fixed;
+    z-index: 80;
+    inset: auto 0 0;
+    max-height: 86dvh;
+    overflow-y: auto;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: transparent;
+    border-top: 1px solid var(--border-strong);
+    border-radius: 8px 8px 0 0;
+    box-shadow: var(--shadow-floating);
+  }
+
+  .explore-page .rr-x-rail[open] .rr-x-rail__scrim {
+    position: fixed;
+    z-index: 0;
+    inset: 0;
+    display: block;
+    width: 100vw;
+    height: 100dvh;
+    padding: 0;
+    background: color-mix(in oklab, var(--foreground) 24%, transparent);
+    border: 0;
+  }
+
+  .explore-page .rr-x-rail__body {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    gap: 12px;
+    max-height: 78dvh;
+    padding: 18px 16px;
+    overflow-y: auto;
+    background: var(--background);
+    border: 0;
+  }
+
+  .explore-page .rr-x-rail__close {
+    position: sticky;
+    bottom: 0;
+    padding: 10px 16px;
+    background: var(--background);
+    border-top: 1px solid var(--border);
+  }
+
+  .explore-page .rr-x-datechip__popover {
+    position: fixed;
+    z-index: 90;
+    inset: auto 0 0;
+    width: auto;
+    max-width: 100vw;
+    max-height: 86dvh;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    background: var(--background);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 8px 8px 0 0;
+    box-shadow: var(--shadow-floating);
+  }
+
+  .explore-page .rr-x-options__body {
+    position: fixed;
+    z-index: 90;
+    inset: auto 12px 12px;
+    width: auto;
+    max-width: none;
+    max-height: 86dvh;
+    overflow-y: auto;
+  }
+
+  .explore-page .rr-x-row__time {
+    font-size: 12px;
+  }
+}

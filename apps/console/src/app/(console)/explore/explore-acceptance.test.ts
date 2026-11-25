@@ -252,19 +252,14 @@ test("P1 invariant (sort T15): the client '.reverse()' display hack is GONE from
   );
 });
 
-test("P1 invariant: a burst does not present its loaded count as a complete day-total (count==reachability)", async () => {
+test("a burst reveal does not add an unverified count to the record rows", async () => {
   const src = await readFile(CANVAS_FILE, "utf8");
-  // The burst expand affordance must NOT say "show all" — that implied the loaded
-  // count was the complete (connection, stream, day) total. The honest label is
-  // "in view" + "expand", since the true day-total needs a server per-burst count.
   assert.ok(
-    !src.includes("show all ↓"),
-    "burst row must not use 'show all ↓' — it falsely implies the loaded count is the complete group total"
+    src.includes("Show more records ↓"),
+    "the burst reveal should describe its action without adding an unverified count"
   );
-  assert.ok(
-    src.includes("rr-x-burst__inview"),
-    "burst row must qualify its count as loaded ('in view'), not a claimed day-total"
-  );
+  // Explore brief decision 5: burst reveals keep the action and omit the unverified count.
+  assert.ok(!src.includes("rr-x-burst__inview"), "the burst reveal should not render an old count label");
 });
 
 test("P1 invariant: the Upcoming section paginates to exhaustion (the 188->32 reachability fix)", async () => {

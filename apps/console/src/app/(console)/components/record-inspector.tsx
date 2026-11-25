@@ -10,7 +10,6 @@ import {
   SheetBody,
   SheetFoot,
   SheetHead,
-  SheetSerial,
   SheetTitle,
 } from "@pdpp/brand-react";
 import type {
@@ -18,6 +17,7 @@ import type {
   ExplorerPeekData,
 } from "@pdpp/operator-ui/components/views/records-explorer-view";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
+import { humanizeFieldLabel } from "@pdpp/display";
 import type { ParentBackLink, RelatedLink, ReverseChildListLink } from "../sources/lib/relationships.ts";
 
 const IMAGE_MIME_RE = /^image\//i;
@@ -32,6 +32,7 @@ export interface RecordInspectorProps {
   record: ExplorerPeekData | null;
   relationships?: RecordInspectorRelationships | null;
   streamRecordsHref?: string | null;
+  recordHref?: string | null;
 }
 
 function parseRecordBody(record: ExplorerPeekData): Record<string, unknown> {
@@ -78,7 +79,7 @@ function BlobAffordanceView({
   mimeType: string | undefined;
 }) {
   if (affordance.state === "unavailable") {
-    return <span className="rr-x-blob rr-x-blob--off">{affordance.reason ?? "Blob unavailable for this view."}</span>;
+    return <span className="rr-x-blob rr-x-blob--off">File unavailable.</span>;
   }
   if (!affordance.href) {
     return null;
@@ -91,41 +92,18 @@ function BlobAffordanceView({
     <div className="rr-x-blob">
       {isImage ? (
         // biome-ignore lint/correctness/useImageSize: a remote record blob has no known intrinsic dimensions; the CSS box constrains it.
-        <img alt={affordance.fieldName} className="rr-x-blob__img" src={affordance.href} />
+        <img alt={humanizeFieldLabel(affordance.fieldName)} className="rr-x-blob__img" src={affordance.href} />
       ) : null}
       <a className="rr-x-blob__open" href={affordance.href}>
-        Open blob →{sizeLabel ? ` (${sizeLabel})` : ""}
+        Open file →{sizeLabel ? ` (${sizeLabel})` : ""}
       </a>
     </div>
   );
 }
 
-export function RecordInspector({ record, relationships, streamRecordsHref }: RecordInspectorProps) {
+export function RecordInspector({ record, relationships, streamRecordsHref, recordHref }: RecordInspectorProps) {
   if (!record) {
-    return (
-      <Sheet className="rr-inspector rr-inspector--empty">
-        <SheetBody className="rr-x-empty">
-          <span className="rr-x-empty__eyebrow">The reading room</span>
-          <p className="rr-x-empty__line">
-            Select any row to inspect the full record, links, files, and sharing facts.
-          </p>
-          <dl className="rr-x-empty__preview">
-            <div className="rr-x-empty__preview-row">
-              <dt className="rr-x-empty__preview-k">Fields</dt>
-              <dd className="rr-x-empty__preview-v">label + the wire key a client receives</dd>
-            </div>
-            <div className="rr-x-empty__preview-row">
-              <dt className="rr-x-empty__preview-k">The call</dt>
-              <dd className="rr-x-empty__preview-v">the exact request that reads this record</dd>
-            </div>
-            <div className="rr-x-empty__preview-row">
-              <dt className="rr-x-empty__preview-k">Withheld</dt>
-              <dd className="rr-x-empty__preview-v">what stays with you, never shared</dd>
-            </div>
-          </dl>
-        </SheetBody>
-      </Sheet>
-    );
+    return null;
   }
 
   const body = parseRecordBody(record);
@@ -136,121 +114,75 @@ export function RecordInspector({ record, relationships, streamRecordsHref }: Re
     }
   }
   const withheld = record.fields.filter((field) => field.state === "withheld");
-  const visibleCount = record.fields.filter((field) => field.state === "visible").length;
-  const totalDeclared = record.fields.length;
+  const visibleFieldCount = record.fields.filter((field) => field.state === "visible").length;
   const blob = blobAffordance(record);
   const blobMime = blob ? declaredBlobMime(body, blob.fieldName) : undefined;
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const relatedLinks = relationships?.relatedLinks ?? [];
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const parentBackLinks = relationships?.parentBackLinks ?? [];
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const reverseChildListLinks = relationships?.reverseChildListLinks ?? [];
-  const hasRelationships = relatedLinks.length > 0 || parentBackLinks.length > 0 || reverseChildListLinks.length > 0;
+  const relationGroups = [
+    ...(relationships?.parentBackLinks ?? []).map((item) => ({ href: item.href, label: `${humanizeFieldLabel(item.parentStream)} · ${humanizeFieldLabel(item.childParentKeyField)}` })),
+    ...(relationships?.relatedLinks ?? []).filter((item) => item.navigable && item.href).map((item) => ({ href: item.href as string, label: humanizeFieldLabel(item.relation) })),
+    ...(relationships?.reverseChildListLinks ?? []).map((item) => ({ href: item.href, label: humanizeFieldLabel(item.childStream) })),
+  ];
+  const advisoryRelations = (relationships?.relatedLinks ?? []).filter((item) => !(item.navigable && item.href));
 
   return (
     <Sheet className="rr-inspector">
       <SheetHead>
-        <SheetTitle>{record.stream}</SheetTitle>
-        <SheetSerial>
-          <CopyMono text={record.recordId} />
-        </SheetSerial>
+        <SheetTitle>{humanizeFieldLabel(record.stream)}</SheetTitle>
+        <p className="rr-x-facets__note">{record.connectionDisplayName ?? "Data source"}</p>
       </SheetHead>
       <SheetBody>
-        <div className="rr-ex-lens">
-          <span className="rr-ex-lens__label">read it as</span>
-          <span className="rr-x-facets__note">
-            You are seeing the full owner view. Apps and clients receive only the fields allowed by their grant;
-            withheld fields are listed below when that view is active.
-          </span>
-        </div>
-
         {record.error ? (
-          <p className="rr-x-warn__msg">{record.error}</p>
+          <p className="rr-x-warn__msg">This could not be loaded. Try again.</p>
         ) : (
-          <RecordBody
-            blobAffordance={blob ?? undefined}
-            data={body}
-            declaredTypes={declaredTypes}
-            stream={record.stream}
-          />
+          <RecordBody blobAffordance={blob ?? undefined} data={body} declaredTypes={declaredTypes} stream={record.stream} />
         )}
-
-        {record.bodyJson ? (
-          <details className="rr-x-raw">
-            <summary>Raw JSON</summary>
-            <pre>{record.bodyJson}</pre>
-          </details>
-        ) : null}
-
-        {blob && <BlobAffordanceView affordance={blob} mimeType={blobMime} />}
-
-        {withheld.length > 0 && (
-          <div className="rr-ex-keep">
-            <span className="rr-ex-keep__label">Stays with you</span>
-            <span className="rr-ex-keep__fields">{withheld.map((field) => field.name).join(" · ")}</span>
-            <span className="rr-ex-keep__note">
-              {withheld.length} {withheld.length === 1 ? "field" : "fields"} never leave your server under this shared
-              view — never sent, not blacked out.
-            </span>
-          </div>
-        )}
-
-        {hasRelationships && (
+        {blob ? <BlobAffordanceView affordance={blob} mimeType={blobMime} /> : null}
+        {relationGroups.length > 0 ? (
           <div className="rr-x-rel">
-            <span className="rr-ex-keep__label">Connected</span>
-            {parentBackLinks.map((link) => (
-              <a
-                className="rr-x-rel__row rr-x-rel__row--link"
-                href={link.href}
-                key={`parent:${link.parentStream}:${link.childParentKeyField}`}
-              >
-                <span className="rr-x-rel__k">{link.parentStream}</span>
-                <span className="rr-x-rel__v">{link.childParentKeyField} → parent</span>
-              </a>
-            ))}
-            {relatedLinks.map((link) =>
-              link.navigable && link.href ? (
-                <a className="rr-x-rel__row rr-x-rel__row--link" href={link.href} key={`rel:${link.relation}`}>
-                  <span className="rr-x-rel__k">{link.relation}</span>
-                  <span className="rr-x-rel__v">{link.cardinality} →</span>
-                </a>
-              ) : (
-                <div className="rr-x-rel__row rr-x-rel__row--inert" key={`rel:${link.relation}`} title={link.advisory}>
-                  <span className="rr-x-rel__k">{link.relation}</span>
-                  <span className="rr-x-rel__v">{link.advisory ?? `no related ${link.relation}`}</span>
-                </div>
-              )
-            )}
-            {reverseChildListLinks.map((link) => (
-              <a
-                className="rr-x-rel__row rr-x-rel__row--link"
-                href={link.href}
-                key={`reverse:${link.childStream}:${link.foreignKey}`}
-              >
-                <span className="rr-x-rel__k">{link.childStream}</span>
-                <span className="rr-x-rel__v">has_many →</span>
-              </a>
-            ))}
+            <span className="rr-ex-keep__label">Related records</span>
+            {relationGroups.map((item) => <a className="rr-x-rel__row rr-x-rel__row--link" href={item.href} key={`${item.href}:${item.label}`}>{item.label}</a>)}
           </div>
-        )}
+        ) : null}
       </SheetBody>
       <SheetFoot>
-        {streamRecordsHref ? (
-          <a className="rr-x-stream-all" href={streamRecordsHref}>
-            Open all records in this stream →
-          </a>
-        ) : null}
-        <div className="rr-x-compiled">
-          <span className="rr-x-compiled__label">Record request:</span>
-          <CopyMono text={`GET ${record.readUrl}`} />
-        </div>
-        <span className="rr-x-facets__note">
-          {withheld.length > 0
-            ? `${visibleCount} of ${totalDeclared} fields included in this shared view · enforced on every read`
-            : `${totalDeclared} fields · readable by you`}
-        </span>
-        <span className="rr-x-facets__note">Record size: {recordSizeLabel(record.recordSizeBytes)}</span>
+        {streamRecordsHref ? <a className="rr-x-stream-all" href={streamRecordsHref}>Browse this kind →</a> : null}
+        <details className="rr-x-raw rr-x-inspector-details">
+          <summary>Details</summary>
+          <div className="rr-x-inspector-details__body">
+            {recordHref ? <a href={recordHref}>Open full record</a> : null}
+            <div className="rr-x-compiled">
+              <span className="rr-x-compiled__label">Record ID</span>
+              <CopyMono text={record.recordId} />
+            </div>
+            <div className="rr-x-compiled">
+              <span className="rr-x-compiled__label">Read request</span>
+              <CopyMono text={`GET ${record.readUrl}`} />
+            </div>
+            <dl className="rr-x-inspector-details__fields">
+              {record.fields.map((field) => (
+                <div className="rr-x-inspector-details__row" key={field.name}>
+                  <dt>{humanizeFieldLabel(field.name)} · {field.name}</dt>
+                  <dd>{field.type ?? "Type not declared"} · {field.state}</dd>
+                </div>
+              ))}
+            </dl>
+            <p>{visibleFieldCount} of {record.fields.length} fields readable</p>
+            {withheld.length > 0 ? <p>Withheld fields: {withheld.map((field) => field.name).join(" · ")}</p> : null}
+            {advisoryRelations.map((item) => (
+              <p key={`${item.relation}:${item.cardinality}`}>
+                {humanizeFieldLabel(item.relation)} · {item.advisory ?? "Related records cannot be opened from here."}
+              </p>
+            ))}
+            <p>Record size: {recordSizeLabel(record.recordSizeBytes)}</p>
+            {record.bodyJson ? (
+              <details>
+                <summary>Raw JSON</summary>
+                <pre>{record.bodyJson}</pre>
+              </details>
+            ) : null}
+            {blob?.state === "unavailable" ? <p>{blob.reason ?? "File unavailable for this view."}</p> : null}
+          </div>
+        </details>
       </SheetFoot>
     </Sheet>
   );

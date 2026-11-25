@@ -68,6 +68,9 @@ export default async function RecordsExplorerPage({
 }: {
   searchParams: Promise<{
     demo?: string;
+    state?: string;
+    // Demo only: "date" or "data-sources" opens that control on first paint for pictures.
+    open?: string;
     q?: string;
     connection?: string | string[];
     // Opaque continuation for the connector-summary FACET page (Sources
@@ -105,10 +108,15 @@ export default async function RecordsExplorerPage({
   const params = await searchParams;
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./explore-demo-data.ts");
+    const demoState = ["empty", "failed", "many-sources", "untitled"].includes(params.state ?? "")
+      ? (params.state as "empty" | "failed" | "many-sources" | "untitled")
+      : "results";
     return (
       <RecordroomShellWithPalette host="this server">
         <ExploreCanvas
-          data={demo.buildExploreDemoData()}
+          data={demo.buildExploreDemoData(demoState)}
+          demoOpen={params.open === "date" || params.open === "data-sources" ? params.open : undefined}
+          demoState={demoState}
           explorePath={dashboardRoutes.section.explore}
           order="newest"
           peekRelationships={null}

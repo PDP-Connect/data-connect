@@ -3,6 +3,7 @@
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { EXPLORE_LOADING_MESSAGE } from "./explore-presentation.ts";
 
 /**
  * Route-level loading state for the Records Explorer.
@@ -16,7 +17,12 @@ import { ListLoadingSkeleton } from "../components/route-loading.tsx";
 export default function ExploreLoading() {
   return (
     <RecordroomShellWithPalette host="this server">
-      <ListLoadingSkeleton label="records" rows={8} />
+      <div className="mx-auto w-full max-w-5xl px-6 py-8">
+        <p aria-live="polite" className="mb-4 text-[13px] text-muted-foreground" role="status">
+          {EXPLORE_LOADING_MESSAGE}
+        </p>
+        <ListLoadingSkeleton label="records" rows={8} />
+      </div>
     </RecordroomShellWithPalette>
   );
 }

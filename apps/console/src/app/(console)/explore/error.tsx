@@ -5,6 +5,7 @@
 
 import { buttonVariants } from "@pdpp/brand-react";
 import { useEffect } from "react";
+import { EXPLORE_FAILED_MESSAGE } from "./explore-presentation.ts";
 
 /**
  * Scoped Explore error boundary (App Router convention).
@@ -20,39 +21,17 @@ import { useEffect } from "react";
  * component). Self-contained on purpose — no server-only imports (App Router
  * error boundaries are Client Components).
  */
-function isInterruptedLoad(error: Error): boolean {
-  const { name, message: rawMessage } = error;
-  const message = rawMessage.toLowerCase();
-  return (
-    name === "AbortError" ||
-    message.includes("aborted") ||
-    message.includes("failed to fetch") ||
-    message.includes("load failed") ||
-    message.includes("networkerror")
-  );
-}
-
 export default function ExploreError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
     console.error(error);
   }, [error]);
 
-  const interrupted = isInterruptedLoad(error);
-
   return (
     <main className="mx-auto flex min-h-[50vh] max-w-xl flex-col items-start justify-center gap-3 px-6 py-16">
-      <p className="pdpp-eyebrow text-muted-foreground/60 uppercase tracking-widest">Explore</p>
-      <h1 className="pdpp-heading text-foreground">
-        {interrupted ? "This view didn’t finish loading" : "Explore ran into a problem"}
-      </h1>
-      <p className="pdpp-body max-w-prose text-muted-foreground">
-        {interrupted
-          ? "The load was interrupted, usually by switching away while records were still loading. Your records are safe and unchanged."
-          : "Explore hit an unexpected error while loading your records. Your records are safe and unchanged; only this view failed."}
-      </p>
+      <p className="pdpp-body max-w-prose text-muted-foreground">{EXPLORE_FAILED_MESSAGE}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button className={buttonVariants({ size: "sm", variant: "default" })} onClick={() => reset()} type="button">
-          Reload
+          Try again
         </button>
         <a className={buttonVariants({ size: "sm", variant: "ghost" })} href="/">
           Back to DataConnect
