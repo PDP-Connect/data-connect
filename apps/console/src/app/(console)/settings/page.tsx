@@ -33,6 +33,10 @@ export default async function SettingsPage() {
       loadOwnerPasswordSource(),
       loadOwnerPasswordSet(),
     ])
+  // Only the desktop app's own window carries the reveal proof cookie; a
+  // browser that reaches a desktop-hosted console over remote access does
+  // not, so the Desktop section stays out of it.
+  const inDesktopApp = managedDesktopHost && hasLocalRevealProof
 
   return (
     <RecordroomShellWithPalette>
@@ -90,12 +94,14 @@ export default async function SettingsPage() {
         ) : null}
         {managedDesktopHost ? (
           <>
-        <Section
-          description="Control how DataConnect starts on this computer."
-          title="Desktop"
-        >
-          <DesktopSettingsSetting />
-        </Section>
+        {inDesktopApp ? (
+          <Section
+            description="Control how DataConnect starts on this computer."
+            title="Desktop"
+          >
+            <DesktopSettingsSetting />
+          </Section>
+        ) : null}
         <Section
           description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
           title="Vault recovery code"

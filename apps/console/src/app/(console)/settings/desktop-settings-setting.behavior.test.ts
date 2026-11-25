@@ -8,9 +8,9 @@
  */
 
 import assert from "node:assert/strict"
+import { mock, test } from "node:test"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { JSDOM } from "jsdom"
-import { mock, test } from "node:test"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
@@ -172,7 +172,10 @@ test("when one read fails and the other succeeds the section is failed, not part
     rig.autostartRead[0]!.resolve({ enabled: true, pending: false })
     rig.appConfigRead[0]!.reject(new Error("config unreadable"))
     await rig.settle()
-    assert.match(rig.container.textContent ?? "", /could not be read, so they are not\s+shown/)
+    const text = rig.container.textContent ?? ""
+    assert.match(text, /Desktop settings could not be read\./)
+    assert.doesNotMatch(text, /config unreadable/, "the raw error text must not reach the screen")
+    assert.equal(rig.container.querySelector('[role="alert"]'), null)
     assertNothingActionable(rig, "after a partial read failure")
     await interactWithAll(rig)
     assertNoWrites(rig)

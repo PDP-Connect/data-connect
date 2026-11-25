@@ -97,7 +97,6 @@ export function DesktopSettingsSetting({
   const appConfig = useLiveQuery("desktop.app-config", loadAppConfig)
   const loadState = loadStateOf(autostart, appConfig)
   const [error, setError] = useState<string | null>(null)
-  const loadError = autostart.error ?? appConfig.error
 
   const autostartMutation = useLiveMutation("desktop.autostart", changeAutostart)
   const startMinimizedMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
@@ -122,7 +121,8 @@ export function DesktopSettingsSetting({
   const busyCloseToTray = closeToTrayMutation.isPending
 
   const reportResult = {
-    onError: (reason: unknown) => setError(String(reason)),
+    // A thrown error carries framework text, not words for the person.
+    onError: () => setError("The change could not be saved. Try again."),
     onSuccess: (result: { ok: true } | { ok: false; message: string }) => {
       if (!result.ok) setError(result.message)
     },
@@ -152,16 +152,7 @@ export function DesktopSettingsSetting({
       ) : null}
       {loadState === "failed" ? (
         <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-          The current desktop settings could not be read, so they are not
-          shown. The controls below are unavailable rather than assumed off.
-        </p>
-      ) : null}
-      {loadError && !error ? (
-        <p
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-          role="alert"
-        >
-          {String(loadError)}
+          Desktop settings could not be read.
         </p>
       ) : null}
       <LiveReadAt updatedAt={Math.min(autostart.dataUpdatedAt, appConfig.dataUpdatedAt)} />

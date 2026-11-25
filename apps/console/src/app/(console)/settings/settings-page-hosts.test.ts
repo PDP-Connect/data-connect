@@ -13,6 +13,8 @@ Object.assign(globalThis, { React })
 type Page = typeof import("./page.tsx")
 
 let loaded: Promise<Page> | null = null
+// Whether the request carries the desktop window's reveal proof cookie.
+let revealProof = false
 
 // The real settings page and real Section chrome, rendered per host. Replaced:
 // the shell (needs the command-palette context), the data loaders (need a
@@ -43,7 +45,7 @@ function loadPage(): Promise<Page> {
     )
     mock.module(new URL("../lib/owner-credential-client.ts", import.meta.url).href, {
       namedExports: {
-        hasValidLocalOwnerCredentialRevealProofCookie: async () => false,
+        hasValidLocalOwnerCredentialRevealProofCookie: async () => revealProof,
       },
     })
     mock.module(new URL("./owner-sessions-data.ts", import.meta.url).href, {
@@ -59,13 +61,15 @@ function loadPage(): Promise<Page> {
   return loaded
 }
 
-async function render(managedDesktopHost: boolean): Promise<string> {
+async function render(managedDesktopHost: boolean, inDesktopWindow = managedDesktopHost): Promise<string> {
   const { default: SettingsPage } = await loadPage()
   const previous = process.env.PDPP_MANAGED_DESKTOP_HOST
   process.env.PDPP_MANAGED_DESKTOP_HOST = managedDesktopHost ? "1" : "0"
+  revealProof = inDesktopWindow
   try {
     return renderToStaticMarkup(await SettingsPage())
   } finally {
+    revealProof = false
     if (previous === undefined) delete process.env.PDPP_MANAGED_DESKTOP_HOST
     else process.env.PDPP_MANAGED_DESKTOP_HOST = previous
   }
@@ -83,11 +87,19 @@ test("an unmanaged server host renders Remote access and Attach a desktop app bu
   assert.doesNotMatch(html, /Control how DataConnect starts on this computer/)
 })
 
-test("a managed desktop host renders the Desktop and Vault recovery sections alongside Remote access", async () => {
+test("in the desktop app window a managed desktop host renders the Desktop and Vault recovery sections alongside Remote access", async () => {
   const html = await render(true)
   assert.match(html, /data-widget="remote-access"/)
   assert.match(html, /Control how DataConnect starts on this computer/)
   assert.match(html, /data-widget="desktop-settings"/)
   assert.match(html, /Vault recovery code/)
   assert.match(html, /data-widget="recovery-key"/)
+})
+
+test("a browser reaching a managed desktop host does not render the Desktop section", async () => {
+  const html = await render(true, false)
+  assert.match(html, /data-widget="remote-access"/)
+  assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render outside the desktop app")
+  assert.doesNotMatch(html, /Control how DataConnect starts on this computer/)
+  assert.match(html, /data-widget="recovery-key"/, "Vault recovery keeps its managed-host rule")
 })
