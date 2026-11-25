@@ -266,7 +266,11 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
     await backend.restoreTo(2);
     await assert.rejects(backend.list({ changes_since: synced.next_changes_since }), { code: "cursor_expired" });
     const resync = await backend.list({ changes_since: "beginning" });
+    assert.deepEqual(ids(resync), ["a", "b"], "beginning returns exactly the restored records");
     assert.ok(resync.next_changes_since, "beginning still recovers after the restore");
+    await backend.put("d");
+    const delta = await backend.list({ changes_since: resync.next_changes_since });
+    assert.deepEqual(ids(delta), ["d"], "the recovered token delivers only writes after the restore");
   });
 
   scenario(
