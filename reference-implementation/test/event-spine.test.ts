@@ -1664,7 +1664,7 @@ test("event spine", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams`, {
           headers: { Authorization: `Bearer ${approval.token}` },
         });
-        assert.equal(rejectedResp.status, 403);
+        assert.equal(rejectedResp.status, 401);
         const requestId = rejectedResp.headers.get("Request-Id");
         const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(requestId?.startsWith("req_"));
@@ -3139,7 +3139,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.reason, "connector_reported_failed");
         assert.equal(failedEvent.data.connector_error_message, "Remote provider rate limit");
         assert.equal(failedEvent.data.connector_error_retryable, true);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
+        assert.equal(failedEvent.data.records_flushed, 1);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
       } finally {
         rmSync(tmpDir, { force: true, recursive: true });

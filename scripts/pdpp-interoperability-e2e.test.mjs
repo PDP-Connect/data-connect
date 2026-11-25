@@ -423,7 +423,7 @@ test(
         await restartedPorts.GrantScopedRecordsRepository.readAfterRevocation(
           redeemed.token
         )
-      assert.equal(read.status, 403)
+      assert.equal(read.status, 401)
       assert.equal(read.body.error.code, "grant_revoked")
     }
   )

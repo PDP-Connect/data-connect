@@ -8,9 +8,9 @@
  * separately (server/records.ts, server/postgres-records.ts), so each oracle
  * runs over HTTP against both:
  *
- *   - spec-core §4 "Tombstones": a sparse `fields` read keeps the whole
- *     tombstone envelope (object, id, stream, deleted, deleted_at,
- *     emitted_at) and adds no `data`.
+ *   - spec-core §4 "Tombstones": a sparse `fields` read keeps the whole client
+ *     tombstone envelope (object, id, instance_id, stream, deleted), carries no
+ *     `deleted_at` or `emitted_at` (Core "Response records"), and adds no `data`.
  *   - spec-core §8 `fields`: an owner sparse read always includes the
  *     schema-required fields; a client sparse read stays inside the request.
  *   - spec-core §8 query parameters: a malformed `limit` is rejected with
@@ -50,7 +50,7 @@ const CLIENT_ID = "concert_recommendation_app";
 const OWNER_CLIENT_ID = "cli_longview";
 const OWNER_ID = "rs_projection_limit_owner";
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
-const TOMBSTONE_KEYS = ["deleted", "deleted_at", "emitted_at", "id", "object", "stream"];
+const TOMBSTONE_KEYS = ["deleted", "id", "object", "stream"];
 
 function notesStream(): JsonObject {
   return {
@@ -211,8 +211,9 @@ async function assertSparseTombstone(rsUrl: string, clientToken: string, cursor:
     assert.equal(tombstone.id, "n2");
     assert.equal(tombstone.stream, "notes");
     assert.equal(tombstone.deleted, true);
-    assert.ok(typeof tombstone.deleted_at === "string" && tombstone.deleted_at.length > 0);
-    assert.ok(typeof tombstone.emitted_at === "string" && tombstone.emitted_at.length > 0);
+    // Core "Response records": a client tombstone carries neither timestamp.
+    assert.equal(Object.hasOwn(tombstone, "deleted_at"), false, `${label} fields=${fields}`);
+    assert.equal(Object.hasOwn(tombstone, "emitted_at"), false, `${label} fields=${fields}`);
     assert.equal(Object.hasOwn(tombstone, "data"), false);
     assert.equal(sparse.body.has_more, false);
     assert.equal(sparse.body.next_changes_since, full.body.next_changes_since);

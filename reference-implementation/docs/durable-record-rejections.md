@@ -34,7 +34,7 @@ The reference server provides two read-only owner-session routes:
 - `GET /_ref/connections/{connection_id}/record-rejections`
 - `GET /_ref/connections/{connection_id}/record-rejections/{receipt_id}`
 
-The list route has a maximum page size of 100 and uses an opaque cursor. It returns the receipt, connection, connector, stream, reason code, byte count, digest, timestamps, replay count, run id, and status. It does not return payload text.
+The list route has a maximum page size of 100 and uses an opaque cursor. It returns the receipt, connection, connector, stream, reason code, byte count, digest, timestamps, replay count, run id, and status. It does not return payload text. The optional `run_id` query parameter narrows the list, ahead of paging, to receipts whose first or latest run is that run; a payload rejected again in a later run is one receipt, so it does not match the runs in between.
 
 The detail route returns the exact retained line as `payload_base64` with `payload_encoding: "base64"` and a nullable `payload_text` preview when strict UTF-8 decoding is lossless. The server first verifies that the current owner controls the connection. A missing receipt and a receipt outside that owner's connection use the same not-found response.
 

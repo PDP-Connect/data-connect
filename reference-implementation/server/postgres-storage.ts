@@ -1423,6 +1423,30 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+/**
+ * Run `fn` against one REPEATABLE READ, read-only snapshot on a single client.
+ * Every statement inside sees the same committed state, so a multi-statement
+ * read cannot straddle a concurrent writer's commit.
+ */
+export async function withPostgresSnapshotRead<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await fn(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original read error.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export interface BulkChunkBudget {
   chunkSize: number;
 }
@@ -2018,7 +2042,7 @@ async function bootstrapPostgresSchemaOnce({
         file_name TEXT NOT NULL,
         staging_path TEXT NOT NULL,
         final_path TEXT,
-        file_size_bytes INTEGER NOT NULL DEFAULT 0,
+        file_size_bytes BIGINT NOT NULL DEFAULT 0,
         artifact_sha256 TEXT,
         status TEXT NOT NULL CHECK (status IN ('uploaded', 'validating', 'staged', 'duplicate', 'failed')),
         acquisition_batch_id TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL,
@@ -2034,6 +2058,22 @@ async function bootstrapPostgresSchemaOnce({
       -- backfill to NULL, which the sweep also treats as orphaned.
       ALTER TABLE manual_upload_artifacts
         ADD COLUMN IF NOT EXISTS owner_epoch TEXT;
+      -- Widen legacy upload sizes without taking an ACCESS EXCLUSIVE lock
+      -- for this type change again on every boot after the upgrade.
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'manual_upload_artifacts'
+             AND column_name = 'file_size_bytes'
+             AND data_type = 'integer'
+        ) THEN
+          ALTER TABLE manual_upload_artifacts
+            ALTER COLUMN file_size_bytes TYPE BIGINT;
+        END IF;
+      END $$;
       CREATE INDEX IF NOT EXISTS idx_pg_manual_upload_artifacts_connection_created
         ON manual_upload_artifacts(connector_instance_id, created_at DESC);
 
@@ -3185,6 +3225,7 @@ async function bootstrapPostgresSchemaOnce({
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 
@@ -5655,6 +5696,7 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
   if (checks.every(Boolean)) {
+    await ensurePostgresChangesFloor(client);
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;
   }
@@ -5790,7 +5832,48 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
     throw err;
   }
+  await ensurePostgresChangesFloor(client);
   await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
+}
+
+// Oldest reconstructible changes_since watermark. A database that predates the
+// column may already have pruned or compacted history, which the floor cannot
+// tell, so seed each stream's floor at its head: every older token expires once
+// and the client re-syncs from `beginning`. The column and its seed commit in one
+// transaction, so an interrupted seed cannot leave a column that makes the next
+// startup skip it. Runs after the instance-namespace migration so both tables
+// carry connector_instance_id.
+async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
+  if (await hasPostgresColumn(client, "version_counter", "changes_floor")) {
+    return;
+  }
+  await client.query("BEGIN");
+  try {
+    // Serialize concurrent starters: the loser re-checks after the winner commits.
+    await client.query("LOCK TABLE version_counter IN ACCESS EXCLUSIVE MODE");
+    if (!(await hasPostgresColumn(client, "version_counter", "changes_floor"))) {
+      await client.query("ALTER TABLE version_counter ADD COLUMN changes_floor BIGINT NOT NULL DEFAULT 0");
+      await client.query(
+        `UPDATE version_counter
+            SET changes_floor = GREATEST(
+              max_version,
+              COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                         WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                           AND rc.stream = version_counter.stream), 0),
+              COALESCE((SELECT MAX(r.version) FROM records r
+                         WHERE r.connector_instance_id = version_counter.connector_instance_id
+                           AND r.stream = version_counter.stream), 0))`
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is what the caller needs.
+    }
+    throw err;
+  }
 }
 
 async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient): Promise<void> {

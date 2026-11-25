@@ -1052,9 +1052,10 @@ test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", a
     const initializeServerInfo = resultOf(initialize).serverInfo as Record<string, unknown>;
     assert.equal(initializeServerInfo.name, "pdpp-reference-mcp");
     assert.deepEqual(initializeServerInfo.icons, [
-      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon.svg` },
+      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon` },
+      { mimeType: "image/png", sizes: ["180x180"], src: `${rsUrl}/apple-icon` },
     ]);
-    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
 
     const tools = await postMcpJson(rsUrl, accessToken, {
       id: 2,
@@ -1927,8 +1928,25 @@ test("/mcp rejects missing and owner bearers", async () => {
   try {
     const missing = await fetchJson(`${rsUrl}/mcp`, { method: "POST" });
     assert.equal(missing.status, 401);
-    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(
+      missing.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp"`
+    );
+    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
     assert.equal(errorOf(missing).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
+
+    const badToken = await postMcpJson(rsUrl, "not-a-real-token", {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(badToken.status, 401);
+    assert.equal(
+      badToken.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`
+    );
+    assert.equal(errorOf(badToken).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
 
     const mcpMetadata = await fetchProtectedResourceMetadata(stringField(errorOf(missing), "resource_metadata"));
     assert.equal(mcpMetadata.resource, `${rsUrl}/mcp`);
@@ -1972,6 +1990,74 @@ test("/mcp rejects missing and owner bearers", async () => {
     assert.equal(errorOf(owner).code, "permission_error");
     assert.match(stringField(errorOf(owner), "message"), /grant-scoped client or MCP package token/);
     assert.match(stringField(errorOf(owner), "message"), /owner-agent REST onboarding/);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/mcp challenges revoked grants as invalid tokens", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource/mcp`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const revoked = await completeOauthCodeFlow({ asUrl, client, manifest });
+    await revokeGrant(mustExist(revoked.grantId, "authorization code flow must issue a grant id"), {
+      request_id: "mcp-invalid-token-revoked-test",
+    });
+    const revokedResponse = await postMcpJson(rsUrl, revoked.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(revokedResponse.status, 401);
+    assert.equal(
+      revokedResponse.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
+    assert.equal(errorOf(revokedResponse).code, "grant_revoked");
+    assert.equal(errorOf(revokedResponse).resource_metadata, metadataUrl);
+
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/mcp challenges expired grants as invalid tokens", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource/mcp`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const expired = await completeOauthCodeFlow({ asUrl, client, manifest });
+    const expiredGrantId = mustExist(expired.grantId, "authorization code flow must issue a grant id");
+    const expiredAt = new Date(Date.now() - 60_000).toISOString();
+    getDb()
+      .prepare("UPDATE grants SET expires_at = ?, grant_json = json_set(grant_json, '$.expires_at', ?) WHERE grant_id = ?")
+      .run(expiredAt, expiredAt, expiredGrantId);
+    getDb().prepare("UPDATE tokens SET expires_at = ? WHERE grant_id = ?").run(expiredAt, expiredGrantId);
+
+    const expiredResponse = await postMcpJson(rsUrl, expired.accessToken, {
+      id: 2,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+
+    assert.equal(expiredResponse.status, 401);
+    assert.equal(
+      expiredResponse.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
+    assert.equal(errorOf(expiredResponse).code, "grant_expired");
+    assert.equal(errorOf(expiredResponse).resource_metadata, metadataUrl);
   } finally {
     await closeServer(server);
   }
@@ -2704,6 +2790,50 @@ test("revoking one child grant silently removes that source from the package /mc
   }
 });
 
+test("revoking a package's last child challenges its token as invalid", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id],
+    });
+    const packageAccess = await introspectAccessToken(asUrl, accessToken);
+    const packageId = stringField(packageAccess, "grant_package_id");
+    const packageMembers = (await getGrantPackageAccess(packageId)) as { members?: Array<{ grant_id?: string }> } | null;
+    const packageMember = packageMembers?.members?.[0];
+    assert.ok(packageMember?.grant_id);
+    assert.equal(packageMembers?.members?.length, 1);
+    await revokeGrant(packageMember.grant_id, {
+      request_id: "mcp-package-last-child-revoked-test",
+    });
+    assert.equal((await introspectAccessToken(asUrl, accessToken)).active, true);
+    const emptyPackageAccess = await getGrantPackageAccess(packageId);
+    assert.equal((emptyPackageAccess?.members as unknown[] | undefined)?.length, 0);
+
+    const after = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(after.status, 401);
+    assert.equal(
+      after.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`
+    );
+    assert.equal(errorOf(after).code, "authentication_error");
+    assert.equal(errorOf(after).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("revoking the package invalidates /mcp access and the refresh-token exchange", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
@@ -2737,9 +2867,8 @@ test("revoking the package invalidates /mcp access and the refresh-token exchang
     await revokeGrantPackage(packageId, { request_id: "multi-source-package-revoke-test" });
 
     // /mcp must now reject the package bearer. introspection marks the
-    // token inactive with `inactive_reason = 'package_revoked'`; that
-    // does not map to a grant_revoked/grant_expired/grant_invalid 403,
-    // so requireToken falls through to a 401 challenge.
+    // token inactive with `inactive_reason = 'package_revoked'`; requireToken
+    // reports the generic authentication error with an invalid-token challenge.
     const after = await postMcpJson(rsUrl, accessToken, {
       id: 2,
       jsonrpc: "2.0",
