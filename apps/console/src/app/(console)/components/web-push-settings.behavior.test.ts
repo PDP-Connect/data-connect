@@ -46,18 +46,22 @@ function acceptedSubscription(): Response {
 // Per-test answers. Each test sets these before mounting.
 const scenario: {
   existing: PushSubscription | null;
+  inspect: () => Promise<unknown>;
   permissionAnswer: NotificationPermission;
   subscribe: () => Promise<unknown>;
   subscriptionResponse: () => Response;
 } = {
   existing: null,
+  inspect: () => Promise.resolve(registration),
   permissionAnswer: "granted",
   subscribe: () => Promise.resolve(pushSubscription),
   subscriptionResponse: refusedSubscription,
 };
 
+// Created under the config key "AQID" (bytes 1, 2, 3).
 const pushSubscription = {
   endpoint: "https://push.example.test/subscription-1",
+  options: { applicationServerKey: Uint8Array.from([1, 2, 3]).buffer },
   toJSON: () => ({
     endpoint: "https://push.example.test/subscription-1",
     keys: { auth: "auth", p256dh: "key" },
@@ -111,7 +115,7 @@ const harness = (async () => {
   Object.defineProperty(window.navigator, "serviceWorker", {
     configurable: true,
     value: {
-      getRegistration: () => Promise.resolve(registration),
+      getRegistration: () => scenario.inspect(),
       register: () => Promise.resolve(registration),
     },
   });
@@ -127,19 +131,22 @@ function pause() {
 }
 
 async function mounted(
-  run: (container: HTMLElement) => void | Promise<void>,
+  run: (container: HTMLElement, rerender: (config: WebPushConfig) => Promise<void>) => void | Promise<void>,
   subscriptions: WebPushSubscriptionSummary[] = []
 ) {
   const { WebPushSettings, window } = await harness;
   const container = window.document.createElement("div");
   window.document.body.append(container);
   const root = createRoot(container);
-  try {
+  const render = async (config: WebPushConfig) => {
     await act(async () => {
-      root.render(createElement(WebPushSettings, { config: CONFIG, subscriptions }));
+      root.render(createElement(WebPushSettings, { config, subscriptions }));
       await pause();
     });
-    await run(container);
+  };
+  try {
+    await render(CONFIG);
+    await run(container, render);
   } finally {
     await act(() => {
       root.unmount();
@@ -267,4 +274,39 @@ test("after a replacement that removed the old subscription fails, the device sh
     assert.doesNotMatch(text, EARLIER_KEY);
   }, LISTED_OLD_ENDPOINT);
   scenario.subscribe = () => Promise.resolve(pushSubscription);
+});
+
+// A server key the page has not seen yet (bytes 9, 9, 9), and the browser's
+// subscription under the key the page first loaded with.
+const NEW_KEY_CONFIG: WebPushConfig = { ...CONFIG, public_key: "CQkJ" };
+const LISTED_CURRENT_ENDPOINT = [
+  { endpoint: pushSubscription.endpoint, revoked_at: null },
+] as WebPushSubscriptionSummary[];
+
+test("a subscription shown as healthy is not shown so once the server key changes, even before the browser is read again", async () => {
+  scenario.existing = pushSubscription as unknown as PushSubscription;
+  await mounted(async (container, rerender) => {
+    assert.match(container.textContent ?? "", SUBSCRIBED, "healthy under the key it was created under");
+    scenario.inspect = () => new Promise(() => undefined);
+    await rerender(NEW_KEY_CONFIG);
+    const text = container.textContent ?? "";
+    assert.doesNotMatch(text, SUBSCRIBED);
+    assert.match(text, EARLIER_KEY);
+    buttonNamed(container, "Enable this device");
+  }, LISTED_CURRENT_ENDPOINT);
+  scenario.inspect = () => Promise.resolve(registration);
+  scenario.existing = null;
+});
+
+test("a subscription shown as healthy is not shown so after the browser could not be read again", async () => {
+  scenario.existing = pushSubscription as unknown as PushSubscription;
+  await mounted(async (container, rerender) => {
+    assert.match(container.textContent ?? "", SUBSCRIBED, "healthy under the key it was created under");
+    scenario.inspect = () => Promise.reject(new Error("Service worker registry unavailable."));
+    await rerender({ ...CONFIG });
+    assert.doesNotMatch(container.textContent ?? "", SUBSCRIBED);
+    buttonNamed(container, "Enable this device");
+  }, LISTED_CURRENT_ENDPOINT);
+  scenario.inspect = () => Promise.resolve(registration);
+  scenario.existing = null;
 });

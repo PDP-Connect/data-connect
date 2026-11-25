@@ -17,17 +17,23 @@ import { isUnderServerKey, subscribeWithServerKey } from "../lib/web-push-subscr
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
 
+// What the browser last reported about its push subscription. The key it was
+// created under is kept with it, so whether it matches the server's key is
+// decided at render against the current config, never remembered from an
+// earlier one.
+type BrowserPushSubscription = Pick<PushSubscription, "endpoint" | "options">;
+
 // The runtime state for *this* browser/device: whether Web Push is usable, the
-// notification permission, the service-worker registration, and the active push
-// endpoint, plus the human-readable status line. These all change together as
-// the async inspection settles and as the owner enables/disables this device,
-// so they live in one reducer (atomic transitions, no cascading re-renders).
+// notification permission, the service-worker registration, and the browser's
+// push subscription, plus the human-readable status line. These all change
+// together as the async inspection settles and as the owner enables/disables
+// this device, so they live in one reducer (atomic transitions, no cascading
+// re-renders).
 interface DeviceState {
-  endpoint: string | null;
-  /** The browser's subscription was created under a server key other than the current one. */
-  staleKey: boolean;
   permission: NotificationPermission | "unknown";
   status: string;
+  /** The browser's push subscription, or null when there is none or it could not be read. */
+  subscription: BrowserPushSubscription | null;
   swState: SwState;
   unavailable: WebPushUnavailableCause | null;
 }
@@ -40,9 +46,9 @@ type DeviceAction =
       unavailable: WebPushUnavailableCause | null;
     }
   | { type: "swState"; swState: SwState; status?: string }
-  | { type: "subscribed"; endpoint: string; status: string }
+  | { type: "subscription"; subscription: BrowserPushSubscription | null; status?: string }
+  | { type: "inspectionFailed"; status?: string }
   | { type: "disabled"; status: string }
-  | { type: "endpoint"; endpoint: string | null; staleKey: boolean; status?: string }
   | { type: "permission"; permission: NotificationPermission | "unknown" }
   | { type: "status"; status: string };
 
@@ -54,17 +60,14 @@ function deviceReducer(state: DeviceState, action: DeviceAction): DeviceState {
       return action.status === undefined
         ? { ...state, swState: action.swState }
         : { ...state, status: action.status, swState: action.swState };
-    case "subscribed":
-      return { ...state, endpoint: action.endpoint, staleKey: false, status: action.status };
+    case "subscription":
+      return { ...state, status: action.status ?? state.status, subscription: action.subscription };
+    // A subscription read before a failed inspection may no longer exist, so
+    // none is shown as current.
+    case "inspectionFailed":
+      return { ...state, status: action.status ?? state.status, subscription: null, swState: "unknown" };
     case "disabled":
-      return { ...state, endpoint: null, staleKey: false, status: action.status };
-    case "endpoint":
-      return {
-        ...state,
-        endpoint: action.endpoint,
-        staleKey: action.staleKey,
-        status: action.status ?? state.status,
-      };
+      return { ...state, status: action.status, subscription: null };
     case "permission":
       return { ...state, permission: action.permission };
     case "status":
@@ -75,10 +78,9 @@ function deviceReducer(state: DeviceState, action: DeviceAction): DeviceState {
 }
 
 const INITIAL_DEVICE_STATE: DeviceState = {
-  endpoint: null,
   permission: "unknown",
-  staleKey: false,
   status: "Checking this browser…",
+  subscription: null,
   swState: "unknown",
   unavailable: null,
 };
@@ -110,16 +112,17 @@ interface SetupStep {
 type BrowserSubscription = "none" | "stale-key" | "unlisted" | "registered";
 
 function browserSubscription(
-  device: Pick<DeviceState, "endpoint" | "staleKey">,
+  subscription: BrowserPushSubscription | null,
+  serverPublicKey: string | null,
   subscriptions: WebPushSubscriptionSummary[]
 ): BrowserSubscription {
-  if (!device.endpoint) {
+  if (!subscription) {
     return "none";
   }
-  if (device.staleKey) {
+  if (!(serverPublicKey && isUnderServerKey(subscription, serverPublicKey))) {
     return "stale-key";
   }
-  return subscriptions.some((s) => s.endpoint === device.endpoint && !s.revoked_at) ? "registered" : "unlisted";
+  return subscriptions.some((s) => s.endpoint === subscription.endpoint && !s.revoked_at) ? "registered" : "unlisted";
 }
 
 function observeWebPushCapabilities(config: WebPushConfig): WebPushCapabilities {
@@ -135,7 +138,7 @@ function observeWebPushCapabilities(config: WebPushConfig): WebPushCapabilities 
 
 /**
  * Effect-mount subscription probe: registers the service worker, updates it
- * (best-effort), and surfaces the existing push subscription if one exists.
+ * (best-effort), and reports the browser's push subscription, or that it has none.
  * `isCancelled` is checked after every await so a fast unmount (config
  * change, navigation) never dispatches into a stale effect.
  */
@@ -159,23 +162,16 @@ async function detectExistingSubscription(
     if (isCancelled()) {
       return;
     }
-    if (existing && isUnderServerKey(existing, serverPublicKey)) {
-      dispatch({ endpoint: existing.endpoint, status: "Web Push is enabled for this browser.", type: "subscribed" });
-    } else if (existing) {
-      dispatch({
-        endpoint: existing.endpoint,
-        staleKey: true,
-        status: "This browser was subscribed under an earlier server key. Enable this device again.",
-        type: "endpoint",
-      });
+    let status: string | undefined;
+    if (existing) {
+      status = isUnderServerKey(existing, serverPublicKey)
+        ? "Web Push is enabled for this browser."
+        : "This browser was subscribed under an earlier server key. Enable this device again.";
     }
+    dispatch({ status, subscription: existing ?? null, type: "subscription" });
   } catch {
     if (!isCancelled()) {
-      dispatch({
-        status: "Could not inspect this browser's Web Push subscription.",
-        swState: "unknown",
-        type: "swState",
-      });
+      dispatch({ status: "Could not inspect this browser's Web Push subscription.", type: "inspectionFailed" });
     }
   }
 }
@@ -643,7 +639,8 @@ export function WebPushSettings({
   subscriptions: WebPushSubscriptionSummary[];
 }) {
   const [device, dispatch] = useReducer(deviceReducer, INITIAL_DEVICE_STATE);
-  const { status, endpoint, permission, swState } = device;
+  const { status, permission, swState } = device;
+  const endpoint = device.subscription?.endpoint ?? null;
   // The owner can answer the browser prompt with "block" after mount, so a
   // denial that arrives later is the same cause as one found at mount.
   const unavailable = device.unavailable ?? (permission === "denied" ? "permission-denied" : null);
@@ -662,13 +659,9 @@ export function WebPushSettings({
       await registration?.update().catch(() => undefined);
       dispatch({ swState: registration ? "registered" : "absent", type: "swState" });
       const existing = await registration?.pushManager.getSubscription();
-      dispatch({
-        endpoint: existing?.endpoint ?? null,
-        staleKey: Boolean(existing && config.public_key && !isUnderServerKey(existing, config.public_key)),
-        type: "endpoint",
-      });
+      dispatch({ subscription: existing ?? null, type: "subscription" });
     } catch {
-      dispatch({ swState: "unknown", type: "swState" });
+      dispatch({ type: "inspectionFailed" });
     }
   }
 
@@ -725,11 +718,7 @@ export function WebPushSettings({
       if (!response.ok) {
         throw await webPushResponseError(response, "Subscription failed");
       }
-      dispatch({
-        endpoint: subscription.endpoint,
-        status: "Web Push is enabled for this browser.",
-        type: "subscribed",
-      });
+      dispatch({ status: "Web Push is enabled for this browser.", subscription, type: "subscription" });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to enable Web Push.";
       dispatch({ status: message, type: "status" });
@@ -811,7 +800,7 @@ export function WebPushSettings({
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
   const [lastSubscription] = subscriptions;
-  const thisBrowser = browserSubscription(device, subscriptions);
+  const thisBrowser = browserSubscription(device.subscription, config.public_key, subscriptions);
   const currentDeviceStatus = deviceStatus({ permission, subscription: thisBrowser, swState, unavailable });
   const setupSteps = buildSetupSteps({ permission, subscription: thisBrowser, testStatus, unavailable });
 
