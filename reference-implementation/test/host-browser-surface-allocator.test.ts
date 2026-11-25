@@ -545,6 +545,100 @@ test("an older run's answer that lands after the next run is bound leaves that b
 	assert.deepEqual(host.postedRunIds, ["run-old", "run-next"]);
 });
 
+/**
+ * A host whose every request waits until the test answers it by method and
+ * run id, oldest first. A request that is never answered fails when the
+ * allocator aborts it, as a real fetch does.
+ */
+function createRequestGatedHost() {
+	const waiting: { key: string; open: () => void }[] = [];
+	const fetchImpl = (async (
+		input: string | URL | Request,
+		init?: RequestInit,
+	) => {
+		const method = init?.method ?? "GET";
+		const runId =
+			method === "POST"
+				? (JSON.parse(String(init?.body)) as { run_id: string }).run_id
+				: decodeURIComponent(
+						String(input).split("/browser-surface/runs/")[1] ?? "",
+					);
+		await new Promise<void>((resolve, reject) => {
+			const entry = { key: `${method} ${runId}`, open: resolve };
+			waiting.push(entry);
+			init?.signal?.addEventListener("abort", () => {
+				const index = waiting.indexOf(entry);
+				if (index >= 0) waiting.splice(index, 1);
+				reject(init.signal?.reason);
+			});
+		});
+		return method === "POST"
+			? Response.json({
+					cdp_url: `http://127.0.0.1:9222/${runId}`,
+					surface_id: `host-${runId}`,
+				})
+			: new Response(null, { status: 204 });
+	}) as typeof fetch;
+	const answer = async (key: string) => {
+		const index = waiting.findIndex((entry) => entry.key === key);
+		assert.ok(index >= 0, `no request is waiting for ${key}`);
+		waiting.splice(index, 1)[0]?.open();
+		await settle();
+	};
+	return { answer, fetchImpl };
+}
+
+test("a start answered while its run is being released is not kept after the release", async () => {
+	const host = createRequestGatedHost();
+	const allocator = hostAllocator(host.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-a", surfaceId: "surface_1" });
+	const started = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	const release = allocator.releaseRun("run-a");
+	await settle();
+
+	await host.answer("POST run-a");
+	assert.equal((await started).health, "ready");
+	await host.answer("DELETE run-a");
+	await release;
+
+	assert.equal(await allocator.getSurfaceStatus("surface_1"), null);
+	assert.deepEqual(await allocator.listSurfaces(), []);
+});
+
+test("a start answered while its unanswered surface is being stopped is not kept after the stop", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const host = createRequestGatedHost();
+	const allocator = createHostBrowserSurfaceAllocator({
+		endpoint: "http://127.0.0.1:9916/agent",
+		fetchImpl: host.fetchImpl,
+		headless: false,
+		now: () => new Date("2026-09-16T16:00:00.000Z"),
+		requestTimeoutMs: 1_000,
+		token: "shared-secret",
+	});
+	allocator.bindRunToSurface({ runId: "run-a", surfaceId: "surface_1" });
+	const unanswered = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	t.mock.timers.tick(1_000);
+	assert.equal((await unanswered).health, "starting");
+	const retried = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	await settle();
+	const stopping = allocator.stopSurface({
+		reason: "surface_failed",
+		surfaceId: "surface_1",
+	});
+	await settle();
+
+	await host.answer("POST run-a");
+	assert.equal((await retried).health, "ready");
+	await host.answer("DELETE run-a");
+	await stopping;
+
+	assert.equal(await allocator.getSurfaceStatus("surface_1"), null);
+	assert.deepEqual(await allocator.listSurfaces(), []);
+});
+
 test("stopping an unanswered start releases its run, so the host drops the browser when the start completes", async () => {
 	const host = createSlowStartHost();
 	const allocator = slowStartAllocator(host.fetchImpl);

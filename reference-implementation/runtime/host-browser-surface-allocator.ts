@@ -268,7 +268,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		return this.#pendingRunIdsBySurfaceId.get(surfaceId) === runId;
 	}
 
-	// The two helpers below run after an awaited host request. While it ran,
+	// The helpers below run after an awaited host request. While it ran,
 	// the surface may have been bound to, or started for, another run, so each
 	// removes only state that still belongs to `runId`.
 
@@ -297,6 +297,28 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			this.#leasesBySurfaceId.get(surfaceId)?.runId !== runId
 		) {
 			this.#surfaceIdsByRunId.delete(runId);
+		}
+	}
+
+	/**
+	 * Drop everything still held for `runId` once the host has released it. A
+	 * start answered while the release ran recorded its lease after the
+	 * release began, so this reads the run's state now instead of before the
+	 * request.
+	 */
+	#forgetRun(runId: string): void {
+		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		if (surfaceId) {
+			this.#forgetLease(
+				surfaceId,
+				runId,
+				this.#leasesBySurfaceId.get(surfaceId),
+			);
+		}
+		for (const [boundSurfaceId, boundRunId] of this.#pendingRunIdsBySurfaceId) {
+			if (boundRunId === runId) {
+				this.#forgetBinding(boundSurfaceId, runId);
+			}
 		}
 	}
 
@@ -360,20 +382,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async releaseRun(runId: string): Promise<void> {
-		const surfaceId = this.#surfaceIdsByRunId.get(runId);
-		const record = surfaceId
-			? this.#leasesBySurfaceId.get(surfaceId)
-			: undefined;
-		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
-			([, pendingRunId]) => pendingRunId === runId,
-		)?.[0];
 		await this.#requestNoContent("DELETE", this.#runUrl(runId));
-		if (surfaceId) {
-			this.#forgetLease(surfaceId, runId, record);
-		}
-		if (pendingSurfaceId) {
-			this.#forgetBinding(pendingSurfaceId, runId);
-		}
+		this.#forgetRun(runId);
 		this.#lastStartFailureByRunId.delete(runId);
 	}
 
@@ -387,14 +397,17 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		// An unanswered start has no host surface id. Releasing its run makes
 		// the host tear down that browser when the start completes, and refuse
 		// the run from then on.
-		await this.#requestNoContent(
-			"DELETE",
-			record.hostSurfaceId === null
-				? this.#runUrl(record.runId)
-				: this.#leaseUrl(record.hostSurfaceId),
-		);
-		this.#forgetLease(request.surfaceId, record.runId, record);
-		this.#forgetBinding(request.surfaceId, record.runId);
+		if (record.hostSurfaceId === null) {
+			await this.#requestNoContent("DELETE", this.#runUrl(record.runId));
+			this.#forgetRun(record.runId);
+		} else {
+			await this.#requestNoContent(
+				"DELETE",
+				this.#leaseUrl(record.hostSurfaceId),
+			);
+			this.#forgetLease(request.surfaceId, record.runId, record);
+			this.#forgetBinding(request.surfaceId, record.runId);
+		}
 		return { ...record.surface, health: "stopping" };
 	}
 
