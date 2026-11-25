@@ -102,7 +102,7 @@ export const NAV_GROUPS: NavGroup[] = [
           { label: "Notifications", href: "/notifications" },
           { label: "Server", href: "/deployment" },
           { label: "Collectors on your devices", href: "/device-exporters", labelBefore: "Experimental" },
-          { label: "Webhooks", href: "/event-subscriptions" },
+          { label: "Webhooks", href: "/event-subscriptions", labelBefore: "Experimental" },
         ],
       },
     ],

@@ -27,11 +27,9 @@ import {
   IcButton,
   IcInput,
   IcSelect,
-  IcTimestamp,
   Sheet,
   SheetBody,
   SheetHead,
-  SheetSerial,
   SheetTitle,
   Table,
   TableCell,
@@ -42,8 +40,9 @@ import {
   Typed,
   TypedSm,
 } from "@pdpp/brand-react";
-import { traceRowLabel } from "@pdpp/display";
+import { formatRelative, traceRowLabel } from "@pdpp/display";
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
@@ -87,6 +86,35 @@ function traceListFilters(params: Params) {
     q: params.q,
     status: params.status,
   };
+}
+
+function traceAppName(trace: TraceSummary): string {
+  if (trace.client?.client_name) {
+    return trace.client.client_name;
+  }
+  const label = traceRowLabel(trace);
+  return label.startsWith("client ") || label.startsWith("provider ") ? "App" : label;
+}
+
+function traceWhatRead(trace: TraceSummary): string {
+  const kind = traceKindLabel(trace.kinds);
+  if (kind === "Data read") {
+    return "Read records";
+  }
+  if (RAW_EVENT_KIND_RE.test(kind)) {
+    return "Activity";
+  }
+  return kind;
+}
+
+const RAW_EVENT_KIND_RE = /^[a-z][a-z0-9_.-]+$/;
+
+function relativeTime(value: string | null | undefined): string {
+  if (!value) {
+    return "Time not available";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
 }
 
 function hasActiveFilters(params: Params): boolean {
@@ -155,12 +183,12 @@ function TracesHeader() {
       <p
         style={{
           color: "var(--muted-foreground)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
+          fontFamily: "var(--font-sans)",
+          fontSize: 16,
           margin: 0,
         }}
       >
-        connected apps · device logins · external API reads — not your own console browsing
+        What apps read and when.
       </p>
     </header>
   );
@@ -168,58 +196,60 @@ function TracesHeader() {
 
 function ActiveFilterChips({ params }: { params: Params }) {
   return (
-    <ul
-      aria-label="Active filters"
-      style={{ display: "flex", flexWrap: "wrap", gap: 6, listStyle: "none", margin: "0 0 16px", padding: 0 }}
-    >
+    <details className="mb-4 text-sm">
+      <summary className="cursor-pointer">Filters applied</summary>
+      <ul aria-label="Active filters" className="mt-2 grid gap-1">
       {params.status ? (
         <li>
-          <Tag>status: {params.status}</Tag>
+          Status: <Tag>{params.status}</Tag>
         </li>
       ) : null}
       {params.q ? (
         <li>
-          <Tag>query: {params.q}</Tag>
+          Search: <code>{params.q}</code>
         </li>
       ) : null}
       {params.client_id ? (
         <li>
-          <Tag>client: {params.client_id}</Tag>
+          App: <code>{params.client_id}</code>
         </li>
       ) : null}
       {params.provider_id ? (
         <li>
-          <Tag>provider: {params.provider_id}</Tag>
+          Data source: <code>{params.provider_id}</code>
         </li>
       ) : null}
-    </ul>
+      </ul>
+    </details>
   );
 }
 
 function TraceFilterBand({ params, hasFilters }: { params: Params; hasFilters: boolean }) {
   return (
     <form action="/audit" method="get" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
-      <IcInput
-        aria-label="Search traces"
-        defaultValue={params.q ?? ""}
-        name="q"
-        placeholder="id contains…"
-        style={{ flex: "1 1 200px", maxWidth: 320 }}
-        type="search"
-      />
-      <IcSelect
-        aria-label="Filter by status"
-        defaultValue={params.status ?? ""}
-        name="status"
-        options={[
-          { label: "all statuses", value: "" },
-          { label: "succeeded", value: "succeeded" },
-          { label: "failed", value: "failed" },
-          { label: "rejected", value: "rejected" },
-          { label: "started", value: "started" },
-        ]}
-        style={{ flex: "0 0 auto", minWidth: 140 }}
-      />
+      <FilterPopover label={params.q ? "Search set" : "Search"}>
+        <IcInput aria-label="Search activity id" defaultValue={params.q ?? ""} name="q" placeholder="Activity ID" type="search" />
+      </FilterPopover>
+      <FilterPopover label={params.status ? `Status: ${params.status}` : "Status"}>
+        <IcSelect
+          aria-label="Filter by status"
+          defaultValue={params.status ?? ""}
+          name="status"
+          options={[
+            { label: "All statuses", value: "" },
+            { label: "Succeeded", value: "succeeded" },
+            { label: "Failed", value: "failed" },
+            { label: "Rejected", value: "rejected" },
+            { label: "Started", value: "started" },
+          ]}
+        />
+      </FilterPopover>
+      <FilterPopover label={params.client_id ? "App set" : "App"}>
+        <IcInput aria-label="Filter by app id" defaultValue={params.client_id ?? ""} name="client_id" placeholder="App id" />
+      </FilterPopover>
+      <FilterPopover label={params.provider_id ? "Data source set" : "Data source"}>
+        <IcInput aria-label="Filter by data source" defaultValue={params.provider_id ?? ""} name="provider_id" placeholder="Data source" />
+      </FilterPopover>
       <IcButton size="sm" type="submit" variant="ghost">
         Apply
       </IcButton>
@@ -229,6 +259,19 @@ function TraceFilterBand({ params, hasFilters }: { params: Params; hasFilters: b
         </a>
       ) : null}
     </form>
+  );
+}
+
+function FilterPopover({ children, label }: { children: ReactNode; label: string }) {
+  return (
+    <details className="relative">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center rounded-md border border-border px-3 py-1 text-foreground text-sm focus-visible:outline-2 focus-visible:outline-primary">
+        {label}
+      </summary>
+      <div className="absolute left-0 z-20 mt-1 min-w-48 rounded-md border border-border bg-background p-3 shadow-md">
+        {children}
+      </div>
+    </details>
   );
 }
 
@@ -256,41 +299,37 @@ function TracesResults({
 function TracesDesktopTable({ traces, params }: { traces: TraceSummary[]; params: Params }) {
   return (
     <div className="rr-traces-table-wrap hidden sm:block">
-      <Table cols="80px 128px minmax(0,1.4fr) minmax(0,1fr) 64px 128px">
+      <Table cols="minmax(0,1fr) minmax(0,1fr) 128px 90px">
         <TableHeaderRow>
-          <TableHeader>Status</TableHeader>
-          <TableHeader>Type</TableHeader>
-          <TableHeader>Subject</TableHeader>
-          <TableHeader>Kinds</TableHeader>
-          <TableHeader numeric>Events</TableHeader>
-          <TableHeader numeric>Time</TableHeader>
+          <TableHeader>App</TableHeader>
+          <TableHeader>What it read</TableHeader>
+          <TableHeader>When</TableHeader>
+          <TableHeader>Details</TableHeader>
         </TableHeaderRow>
         {traces.map((trace) => {
           const peeked = params.peek === trace.trace_id;
           const peekHref = listHref(params, { cursor: undefined, peek: peeked ? undefined : trace.trace_id });
-          const label = traceRowLabel(trace);
+          const label = traceAppName(trace);
           const kinds = trace.kinds.slice(0, 3).join(", ");
           return (
             <TableRow className={peeked ? "pdpp-table__row--active" : undefined} key={trace.trace_id}>
               <TableCell>
-                <Endorse label={trace.status} status={traceEndorseStatus(trace.status)} />
+                <TraceSubjectLink href={`/audit/${encodeURIComponent(trace.trace_id)}`} label={label} />
               </TableCell>
               <TableCell>
-                <Tag>{traceKindLabel(trace.kinds)}</Tag>
-              </TableCell>
-              <TableCell>
-                <TraceSubjectLink href={peekHref} label={label} traceId={trace.trace_id} />
-              </TableCell>
-              <TableCell>
-                {kinds ? <TypedSm style={{ color: "var(--muted-foreground)" }}>{kinds}</TypedSm> : null}
+                <TypedSm>{traceWhatRead(trace)}</TypedSm>
               </TableCell>
               <TableCell numeric>
-                <TypedSm>{trace.event_count}</TypedSm>
+                {relativeTime(trace.last_at)}
               </TableCell>
-              <TableCell numeric>
-                <TypedSm>
-                  <IcTimestamp value={trace.last_at} />
-                </TypedSm>
+              <TableCell>
+                <details>
+                  <summary className="cursor-pointer">Details</summary>
+                  <TypedSm>{trace.status} · {traceKindLabel(trace.kinds)} · {trace.event_count} events</TypedSm>
+                  {kinds ? <TypedSm>{kinds}</TypedSm> : null}
+                  <code>{trace.trace_id}</code>
+                </details>
+                <Link className="hidden xl:inline-block" href={peekHref} scroll={false}>Peek</Link>
               </TableCell>
             </TableRow>
           );
@@ -300,7 +339,7 @@ function TracesDesktopTable({ traces, params }: { traces: TraceSummary[]; params
   );
 }
 
-function TraceSubjectLink({ href, label, traceId }: { href: string; label: string; traceId: string }) {
+function TraceSubjectLink({ href, label }: { href: string; label: string }) {
   return (
     <Link href={href} scroll={false} style={{ display: "block", textDecoration: "none" }}>
       <span
@@ -317,17 +356,6 @@ function TraceSubjectLink({ href, label, traceId }: { href: string; label: strin
       >
         {label}
       </span>
-      <TypedSm
-        style={{
-          display: "block",
-          marginTop: 1,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {traceId}
-      </TypedSm>
     </Link>
   );
 }
@@ -337,7 +365,7 @@ function TracesMobileCards({ traces }: { traces: TraceSummary[] }) {
     <ul className="rr-traces-cards sm:hidden" style={{ listStyle: "none", margin: 0, padding: 0 }}>
       {traces.map((trace) => {
         const detailHref = `/audit/${encodeURIComponent(trace.trace_id)}`;
-        const label = traceRowLabel(trace);
+        const label = traceAppName(trace);
         const kinds = trace.kinds.slice(0, 3).join(", ");
         return (
           <TraceMobileCard detailHref={detailHref} key={trace.trace_id} kinds={kinds} label={label} trace={trace} />
@@ -390,7 +418,7 @@ function TraceMobileCard({
             whiteSpace: "nowrap",
           }}
         >
-          {trace.trace_id}
+          {traceWhatRead(trace)}
         </TypedSm>
         <div
           style={{
@@ -401,15 +429,14 @@ function TraceMobileCard({
             marginTop: 6,
           }}
         >
-          <Endorse label={trace.status} status={traceEndorseStatus(trace.status)} />
-          <Tag>{traceKindLabel(trace.kinds)}</Tag>
-          {kinds ? <TypedSm style={{ color: "var(--muted-foreground)" }}>{kinds}</TypedSm> : null}
-          <TypedSm style={{ color: "var(--muted-foreground)" }}>{trace.event_count} events</TypedSm>
-          <TypedSm style={{ color: "var(--muted-foreground)" }}>
-            <IcTimestamp value={trace.last_at} />
-          </TypedSm>
+          {relativeTime(trace.last_at)}
         </div>
       </Link>
+      <details className="pdpp-caption mt-1">
+        <summary className="cursor-pointer">Details</summary>
+        <code>{trace.trace_id}</code> · <Endorse label={trace.status} status={traceEndorseStatus(trace.status)} /> · <Tag>{traceKindLabel(trace.kinds)}</Tag>
+        {kinds ? <TypedSm>{kinds}</TypedSm> : null}<TypedSm>{trace.event_count} events</TypedSm>
+      </details>
     </li>
   );
 }
@@ -493,19 +520,19 @@ function TracesEmptyState({ hasFilters }: { hasFilters: boolean }) {
           margin: "0 0 6px",
         }}
       >
-        {hasFilters ? "No matching audit events" : "No audit events yet"}
+        {hasFilters ? "Nothing matches these filters" : "Nothing has happened yet"}
       </p>
       <p
         style={{
           color: "var(--muted-foreground)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
+          fontFamily: "var(--font-sans)",
+          fontSize: 16,
           margin: 0,
         }}
       >
         {hasFilters
-          ? "Try widening the filters or clearing the query."
-          : "Trace artifacts appear as provider-connect, owner-device, or /v1 read flows run."}
+          ? "Change a filter or clear them."
+          : "App activity appears here after an app reads your data."}
       </p>
     </div>
   );
@@ -528,8 +555,7 @@ function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPane
       <SheetHead>
         <div style={{ alignItems: "flex-start", display: "flex", gap: 8, justifyContent: "space-between" }}>
           <div style={{ minWidth: 0 }}>
-            <SheetTitle as="h2">Trace</SheetTitle>
-            <SheetSerial>{traceId}</SheetSerial>
+            <SheetTitle as="h2">Activity</SheetTitle>
           </div>
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={closeHref} scroll={false}>
             ✕
@@ -537,6 +563,12 @@ function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPane
         </div>
       </SheetHead>
       <SheetBody>
+        <details>
+          <summary className="cursor-pointer">Details</summary>
+          <div className="pt-3">
+            <p className="pdpp-caption mb-2">
+              Trace ID <code>{traceId}</code>
+            </p>
         {/* Summary meta */}
         <div
           style={{
@@ -585,7 +617,7 @@ function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPane
                   {event.event_type}
                 </Typed>
                 <TypedSm style={{ color: "var(--muted-foreground)", flexShrink: 0 }}>
-                  <IcTimestamp value={event.occurred_at} />
+                  {relativeTime(event.occurred_at)}
                 </TypedSm>
               </div>
               {event.status ? (
@@ -640,6 +672,8 @@ function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPane
             {cliCommand}
           </Typed>
         </div>
+          </div>
+        </details>
 
         {/* Full detail link */}
         <div style={{ marginTop: 14 }}>

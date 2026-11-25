@@ -11,9 +11,10 @@
  *
  * Content mirrors the peek pane in the list page — same KV metadata, same
  * disable form, same recent-attempts list — but rendered full-width with a
- * back link to the list. The `disableSubscriptionDetailAction` server action
- * (defined in `./disable-action.ts`) redirects back to this page (not to
- * the list) so the operator sees the updated state after disabling.
+ * back link to the list. The shared `disableSubscriptionAction` server action
+ * (defined in `../disable-action.ts`) redirects back to this page (not to
+ * the list) when the form posts `return_to=detail`, so the operator sees the
+ * updated state after disabling.
  *
  * Spec: openspec/changes/add-client-event-subscription-management/specs/
  *       reference-implementation-architecture/spec.md
@@ -25,7 +26,6 @@ import {
   IcButton,
   IcField,
   IcInput,
-  IcTimestamp,
   KV,
   KVRow,
   Sheet,
@@ -37,6 +37,7 @@ import {
   TypedSm,
 } from "@pdpp/brand-react";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { formatRelative } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -50,7 +51,7 @@ import {
   type ClientEventSubscriptionStatus,
   getClientEventSubscription,
 } from "../../lib/ref-client.ts";
-import { disableSubscriptionDetailAction } from "./disable-action.ts";
+import { disableSubscriptionAction } from "../disable-action.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -84,9 +85,9 @@ function subscriptionEndorseLabel(status: ClientEventSubscriptionStatus): string
     case "disabled":
       return "disabled";
     case "disabled_failure":
-      return "disabled (failure)";
+      return "disabled · failure";
     case "disabled_revoked":
-      return "disabled (revoked)";
+      return "disabled · revoked";
     case "deleted":
       return "deleted";
     default:
@@ -116,7 +117,15 @@ function describeScope(scope: ClientEventSubscriptionDetail["scope"]): ReactNode
   if (streams.length === 0) {
     return "—";
   }
-  return <span>streams {streams.join(", ")}</span>;
+  return `Changes to ${streams.join(", ")}`;
+}
+
+function relativeTime(value: string | null | undefined): string {
+  if (!value) {
+    return "Time not available";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
 }
 
 // ─── Per-status copy for disabled subscriptions ───────────────────────────────
@@ -133,37 +142,40 @@ function DisabledNoticeCopy({
       PATCH /v1/event-subscriptions/{subscriptionId} {"{ enabled: true }"}
     </Typed>
   );
-  if (status === "disabled") {
-    return (
-      <p className="pdpp-caption mt-4 text-muted-foreground">
-        This subscription is already disabled. The bound client can re-enable it by sending {clientReenablePatch} from
-        its own credentials.
-      </p>
-    );
+  let message: string;
+  switch (status) {
+    case "disabled":
+      message = "This webhook is off. The app can turn it on again.";
+      break;
+    case "disabled_failure":
+      message = "This webhook stopped after repeated delivery failures. The app can turn it on again after the address works.";
+      break;
+    case "disabled_revoked":
+      message = "This webhook cannot be turned on again because the app's access was removed. The app needs new access and a new webhook.";
+      break;
+    default:
+      message = "This webhook was removed and cannot be turned on again.";
   }
-  if (status === "disabled_failure") {
-    return (
-      <p className="pdpp-caption mt-4 text-muted-foreground">
-        This subscription was disabled by the delivery worker after repeated failures. The bound client can re-enable it
-        once the callback is healthy by sending {clientReenablePatch} from its own credentials.
-      </p>
+  const reenableDetails =
+    status === "disabled_revoked" ? (
+      <>
+        The app cannot re-enable this webhook with <Typed as="code">PATCH /v1/event-subscriptions/{subscriptionId} &#123; enabled: true &#125;</Typed> because access was removed (409 grant_revoked).
+      </>
+    ) : (
+      <>The app can re-enable this webhook with {clientReenablePatch} from its own credentials.</>
     );
-  }
-  if (status === "disabled_revoked") {
-    return (
-      <p className="pdpp-caption mt-4 text-muted-foreground">
-        The bound grant has been revoked, so this subscription is not recoverable in place. The client&apos;s re-enable
-        PATCH is rejected with <Typed as="code">409 grant_revoked</Typed>; the client would need to obtain a new grant
-        and create a new subscription.
-      </p>
-    );
-  }
-  // status === "deleted"
   return (
-    <p className="pdpp-caption mt-4 text-muted-foreground">
-      This subscription has been deleted and cannot be re-enabled. The client would need to create a new subscription
-      against an active grant.
-    </p>
+    <div className="mt-4">
+      <p className="pdpp-caption text-muted-foreground">{message}</p>
+      {status === "deleted" ? null : (
+        <details className="pdpp-caption mt-2">
+          <summary className="cursor-pointer">Details</summary>
+          <p className="mt-1 text-muted-foreground">
+            {reenableDetails}
+          </p>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -171,28 +183,34 @@ function DisabledNoticeCopy({
 
 function DisableForm({ subscriptionId, disableError }: { subscriptionId: string; disableError: string }) {
   return (
-    <form action={disableSubscriptionDetailAction} className="mt-4 flex flex-col gap-2">
+    <form action={disableSubscriptionAction} className="mt-4 flex flex-col gap-2">
       <input name="subscription_id" type="hidden" value={subscriptionId} />
-      <IcField htmlFor={`reason-${subscriptionId}`} label="Reason (optional, max 256 bytes UTF-8)">
-        <IcInput defaultValue="" id={`reason-${subscriptionId}`} name="reason" placeholder="loop_suspected" />
+      <input name="return_to" type="hidden" value="detail" />
+      <IcField htmlFor={`reason-${subscriptionId}`} label="Reason (optional)">
+        <IcInput defaultValue="" id={`reason-${subscriptionId}`} name="reason" placeholder="Repeated messages" />
       </IcField>
+      <details className="pdpp-caption">
+        <summary className="cursor-pointer">Details</summary>
+        <p>Max 256 bytes (UTF-8).</p>
+      </details>
       <label
         className="pdpp-caption mt-1 flex items-center gap-2 text-muted-foreground"
         htmlFor={`confirm-${subscriptionId}`}
       >
         <input id={`confirm-${subscriptionId}`} name="confirm_disable" required type="checkbox" value="yes" />
-        <span>
-          I understand this stops deliveries for the subscription. The bound grant stays active and the client may
-          re-enable.
-        </span>
+        <span>This stops messages to this address; the app can turn them back on.</span>
       </label>
       {disableError ? (
-        <p className="pdpp-caption text-destructive" role="alert">
-          {disableError}
-        </p>
+        <div>
+          <p className="pdpp-caption text-destructive" role="alert">Could not turn off this webhook. Try again.</p>
+          <details className="pdpp-caption">
+            <summary className="cursor-pointer">Details</summary>
+            <p>{disableError}</p>
+          </details>
+        </div>
       ) : null}
       <IcButton size="sm" type="submit" variant="destructive">
-        Disable subscription
+        Turn off webhook
       </IcButton>
     </form>
   );
@@ -202,27 +220,26 @@ function DisableForm({ subscriptionId, disableError }: { subscriptionId: string;
 
 function RecentAttempts({ attempts }: { attempts: ClientEventSubscriptionAttempt[] }) {
   if (attempts.length === 0) {
-    return <p className="pdpp-caption mt-4 text-muted-foreground">No delivery attempts recorded yet.</p>;
+    return <p className="pdpp-caption mt-4 text-muted-foreground">No deliveries yet.</p>;
   }
   return (
     <div className="mt-5">
       <Eyebrow as="h3" className="mb-2">
-        Recent attempts
+        Deliveries
       </Eyebrow>
       <ol className="pdpp-caption divide-y divide-border/70 border-border/70 border-y">
         {attempts.map((attempt) => (
           <li className="flex flex-wrap items-baseline justify-between gap-2 px-1 py-1.5" key={attempt.attempt_id}>
-            <Typed as="span">
-              {attempt.ok ? "ok" : "fail"} {attempt.status_code ?? "—"}
-            </Typed>
-            <span className="text-muted-foreground">{attempt.event_type}</span>
-            <span className="text-muted-foreground tabular-nums">
-              {attempt.latency_ms === null ? "—" : `${attempt.latency_ms}ms`}
-            </span>
-            <TypedSm className="text-muted-foreground">
-              <IcTimestamp value={attempt.attempted_at} />
-            </TypedSm>
-            {attempt.error ? <span className="text-destructive">err: {attempt.error}</span> : null}
+            <Typed as="span">{attempt.ok ? "Delivered" : "Failed"}</Typed>
+            <TypedSm className="text-muted-foreground">{relativeTime(attempt.attempted_at)}</TypedSm>
+            <details>
+              <summary className="cursor-pointer">Details</summary>
+              <div>
+                {attempt.event_type} · {attempt.status_code === null ? "No response code" : `Response ${attempt.status_code}`} ·{" "}
+                {attempt.latency_ms === null ? "Time unavailable" : `${attempt.latency_ms}ms`}
+              </div>
+              {attempt.error ? <span className="text-destructive">{attempt.error}</span> : null}
+            </details>
           </li>
         ))}
       </ol>
@@ -257,16 +274,17 @@ export default async function SubscriptionDetailPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader
+        <PageHeader
             actions={
               <Link
                 className="pdpp-caption text-muted-foreground underline-offset-2 hover:underline"
                 href="/event-subscriptions"
               >
-                ← Event subscriptions
+                ← Webhooks
               </Link>
             }
-            title="Subscription"
+          title="Webhooks"
+          description="Send a message to your own address when something changes."
           />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
@@ -289,60 +307,61 @@ export default async function SubscriptionDetailPage({
             className="pdpp-caption text-muted-foreground underline-offset-2 hover:underline"
             href="/event-subscriptions"
           >
-            ← Event subscriptions
+            ← Webhooks
           </Link>
         }
-        title="Subscription"
+        description="Send a message to your own address when something changes."
+        title="Webhooks"
       />
 
       <Sheet>
         <SheetHead>
           <div className="flex flex-wrap items-baseline gap-2">
-            <SheetTitle>
-              <Typed as="code" className="break-all">
-                {subscription.subscription_id}
-              </Typed>
-            </SheetTitle>
+            <SheetTitle>{subscription.callback_host}</SheetTitle>
             <Endorse
               label={subscriptionEndorseLabel(subscription.status)}
               status={subscriptionEndorseStatus(subscription.status)}
             />
           </div>
-          <p className="pdpp-caption mt-2 text-muted-foreground">
-            grant{" "}
-            <Link className="underline-offset-2 hover:underline" href={dashboardRoutes.grant(subscription.grant_id)}>
-              <SheetSerial>{subscription.grant_id}</SheetSerial>
-            </Link>{" "}
-            · client <SheetSerial>{subscription.client_id}</SheetSerial>
-          </p>
+          <details className="pdpp-caption mt-2 text-muted-foreground">
+            <summary className="cursor-pointer text-foreground">Details</summary>
+            <div className="mt-1 flex flex-wrap gap-2">
+              Webhook <SheetSerial>{subscription.subscription_id}</SheetSerial>
+              · App <SheetSerial>{subscription.client_id}</SheetSerial>
+              · Access{" "}
+              <Link className="underline-offset-2 hover:underline" href={dashboardRoutes.grant(subscription.grant_id)}>
+                <SheetSerial>{subscription.grant_id}</SheetSerial>
+              </Link>
+            </div>
+          </details>
         </SheetHead>
         <SheetBody>
           <KV className="mb-4">
-            <KVRow k="callback">
-              <Typed as="code" className="break-all">
+            <KVRow k="Address">
+              <span className="break-all">
                 {subscription.callback_url}
-              </Typed>
+              </span>
             </KVRow>
-            <KVRow k="created">
-              <IcTimestamp value={subscription.created_at} />
+            <KVRow k="Created">
+              {relativeTime(subscription.created_at)}
             </KVRow>
-            <KVRow k="updated">
-              <IcTimestamp value={subscription.updated_at} />
+            <KVRow k="Updated">
+              {relativeTime(subscription.updated_at)}
             </KVRow>
             {subscription.disabled_at ? (
-              <KVRow k="disabled">
-                <IcTimestamp value={subscription.disabled_at} />
+              <KVRow k="Turned off">
+                {relativeTime(subscription.disabled_at)}
                 {subscription.disabled_reason ? (
-                  <>
-                    {" "}
-                    · <Typed as="code">{subscription.disabled_reason}</Typed>
-                  </>
+                  <details className="ml-2">
+                    <summary className="cursor-pointer">Details</summary>
+                    <Typed as="code">{subscription.disabled_reason}</Typed>
+                  </details>
                 ) : null}
               </KVRow>
             ) : null}
-            <KVRow k="pending">{subscription.pending_queue_count}</KVRow>
-            <KVRow k="final fail">{subscription.final_failure_count}</KVRow>
-            <KVRow k="scope">{describeScope(subscription.scope)}</KVRow>
+            <KVRow k="Waiting to send">{subscription.pending_queue_count}</KVRow>
+            <KVRow k="Failed deliveries">{subscription.final_failure_count}</KVRow>
+            <KVRow k="What it listens for">{describeScope(subscription.scope)}</KVRow>
           </KV>
 
           {hideDisableForm ? (

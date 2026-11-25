@@ -39,7 +39,7 @@ import {
 } from "./render.ts";
 
 export const metadata = {
-  title: "Local device exporters",
+  title: "Collectors on your devices",
 };
 
 const DEVICE_STATUS_VOCABULARY = {
@@ -104,13 +104,13 @@ export default async function DeviceExportersPage({
         <PageHeader
           breadcrumbs={addConnectionBreadcrumbs}
           count={`${devices.length}`}
-          meta={
+          description="Collect data on a phone or computer and send it to this server."
+          title={
             <>
-              <MetaPill label="surface" tone="protocol" value="reference-experimental" />
-              <MetaPill label="source instances" value={sourceInstances.data.length} />
+              <span className="mr-2 font-normal text-muted-foreground text-sm">Experimental</span>
+              Collectors on your devices
             </>
           }
-          title="Collectors on your devices"
         />
 
         {browserBoundRequest ? (
@@ -118,24 +118,33 @@ export default async function DeviceExportersPage({
         ) : null}
 
         <Section>
-          <EnrollmentForm
-            collectorConnectorIds={collectorConnectorIds}
-            defaultConnectorId={defaultConnectorId}
-            referenceBaseUrl={referenceBaseUrl}
-          />
+          <details>
+            <summary className="cursor-pointer">Set up a collector</summary>
+            <div className="pt-3">
+              <EnrollmentForm
+                collectorConnectorIds={collectorConnectorIds}
+                defaultConnectorId={defaultConnectorId}
+                referenceBaseUrl={referenceBaseUrl}
+              />
+            </div>
+          </details>
         </Section>
 
-        <Section
-          description="This server shows enrolled devices, received data, and connection health. The device controls when collection runs."
-          title="Enrolled devices"
-        >
+        <details className="mb-4 text-sm">
+          <summary className="cursor-pointer">Details</summary>
+          <p className="mt-2 text-muted-foreground">
+            Surface: reference-experimental · Data sources: {sourceInstances.data.length}
+          </p>
+        </details>
+
+        <Section title="Your devices">
           {devices.length === 0 ? (
             <EmptyState
-              hint="Create an enrollment code and run the local collector on the device that has the data. This list updates after the device sends its first heartbeat."
-              title="No local device exporters enrolled"
+              hint="Create a code on this page, then finish setup on the device that has the data."
+              title="No devices yet"
             />
           ) : (
-            <DataList ariaLabel="Local device exporters">
+            <DataList ariaLabel="Collectors on your devices">
               {devices.map((device) => (
                 <DeviceRow
                   collectorTemplates={collectorTemplates}
@@ -219,29 +228,35 @@ function DeviceRow({
     <li className="py-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0 flex-1">
-          {/* P1: device name on its own line, badges below with consistent gap */}
-          <h2 className="pdpp-title text-foreground">{device.display_name || device.device_id}</h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <StatusBadge status={device.status} vocabulary={DEVICE_STATUS_VOCABULARY} />
-            <StatusBadge status={visibleStatus} vocabulary={DEVICE_STATUS_VOCABULARY} />
-          </div>
-          <div className="pdpp-caption mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
-            <span className="inline-flex min-w-0 items-center gap-1">
-              device
-              <code className="max-w-[20rem] truncate font-mono text-foreground/80">{device.device_id}</code>
-              <CopyButton ariaLabel={`Copy ${device.device_id}`} value={device.device_id} />
-            </span>
-            <span>created {formatRelativeTime(device.created_at)}</span>
-            <span>heartbeat {formatRelativeTime(device.last_heartbeat_at)}</span>
-            <span>last ingest {formatRelativeTime(device.last_ingest_at)}</span>
-            {device.agent_version ? (
-              <span className="inline-flex min-w-0 items-center gap-1">
-                build
-                <code className="max-w-[14rem] truncate font-mono text-foreground/80">{device.agent_version}</code>
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-2">
+          <h2 className="pdpp-title text-foreground">{device.display_name || "Your device"}</h2>
+          <p className="pdpp-caption mt-1 text-muted-foreground">
+            {device.last_heartbeat_at ? `Last seen ${formatRelativeTime(device.last_heartbeat_at)}` : "Not seen yet"}
+            {device.source_instances.length ? ` · Sends ${device.source_instances.map(sourceLabel).join(", ")}` : " · Nothing sent yet"}
+          </p>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-sm">Details</summary>
+            <div className="pt-3">
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <StatusBadge status={device.status} vocabulary={DEVICE_STATUS_VOCABULARY} />
+                <StatusBadge status={visibleStatus} vocabulary={DEVICE_STATUS_VOCABULARY} />
+              </div>
+              <div className="pdpp-caption mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+                <span className="inline-flex min-w-0 items-center gap-1">
+                  device
+                  <code className="max-w-[20rem] truncate font-mono text-foreground/80">{device.device_id}</code>
+                  <CopyButton ariaLabel={`Copy ${device.device_id}`} value={device.device_id} />
+                </span>
+                <span>created {formatRelativeTime(device.created_at)}</span>
+                <span>heartbeat {formatRelativeTime(device.last_heartbeat_at)}</span>
+                <span>last ingest {formatRelativeTime(device.last_ingest_at)}</span>
+                {device.agent_version ? (
+                  <span className="inline-flex min-w-0 items-center gap-1">
+                    build
+                    <code className="max-w-[14rem] truncate font-mono text-foreground/80">{device.agent_version}</code>
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-2">
             {/* An incomplete sum renders "unknown" in a neutral tone rather
                 than a number. The rejected tone in particular must follow the
                 PROVEN count: a device whose counts were omitted has not been
@@ -269,39 +284,38 @@ function DeviceRow({
               tone={formatLastError(device.last_error) === "none" ? "neutral" : "danger"}
               value={formatLastError(device.last_error)}
             />
-          </div>
-        </div>
-
-        <div className="shrink-0">
-          {device.status === "active" ? (
-            <form action={revokeDeviceExporterAction}>
-              <input name="device_id" type="hidden" value={device.device_id} />
-              <IcButton size="sm" type="submit" variant="destructive">
-                Revoke
-              </IcButton>
-            </form>
-          ) : (
-            <span className="pdpp-caption text-muted-foreground">Revoked {formatRelativeTime(device.revoked_at)}</span>
-          )}
+              </div>
+              {device.status === "active" ? (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-destructive">Revoke</summary>
+                  <p className="pdpp-caption mt-2">This stops this device from sending data to this server.</p>
+                  <form action={revokeDeviceExporterAction} className="mt-2">
+                    <input name="device_id" type="hidden" value={device.device_id} />
+                    <input name="confirm_revoke" type="hidden" value="yes" />
+                    <IcButton size="sm" type="submit" variant="destructive">Confirm revoke</IcButton>
+                  </form>
+                </details>
+              ) : (
+                <span className="pdpp-caption text-muted-foreground">Revoked {formatRelativeTime(device.revoked_at)}</span>
+              )}
+              {reenrollSource ? (
+                <ReenrollButton
+                  connectorId={reenrollSource.connector_id}
+                  localBindingName={reenrollSource.local_binding_name}
+                  referenceBaseUrl={referenceBaseUrl}
+                />
+              ) : null}
+              {device.source_instances.length > 0 ? (
+                <ul className="mt-4 grid gap-3 lg:grid-cols-2">
+                  {device.source_instances.map((source) => (
+                    <SourceInstanceCard connectorIcon={connectorIcons[source.connector_id]} key={source.source_instance_id} source={source} />
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </details>
         </div>
       </div>
-
-      {reenrollSource ? (
-        <ReenrollButton
-          connectorId={reenrollSource.connector_id}
-          localBindingName={reenrollSource.local_binding_name}
-          referenceBaseUrl={referenceBaseUrl}
-        />
-      ) : null}
-
-      {device.source_instances.length > 0 ? (
-        /* P1: single column on mobile, 2-col on lg only — cards need breathing room */
-        <ul className="mt-4 grid gap-3 lg:grid-cols-2">
-          {device.source_instances.map((source) => (
-            <SourceInstanceCard connectorIcon={connectorIcons[source.connector_id]} key={source.source_instance_id} source={source} />
-          ))}
-        </ul>
-      ) : null}
     </li>
   );
 }

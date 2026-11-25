@@ -4,9 +4,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
+import { formatRelative } from "@pdpp/display";
 import { useActionState } from "react";
 import { pdppLocalCollectorEnrollCommand, pdppLocalCollectorRunCommand } from "@/lib/pdpp-cli-command.ts";
 import { createEnrollmentCodeAction } from "./actions.ts";
+
+function relativeExpiry(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
+}
 
 /**
  * Inline re-enrollment panel for a stale or revoked local device.
@@ -48,7 +54,7 @@ export function ReenrollButton({
 
     return (
       <div className="mt-3 space-y-3 rounded-md border border-border/80 bg-background/60 p-3">
-        <div className="pdpp-eyebrow text-[color:var(--success)]">Re-enrollment code ready</div>
+        <div className="pdpp-eyebrow text-muted-foreground">New setup code ready</div>
 
         <div>
           <div className="pdpp-eyebrow text-muted-foreground">1. Re-enroll this device</div>
@@ -66,7 +72,7 @@ export function ReenrollButton({
             </code>
             <CopyButton ariaLabel="Copy re-enroll command" value={enrollCommand} />
           </div>
-          <p className="pdpp-caption mt-1 text-muted-foreground">Code expires at {state.code.expires_at}</p>
+          <p className="pdpp-caption mt-1 text-muted-foreground">Expires {relativeExpiry(state.code.expires_at)}</p>
         </div>
 
         <div>
@@ -92,7 +98,15 @@ export function ReenrollButton({
 
   return (
     <div className="mt-3">
-      {state.ok === false ? <p className="pdpp-caption mb-2 text-destructive">{state.message}</p> : null}
+      {state.ok === false ? (
+        <div className="mb-2">
+          <p className="pdpp-caption text-destructive">Could not make a new setup code. Try again.</p>
+          <details className="pdpp-caption mt-1">
+            <summary className="cursor-pointer">Details</summary>
+            <p>{state.message}</p>
+          </details>
+        </div>
+      ) : null}
       <form action={formAction}>
         <input name="connector_id" type="hidden" value={connectorId} />
         <input name="display_name" type="hidden" value="" />

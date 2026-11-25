@@ -42,6 +42,7 @@ const REF_DISABLE_PATH_RE = /\/_ref\/event-subscriptions\/.+\/disable/;
 const USE_SERVER_DIRECTIVE_RE = /"use server"/;
 const REQUIRE_DASHBOARD_ACCESS_CALL_RE = /requireDashboardAccess\(/;
 const DISABLE_CLIENT_CALL_RE = /disableClientEventSubscription\(/;
+const DETAIL_RETURN_HREF_RE = /returnTo === "detail" \? `\/event-subscriptions\/\$\{encodeURIComponent\(subscriptionId\)\}`/;
 
 // Stale-string sentinels. These are real defects we corrected; the
 // regression-tests keep the page from drifting back.
@@ -63,7 +64,8 @@ const STATUS_BRANCH_DISABLED_RE = /status === "disabled"/;
 const STATUS_BRANCH_DISABLED_FAILURE_RE = /status === "disabled_failure"/;
 const STATUS_BRANCH_DISABLED_REVOKED_RE = /status === "disabled_revoked"/;
 const GRANT_REVOKED_409_RE = /409 grant_revoked/;
-const DELETED_COPY_RE = /has been deleted/;
+// RAISE-RULES.md #4: deleted-state copy names the webhook in plain words.
+const DELETED_COPY_RE = /webhook (?:has been|was) deleted/;
 
 // Filter-status select must surface exactly one empty-value option (the
 // "any" fallback). A duplicate is a real bug we saw upstream of this
@@ -170,4 +172,50 @@ test("disable server action enforces confirmation and byte-bounded reason withou
   // Byte-based cap with Buffer.byteLength, not UTF-16 `slice` truncation.
   assert.match(src, REASON_BYTE_LENGTH_CALL_RE);
   assert.doesNotMatch(src, SILENT_TRUNCATE_RE);
+});
+
+test("list and detail use the same disable action while preserving their return routes", async () => {
+  const [action, detail] = await Promise.all([
+    readFile(ACTION_FILE, "utf8"),
+    readFile(`${HERE}[subscriptionId]/page.tsx`, "utf8"),
+  ]);
+  // DIRECTION.md §The frame and the menu: addresses stay fixed; the brief specifies one shared disable action.
+  assert.ok(action.includes('returnTo: "list" | "detail"'));
+  assert.match(action, DETAIL_RETURN_HREF_RE);
+  assert.ok(action.includes('returnTo === "list" ? { peek: subscriptionId } : {}'));
+  assert.ok(detail.includes("action={disableSubscriptionAction}"));
+  assert.ok(detail.includes('name="return_to" type="hidden" value="detail"'));
+});
+
+test("webhook page uses its plain title and purpose sentence", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md §What the look is for: use plain words and a short purpose sentence.
+  assert.ok(src.includes('title: "Webhooks"'));
+  assert.ok(src.includes("Send a message to your own address when something changes."));
+  // RAISE-RULES.md #6: the empty sentence says how a webhook appears (apps create them), not a wrong retry hint.
+  assert.ok(src.includes("An app adds a webhook here when it asks to hear about changes."));
+  assert.ok(!src.includes("Try again after an app sends a message"));
+});
+
+test("webhook rows show the address and delivery time, with identifiers in Details", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const row = src.slice(src.indexOf("function SubscriptionRow"), src.indexOf("function LastAttemptCell"));
+  const peek = src.slice(src.indexOf("function PeekPane"), src.indexOf("function DisabledNoticeCopy"));
+  // RAISE-RULES.md #2 and #4: rows use familiar words and raw IDs stay in Details.
+  assert.ok(row.includes("subscription.callback_host"));
+  assert.ok(row.includes("Last delivery {relativeTime(subscription.last_attempted_at)}"));
+  const rowDetails = row.indexOf('<summary className="cursor-pointer text-foreground">Details</summary>');
+  assert.ok(rowDetails >= 0 && row.indexOf("subscription.client_id", rowDetails) > rowDetails);
+  assert.ok(peek.includes('<KVRow k="Address">') && peek.includes('<KVRow k="Last delivery">'));
+  const peekDetails = peek.indexOf('<summary className="cursor-pointer">Details</summary>');
+  assert.ok(peekDetails >= 0 && peek.indexOf("subscription.subscription_id", peekDetails) > peekDetails);
+});
+
+test("the Webhooks menu entry is marked Experimental", async () => {
+  const menu = fileURLToPath(
+    new URL("../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url)
+  );
+  const src = await readFile(menu, "utf8");
+  // DIRECTION.md §The frame and the menu: experimental links sit under the Experimental label.
+  assert.ok(src.includes('label: "Webhooks", href: "/event-subscriptions", labelBefore: "Experimental"'));
 });
