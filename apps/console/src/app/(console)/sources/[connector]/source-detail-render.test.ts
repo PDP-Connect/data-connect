@@ -336,7 +336,7 @@ test("row 5 falls back to Retry first sync and row 7 has no action without a ser
   }
 });
 
-test("paused historical archives use Continue when sign-in repair is unknown", async (t) => {
+test("paused historical archives offer Resume syncing when the source page has no sign-in repair", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const dom = await renderDemo("status-10-historical-archive");
   const document = dom.window.document;
@@ -345,8 +345,8 @@ test("paused historical archives use Continue when sign-in repair is unknown", a
   assert.equal(document.querySelector("[data-status-row]")?.getAttribute("data-status-row"), "10");
   assert.equal(controls.some((element) => element.textContent?.trim() === "Resume"), false);
   // Round 2 sources brief P2: the detail page chooses resume or repair behind one shared label.
-  assert.equal(controls.some((element) => element.textContent?.trim() === "Continue"), true);
-  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume syncing"), false);
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Continue"), false);
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume syncing"), true);
   assert.equal(controls.some((element) => element.textContent?.trim() === "Reconnect"), false);
   assert.match(visibleOutsideDetails(dom), /Paused\. Your records are kept\./);
   assert.doesNotMatch(visibleOutsideDetails(dom), /Paused\. Your records and sign-in are kept\./);

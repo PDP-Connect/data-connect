@@ -108,5 +108,4 @@ test("the record page humanizes the kind breadcrumb and uses the kind name when 
   assert.match(src, SCHEMA_TYPES_TO_INSPECTOR_RE);
   assert.match(src, SOURCE_TIME_FALLBACK_RE);
   assert.match(src, UPDATED_TIME_RE);
-  assert.doesNotMatch(src, /sourceLabelForConnection/);
 });

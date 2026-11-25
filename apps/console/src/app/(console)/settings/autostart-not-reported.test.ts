@@ -100,3 +100,31 @@ test("unreported autostart state is returned as unknown and shown without an err
     globalThis.fetch = originalFetch;
   }
 });
+
+test("unreported autostart state is recognized by its server code", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { code: "autostart_state_not_reported", message: "The desktop has not sent a setting." } }),
+    { status: 500, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const { getAutostart } = await import("../lib/autostart-client.ts");
+    assert.deepEqual(await getAutostart(), { enabled: false, error: null, known: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("older servers still use the unreported autostart message fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { code: "api_error", message: "Autostart state is not available yet. The desktop app has not reported it.", type: "api_error" } }),
+    { status: 500, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const { getAutostart } = await import("../lib/autostart-client.ts");
+    assert.deepEqual(await getAutostart(), { enabled: false, error: null, known: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

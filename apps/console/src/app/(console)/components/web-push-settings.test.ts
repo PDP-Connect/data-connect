@@ -141,6 +141,14 @@ test("server-not-ready wording tells the owner what is missing and where to set 
   assert.match(src, /unavailableSentence\(unavailable, !\(config\.enabled && config\.public_key\)\)/);
 });
 
+test("notification server environment is hidden when the server is ready", () => {
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, {
+    config: { enabled: true, object: "web_push_config", public_key: "public-key", unavailable_reason: null },
+    subscriptions: [],
+  }));
+  assert.doesNotMatch(markup, /Server environment:|PDPP_WEB_PUSH_VAPID_(?:PUBLIC|PRIVATE)_KEY/);
+});
+
 test("dashboard service worker fails closed and click-through targets clean owner URLs", async () => {
   const src = await readFile(join(APP_ROOT, "public", "pdpp-dashboard-sw.js"), "utf8");
   assert.match(src, SERVICE_WORKER_KNOWN_TYPES_PATTERN);

@@ -313,18 +313,18 @@ test("a local-device source offers neither sync now nor resume", () => {
 });
 
 // Round 2 sources brief P2: Home and the list cannot know the detail page's repair capability.
-test("a paused historical archive uses one Continue label on every surface", () => {
+test("a paused historical archive names the resume action and keeps credential repair distinct", () => {
   const archive = source({ ...fixture(10), source_binding_kind: "historical_archive" });
-  // The detail page decides whether to resume or update sign-in; the list cannot know that fact.
+  // The source page uses this action to resume the archived source directly.
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: false }).action,
-    { kind: "resume", label: "Continue", filled: false }
+    { kind: "resume", label: "Resume syncing", filled: false }
   );
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action,
     { kind: "repair_credential", label: "Continue", filled: false }
   );
-  // Home and the list do not know; Continue links to the source page, which chooses the next step.
+  // The home and list do not know whether the source page can resume directly.
   assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Continue", filled: false });
   // No server sign-in action does not mean no sign-in is needed.
   assert.equal(sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action?.kind, "repair_credential");

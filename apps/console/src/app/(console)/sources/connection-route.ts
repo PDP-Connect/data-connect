@@ -80,7 +80,3 @@ export async function resolveConnectionForRecordsRoute(
 export function connectorInstanceIdForConnection(summary: RefConnectorSummary): string {
   return summary.connector_instance_id ?? summary.connection_id;
 }
-
-export function sourceLabelForConnection(summary: RefConnectorSummary): string {
-  return summary.display_name.trim() || summary.connector_display_name?.trim() || summary.connection_id;
-}

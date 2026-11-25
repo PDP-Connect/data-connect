@@ -94,7 +94,6 @@ test("the health page humanizes the kind name and keeps technical checks inside 
   assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
   // Round 3 item 2: all console surfaces use the shared connection-name rule.
   assert.match(src, SHARED_CONNECTION_NAME_RE);
-  assert.doesNotMatch(src, /sourceLabelForConnection/);
   assert.match(src, HEALTH_TITLE_RE);
   assert.match(src, TECHNICAL_SECTIONS_FOLDED_RE);
 

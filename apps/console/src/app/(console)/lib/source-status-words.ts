@@ -157,7 +157,7 @@ function lifecycleRow(
       ? action("view_device", "View this device", false)
       : source.source_binding_kind === "historical_archive"
         ? signInRepairAvailable === false
-          ? action("resume", "Continue", false)
+          ? action("resume", "Resume syncing", false)
           : action("repair_credential", "Continue", false)
         : action("resume", "Resume", false);
     return { row: 10, words: "Paused", tone: "faint", action: pausedAction };

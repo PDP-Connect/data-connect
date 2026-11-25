@@ -42,7 +42,11 @@ async function answer(dir: string, commandId: string, desiredEnabled: boolean, e
 test("load reports unavailable until native observed state is seeded", async () => {
   await withTempDir(async dir => {
     const store = createAutostartStore(dir);
-    await assert.rejects(store.load(), /not available yet/);
+    await assert.rejects(store.load(), error => {
+      assert.match((error as Error).message, /not available yet/);
+      assert.equal((error as Error & { code?: string }).code, "autostart_state_not_reported");
+      return true;
+    });
     await writeFile(join(dir, "autostart-state.json"), JSON.stringify({
       enabled: false, error: null, observedAt: new Date().toISOString(), revision: "one",
     }));

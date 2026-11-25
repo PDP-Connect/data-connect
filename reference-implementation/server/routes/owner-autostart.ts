@@ -20,7 +20,7 @@
 // `AutostartStore` (`../autostart-store.ts`), which publishes one command file
 // and polls for that command's result from `spawn_autostart_watcher`.
 
-import type { AutostartState, AutostartStore } from "../autostart-store.ts"
+import { AutostartStateNotReportedError, type AutostartState, type AutostartStore } from "../autostart-store.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 interface RouteRequest {
@@ -63,6 +63,10 @@ export function mountOwnerAutostart(app: AppLike, ctx: MountOwnerAutostartContex
       try {
         res.json({ data: toResponseShape(await ctx.store.load()), object: "autostart_state" })
       } catch (err) {
+        if (err instanceof AutostartStateNotReportedError) {
+          ctx.pdppError(res, 500, err.code, err.message, null)
+          return
+        }
         ctx.handleError(res, err)
       }
     }

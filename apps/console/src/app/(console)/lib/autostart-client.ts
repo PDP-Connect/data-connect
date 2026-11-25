@@ -46,11 +46,25 @@ async function autostartFetch(path: string, init: RequestInit = {}): Promise<unk
   }
   if (!response.ok) {
     const body = await response.text()
-    throw new ResourceServerHttpError(
+    const error = new ResourceServerHttpError(
       path,
       response.status,
       describeErrorText(body, `autostart request failed (${response.status})`)
     )
+    let code: string | undefined
+    try {
+      const parsed: unknown = JSON.parse(body)
+      if (parsed && typeof parsed === "object" && "error" in parsed) {
+        const detail = (parsed as { error?: unknown }).error
+        if (detail && typeof detail === "object" && "code" in detail && typeof detail.code === "string") {
+          code = detail.code
+        }
+      }
+    } catch {
+      // Older endpoints may return plain-text errors.
+    }
+    if (code) Object.assign(error, { code })
+    throw error
   }
   return response.json()
 }
@@ -70,7 +84,9 @@ export async function getAutostart(): Promise<AutostartState> {
       err instanceof ResourceServerHttpError &&
       err.path === "/v1/owner/autostart" &&
       err.status === 500 &&
-      err.body.startsWith("Autostart state is not available yet")
+      // Older servers send the generic "api_error" code, so the message stays a fallback.
+      ((err as ResourceServerHttpError & { code?: string }).code === "autostart_state_not_reported" ||
+        err.body.startsWith("Autostart state is not available yet"))
     ) {
       return { enabled: false, error: null, known: false }
     }

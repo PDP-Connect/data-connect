@@ -252,5 +252,4 @@ test("the kind page uses the shared connection-name rule, never the lowercase ke
   assert.equal(sourceDisplayName({ connector_id: "spotify", display_name: "Family Spotify" }), "Family Spotify");
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, /sourceLabel = sourceDisplayName\(connection\);/);
-  assert.doesNotMatch(src, /sourceLabelForConnection/);
 });

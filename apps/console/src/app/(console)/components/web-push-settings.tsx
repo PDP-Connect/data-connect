@@ -898,6 +898,7 @@ export function WebPushSettings({
           }}
           setupSteps={setupSteps}
           showDetails={showDetails}
+          serverNotReady={!(config.enabled && config.public_key)}
           status={status}
           subscriptionsCount={currentSubscriptions.length}
           testStatus={testStatus}
@@ -931,6 +932,7 @@ function WebPushSetupDetails({
   subscriptionsCount,
   lastSubscription,
   diagnostics,
+  serverNotReady,
   showDetails,
   onToggleDetails,
 }: {
@@ -951,6 +953,7 @@ function WebPushSetupDetails({
   subscriptionsCount: number;
   lastSubscription: WebPushSubscriptionSummary | undefined;
   diagnostics: DiagnosticRow[];
+  serverNotReady: boolean;
   showDetails: boolean;
   onToggleDetails: () => void;
 }) {
@@ -958,9 +961,11 @@ function WebPushSetupDetails({
     <div className="mt-4 border-border/60 border-t pt-4" id="web-push-setup">
       <p className="pdpp-caption max-w-3xl text-muted-foreground">{detail}</p>
       <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">{caveat}</p>
-      <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">
-        Server environment: <code>PDPP_WEB_PUSH_VAPID_PUBLIC_KEY</code> and <code>PDPP_WEB_PUSH_VAPID_PRIVATE_KEY</code>.
-      </p>
+      {serverNotReady ? (
+        <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">
+          Server environment: <code>PDPP_WEB_PUSH_VAPID_PUBLIC_KEY</code> and <code>PDPP_WEB_PUSH_VAPID_PRIVATE_KEY</code>.
+        </p>
+      ) : null}
       <div className="mt-4 grid gap-3 text-[13px] text-muted-foreground md:grid-cols-3">
         <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
         <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>

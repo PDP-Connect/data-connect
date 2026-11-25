@@ -753,7 +753,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
 }
 .hosted-ui-expiry-option {
-  min-height: 44px;
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 0.625rem;

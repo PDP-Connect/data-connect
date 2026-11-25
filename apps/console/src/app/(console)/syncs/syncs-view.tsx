@@ -593,7 +593,7 @@ function RecentSyncsSection({
  */
 function formatCollectedThisRun(row: SyncRow): string | null {
   if (row.streamSkipped) {
-    return "skipped";
+    return "Skipped";
   }
   if (row.collectedThisRun === null) {
     return row.failed ? "Sync failed" : null;
@@ -607,7 +607,7 @@ function formatCollectedThisRun(row: SyncRow): string | null {
   if (row.failed) {
     return "Sync failed";
   }
-  return "no change";
+  return "No change";
 }
 
 /**
@@ -725,6 +725,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
   return (
     <section
       className="rr-sync-group"
+      data-connection-id={group.connectionId}
       style={{ "--sync-group-intrinsic": `${intrinsicHeight}px` } as Record<string, string>}
     >
       <div className="rr-sync-group__head">
@@ -733,7 +734,6 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
           <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.name} />
           {group.name}
         </span>
-        <span className="rr-sync-group__cin">{group.connectionId}</span>
         <span className="rr-sync-group__count">
           {group.streams.length} {group.streams.length === 1 ? "kind of record" : "kinds of records"}
         </span>
