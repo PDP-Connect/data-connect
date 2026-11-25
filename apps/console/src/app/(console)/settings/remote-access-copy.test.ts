@@ -16,7 +16,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import type { requestReachability } from "./reachability-client.ts";
 import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./reachability-errors.ts";
-import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
+import { ErrorNotice, ReachabilityFailure, RecoveryContext, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { ConsentDisclosures, PlainDisclosure, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
@@ -619,9 +619,11 @@ test("reads that get no answer while the service restarts show the paused line w
 
 test("a read the service answers with its generic error shows a card that says it couldn't check", async () => {
   await withScreen(world({ "/state": fail("reachability_unavailable") }), async ({ container }) => {
-    const alert = container.querySelector("[role=alert]")?.textContent ?? "";
-    assert.match(alert, /We couldn't check remote access\. Try again, or copy the details for support\./);
-    assert.match(alert, /Code: reachability_unavailable/);
+    const alert = container.querySelector("[role=alert]")!;
+    // RAISE rule 6: a failed state has one plain sentence and one next step.
+    assert.equal(alert.querySelector(":scope > p")?.textContent, "We couldn't check remote access.");
+    assert.ok([...alert.querySelectorAll("button")].some((button) => button.textContent === "Try again"));
+    assert.match(alert.textContent ?? "", /Code: reachability_unavailable/);
     const text = visibleText(container);
     assert.doesNotMatch(text, /couldn't turn on/);
     // The service answered, so the paused line must not say it can't be reached.
@@ -685,7 +687,9 @@ test("an unknown error code shows the generic message, and an action error survi
     await failFirstAction(container, run, settle);
     const text = visibleText(container);
     assertClean("action error", text);
-    assert.match(text, /Remote access couldn.t turn on\. Try again, or copy the details for support\./);
+    // RAISE rule 6: the failed sentence and its one next step are separate.
+    assert.equal(container.querySelector('[role="alert"] > p')?.textContent, "Remote access couldn't turn on.");
+    assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
     assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));
     await run(async () => t.mock.timers.tick(3000));
     assert.ok(container.querySelector("[role=alert]"), "an action error should stay until the next action");
@@ -900,7 +904,10 @@ test("a failed turn off says so on screen", async () => {
     // The last Turn off is the route's; the first belongs to the address that may still be on.
     await press(/^Turn off$/);
     await press(/^Turn off$/);
-    assert.match(alertText(container), /couldn.t turn off\. It may still be on/);
+    // RAISE rule 6: a failed action gets one sentence and one next step.
+    // The failure keeps the fact that the address may still be on; only the next step becomes the button.
+    assert.equal(container.querySelector('[role="alert"] > p')?.textContent, "Remote access couldn't turn off. It may still be on.");
+    assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
   });
 });
 
@@ -977,4 +984,37 @@ test("provider detection shows its checked time and stale state; subsequent cata
     assert.ok(paths.includes("/catalog"));
     assert.equal(paths.filter(path => path === "/catalog?refresh=true").length, 1);
   });
+});
+
+test("a failed state has one plain sentence, one next step, and closed Details", () => {
+  // RAISE rule 6: failures use one plain sentence, one next step and folded details.
+  const error = toDisplayError(new ReachabilityFailure(publicError("provider_unavailable")), "action");
+  const recovery = {
+    request: (async () => ({ ok: false })) as never,
+    onTryAgain: () => {},
+    onTryAnotherWay: () => {},
+    onRefresh: () => {},
+  };
+  const markup = renderToStaticMarkup(
+    createElement(RecoveryContext.Provider, { value: recovery }, createElement(ErrorNotice, { error }))
+  );
+  const dom = new JSDOM(markup);
+  try {
+    const alert = dom.window.document.querySelector('[role="alert"]');
+    assert.ok(alert);
+    assert.equal(alert.querySelector(":scope > p")?.textContent, "Couldn't reach the service. It may be busy or down.");
+    assert.equal(alert.querySelectorAll(":scope > p").length, 1);
+    assert.deepEqual(
+      [...alert.querySelectorAll("button")].filter((button) => !button.closest("details")).map((button) => button.textContent),
+      ["Try again"]
+    );
+    const details = alert.querySelector("details");
+    assert.ok(details);
+    assert.equal(details.querySelector("summary")?.textContent, "Details");
+    assert.equal((details as HTMLDetailsElement).open, false);
+    assert.match(details.textContent ?? "", /Code: provider_unavailable/);
+    assert.doesNotMatch(alert.className, /destructive|red-/);
+  } finally {
+    dom.window.close();
+  }
 });

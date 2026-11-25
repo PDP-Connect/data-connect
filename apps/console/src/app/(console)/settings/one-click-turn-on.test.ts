@@ -625,8 +625,9 @@ test("a failed preparation says so and Try again runs it again", async () => {
   let drafts = 0;
   const handler = host({ "/drafts": () => (++drafts === 1 ? fail("brand_new_server_code") : ok(draftWith())) });
   await withScreen(handler, async ({ calls, press, text, container }) => {
-    // Nothing turned on yet, so the sentence must not say turning on failed.
-    assert.match(text(), /We couldn.t get this way ready\. Try again/);
+    // Nothing turned on yet; RAISE rule 6 keeps the failure sentence separate from its retry action.
+    assert.equal(container.querySelector('[role="alert"] > p')?.textContent, "We couldn't get this way ready.");
+    assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
     assert.doesNotMatch(text(), /couldn.t turn on/);
     assert.deepEqual(approvals(calls), []);
     assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));

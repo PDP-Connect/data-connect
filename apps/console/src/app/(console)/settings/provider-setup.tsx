@@ -708,10 +708,10 @@ export function ProviderSetup({
     return (
       <section aria-label={`Finish setting up ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
-        <p role="status">Finish one step in your account, then check again.</p>
+        <p role="status">{adminCopy.line}</p>
         <details>
           <summary>Details</summary>
-          <p>{adminCopy.line}</p>
+          <p>{adminCopy.detail}</p>
         </details>
         {notice ? <p role="status">{notice}</p> : null}
         {error ? <ErrorNotice error={error} /> : null}

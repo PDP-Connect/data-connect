@@ -319,9 +319,9 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
   }
 })
 
-for (const [id, line] of [
-  ["tailscale-magicdns", "Turn on MagicDNS for your tailnet."],
-  ["tailscale-https", "Turn on HTTPS certificates for your tailnet."],
+for (const [id, line, detail] of [
+  ["tailscale-magicdns", "Set up your Tailscale network address.", "Turn on MagicDNS for your tailnet."],
+  ["tailscale-https", "Turn on HTTPS certificates for your Tailscale network address.", "Turn on HTTPS certificates for your tailnet."],
 ] as const) {
   test(`administrator step ${id} says what to do in plain words`, async () => {
     opened.length = 0
@@ -339,6 +339,17 @@ for (const [id, line] of [
       const text = container.textContent ?? ""
       assert.match(text, /Needs your action/)
       assert.ok(text.includes(line))
+      const section = container.querySelector('[aria-label="Finish setting up Tailscale"]')
+      assert.ok(section)
+      const details = section.querySelector("details")
+      assert.ok(details)
+      const outsideDetails = section.cloneNode(true) as HTMLElement
+      const folded = outsideDetails.querySelector("details")
+      assert.ok(folded)
+      folded.remove()
+      // Remote access repair 3: plain wording stays outside; provider terms stay folded.
+      assert.doesNotMatch(outsideDetails.textContent ?? "", /MagicDNS|tailnet/)
+      assert.ok(details.textContent?.includes(detail))
       assert.deepEqual(bannedIn(text), [])
       assert.doesNotMatch(text, /daemon|refresh setup|administrator can/i)
       await act(async () => button("Open Tailscale admin")!.click())

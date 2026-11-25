@@ -6,6 +6,7 @@ import { JSDOM } from "jsdom"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
+import { renderToString } from "react-dom/server"
 import type { requestReachability } from "./reachability-client.ts"
 
 const windowCalls: string[] = []
@@ -104,13 +105,38 @@ test("with a password set there is no step 1 and step 2 is open", async () => {
 })
 
 test("coming back from the password restart shows the saved note once and clears the fragment", async () => {
-  const screen = await mount(true, "#remote-access")
+  const screen = await mount(true, "#remote-access-password-set")
   try {
     assert.match(screen.container.textContent ?? "", /Password saved ✓/)
     assert.equal(screen.window.location.hash, "")
     assert.equal(screen.window.location.pathname, "/settings")
   } finally {
     await screen.stop()
+  }
+})
+
+test("a plain #remote-access link scrolls to the card but claims no password was saved", async () => {
+  // /connect links to /settings#remote-access; nothing was saved on that path.
+  const screen = await mount(true, "#remote-access")
+  try {
+    assert.doesNotMatch(screen.container.textContent ?? "", /Password saved/)
+    assert.equal(screen.window.location.hash, "#remote-access")
+  } finally {
+    await screen.stop()
+  }
+})
+
+test("the first render does not read the fragment, so the server and browser markup match", async () => {
+  // The note appears only after mount; reading the address during render caused a hydration mismatch.
+  dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/settings#remote-access-password-set" })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document })
+  try {
+    const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
+    const request = (async () => ({ ok: true, data: { routes: [], reasons: {}, starting: false, passwordSet: true } })) as unknown as typeof requestReachability
+    const html = renderToString(createElement(RemoteAccessSetting, { request }))
+    assert.doesNotMatch(html, /Password saved/)
+  } finally {
+    dom.window.close()
   }
 })
 
@@ -121,7 +147,7 @@ test("Set password records the return fragment before the native window opens", 
   try {
     const button = [...screen.container.querySelectorAll("button")].find(item => item.textContent === "Set password")!
     await act(async () => button.dispatchEvent(new screen.window.MouseEvent("click", { bubbles: true })))
-    assert.deepEqual(windowCalls, ["#remote-access"])
+    assert.deepEqual(windowCalls, ["#remote-access-password-set"])
   } finally {
     await screen.stop()
   }

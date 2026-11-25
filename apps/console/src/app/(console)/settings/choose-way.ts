@@ -51,13 +51,13 @@ const copy: Record<string, { title: string; line: string; group: GroupId }> = {
   lan: { title: "Same Wi-Fi only", line: "Free. Your phone and computer need the same Wi-Fi.", group: "own-devices" },
   "own-address": { title: "Your own address", line: "Needs a web address you already use.", group: "advanced" },
   "ngrok-tls-passthrough": {
-    title: "Advanced hosted address",
-    line: "Needs an account and extra setup.",
+    title: "ngrok encrypted web address",
+    line: "The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
   "ngrok-tcp-passthrough": {
-    title: "Advanced hosted address",
-    line: "Needs an account and extra setup.",
+    title: "ngrok network address",
+    line: "Uses an address without a domain name.",
     group: "advanced",
   },
   "tunnl-gg": { title: "Temporary hosted address", line: "Free. Needs no account.", group: "advanced" },

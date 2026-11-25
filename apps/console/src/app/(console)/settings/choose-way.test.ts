@@ -139,6 +139,25 @@ test("Other ways has three groups, no development row, and no code in any text",
   }
 });
 
+test("the two ngrok passthrough ways have distinct plain names and facts", () => {
+  // RAISE rule 4: the two alternatives use distinct plain words.
+  const rows = otherWays(
+    inv({ ...noTailscale, providers: [way("ngrok-tls-passthrough"), way("ngrok-tcp-passthrough")] }),
+    caps,
+    null
+  ).flatMap((group) => group.rows);
+  const tls = rows.find((row) => row.providerId === "ngrok-tls-passthrough");
+  const tcp = rows.find((row) => row.providerId === "ngrok-tcp-passthrough");
+  assert.ok(tls);
+  assert.ok(tcp);
+
+  assert.notEqual(tls.title, tcp.title);
+  assert.equal(tls.title, "ngrok encrypted web address");
+  assert.equal(tls.line, "The connection stays encrypted until it reaches this computer.");
+  assert.equal(tcp.title, "ngrok network address");
+  assert.equal(tcp.line, "Uses an address without a domain name.");
+});
+
 test("a missing prerequisite the owner can supply during setup does not block the way", () => {
   // Real 0.5.1 shape for managed Cloudflare with the connector installed: the
   // saved credential is missing, with a remedy (the token the setup asks for).

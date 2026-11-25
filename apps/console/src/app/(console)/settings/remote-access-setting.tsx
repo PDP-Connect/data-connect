@@ -129,6 +129,9 @@ function OffStatusRow({ possiblyLive, framed = false, localOnly = true }: { poss
   );
 }
 
+// The fragment Set password leaves for the desktop to carry across its restart.
+const PASSWORD_SET_FRAGMENT = "#remote-access-password-set";
+
 export function RemoteAccessSetting({
   request = requestReachability,
   appVersion,
@@ -937,18 +940,22 @@ export function RemoteAccessSetting({
     setPrepRun((n) => n + 1);
   }
 
-  // After the desktop restarts for a new password it reopens this card by its
-  // fragment. Remember that once, then clear the fragment.
-  const [returnedFromPassword] = useState(
-    () => typeof window !== "undefined" && window.location.hash === "#remote-access"
-  );
+  // After the desktop restarts for a new password it reopens this page with
+  // PASSWORD_SET_FRAGMENT. Read it after mount (the server render cannot see it),
+  // bring the card into view, remember it once, then clear the fragment. A plain
+  // #remote-access link only scrolls here; it does not mean a password was saved.
+  const [returnedFromPassword, setReturnedFromPassword] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (returnedFromPassword) window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  }, [returnedFromPassword]);
+    if (window.location.hash !== PASSWORD_SET_FRAGMENT) return;
+    setReturnedFromPassword(true);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    sectionRef.current?.scrollIntoView?.();
+  }, []);
   async function setPassword() {
     // The native shell reads this address before it restarts, so the card is
     // reopened afterwards.
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#remote-access`);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${PASSWORD_SET_FRAGMENT}`);
     await change(async () => {
       const result = await requestOwnerPasswordWindowAction();
       if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
@@ -1021,7 +1028,7 @@ export function RemoteAccessSetting({
   return (
     <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
     {/* The page's Section already names this card; no second heading here. */}
-    <section aria-label="Remote access" className="grid gap-4">
+    <section aria-label="Remote access" className="grid gap-4" ref={sectionRef}>
       {confirmStop ? (
         <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
           <p className="text-sm font-medium">

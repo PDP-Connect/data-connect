@@ -140,7 +140,7 @@ async function withScreen<T>(
 
 // ---------- folder permissions ----------
 
-const UNSAFE_WORDS = /A DataConnect folder can be changed by other accounts on this computer\. Fix its permissions to continue\./;
+const UNSAFE_WORDS = /A DataConnect folder can be changed by other accounts on this computer\./;
 
 test("unsafe folder permissions offer a fix, and after it the card moves on with no reload", async () => {
   let fixed = false;
@@ -153,8 +153,9 @@ test("unsafe folder permissions offer a fix, and after it the card moves on with
     },
   });
   await withScreen(handler, async ({ calls, press, mainText, text, buttons }) => {
+    // RAISE rule 6: the failed sentence and its one next step are separate.
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.match(mainText(), /Needs your action/);
+    assert.doesNotMatch(mainText(), /Needs your action/);
     assert.doesNotMatch(mainText(), SNAKE);
     assert.ok(buttons().includes("Fix permissions"));
     assert.equal(calls.filter((call) => call.url === "/state-paths/fix").length, 0, "nothing is changed before the click");
@@ -245,7 +246,9 @@ test("when some paths are not fixable, the command shows once with one sentence"
 
 test("a background service that is down says so, copies diagnostics, and shows no code outside Details", async () => {
   await withScreen(host({ "/catalog": fail("host_supervisor_unavailable") }), async ({ mainText, text, buttons }) => {
-    assert.match(mainText(), /DataConnect's background service isn't running\. Quit and reopen DataConnect\./);
+    // RAISE rule 6: one failure sentence is followed by its next step.
+    assert.match(mainText(), /DataConnect's background service isn't running\./);
+    assert.match(mainText(), /Quit and reopen DataConnect\./);
     assert.doesNotMatch(mainText(), SNAKE);
     assert.ok(buttons().includes("Copy diagnostics"));
     assert.match(text(), /Code: host_supervisor_unavailable/);
@@ -301,7 +304,9 @@ test("a stale configuration retries once on its own, then shows the error and st
   await withScreen(handler, async ({ press, mainText, buttons }) => {
     await press(/^Turn on remote access$/);
     assert.equal(approvals, 2, "one retry, no more");
-    assert.match(mainText(), /Something changed while we were connecting\. Try again\./);
+    // RAISE rule 6: the failure sentence and retry action stay distinct.
+    assert.match(mainText(), /Something changed while we were connecting\./);
+    assert.ok(buttons().includes("Try again"));
     assert.doesNotMatch(mainText(), SNAKE);
     assert.ok(buttons().includes("Try again"));
     assert.ok(buttons().includes("Turn on remote access"), "still Off with step 2 ready");

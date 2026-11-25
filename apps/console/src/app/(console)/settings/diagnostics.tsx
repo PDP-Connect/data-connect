@@ -176,32 +176,27 @@ export function ErrorNotice({ error, action = "turn-on" }: { error: DisplayError
   const recover = useContext(RecoveryContext);
   const text = diagnosticsText(error, appVersion);
   const recovery = recoveryFor(error.code, action);
-  const copyOutside = recovery.buttons.some((button) => button.kind === "copy-diagnostics");
   const actions = recovery.buttons.filter((button) => button.kind !== "copy-diagnostics");
+  const nextAction = actions.find((button) => recover && handlerFor(button.kind, recover));
+  const hasStatePathRecovery = !!recover && recovery.buttons.some((button) => button.kind === "fix-permissions");
+  // The last sentence is the next step; everything before it is what failed
+  // (for example "Remote access couldn't turn off. It may still be on.").
+  const sentenceEnd = error.message.lastIndexOf(". ");
+  const failure = sentenceEnd < 0 ? error.message : error.message.slice(0, sentenceEnd + 1);
+  const nextStep = sentenceEnd < 0 ? null : error.message.slice(sentenceEnd + 2);
   return (
-    <div className="grid gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4" data-status={recovery.status} role="alert">
-      {recovery.status === "needs-action" ? (
-        <p className="flex items-center gap-2 text-sm font-medium">
-          <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
-          Needs your action
-        </p>
-      ) : null}
-      <p className="text-sm text-destructive">{error.message}</p>
+    <div className="grid gap-2" data-status={recovery.status} role="alert">
+      <p className="text-sm">{failure}</p>
+      {!nextAction && !hasStatePathRecovery && nextStep ? <p className="text-sm text-muted-foreground">{nextStep}</p> : null}
       {recover && recovery.buttons.some((button) => button.kind === "fix-permissions") ? <StatePathsFix recover={recover} /> : null}
-      <div className="flex flex-wrap gap-3">
-        {copyOutside ? <CopyButton label="Copy diagnostics" text={text} /> : null}
-        {actions.map((button, index) => {
-          const run = recover ? handlerFor(button.kind, recover) : null;
-          return run ? (
-            <Button key={button.kind} onClick={run} type="button" variant={index === 0 ? "default" : "outline"}>
-              {button.label}
-            </Button>
-          ) : null;
-        })}
-      </div>
-      <Diagnostics label={copyOutside ? "Details for support" : "Details"}>
+      {nextAction && recover ? (
+        <Button onClick={handlerFor(nextAction.kind, recover)!} type="button">
+          {nextAction.label}
+        </Button>
+      ) : null}
+      <Diagnostics label="Details">
         <pre className="whitespace-pre-wrap break-words">{text}</pre>
-        {copyOutside ? null : <CopyButton label="Copy diagnostics" text={text} />}
+        <CopyButton label="Copy diagnostics" text={text} />
       </Diagnostics>
     </div>
   );
