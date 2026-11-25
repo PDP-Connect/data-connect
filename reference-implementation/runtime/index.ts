@@ -5572,19 +5572,22 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // The staged cursor vouches for every record already buffered on this
       // stream and on the streams it owns (co-emitted `state_stream` children
       // and detail lanes), so all of them must be durable before staging.
-      for (const stream of streamsCheckpointedBy(stateStream, manifestByStream.keys(), {
+      const vouchedStreams = streamsCheckpointedBy(stateStream, manifestByStream.keys(), {
         detailParentsByStream: manifestDetailParentStreamsByStream,
         stateStreamByStream: manifestStateStreamByStream,
-      })) {
+      });
+      for (const stream of vouchedStreams) {
         // biome-ignore lint/performance/noAwaitInLoops: flushes are sequential so a failure stops before staging.
         await flushBatch(stream);
       }
-      // Transient manifest drift: this stream's batch was rejected as
-      // not_found for a manifest-declared stream and recorded as a per-stream
-      // gap. Do NOT stage its cursor — leaving it uncommitted makes the next
-      // run re-collect the stream once the RS manifest row re-heals. Skipping
-      // the `run.state_staged` event keeps the timeline honest (no advance).
-      if (driftSkippedStreams.has(stateStream)) {
+      // Transient manifest drift: a batch of this stream, or of a stream its
+      // cursor vouches for, was rejected as not_found for a manifest-declared
+      // stream and dropped as a per-stream gap. A flush that drops a batch
+      // returns normally, so the flush alone does not prove durability. Do NOT
+      // stage the cursor: leaving it uncommitted makes the next run re-collect
+      // those records once the RS manifest row re-heals. Skipping the
+      // `run.state_staged` event keeps the timeline honest (no advance).
+      if (vouchedStreams.some((stream) => driftSkippedStreams.has(stream))) {
         return;
       }
       newState[stateStream] = msg.cursor;

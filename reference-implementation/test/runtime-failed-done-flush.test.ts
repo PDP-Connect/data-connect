@@ -72,8 +72,15 @@ interface RsRequest {
 }
 
 // `failIngestAfter` lets that many ingest POSTs succeed before every later
-// one fails; `failIngest` is the same with zero.
-function startMockRs({ failIngestAfter }: { failIngestAfter: number | null }) {
+// one fails; `failIngest` is the same with zero. Ingests for `driftStreams`
+// are answered as transient manifest drift (404 not_found).
+function startMockRs({
+  driftStreams = [],
+  failIngestAfter,
+}: {
+  driftStreams?: readonly string[];
+  failIngestAfter: number | null;
+}) {
   let ingestPosts = 0;
   const requests: RsRequest[] = [];
   const server = createServer((req, res) => {
@@ -85,6 +92,11 @@ function startMockRs({ failIngestAfter }: { failIngestAfter: number | null }) {
       const { pathname } = new URL(req.url ?? "/", "http://localhost");
       requests.push({ body, method: req.method, pathname });
       if (req.method === "POST" && pathname.startsWith("/v1/ingest/")) {
+        if (driftStreams.includes(decodeURIComponent(pathname.slice("/v1/ingest/".length)))) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "not_found", message: "stream not declared by the connector" } }));
+          return;
+        }
         ingestPosts += 1;
         if (failIngestAfter !== null && ingestPosts > failIngestAfter) {
           res.writeHead(401, { "Content-Type": "application/json" });
@@ -172,6 +184,7 @@ function spineRows(runId: string): SpineRow[] {
 
 interface Scenario {
   cancelAfterReady?: boolean;
+  driftStreams?: readonly string[];
   exitCode: number;
   failIngest?: boolean;
   failIngestAfter?: number;
@@ -183,7 +196,10 @@ interface Scenario {
 async function runScenario(t: TestContext, scenario: Scenario) {
   freshDb(t);
   const failIngestAfter = scenario.failIngest === true ? 0 : (scenario.failIngestAfter ?? null);
-  const { server, requests } = startMockRs({ failIngestAfter });
+  const { server, requests } = startMockRs({
+    failIngestAfter,
+    ...(scenario.driftStreams ? { driftStreams: scenario.driftStreams } : {}),
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object", "ephemeral port");
@@ -462,6 +478,44 @@ test("certified stream-scoped failure with a failing terminal flush: a parent's 
       { keys: ["order_notes_0", "order_notes_1"], stream: ORDER_NOTES },
     ],
     "both accepted ingests happen at STATE and hold every record the committed cursor covers"
+  );
+});
+
+test("a parent's cursor is not staged when its co-emitted child's batch was dropped as manifest drift", async (t) => {
+  // order_notes declares state_stream: orders. The notes ingest is answered
+  // as transient manifest drift, which drops the batch and returns normally.
+  // Staging the orders cursor would commit a checkpoint that covers notes
+  // the server never stored, and the next run would not collect them again.
+  const manifest = {
+    ...MANIFEST,
+    streams: [
+      { ...(MANIFEST.streams[0] as (typeof MANIFEST.streams)[number]), name: ORDERS },
+      { ...(MANIFEST.streams[0] as (typeof MANIFEST.streams)[number]), name: ORDER_NOTES, state_stream: ORDERS },
+    ],
+  };
+  const { ingested, outcomeError, stateCommits } = await runScenario(t, {
+    driftStreams: [ORDER_NOTES],
+    exitCode: 0,
+    manifest,
+    messages: [
+      ...records(ORDER_NOTES, 2),
+      record(ORDERS, "orders_0"),
+      { cursor: { offset: 1 }, stream: ORDERS, type: "STATE" },
+      done("succeeded", 3),
+    ],
+    runId: "run_failed_done_flush_child_drift",
+  });
+
+  assert.equal(outcomeError, null);
+  assert.deepEqual(
+    ingested.map((r) => r.stream).sort(),
+    [ORDER_NOTES, ORDER_NOTES, ORDERS],
+    "both streams were sent; the notes were answered as drift"
+  );
+  assert.deepEqual(
+    stateCommits.flatMap((r) => Object.keys((JSON.parse(r.body) as { state: Record<string, unknown> }).state)),
+    [],
+    "no committed cursor covers the dropped notes"
   );
 });
 
