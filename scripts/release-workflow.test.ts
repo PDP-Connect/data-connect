@@ -16,6 +16,34 @@ import { basename, dirname, join, matchesGlob, resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
+describe("desktop sidecar lifeline", () => {
+  const preload = new URL("./parent-lifeline.mjs", import.meta.url).href
+
+  it("does not arm when a non-desktop launch has no flag", () => {
+    const env = { ...process.env }
+    delete env.PDPP_PARENT_LIFELINE
+    const result = spawnSync(process.execPath, ["--import", preload, "-e", "process.stdin.resume(); process.on('SIGTERM', () => process.exit(31))"], {
+      input: "", env, encoding: "utf8", timeout: 4000,
+    })
+    expect(result.status).toBe(0)
+    expect(result.stderr).not.toContain("[parent-lifeline]")
+  })
+
+  it.skipIf(process.platform === "win32")("strips the flag and signals once when the parent pipe closes", () => {
+    const script = [
+      "if (process.env.PDPP_PARENT_LIFELINE !== undefined) process.exit(30)",
+      "process.on('SIGTERM', () => { console.log('received TERM'); process.exit(31) })",
+      "setTimeout(() => process.exit(32), 1500)",
+    ].join(";")
+    const result = spawnSync(process.execPath, ["--import", preload, "-e", script], {
+      input: "", env: { ...process.env, PDPP_PARENT_LIFELINE: "stdin" }, encoding: "utf8", timeout: 4000,
+    })
+    expect(result.status).toBe(31)
+    expect(result.stdout.trim()).toBe("received TERM")
+    expect(result.stderr.match(/parent closed stdin/g)).toHaveLength(1)
+  })
+})
+
 const releaseWorkflowPath = resolve(
   process.cwd(),
   ".github/workflows/release.yml"
