@@ -410,8 +410,11 @@ export function tuningNamespacePrefix(connectorKey: string): string {
  * `connectorKey` owns: a key inside its `PDPP_<KEY>_` namespace with a
  * non-empty remainder. Never owned: reserved, proxy and server-owned names,
  * and a key inside the longer namespace of another installed connector
- * (`foo` does not own `PDPP_FOO_BAR_X` while `foo_bar` is installed). Manifest
- * validation and child spawn both call this, so they cannot disagree.
+ * (`foo` does not own `PDPP_FOO_BAR_X` while `foo_bar` is installed). Keys
+ * that differ only outside `A-Z0-9` (`acme-widgets`, `acme_widgets`) share one
+ * namespace; while both are installed neither owns a key in it, so one
+ * connector's value never reaches the other. Manifest validation and child
+ * spawn both call this, so they cannot disagree.
  */
 export function ownsTuningKey(
   connectorKey: string,
@@ -427,7 +430,7 @@ export function ownsTuningKey(
   }
   return !installedConnectorKeys.some((other) => {
     const otherPrefix = tuningNamespacePrefix(other);
-    return other !== connectorKey && otherPrefix.length > prefix.length && key.startsWith(otherPrefix);
+    return other !== connectorKey && otherPrefix.length >= prefix.length && key.startsWith(otherPrefix);
   });
 }
 

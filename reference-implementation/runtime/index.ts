@@ -3136,8 +3136,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // can collide across unrelated concurrent runs.
   const spawnRunId = opts.runId || `run_${randomUUID()}`;
 
-  // Read at spawn: a connector installed after this one still takes the keys
-  // inside its longer namespace.
+  // Read at each spawn, so a run sees the connectors installed when it starts.
   const installedConnectorKeys = opts.installedConnectorKeys ?? (await listInstalledConnectorKeys());
 
   const launchConfig = buildConnectorLaunchConfig({

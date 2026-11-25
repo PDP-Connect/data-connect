@@ -661,7 +661,7 @@ function validateTuningEnvironment(
     }
     if (ownKey !== null && !ownsTuningKey(ownKey, key, installedConnectorKeys)) {
       throw invalidConnectorManifest(
-        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace or belongs to a longer installed namespace`,
+        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace, or that namespace is shared with or nested in another installed connector's`,
         code
       );
     }

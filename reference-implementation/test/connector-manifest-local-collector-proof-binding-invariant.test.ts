@@ -4,8 +4,8 @@
 /**
  * The planner reads `capabilities.proven.local_collector` from each manifest;
  * no connector key list stands behind it. This file checks that the invariant
- * the generator and connector-manifest-validation.ts's
- * validateProvenModalityConsistency both assume — a connector cannot claim
+ * connector-manifest-validation.ts's validateProvenModalityConsistency
+ * assumes — a connector cannot claim
  * `capabilities.proven.local_collector` without also declaring
  * `runtime_requirements.bindings.filesystem` — holds for every manifest
  * actually shipped today, not just synthetic fixtures.

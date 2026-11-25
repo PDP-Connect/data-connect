@@ -169,3 +169,18 @@ test("a real child receives a nested-namespace key only when it is the longest-m
     { PDPP_FOO_BAR_X: "nested" }
   );
 });
+
+test("a real child gets no key from a namespace another installed connector shares", async () => {
+  const serverEnv = { ...SERVER_ENV, PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" };
+  const declared = { tuning_environment: ["PDPP_GOOGLE_MESSAGES_PAGE_SIZE"] };
+  const installedConnectorKeys = ["google-messages", "google_messages"];
+  const spawn = (connectorId: string, installed: readonly string[]) =>
+    childTuningEnvironment(connectorId, manifest(connectorId, declared), serverEnv, {
+      installedConnectorKeys: installed,
+    });
+
+  assert.deepEqual(await spawn("google-messages", ["google-messages"]), { PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" });
+  assert.deepEqual(await spawn("google_messages", ["google_messages"]), { PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" });
+  assert.deepEqual(await spawn("google-messages", installedConnectorKeys), {}, "beside google_messages");
+  assert.deepEqual(await spawn("google_messages", installedConnectorKeys), {}, "beside google-messages");
+});
