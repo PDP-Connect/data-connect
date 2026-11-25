@@ -40,3 +40,12 @@ test("the sync page omits the internal server address and keeps one source bread
   // DIRECTION.md, “What must stay true” #4: both source navigation and the timeline controls remain reachable.
   assert.match(source, /dashboardRoutes\.section\.runs/);
 });
+
+test("collection facts show cancelled and failed partial counts, while zero kinds stay out", () => {
+  // Brief item 3: cancelled and failed syncs label partial counts as collected before stopping.
+  assert.match(source, /event\.event_type === "run\.cancelled"/);
+  assert.match(source, /Collected before it stopped/);
+  // Brief item 3: zero-count kinds are omitted, and an all-zero result says nothing was collected.
+  assert.match(source, /collectedKinds\.filter\(\(\{ count \}\) => count > 0\)/);
+  assert.match(source, /Nothing was collected\./);
+});

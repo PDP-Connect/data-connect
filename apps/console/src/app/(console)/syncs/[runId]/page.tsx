@@ -398,23 +398,30 @@ function interactionFormKind(assistance: CurrentRunAssistance): string {
 }
 
 function CollectedKindsSection({ events }: { events: SpineEvent[] }) {
-  const collectedKinds = getCollectedKinds(events);
-  if (collectedKinds.length === 0) {
+  const terminalEvent = getCollectionTerminalEvent(events);
+  const collectedKinds = getCollectedKinds(terminalEvent);
+  if (!terminalEvent || collectedKinds === null) {
     return null;
   }
+  const visibleKinds = collectedKinds.filter(({ count }) => count > 0);
+  const stopped = terminalEvent.event_type !== "run.completed" || terminalEvent.status === "cancelled";
 
   return (
-    <Section title="What it collected">
-      <dl className="divide-y divide-border">
-        {collectedKinds.map(({ count, kind }) => (
-          <div className="flex items-center justify-between gap-4 py-2" key={kind}>
-            <dt>{humanizeFieldLabel(kind)}</dt>
-            <dd className="tabular-nums">
-              {count.toLocaleString()} {count === 1 ? "record" : "records"}
-            </dd>
-          </div>
-        ))}
-      </dl>
+    <Section title={stopped ? "Collected before it stopped" : "What it collected"}>
+      {visibleKinds.length === 0 ? (
+        <p>Nothing was collected.</p>
+      ) : (
+        <dl className="divide-y divide-border">
+          {visibleKinds.map(({ count, kind }) => (
+            <div className="flex items-center justify-between gap-4 py-2" key={kind}>
+              <dt>{humanizeFieldLabel(kind)}</dt>
+              <dd className="tabular-nums">
+                {count.toLocaleString()} {count === 1 ? "record" : "records"}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
     </Section>
   );
 }
@@ -1211,27 +1218,34 @@ function getLatestProgress(events: SpineEvent[]): LatestProgress | null {
   };
 }
 
-function getCollectedKinds(events: SpineEvent[]): { count: number; kind: string }[] {
-  const terminalEvent = [...events].reverse().find((event) =>
-    event.event_type === "run.completed" || event.event_type === "run.failed"
-  );
+function getCollectionTerminalEvent(events: SpineEvent[]): SpineEvent | null {
+  return [...events].reverse().find((event) =>
+    event.event_type === "run.completed" || event.event_type === "run.failed" || event.event_type === "run.cancelled"
+  ) ?? null;
+}
+
+function getCollectedKinds(terminalEvent: SpineEvent | null): { count: number; kind: string }[] | null {
   const facts = terminalEvent?.data.collection_facts;
   if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
-    return [];
+    return null;
   }
   const { streams } = facts as { streams?: unknown };
-  if (!Array.isArray(streams)) {
-    return [];
+  // An empty list knows no counts, so it cannot say "Nothing was collected."
+  if (!Array.isArray(streams) || streams.length === 0) {
+    return null;
   }
-  return streams.flatMap((entry) => {
+  const collectedKinds: { count: number; kind: string }[] = [];
+  for (const entry of streams) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return [];
+      return null;
     }
     const { collected, stream } = entry as { collected?: unknown; stream?: unknown };
-    return typeof stream === "string" && stream.trim() && typeof collected === "number" && Number.isFinite(collected)
-      ? [{ count: collected, kind: stream }]
-      : [];
-  });
+    if (typeof stream !== "string" || !stream.trim() || typeof collected !== "number" || !Number.isFinite(collected) || collected < 0) {
+      return null;
+    }
+    collectedKinds.push({ count: collected, kind: stream.trim() });
+  }
+  return collectedKinds;
 }
 
 function isUserFacingProgressEvent(event: SpineEvent): boolean {

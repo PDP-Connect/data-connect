@@ -188,6 +188,17 @@ test("dashboard Web Push enable and disable clear any stale test-notification st
   assert.match(src, DISABLE_CLEARS_TEST_STATUS_PATTERN);
 });
 
+test("successful notification enable and disable reread the server device list", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  const refresh = src.slice(src.indexOf("async function refreshSubscriptions"), src.indexOf("async function enable"));
+  const enable = src.slice(src.indexOf("async function enable"), src.indexOf("async function sendTest"));
+  const disable = src.slice(src.indexOf("async function disable"), src.indexOf("// Per-device install reminder"));
+  // Brief item 4: after either successful action, use the same server list endpoint as page load.
+  assert.match(refresh, /fetch\("\/_ref\/web-push\/subscriptions"[\s\S]*method:\s*"GET"/);
+  assert.match(enable, /await refreshSubscriptions\(\)/);
+  assert.match(disable, /await refreshSubscriptions\(\)/);
+});
+
 test("dashboard Web Push status changes are announced as live status regions", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
   assert.match(src, WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN);

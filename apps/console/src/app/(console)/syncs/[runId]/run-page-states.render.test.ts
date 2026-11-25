@@ -276,17 +276,46 @@ const scenarios: Record<string, Scenario> = {
     events: [
       started,
       progress,
-      event("run.failed", { connector_error_message: "Strava returned 500", failure_origin: "connector", reason: "connector_error" }),
+      event("run.failed", {
+        collection_facts: { streams: [{ collected: 4, stream: "posts" }, { collected: 0, stream: "comments" }] },
+        connector_error_message: "Strava returned 500",
+        failure_origin: "connector",
+        reason: "connector_error",
+      }),
     ],
-    expect: [/This sync did not finish\./],
+    expect: [/This sync did not finish\./, /Collected before it stopped/, /Posts/, /4 records/],
     status: statusFor("failed", { connector_error_message: "Strava returned 500", message: null, origin: "connector", reason: "connector_error" }),
     terminal: "failed",
   },
   cancelled: {
-    events: [started, progress, event("run.failed", { reason: "cancelled" })],
-    expect: [/This sync was cancelled\./],
+    events: [started, progress, event("run.cancelled", {
+      collection_facts: { streams: [{ collected: 2, stream: "comments" }] },
+    }, { status: "cancelled" })],
+    expect: [/This sync was cancelled\./, /Collected before it stopped/, /2 records/],
     status: statusFor("cancelled"),
     terminal: "cancelled",
+  },
+  "all-zero": {
+    events: [started, event("run.completed", {
+      collection_facts: { streams: [{ collected: 0, stream: "activities" }, { collected: 0, stream: "posts" }] },
+    }, { status: "succeeded" })],
+    expect: [/Nothing was collected\./],
+    status: statusFor("completed"),
+    terminal: "completed",
+  },
+  "unknown-count": {
+    events: [started, event("run.completed", {
+      collection_facts: { streams: [{ collected: 0, stream: "activities" }, { stream: "posts" }] },
+    }, { status: "succeeded" })],
+    expect: [/This sync finished\./],
+    status: statusFor("completed"),
+    terminal: "completed",
+  },
+  "no-kinds": {
+    events: [started, event("run.completed", { collection_facts: { streams: [] } }, { status: "succeeded" })],
+    expect: [/This sync finished\./],
+    status: statusFor("completed"),
+    terminal: "completed",
   },
 };
 
@@ -379,4 +408,33 @@ test("sync page, finished: collected kinds and counts are shown", async () => {
   assert.match(visible, WHAT_COLLECTED_RE);
   assert.match(visible, ACTIVITIES_RE);
   assert.match(visible, COLLECTED_COUNT_RE);
+});
+
+test("sync page, failed partial collection omits kinds with zero records", async () => {
+  const { visible } = await renderScenario("failed");
+  assert.match(visible, /Collected before it stopped/);
+  assert.match(visible, /Posts/);
+  assert.match(visible, /4 records/);
+  assert.doesNotMatch(visible, /Comments/);
+});
+
+test("sync page, cancelled collection reports what arrived before it stopped", async () => {
+  const { visible } = await renderScenario("cancelled");
+  assert.match(visible, /Collected before it stopped/);
+  assert.match(visible, /Comments/);
+  assert.match(visible, /2 records/);
+});
+
+test("sync page, all-zero collection says nothing was collected", async () => {
+  const { visible } = await renderScenario("all-zero");
+  assert.match(visible, /Nothing was collected\./);
+  assert.doesNotMatch(visible, /Activities|Posts/);
+});
+
+test("sync page never says nothing was collected unless every count is known and zero", async () => {
+  for (const name of ["unknown-count", "no-kinds"] as const) {
+    const { visible } = await renderScenario(name);
+    assert.doesNotMatch(visible, /Nothing was collected/, name);
+    assert.doesNotMatch(visible, WHAT_COLLECTED_RE, name);
+  }
 });

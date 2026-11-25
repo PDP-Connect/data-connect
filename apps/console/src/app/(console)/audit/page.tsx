@@ -23,6 +23,8 @@
 
 import {
   buttonVariants,
+  Body,
+  Caption,
   Endorse,
   IcButton,
   IcInput,
@@ -37,7 +39,6 @@ import {
   TableHeaderRow,
   TableRow,
   Tag,
-  Typed,
   TypedSm,
 } from "@pdpp/brand-react";
 import { formatRelative, traceRowLabel } from "@pdpp/display";
@@ -54,6 +55,7 @@ import {
   type TraceSummary,
 } from "../lib/ref-client.ts";
 import { traceEndorseStatus } from "./trace-endorse-status.ts";
+import { traceEntryReadFacts, traceEntryTitle } from "./trace-entry-title.ts";
 import { traceKindLabel } from "./trace-kind-label.ts";
 
 export const dynamic = "force-dynamic";
@@ -492,7 +494,6 @@ function TracePeekSlot({
   return (
     <div className="hidden xl:block">
       <TracesPeekPanel
-        cliCommand={`pdpp ref trace show ${traceId}`}
         envelope={envelope}
         listParams={params}
         traceId={traceId}
@@ -539,16 +540,17 @@ function TracesEmptyState({ hasFilters }: { hasFilters: boolean }) {
 }
 
 interface PeekPanelProps {
-  cliCommand: string;
   envelope: TimelineEnvelope;
   listParams: Params;
   traceId: string;
 }
 
-function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPanelProps) {
+function TracesPeekPanel({ traceId, envelope, listParams }: PeekPanelProps) {
   const [firstEvent] = envelope.events;
   const closeHref = listHref(listParams, { peek: undefined });
   const detailHref = `/audit/${encodeURIComponent(traceId)}`;
+  const { actor, kind } = traceEntryTitle(firstEvent ?? null);
+  const what = kind === "Data read" ? traceEntryReadFacts(envelope.events, !envelope.truncated) ?? "Data read" : kind;
 
   return (
     <Sheet>
@@ -563,125 +565,26 @@ function TracesPeekPanel({ traceId, envelope, cliCommand, listParams }: PeekPane
         </div>
       </SheetHead>
       <SheetBody>
-        <details>
-          <summary className="cursor-pointer">Details</summary>
-          <div className="pt-3">
-            <p className="pdpp-caption mb-2">
-              Trace ID <code>{traceId}</code>
-            </p>
-        {/* Summary meta */}
-        <div
-          style={{
-            borderBottom: "1px solid var(--border)",
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "6px 16px",
-            marginBottom: 16,
-            paddingBottom: 12,
-          }}
-        >
-          <span style={{ color: "var(--muted-foreground)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-            {envelope.events.length} events
-          </span>
-          {firstEvent ? (
-            <span style={{ color: "var(--muted-foreground)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-              actor{" "}
-              <span style={{ color: "var(--foreground)" }}>
-                {firstEvent.actor_type}/{firstEvent.actor_id}
-              </span>
-            </span>
-          ) : null}
-        </div>
-
-        {/* Event timeline — first 8 events to keep the panel compact */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {envelope.events.slice(0, 8).map((event) => (
-            <div
-              key={event.event_id}
-              style={{
-                borderBottom: "1px solid var(--border)",
-                padding: "6px 0",
-              }}
-            >
-              <div style={{ alignItems: "baseline", display: "flex", gap: 8, justifyContent: "space-between" }}>
-                <Typed
-                  style={{
-                    flex: 1,
-                    fontSize: "0.7rem",
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {event.event_type}
-                </Typed>
-                <TypedSm style={{ color: "var(--muted-foreground)", flexShrink: 0 }}>
-                  {relativeTime(event.occurred_at)}
-                </TypedSm>
-              </div>
-              {event.status ? (
-                <TypedSm
-                  style={{
-                    color: "var(--muted-foreground)",
-                    display: "block",
-                    marginTop: 2,
-                  }}
-                >
-                  {event.status}
-                </TypedSm>
-              ) : null}
-            </div>
-          ))}
-          {envelope.events.length > 8 ? (
-            <TypedSm style={{ color: "var(--muted-foreground)", paddingTop: 4 }}>
-              +{envelope.events.length - 8} more events
-            </TypedSm>
-          ) : null}
-        </div>
-
-        {/* CLI command */}
-        <div
-          style={{
-            borderTop: "1px solid var(--border)",
-            marginTop: 16,
-            paddingTop: 12,
-          }}
-        >
-          <p
-            style={{
-              color: "var(--muted-foreground)",
-              fontFamily: "var(--font-mono)",
-              fontSize: "0.625rem",
-              fontWeight: 500,
-              letterSpacing: "0.1em",
-              margin: "0 0 4px",
-              textTransform: "uppercase",
-            }}
-          >
-            CLI
-          </p>
-          <Typed
-            as="code"
-            style={{
-              display: "block",
-              fontSize: "0.72rem",
-              wordBreak: "break-all",
-            }}
-          >
-            {cliCommand}
-          </Typed>
-        </div>
-          </div>
-        </details>
-
-        {/* Full detail link */}
-        <div style={{ marginTop: 14 }}>
+        <dl className="grid gap-3 text-sm">
+          {actor ? <FactRow label="Who" value={actor} /> : null}
+          <FactRow label="What" value={what} />
+          <FactRow label="When" value={firstEvent ? relativeTime(firstEvent.occurred_at) : "Time not available"} />
+        </dl>
+        <div className="mt-4">
           <Link className={buttonVariants({ size: "sm" })} href={detailHref}>
-            Full timeline →
+            Full entry →
           </Link>
         </div>
       </SheetBody>
     </Sheet>
+  );
+}
+
+function FactRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <Caption as="dt" className="text-muted-foreground">{label}</Caption>
+      <Body as="dd" className="text-foreground">{value}</Body>
+    </div>
   );
 }

@@ -616,6 +616,7 @@ export function WebPushSettings({
   config: WebPushConfig;
   subscriptions: WebPushSubscriptionSummary[];
 }) {
+  const [currentSubscriptions, setCurrentSubscriptions] = useState(subscriptions);
   const [device, dispatch] = useReducer(deviceReducer, INITIAL_DEVICE_STATE);
   const { status, endpoint, unavailable, permission, swState } = device;
   const [busy, setBusy] = useState(false);
@@ -623,6 +624,26 @@ export function WebPushSettings({
   const [showDetails, setShowDetails] = useState(false);
   const [confirmingEndpoint, setConfirmingEndpoint] = useState<string | null>(null);
   const [removedEndpoints, setRemovedEndpoints] = useState<string[]>([]);
+
+  async function refreshSubscriptions() {
+    try {
+      const response = await fetch("/_ref/web-push/subscriptions", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        method: "GET",
+      });
+      if (!response.ok) {
+        throw await webPushResponseError(response, "Refresh device list failed");
+      }
+      const body = (await response.json()) as { data?: unknown };
+      if (!Array.isArray(body.data)) {
+        throw new Error("Device list response was not valid.");
+      }
+      setCurrentSubscriptions(body.data as WebPushSubscriptionSummary[]);
+    } catch {
+      dispatch({ status: "The device list could not be refreshed.", type: "status" });
+    }
+  }
 
   async function refreshSubscriptionState() {
     if (!hasNavigatorFeature("serviceWorker")) {
@@ -703,6 +724,7 @@ export function WebPushSettings({
         status: "Web Push is enabled for this browser.",
         type: "subscribed",
       });
+      await refreshSubscriptions();
     } catch (err) {
       dispatch({ status: err instanceof Error ? err.message : "Failed to enable Web Push.", type: "status" });
     } finally {
@@ -768,6 +790,7 @@ export function WebPushSettings({
       if (targetEndpoint === endpoint) {
         dispatch({ status: "Web Push is disabled for this browser.", type: "disabled" });
       }
+      await refreshSubscriptions();
     } catch (err) {
       dispatch({ status: err instanceof Error ? err.message : "Failed to disable Web Push.", type: "status" });
     } finally {
@@ -781,8 +804,8 @@ export function WebPushSettings({
   const caveat =
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
-  const [lastSubscription] = subscriptions;
-  const matchesThisBrowser = isCurrentBrowserSubscriptionRegistered(endpoint, subscriptions);
+  const [lastSubscription] = currentSubscriptions;
+  const matchesThisBrowser = isCurrentBrowserSubscriptionRegistered(endpoint, currentSubscriptions);
   const currentDeviceStatus = deviceStatus({ endpoint, matchesThisBrowser, permission, swState, unavailable });
   const setupSteps = buildSetupSteps({ endpoint, matchesThisBrowser, permission, testStatus, unavailable });
 
@@ -792,13 +815,13 @@ export function WebPushSettings({
     lastSubscription,
     matchesThisBrowser,
     permission,
-    subscriptions,
+    subscriptions: currentSubscriptions,
     swState,
   });
 
   const enabled = matchesThisBrowser && !unavailable;
   const checking = status === "Checking this browser…";
-  const receivingDevices = subscriptions.filter(
+  const receivingDevices = currentSubscriptions.filter(
     (subscription) => !subscription.revoked_at && !removedEndpoints.includes(subscription.endpoint)
   );
 
@@ -876,7 +899,7 @@ export function WebPushSettings({
           setupSteps={setupSteps}
           showDetails={showDetails}
           status={status}
-          subscriptionsCount={subscriptions.length}
+          subscriptionsCount={currentSubscriptions.length}
           testStatus={testStatus}
           unavailable={unavailable}
         />

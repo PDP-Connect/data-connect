@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const PAGE = fileURLToPath(new URL("./page.tsx", import.meta.url));
+const ENTRY_PAGE = fileURLToPath(new URL("./[traceId]/page.tsx", import.meta.url));
 const ENTRY_HREF_RE = /href=\{`\/audit\/\$\{encodeURIComponent\(trace\.trace_id\)\}`\}/;
 
 test("activity gives compact filters and all four filter fields", async () => {
@@ -33,13 +34,22 @@ test("activity uses the requested sentence and keeps technical row facts folded"
   assert.ok(src.includes('<summary className="cursor-pointer">Details</summary>'));
 });
 
-test("desktop peek keeps trace identifiers and raw events inside Details", async () => {
+test("the Activity entry names disclosed source, kind and count when present", async () => {
+  const src = await readFile(ENTRY_PAGE, "utf8");
+  // Brief item 1: the entry uses disclosure facts when the event provides them.
+  assert.ok(src.includes("traceEntryReadFacts(events, !(cursor || envelope.truncated))"));
+  assert.ok(src.includes('firstKind === "Data read" ? readFacts ?? "Data read" : firstKind'));
+});
+
+test("desktop peek shows the entry facts and links to its full entry", async () => {
   const src = await readFile(PAGE, "utf8");
   const peek = src.slice(src.indexOf("function TracesPeekPanel"));
-  // DIRECTION.md §What the look is for: raw IDs and request details stay in Details.
+  // Brief item 2: the side panel repeats who, what and when, then links to the full entry.
   assert.ok(peek.includes('<SheetTitle as="h2">Activity</SheetTitle>'));
-  const detailsStart = peek.indexOf("<details>");
-  const traceIdInDetails = peek.indexOf("{traceId}", detailsStart);
-  assert.ok(detailsStart >= 0 && traceIdInDetails > detailsStart);
-  assert.ok(!peek.includes("<SheetSerial>{traceId}</SheetSerial>"));
+  assert.ok(peek.includes('<FactRow label="Who" value={actor} />'));
+  assert.ok(peek.includes('<FactRow label="What" value={what} />'));
+  assert.ok(peek.includes('<FactRow label="When"'));
+  assert.ok(peek.includes("Full entry →"));
+  assert.ok(!peek.includes("<details>"));
+  assert.equal((peek.match(/href=\{detailHref\}/g) ?? []).length, 1);
 });

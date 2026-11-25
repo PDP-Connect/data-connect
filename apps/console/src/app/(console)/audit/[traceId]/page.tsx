@@ -46,7 +46,7 @@ import { formatRelative } from "@pdpp/display";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getTraceTimeline, type SpineEvent, type TimelineEnvelope } from "../../lib/ref-client.ts";
 import { eventEndorseStatus, traceOverall } from "../trace-timeline-status.ts";
-import { traceEntryTitle } from "../trace-entry-title.ts";
+import { traceEntryReadFacts, traceEntryTitle } from "../trace-entry-title.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -310,7 +310,9 @@ export default async function TraceDetailPage({
   const runIds = collectPivotIds(envelope, "run_id");
 
   const overall = traceOverall(events);
-  const { actor: appWord, kind: firstKind, title } = traceEntryTitle(first);
+  const readFacts = traceEntryReadFacts(events, !(cursor || envelope.truncated));
+  const { actor: appWord, kind: firstKind, title } = traceEntryTitle(first, readFacts);
+  const what = firstKind === "Data read" ? readFacts ?? "Data read" : firstKind;
 
   // Load-more
   const loadMoreHref =
@@ -331,7 +333,7 @@ export default async function TraceDetailPage({
         <SheetBody>
           <KV>
             {appWord ? <KVRow k="App">{appWord}</KVRow> : null}
-            <KVRow k="What">{firstKind === "Data read" ? "Your data" : firstKind}</KVRow>
+            <KVRow k="What">{what}</KVRow>
             <KVRow k="When">{first ? relativeTime(first.occurred_at) : "Time not available"}</KVRow>
           </KV>
         </SheetBody>
