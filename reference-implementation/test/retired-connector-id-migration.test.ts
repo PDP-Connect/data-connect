@@ -6,12 +6,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { migrateRenamedConnectorIdsSqlite } from "../server/connector-id-rename-migration.ts";
+import {
+  describeConnectorIdRename,
+  migrateRenamedConnectorIdsSqlite,
+} from "../server/connector-id-rename-migration.ts";
+import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 
 type Db = ReturnType<typeof getDb>;
 
 const NOW = "2026-11-14T00:00:00.000Z";
+const SUPERSEDED_LOG = /were deleted \(connector_installs: 1, connectors: 1\)/;
 
 function seedConnector(db: Db, connectorId: string): void {
   db.prepare("INSERT INTO connectors (connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
@@ -82,7 +87,7 @@ test(
        VALUES ('h', 'owner_local', 'google_takeout', 'b', ?, ?)`
     ).run(NOW, NOW);
 
-    const changed = migrateRenamedConnectorIdsSqlite(db);
+    const changed = migrateRenamedConnectorIdsSqlite(db).changedRows;
     assert.ok(changed >= 4, `expected the seeded rows to change, got ${changed}`);
 
     assert.deepEqual(ids(db, "connectors"), ["claude-code"]);
@@ -106,7 +111,7 @@ test(
     );
 
     const before = Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n);
-    assert.equal(migrateRenamedConnectorIdsSqlite(db), 0);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
     assert.equal(Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n), before, "no write");
   })
 );
@@ -117,13 +122,30 @@ test(
     seedConnector(db, "claude-code");
     seedConnector(db, "codex");
     const before = Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n);
-    assert.equal(migrateRenamedConnectorIdsSqlite(db), 0);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
     assert.equal(Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n), before);
   })
 );
 
 test(
-  "a retired row that a current row already covers is dropped; the current row wins",
+  "a manifest that names its connector only in storage_binding resolves to the new key after the rename",
+  withDb((db) => {
+    db.prepare("INSERT INTO connectors (connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
+      "apple_photos",
+      JSON.stringify({ storage_binding: { connector_id: "apple_photos", kind: "native" }, streams: [] }),
+      NOW
+    );
+    migrateRenamedConnectorIdsSqlite(db);
+    const manifest = JSON.parse(
+      String((db.prepare("SELECT manifest FROM connectors").get() as { manifest: string }).manifest)
+    );
+    assert.equal(canonicalConnectorKeyFromManifest(manifest), "apple-photos");
+    assert.equal(manifest.storage_binding.kind, "native", "the rest of the binding is kept");
+  })
+);
+
+test(
+  "a retired row that a current row already covers is deleted and counted; the current row wins",
   withDb((db) => {
     seedConnector(db, "claude_code");
     seedConnector(db, "claude-code");
@@ -135,13 +157,34 @@ test(
         NOW
       );
     }
-    migrateRenamedConnectorIdsSqlite(db);
+    const result = migrateRenamedConnectorIdsSqlite(db);
+    assert.deepEqual(result.supersededRows, { connector_installs: 1, connectors: 1 });
+    assert.match(String(describeConnectorIdRename(result)), SUPERSEDED_LOG);
     assert.deepEqual(ids(db, "connectors"), ["claude-code"]);
     const rows = db.prepare("SELECT connector_id, record_json FROM connector_installs").all() as {
       connector_id: string;
       record_json: string;
     }[];
     assert.deepEqual(rows, [{ connector_id: "claude-code", record_json: record("claude-code") }]);
+  })
+);
+
+test(
+  "a placeholder label follows the rename only on a connection of the renamed connector",
+  withDb((db) => {
+    seedConnector(db, "claude_code");
+    seedConnector(db, "codex");
+    seedInstance(db, "inst_cc", "claude_code", "binding-a");
+    seedInstance(db, "inst_codex", "codex", "binding-b");
+    db.prepare("UPDATE connector_instances SET display_name = 'claude_code'").run();
+    migrateRenamedConnectorIdsSqlite(db);
+    const labels = db
+      .prepare("SELECT connector_instance_id, display_name FROM connector_instances ORDER BY connector_instance_id")
+      .all();
+    assert.deepEqual(labels, [
+      { connector_instance_id: "inst_cc", display_name: "claude-code" },
+      { connector_instance_id: "inst_codex", display_name: "claude_code" },
+    ]);
   })
 );
 

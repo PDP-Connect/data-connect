@@ -11,7 +11,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { formatSourceOutboxState } from "../lib/connection-evidence.ts";
-import { loadBrowserConnectSupport } from "../lib/load-browser-connect-support.ts";
+import { loadBrowserBoundVerdict } from "../lib/load-browser-connect-support.ts";
 import { loadLocalCollectorTemplates } from "../lib/load-local-collector-support.ts";
 import {
   type LocalCollectorTemplate,
@@ -67,15 +67,6 @@ export default async function DeviceExportersPage({
   const collectorTemplates = (await loadLocalCollectorTemplates()) ?? [];
   const collectorConnectorIds = localCollectorEnrollmentKeys(collectorTemplates);
   const defaultConnectorId = resolveLocalCollectorEnrollmentKey(collectorTemplates, requestedConnector) ?? undefined;
-  // A deep-link to an unsupported *browser-bound* connector is an intentful
-  // request this page cannot generate commands for yet. Detect that case from the
-  // connector's own browser binding and surface an honest notice that names the
-  // connector and points at the owner-run runbook — never a faked enroll flow.
-  const browserBoundRequest =
-    !defaultConnectorId && requestedConnector && (await loadBrowserConnectSupport(requestedConnector)).browserBound
-      ? requestedConnector
-      : undefined;
-
   // When the owner arrives here from the "Add source" picker (a validated
   // `?connector=` deep-link), frame the page as finishing the connector they
   // chose — a "Sources / Add <Connector>" breadcrumb — instead of the bare
@@ -87,12 +78,19 @@ export default async function DeviceExportersPage({
     : undefined;
 
   try {
-    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests] = await Promise.all([
-      listDeviceExporterDiagnostics(),
-      listDeviceExporterSourceInstances(),
-      getReferencePublicOrigin(),
-      listConnectorManifests().catch(() => []),
-    ]);
+    // A deep-link to an unsupported *browser-bound* connector is an intentful
+    // request this page cannot generate commands for yet. Only the server's
+    // verdict that the connector is browser-bound shows the notice; without a
+    // verdict the page shows no notice and keeps its diagnostics.
+    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests, requestIsBrowserBound] =
+      await Promise.all([
+        listDeviceExporterDiagnostics(),
+        listDeviceExporterSourceInstances(),
+        getReferencePublicOrigin(),
+        listConnectorManifests().catch(() => []),
+        !defaultConnectorId && requestedConnector ? loadBrowserBoundVerdict(requestedConnector) : null,
+      ]);
+    const browserBoundRequest = requestIsBrowserBound === true ? requestedConnector : undefined;
     const connectorIcons = Object.fromEntries(
       connectorManifests.flatMap((manifest) => [
         [manifest.connector_id, manifest.icon] as const,

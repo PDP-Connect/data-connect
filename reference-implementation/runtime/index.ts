@@ -61,6 +61,7 @@ import {
   coveredRequiredKeys,
   decideCheckpointCommits,
   type ReportedOmission,
+  streamsCheckpointedBy,
   type WithholdReason,
   withholdReasonKey,
 } from "./checkpoint-commit-decision.ts";
@@ -5578,14 +5579,25 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // Proven a non-empty, in-scope stream name by the validator above.
       const stateStream = msg.stream as string;
 
-      // Flush records for this stream before persisting state
-      await flushBatch(stateStream);
-      // Transient manifest drift: this stream's batch was rejected as
-      // not_found for a manifest-declared stream and recorded as a per-stream
-      // gap. Do NOT stage its cursor — leaving it uncommitted makes the next
-      // run re-collect the stream once the RS manifest row re-heals. Skipping
-      // the `run.state_staged` event keeps the timeline honest (no advance).
-      if (driftSkippedStreams.has(stateStream)) {
+      // The staged cursor vouches for every record already buffered on this
+      // stream and on the streams it owns (co-emitted `state_stream` children
+      // and detail lanes), so all of them must be durable before staging.
+      const vouchedStreams = streamsCheckpointedBy(stateStream, manifestByStream.keys(), {
+        detailParentsByStream: manifestDetailParentStreamsByStream,
+        stateStreamByStream: manifestStateStreamByStream,
+      });
+      for (const stream of vouchedStreams) {
+        // biome-ignore lint/performance/noAwaitInLoops: flushes are sequential so a failure stops before staging.
+        await flushBatch(stream);
+      }
+      // Transient manifest drift: a batch of this stream, or of a stream its
+      // cursor vouches for, was rejected as not_found for a manifest-declared
+      // stream and dropped as a per-stream gap. A flush that drops a batch
+      // returns normally, so the flush alone does not prove durability. Do NOT
+      // stage the cursor: leaving it uncommitted makes the next run re-collect
+      // those records once the RS manifest row re-heals. Skipping the
+      // `run.state_staged` event keeps the timeline honest (no advance).
+      if (vouchedStreams.some((stream) => driftSkippedStreams.has(stream))) {
         return;
       }
       newState[stateStream] = msg.cursor;
@@ -5612,6 +5624,44 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       });
     }
 
+    // A flush failure on a failed DONE must not replace the connector's error:
+    // the run still terminates failed with the connector's own error, and the
+    // flush failure is recorded as its own event ahead of the terminal event.
+    // `buffered_records_dropped` on the terminal event counts what did not land.
+    async function flushBeforeFailedTerminal(): Promise<void> {
+      try {
+        await flushAll();
+      } catch (caught) {
+        if (terminalStopRequested()) {
+          return;
+        }
+        const err = caught as RuntimeRunError;
+        const ingestFailure = toPublicIngestFailure(err.ingest_failure);
+        try {
+          await emitSpineEventTracked({
+            actor_id: connectorId,
+            actor_type: "runtime",
+            data: {
+              buffered_records: countBufferedRecords(),
+              grant_id: grantId,
+              ...(ingestFailure ? { ingest_failure: ingestFailure } : {}),
+              message: boundedRuntimeFailureMessage(err.message || String(caught)),
+              source: runSource,
+            },
+            event_type: "run.terminal_flush_failed",
+            object_id: runId,
+            object_type: "run",
+            run_id: runId,
+            scenario_id: traceContext.scenario_id,
+            status: "failed",
+            trace_id: traceContext.trace_id,
+          });
+        } catch (emitErr) {
+          onProgress({ error: (emitErr as Error).message, type: "spine_error" });
+        }
+      }
+    }
+
     async function handleDoneMessage(msg: ConnectorMessage): Promise<void> {
       const invalidDoneStatus = validateDoneStatus(msg.status);
       if (invalidDoneStatus) {
@@ -5629,12 +5679,23 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         status: doneStatus,
       };
 
-      if (msg.status === "succeeded") {
-        // Flush any remaining records
+      // Records the connector emitted and the runtime validated are durable on
+      // succeeded and failed DONE, as mid-run batches already are: ingest upserts
+      // (connector_instance_id, stream, record_key), so a later run re-emitting them
+      // cannot duplicate. STATE is committed only by handleDoneClose: never for an
+      // ordinary failed run, and for a certified stream-scoped failure only for the
+      // staged sibling checkpoints it allows. Those are safe whether or not this flush
+      // succeeds, because handleStateMessage flushed each stream before staging its
+      // cursor. Connector-reported cancelled and owner cancel/timeout drop buffers.
+      // The flush completes here, before the terminal event is emitted.
+      if (doneStatus === "succeeded") {
         await flushAll();
+      } else if (doneStatus === "failed") {
+        await flushBeforeFailedTerminal();
       }
       // Close child stdin to signal that the runtime has finished
-      // consuming DONE (and flushed all records for succeeded runs).
+      // consuming DONE (and attempted the terminal flush for succeeded and
+      // failed runs).
       // The connector's flushAndExit waits for this EOF before calling
       // process.exit(), closing the race where the connector exits while
       // buffered stdout bytes are still in transit through the kernel pipe.
