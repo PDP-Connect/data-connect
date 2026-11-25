@@ -9,13 +9,16 @@ import {
   rmSync,
   writeFileSync,
   existsSync,
+  lstatSync,
   readFileSync,
+  renameSync,
 } from "node:fs"
 import { join } from "node:path"
 import { afterEach, test } from "node:test"
 import {
   createFileLocalConnectorSourceStore,
   inspectActiveLocalConnectorSource,
+  readConfinedFile,
 } from "../server/connector-install/local-source.ts"
 
 const temporaryRoots: string[] = []
@@ -198,4 +201,21 @@ test("re-adding a source whose profile changed connector key is rejected", async
   )
   await assert.rejects(store.add(root), /changed connector identity/)
   assert.equal((await store.list()).find((item) => item.sourceId === source.sourceId)?.connectorKey, "first-fixture")
+})
+
+test("a confined read refuses a file replaced after its check and stops one byte past the limit", () => {
+  const root = fixture()
+  const path = join(root, "profile", "collection-profile.json")
+  const checked = { label: "Manifest", path, stat: lstatSync(path) }
+  writeFileSync(join(root, "replacement.json"), "{}")
+  renameSync(join(root, "replacement.json"), path)
+  assert.throws(
+    () => readConfinedFile(checked, 1024),
+    /Manifest changed while it was being read/
+  )
+
+  const current = { label: "Manifest", path, stat: lstatSync(path) }
+  writeFileSync(path, "x".repeat(100))
+  assert.equal(readConfinedFile(current, 10).byteLength, 11)
+  assert.equal(readConfinedFile(current, 1000).byteLength, 100)
 })

@@ -13,6 +13,7 @@ import { createHash } from "node:crypto"
 import {
   closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -20,6 +21,7 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  type Stats,
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -98,11 +100,26 @@ function assertRecord(
   }
 }
 
+/** A regular file inside the source root, with the identity it had when checked. */
+export interface ConfinedFile {
+  readonly label: string
+  readonly path: string
+  readonly stat: Pick<Stats, "dev" | "ino">
+}
+
 function confinedFile(
   root: string,
   relativePath: string,
   label: string
 ): string {
+  return checkConfinedFile(root, relativePath, label).path
+}
+
+function checkConfinedFile(
+  root: string,
+  relativePath: string,
+  label: string
+): ConfinedFile {
   const candidate = resolve(root, relativePath)
   if (
     relative(root, candidate).startsWith(`..${sep}`) ||
@@ -114,10 +131,41 @@ function confinedFile(
   if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
     throw new Error(`${label} escapes the local source root.`)
   }
-  if (!lstatSync(resolved).isFile()) {
+  const stat = lstatSync(resolved)
+  if (!stat.isFile()) {
     throw new Error(`${label} must resolve to a file.`)
   }
-  return resolved
+  return { label, path: resolved, stat }
+}
+
+/**
+ * Reads at most `limit + 1` bytes from one descriptor, which must be the
+ * regular file that passed confinement. A path replaced after the check opens
+ * another inode and is refused, and a file that grows mid-read cannot allocate
+ * past the limit.
+ */
+export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
+  const fd = openSync(file.path, "r")
+  try {
+    const opened = fstatSync(fd)
+    if (
+      !opened.isFile() ||
+      opened.dev !== file.stat.dev ||
+      opened.ino !== file.stat.ino
+    ) {
+      throw new Error(`${file.label} changed while it was being read.`)
+    }
+    const buffer = Buffer.alloc(limit + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const n = readSync(fd, buffer, length, buffer.length - length, null)
+      if (n === 0) break
+      length += n
+    }
+    return buffer.subarray(0, length)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 function canonicalRoot(sourcePath: string): string {
@@ -141,27 +189,12 @@ function readManifest(root: string): {
   readonly manifestSha256: string
   readonly version: string
 } {
-  const manifestPath = confinedFile(
-    root,
-    MANIFEST_PATH,
-    "Collection Profile manifest"
+  // Parse and hash the bytes of one bounded read, so the recorded digest is
+  // of the parsed bytes.
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, MANIFEST_PATH, "Collection Profile manifest"),
+    MAX_PROFILE_BYTES
   )
-  // Parse and hash one bounded read from one descriptor, so the recorded
-  // digest is of the parsed bytes and a file that grows mid-read cannot
-  // allocate past the limit.
-  const buffer = Buffer.alloc(MAX_PROFILE_BYTES + 1)
-  const fd = openSync(manifestPath, "r")
-  let length = 0
-  try {
-    while (length < buffer.length) {
-      const n = readSync(fd, buffer, length, buffer.length - length, null)
-      if (n === 0) break
-      length += n
-    }
-  } finally {
-    closeSync(fd)
-  }
-  const bytes = buffer.subarray(0, length)
   if (bytes.byteLength > MAX_PROFILE_BYTES) {
     throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
   }
