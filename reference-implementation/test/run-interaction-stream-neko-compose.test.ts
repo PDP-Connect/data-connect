@@ -47,7 +47,7 @@ const TOP_LEVEL_REGEX_41 = /neko:[\s\S]*ports:[\s\S]*"\$\{NEKO_WEBRTC_PORT:-5900
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -230,6 +230,37 @@ test("the n.eko image installs the executable named by the proxy supervisor", as
   const lines = dockerfile.split("\n");
   assert.equal(lines.find((line) => line.startsWith(copy))?.slice(copy.length), command);
   assert.ok(lines.some((line) => line.startsWith("RUN chmod +x ") && line.split(" ").includes(command)));
+});
+
+test("Patchright installer refuses a missing browser destination before reading packages", async () => {
+  const script = join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh");
+  const result = spawnSync("/bin/bash", [script], { env: { PATH: process.env.PATH }, encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /PLAYWRIGHT_BROWSERS_PATH must be set/);
+  assert.doesNotMatch(result.stdout, /downloading/);
+});
+
+test("Patchright installer refuses a package without Chromium without a download or output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neko-patchright-failure-"));
+  try {
+    const mod = join(root, "node_modules", "patchright-core");
+    await mkdir(mod, { recursive: true });
+    await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+    await writeFile(join(mod, "browsers.json"), JSON.stringify({ browsers: [] }));
+    const destination = join(root, "browser-output");
+    const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+      env: { PATH: process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: destination }, encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no chromium descriptor/);
+    assert.match(result.stderr, /failed to resolve chromium revision\/version/);
+    assert.doesNotMatch(result.stdout, /downloading/);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
