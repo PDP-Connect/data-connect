@@ -98,7 +98,10 @@ function renamedInList(placeholder: (n: number) => string, offset = 0): string {
     .join(", ");
 }
 
-/** Replace the id fields inside a stored manifest document. Unparseable text is returned unchanged. */
+/**
+ * Replace the id fields inside a stored manifest document: every field `canonicalConnectorKeyFromManifest`
+ * reads, the top-level ones and `storage_binding.connector_id`. Unparseable text is returned unchanged.
+ */
 function rewriteManifestIds(manifest: unknown, oldId: string, newId: string): unknown {
   let parsed: unknown = manifest;
   if (typeof manifest === "string") {
@@ -115,6 +118,13 @@ function rewriteManifestIds(manifest: unknown, oldId: string, newId: string): un
   for (const field of ID_COLUMN_NAMES) {
     if (record[field] === oldId) {
       record[field] = newId;
+    }
+  }
+  const binding = record.storage_binding;
+  if (binding !== null && typeof binding === "object" && !Array.isArray(binding)) {
+    const bindingRecord = binding as Record<string, unknown>;
+    if (bindingRecord.connector_id === oldId) {
+      record.storage_binding = { ...bindingRecord, connector_id: newId };
     }
   }
   // SQLite stores the manifest as text, Postgres as jsonb (the driver hands back an object).

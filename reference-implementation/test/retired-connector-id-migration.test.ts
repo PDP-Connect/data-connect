@@ -10,6 +10,7 @@ import {
   describeConnectorIdRename,
   migrateRenamedConnectorIdsSqlite,
 } from "../server/connector-id-rename-migration.ts";
+import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 
 type Db = ReturnType<typeof getDb>;
@@ -123,6 +124,23 @@ test(
     const before = Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n);
     assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
     assert.equal(Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n), before);
+  })
+);
+
+test(
+  "a manifest that names its connector only in storage_binding resolves to the new key after the rename",
+  withDb((db) => {
+    db.prepare("INSERT INTO connectors (connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
+      "apple_photos",
+      JSON.stringify({ storage_binding: { connector_id: "apple_photos", kind: "native" }, streams: [] }),
+      NOW
+    );
+    migrateRenamedConnectorIdsSqlite(db);
+    const manifest = JSON.parse(
+      String((db.prepare("SELECT manifest FROM connectors").get() as { manifest: string }).manifest)
+    );
+    assert.equal(canonicalConnectorKeyFromManifest(manifest), "apple-photos");
+    assert.equal(manifest.storage_binding.kind, "native", "the rest of the binding is kept");
   })
 );
 
