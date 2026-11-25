@@ -48,7 +48,7 @@ export function formatConnectorKeyForDisplay(connectorId: string | null | undefi
 
   const fromUrl = connectorKeyFromUrl(raw);
   if (fromUrl) {
-    return fromUrl;
+    return CONNECTOR_KEY_ALIASES.get(fromUrl) ?? CONNECTOR_KEY_ALIASES.get(fromUrl.toLowerCase()) ?? fromUrl;
   }
 
   return formatUnknownConnectorKey(raw);

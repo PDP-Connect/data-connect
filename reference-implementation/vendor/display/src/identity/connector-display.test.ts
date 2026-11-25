@@ -152,3 +152,9 @@ test("a connection name the server saved, not a person, falls back to the connec
 test("a connection name a person gave is shown as written", () => {
   assert.equal(formatConnectionDisplayName("  Work email ", "Gmail", "gmail"), "Work email");
 });
+
+test("a registry address gets the same display name as its bare connector key", () => {
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/github"), "GitHub");
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/chatgpt"), "ChatGPT");
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/spotify"), "spotify");
+});
