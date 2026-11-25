@@ -195,3 +195,15 @@ test("visible approval copy avoids system words in review and confirmation state
   assert.doesNotMatch(visibleMarkup(render(consent())), banned);
   assert.doesNotMatch(visibleMarkup(render(consent(), true)), banned);
 });
+
+test("reviewed requests humanize record kinds and connector names", () => {
+  const html = render(consent());
+  const visible = visibleMarkup(html);
+  const details = html.slice(html.indexOf("<details"), html.indexOf("</details>"));
+  // DIRECTION.md, PAGE-RULES 6: the reviewed request uses the connector's display name.
+  assert.match(visible, /Spotify/);
+  // DIRECTION.md, PAGE-RULES 6: kind names use the shared humanizer inside Details.
+  assert.match(details, /Top artists/);
+  // DIRECTION.md, PAGE-RULES 6: raw connector and kind names do not appear outside Details.
+  assert.doesNotMatch(visible, /top_artists|spotify/);
+});

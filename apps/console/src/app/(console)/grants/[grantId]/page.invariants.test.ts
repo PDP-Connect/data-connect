@@ -56,3 +56,9 @@ test("access detail confirms the effect before removing one access", async () =>
   assert.match(action, /confirm_revoke"\)\) !== "yes"/);
   assert.match(action, /\/grants\/\$\{encodeURIComponent\(grantId\)\}\/revoke/);
 });
+
+test("app access detail uses the shared source display name", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, PAGE-RULES 6: connector names on Apps pages use the shared display rule.
+  assert.match(src, /appSourceName\(grant\?\.source\)/);
+});

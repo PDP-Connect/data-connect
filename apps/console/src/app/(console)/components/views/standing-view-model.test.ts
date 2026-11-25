@@ -23,7 +23,6 @@ import {
   type HomeHrefs,
   type HomeInputs,
   joinHuman,
-  scopeHuman,
 } from "./standing-view-model.ts";
 
 const NOW = new Date("2026-11-24T12:00:00Z");
@@ -387,20 +386,14 @@ function trace(
   };
 }
 
-test("scope labels reuse the existing human mapping", () => {
-  // DIRECTION.md, Home: app rows use the established plain words for permissions.
-  assert.equal(scopeHuman("pay_statements.read"), "your pay");
-  // DIRECTION.md, Home: unknown permission names keep a readable spaced fallback.
-  assert.equal(scopeHuman("loyalty_points.read"), "loyalty points");
-  // DIRECTION.md, Home: permission phrases remain complete when joined.
-  assert.equal(joinHuman(["your pay", "your spending", "your email"]), "your pay, your spending, and your email");
-  // DIRECTION.md, Home: apps say what they may read in plain words.
+test("Home source labels use shared names and preserve all sources", () => {
+  // DIRECTION.md, Home § Apps that can read your data: include every data source name.
+  assert.equal(joinHuman(["Spotify", "GitHub", "Gmail"]), "Spotify, GitHub, and Gmail");
+  // DIRECTION.md, Home § Apps that can read your data: use the named data source, not an event kind.
   assert.equal(
-    grantReads(grant("one", "app", ["pay_statements", "transactions"])),
-    "reads only your pay and your spending",
+    grantReads({ ...grant("one", "app", ["token.issued"]), source: { id: "spotify", kind: "connector" } }),
+    "reads only Spotify",
   );
-  // PAGE-RULES 6 (DIRECTION.md, "What must stay true" 3): no "grant" on screen, even for consent-decision permissions.
-  assert.equal(scopeHuman("consent.approved"), "access decisions");
 });
 
 test("the title answers first run, one or many needs, sync, current data, and a neutral state", () => {
@@ -557,6 +550,10 @@ test("needs-you rows contain their source or request details and follow the requ
         approval("a2", "Northstar HR", "2026-11-23T11:00:00Z"),
         approval("a1", "Atlas Mortgage", "2026-11-23T10:00:00Z"),
       ],
+      ownerClients: [
+        { active_token_count: 0, client_id: "Atlas Mortgage", client_name: "Atlas Mortgage", created_at: SUCCESS },
+        { active_token_count: 0, client_id: "Northstar HR", client_name: "Northstar HR", created_at: SUCCESS },
+      ],
       sourcePage: {
         hasMore: false,
         kind: "ok",
@@ -635,6 +632,24 @@ test("a needs-you row says when it last synced only after a successful sync", ()
   assert.equal(data.needs.find((need) => need.name === "Notion")?.syncNote, null);
   // Lead decision (home-pictures 1): the status words stay on the second line, capital first.
   assert.equal(data.needs.find((need) => need.name === "Notion")?.status?.words, "Setup in progress");
+});
+
+test("Home names a waiting request from the app name in its grants read", () => {
+  const clientId = "https://console.example/oauth/client-metadata/client-1";
+  const data = buildHomeViewModel(
+    base({
+      approvals: [approval("approval-1", clientId, SUCCESS)],
+      grants: [
+        {
+          ...grant("grant-1", clientId),
+          client: { client_id: clientId, client_name: "Listening recap", registration_mode: "dynamic" },
+        },
+      ],
+    }),
+  );
+
+  // round5 item 1: Home uses the known app name from the data already read for Apps.
+  assert.equal(data.needs.find((need) => need.kind === "approval")?.name, "Listening recap");
 });
 
 test("each seeded sample's counts agree with its own rows", () => {
@@ -781,6 +796,70 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   assert.equal(failed.summaryError, true);
 });
 
+test("Home names the data sources an app can read, not event kinds", () => {
+  const data = buildHomeViewModel(base({
+    grants: [
+      { ...grant("g1", "Listening recap", ["token.issued"]), source: { id: "spotify", kind: "connector" } },
+      { ...grant("g2", "Listening recap", ["read.success"]), source: { id: "github", kind: "connector" } },
+    ],
+  }));
+  // DIRECTION.md, Home § Apps that can read your data: name the first data source in the access.
+  // DIRECTION.md, Home § Apps that can read your data: include the next data source in the access.
+  assert.equal(data.apps[0]?.reads, "Spotify and GitHub");
+});
+
+test("Home does not show the page warning for failures in section-local reads", () => {
+  const data = buildHomeViewModel(base({
+    approvalsFailed: true,
+    grantsFailed: true,
+    ownerClientsFailed: true,
+    sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(19, "Spotify")] },
+    tracesFailed: true,
+  }));
+  // DIRECTION.md, Home: optional failed reads use their affected section, not the page warning.
+  assert.equal(data.warning, false);
+  // DIRECTION.md, Home: a failed approval read remains visible in Needs you.
+  assert.equal(data.needsError, true);
+  // DIRECTION.md, Home: failed app reads remain visible in the Apps section.
+  assert.equal(data.appError, true);
+});
+
+test("each read that no longer raises the page warning never reads as an empty fact", () => {
+  const healthy = { hasMore: false, kind: "ok" as const, sources: [statusSource(19, "Spotify")] };
+  const calm = ["Nothing needs you", "Everything is up to date"];
+
+  const approvals = buildHomeViewModel(base({ approvalsFailed: true, sourcePage: healthy }));
+  // Intake round56 item 1: a failed approvals read must not say that nothing needs the owner.
+  assert.ok(!calm.includes(approvals.title));
+  // Intake round56 item 1: Needs you stays on screen and says it could not load.
+  assert.equal(approvals.needsVisible, true);
+  assert.equal(approvals.needsError, true);
+
+  for (const failed of ["grantsFailed", "tracesFailed", "ownerClientsFailed"] as const) {
+    const apps = buildHomeViewModel(base({ [failed]: true, sourcePage: healthy }));
+    // Intake round56 item 1: a failed app read does not claim that no app can read the data.
+    assert.equal(apps.appsEmpty, false, failed);
+    // Intake round56 item 1: the Apps section says it could not load.
+    assert.equal(apps.appError, true, failed);
+    assert.equal(apps.firstRun, false, failed);
+  }
+
+  const sources = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "error", sources: [] } }));
+  // Intake round56 item 1: a failed source read is not a first run and not "No data sources yet."
+  assert.equal(sources.firstRun, false);
+  assert.equal(sources.noSources, false);
+  // Intake round56 item 1: the Data sources section says it could not load.
+  assert.equal(sources.dataSourceError, true);
+  assert.ok(!calm.includes(sources.title));
+});
+
+test("Home labels the successful read time in sentence case", async () => {
+  const src = await readFile(new URL("./standing-overview.tsx", import.meta.url), "utf8");
+  // DIRECTION.md, Home § Apps that can read your data: use the same sentence-case label as Apps.
+  const row = src.slice(src.indexOf("function AppRow"), src.indexOf("function AppsBlock"));
+  assert.match(row, /Last read \{app\.lastRead\}/);
+});
+
 test("apps group active grants, say what can be read, and include only matching successful recent reads", () => {
   const clients: OwnerIssuedClient[] = [
     {
@@ -793,8 +872,8 @@ test("apps group active grants, say what can be read, and include only matching 
   const data = buildHomeViewModel(
     base({
       grants: [
-        grant("g1", "Atlas", ["pay_statements"]),
-        grant("g2", "Atlas", ["transactions"]),
+        { ...grant("g1", "Atlas", ["pay_statements"]), source: { id: "spotify", kind: "connector" } },
+        { ...grant("g2", "Atlas", ["transactions"]), source: { id: "github", kind: "connector" } },
         { ...grant("revoked", "Retired"), status: "revoked" },
       ],
       ownerClients: clients,
@@ -811,8 +890,8 @@ test("apps group active grants, say what can be read, and include only matching 
 
   // DIRECTION.md, Home § Apps that can read your data: a client with multiple active permissions gets one row.
   assert.equal(data.apps.length, 1);
-  // DIRECTION.md, Home § Apps that can read your data: app access reuses the permission-to-words mapping.
-  assert.equal(data.apps[0]?.reads, "your pay and your spending");
+  // DIRECTION.md, Home § Apps that can read your data: the app summary names its data sources.
+  assert.equal(data.apps[0]?.reads, "Spotify and GitHub");
   // DIRECTION.md, Home § Apps that can read your data: grouped grants use the full access list address.
   assert.equal(data.apps[0]?.href, HREFS.grants);
   // DIRECTION.md, Home § Apps that can read your data: only a successful read by the same app supplies last-read text.

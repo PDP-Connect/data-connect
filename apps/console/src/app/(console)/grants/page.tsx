@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcSelect, IcTimestamp } from "@pdpp/brand-react";
-import { formatSourceForDisplay, grantRowLabel } from "@pdpp/display";
+import { grantRowLabel } from "@pdpp/display";
 import { PeekEmpty, PeekPane, PeekTimeline, pivotsFromEnvelope } from "@pdpp/operator-ui/components/peek";
 import { DataList, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { GRANT_LIFECYCLE_VOCABULARY } from "@pdpp/operator-ui/components/status-vocabularies";
@@ -11,11 +11,11 @@ import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { AppAccessList } from "./app-access-list.tsx";
-import { groupGrantAccessByApp, pendingApprovalAppName } from "./app-access.ts";
+import { appNamesByClientId, appSourceName, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups } from "./app-access.ts";
 import { DeveloperModeRequestLink } from "./developer-mode-gate.tsx";
 import { revokeGrantAccessAction } from "./[grantId]/revoke-action.ts";
 import { ServerUnreachable } from "../components/shell.tsx";
-import { getOwnerLoginPath, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
+import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import {
   type GrantSummary,
   getGrantTimeline,
@@ -100,14 +100,11 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     }
   }
 
-  const ownerLoginUrl = getOwnerLoginPath();
   const apps = groupGrantAccessByApp(result.data);
-  const clientNames = new Map(result.data.flatMap((grant) => {
-    const name = grant.client?.client_name?.trim();
-    return grant.client_id && name ? [[grant.client_id, name] as const] : [];
-  }));
-  const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, grant.client?.client_name?.trim() || "App"] as const] : [])).entries()];
-  const filterSources = [...new Map(result.data.flatMap((grant) => grant.source ? [[grant.source.id, formatSourceForDisplay(grant.source)] as const] : [])).entries()];
+  const appGroups = splitAppAccessGroups(apps);
+  const clientNames = appNamesByClientId(result.data);
+  const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, clientNames.get(grant.client_id) || "App"] as const] : [])).entries()];
+  const filterSources = [...new Map(result.data.flatMap((grant) => grant.source ? [[grant.source.id, appSourceName(grant.source) ?? "Data source"] as const] : [])).entries()];
 
   // A later page, or a list narrowed by data source, search or state, holds only
   // part of an app's access, so removing "the app" from it would leave the rest.
@@ -129,9 +126,6 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
               </li>
             ))}
           </DataList>
-          <p className="mt-2 text-[13px] text-muted-foreground">
-            If you need to sign in before reviewing, <a className="underline-offset-2 hover:underline" href={ownerLoginUrl}>open owner access</a>.
-          </p>
         </Section>
       ) : null}
 
@@ -156,13 +150,24 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
           {params.client_id || params.source_kind || params.source_id ? <Link className="min-h-11 rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants">Clear filters</Link> : null}
         </form> : null}
         <AppAccessList
-          apps={apps}
+          apps={appGroups.reading}
           canRemove={!(result.has_more || listNarrowed)}
           removeAction={revokeGrantAccessAction}
           returnTo="/grants"
         />
         {result.has_more && result.next_cursor ? <p className="mt-3 text-[13px] text-muted-foreground">More apps are available in Details.</p> : null}
       </Section>
+
+      {appGroups.stopped.length > 0 ? (
+        <Section title="Access stopped">
+          <AppAccessList apps={appGroups.stopped} canRemove={false} removeAction={revokeGrantAccessAction} returnTo="/grants" />
+        </Section>
+      ) : null}
+      {appGroups.other.length > 0 ? (
+        <Section title="Other apps">
+          <AppAccessList apps={appGroups.other} canRemove={false} removeAction={revokeGrantAccessAction} returnTo="/grants" />
+        </Section>
+      ) : null}
 
       <details className="mt-5 border-t border-border pt-3" open={Boolean(params.peek || params.cursor || params.q || params.status)}>
         <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
@@ -281,7 +286,7 @@ function GrantRow({
         {grant.source ? (
           <>
             <span className="text-muted-foreground/50">·</span>
-            <span>source {formatSourceForDisplay(grant.source)}</span>
+            <span>data source {appSourceName(grant.source)}</span>
           </>
         ) : null}
       </div>

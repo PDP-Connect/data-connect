@@ -52,9 +52,17 @@ function AppAccessRow({
         <span className="mt-1 block text-[13px] text-muted-foreground">
           {app.status ?? `Can read ${app.sources.length ? app.sources.join(", ") : "data from this server"}`}
         </span>
-        <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
-          Last read {formatAppLastRead(app.lastRead)}
-        </span>
+        {app.status === "Removed" ? (
+          app.stoppedAt ? (
+            <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
+              Access stopped {formatAppLastRead(app.stoppedAt)}
+            </span>
+          ) : null
+        ) : (
+          <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
+            Last read {formatAppLastRead(app.lastRead)}
+          </span>
+        )}
       </Link>
       {canRemove && app.status === null ? (
         <Menu.Root>

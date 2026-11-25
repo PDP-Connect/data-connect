@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { humanizeFieldLabel } from "@pdpp/display";
 import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type { PendingApproval } from "../lib/ref-client.ts";
@@ -22,7 +23,7 @@ export function PendingApprovalRow({
   const previewStreams = Array.isArray(approval.grant_preview?.streams)
     ? approval.grant_preview.streams.flatMap((stream) => {
         const name = typeof stream === "string" ? stream : stream?.name || "";
-        return name ? [name] : [];
+        return name ? [humanizeFieldLabel(name)] : [];
       })
     : [];
   const connectorId = approval.grant_preview?.source?.kind === "connector" ? approval.grant_preview.source.connector_id ?? approval.grant_preview.source.id : null;
@@ -41,7 +42,7 @@ export function PendingApprovalRow({
             <IcTimestamp value={approval.created_at} />
             <span>{approval.kind}</span>
             {approval.client_id ? <span>App id: {approval.client_id}</span> : null}
-            {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={connectorId} /> : null}
+            {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={appSourceName(approval.grant_preview?.source) ?? connectorId} /> : null}
           </div>
         </details>
       </div>

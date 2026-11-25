@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatSourceForDisplay, formatRelative, grantRowLabel } from "@pdpp/display";
-import type { GrantPackageChild, GrantSummary } from "../lib/ref-client.ts";
+import { formatConnectorKeyForDisplay, formatRelative, formatSourceForDisplay, grantRowLabel } from "@pdpp/display";
+import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
   /** Active access outside any package; removed one by one. */
@@ -13,6 +13,7 @@ export interface AppAccess {
   /** Packages holding active access; removed whole, so the package and its tokens end too. */
   packageIds: string[];
   sources: string[];
+  stoppedAt: string | null;
   status: string | null;
 }
 
@@ -29,12 +30,33 @@ function statusWord(status: string): string | null {
 
 export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[0] | null | undefined): string | null {
   if (!source) return null;
+  if (source.kind === "connector") {
+    const label = formatConnectorKeyForDisplay(source.connector_id ?? source.id);
+    return `${label[0]?.toUpperCase()}${label.slice(1)}`;
+  }
   const label = formatSourceForDisplay(source).replace(/^provider_native:/, "");
   return label ? `${label[0]?.toUpperCase()}${label.slice(1)}` : label;
 }
 
 export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(children: readonly T[]): T[] {
   return children.filter((child) => child.grant_status === "active" && child.member_status === "active");
+}
+
+/** Index app display names from grant and owner-client reads by client id. */
+export function appNamesByClientId(
+  grants: readonly Pick<GrantSummary, "client" | "client_id">[],
+  clients: readonly OwnerIssuedClient[] = [],
+): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const grant of grants) {
+    const name = grant.client?.client_name?.trim();
+    if (grant.client_id && name) names.set(grant.client_id, name);
+  }
+  for (const client of clients) {
+    const name = client.client_name?.trim();
+    if (name && !names.has(client.client_id)) names.set(client.client_id, name);
+  }
+  return names;
 }
 
 /**
@@ -50,6 +72,7 @@ export function pendingApprovalAppName(clientName: string | null | undefined): s
 
 export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAccess[] {
   const groups = new Map<string, { app: AppAccess; statuses: string[] }>();
+  const names = appNamesByClientId(grants);
   for (const grant of grants) {
     const key = grant.client_id || grant.grant_id;
     const isActive = ACTIVE_STATUSES.has(grant.status);
@@ -60,9 +83,10 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
           grantIds: [],
           hrefId: grant.grant_id,
           lastRead: null,
-          name: grant.client?.client_name?.trim() || "App",
+          name: names.get(key) || "App",
           packageIds: [],
           sources: [],
+          stoppedAt: null,
           status: null,
         },
         statuses: [],
@@ -81,8 +105,14 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
     if (grant.last_at && (!group.app.lastRead || grant.last_at > group.app.lastRead)) {
       group.app.lastRead = grant.last_at;
     }
+    if (grant.status === "revoked" && grant.last_at && (!group.app.stoppedAt || grant.last_at > group.app.stoppedAt)) {
+      group.app.stoppedAt = grant.last_at;
+    }
     group.statuses.push(grant.status);
-    const source = appSourceName(grant.source) ?? grant.connector_id ?? grantRowLabel(grant);
+    const source =
+      appSourceName(grant.source) ??
+      (grant.connector_id ? formatConnectorKeyForDisplay(grant.connector_id) : null) ??
+      grantRowLabel(grant);
     if (isActive && source && !group.app.sources.includes(source)) group.app.sources.push(source);
   }
 
@@ -91,9 +121,26 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
       app.status = statuses.some((status) => ACTIVE_STATUSES.has(status))
         ? null
         : statusWord(statuses[0] ?? "");
+      if (!statuses.every((status) => status === "revoked")) app.stoppedAt = null;
       return app;
     })
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function splitAppAccessGroups(apps: readonly AppAccess[]): {
+  other: AppAccess[];
+  reading: AppAccess[];
+  stopped: AppAccess[];
+} {
+  const reading: AppAccess[] = [];
+  const stopped: AppAccess[] = [];
+  const other: AppAccess[] = [];
+  for (const app of apps) {
+    if (app.status === null) reading.push(app);
+    else if (app.status === "Removed") stopped.push(app);
+    else other.push(app);
+  }
+  return { other, reading, stopped };
 }
 
 export function formatAppLastRead(value: string | null, now = Date.now()): string {

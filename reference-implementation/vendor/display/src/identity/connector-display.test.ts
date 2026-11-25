@@ -6,8 +6,17 @@ import test from "node:test";
 import {
   deriveSourceDisplayNameFallback,
   formatConnectionDisplayName,
+  formatConnectorKeyForDisplay,
+  formatSourceForDisplay,
   isFallbackConnectionLabel,
 } from "./connector-display.ts";
+
+test("GitHub uses its product name in source and connector labels", () => {
+  // PAGE-RULES 6: connector names use the shared display rule.
+  assert.equal(formatConnectorKeyForDisplay("github"), "GitHub");
+  // PAGE-RULES 6: source labels use the same shared connector-name rule.
+  assert.equal(formatSourceForDisplay({ id: "github", kind: "connector" }), "GitHub");
+});
 
 test("absent display name is a fallback", () => {
   assert.equal(isFallbackConnectionLabel({ connectorId: "gmail", displayName: null }), true);

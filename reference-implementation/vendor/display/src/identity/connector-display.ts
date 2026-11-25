@@ -10,6 +10,7 @@ const CONNECTOR_KEY_ALIASES = new Map<string, string>([
   ["gmail", "Gmail"],
   ["google-maps", "Google Maps"],
   ["google-maps-data-portability", "Google Maps (Data Portability)"],
+  ["github", "GitHub"],
 ]);
 
 export interface ConnectorDisplayInput {

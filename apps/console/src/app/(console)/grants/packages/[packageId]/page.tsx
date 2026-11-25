@@ -17,7 +17,6 @@
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
 import { formatRelative } from "@pdpp/display";
-import { formatSourceWithConnectionForDisplay } from "@pdpp/display";
 import { DataList, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { GRANT_LIFECYCLE_VOCABULARY } from "@pdpp/operator-ui/components/status-vocabularies";
 import type { Metadata } from "next";
@@ -36,7 +35,7 @@ import {
 } from "../../../lib/ref-client.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { technicalClientCaption } from "../../client-caption.ts";
-import { activePackageAccesses } from "../../app-access.ts";
+import { activePackageAccesses, appSourceName } from "../../app-access.ts";
 import { RemovePackageAccess } from "../../remove-access-confirmation.tsx";
 import { revokePackageAction } from "./revoke-action.ts";
 
@@ -91,7 +90,7 @@ export default async function GrantPackageDetailPage({
   const summaries = await listGrants({ client_id: pkg.client_id, limit: 50 }).catch(() => null);
   const appName = summaries?.data.find((grant) => grant.client?.client_name?.trim())?.client?.client_name?.trim() ?? "App";
   const activeChildren = activePackageAccesses(pkg.children);
-  const sources = [...new Set(activeChildren.flatMap((child) => child.source ? [formatSourceWithConnectionForDisplay(child.source)] : []))];
+  const sources = [...new Set(activeChildren.flatMap((child) => appSourceName(child.source) ?? []))];
   const childIds = new Set(pkg.children.map((child) => child.grant_id));
   const lastRead = summaries?.data.filter((grant) => childIds.has(grant.grant_id)).map((grant) => grant.last_at).sort().at(-1) ?? null;
 
@@ -348,7 +347,7 @@ function ChildRow({
 
 function describeSource(source: GrantPackageChild["source"]): string {
   if (!source) {
-    return "source —";
+    return "Data source not available";
   }
-  return `source ${formatSourceWithConnectionForDisplay(source)}`;
+  return appSourceName(source) ?? "Data source not available";
 }

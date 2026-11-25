@@ -58,6 +58,7 @@ import {
   listClientEventSubscriptions,
 } from "../lib/ref-client.ts";
 import { disableSubscriptionAction } from "./disable-action.ts";
+import { subscriptionFailureSentence } from "./row-copy.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -359,6 +360,7 @@ function SubscriptionRow({
   peeked: boolean;
 }) {
   const detailHref = `/event-subscriptions/${encodeURIComponent(subscription.subscription_id)}`;
+  const failureSentence = subscriptionFailureSentence(subscription);
 
   const rowContent = (
     <>
@@ -366,6 +368,7 @@ function SubscriptionRow({
         <span className="min-w-0">
           <Typed as="span" className="block truncate font-medium">{subscription.callback_host}</Typed>
           <TypedSm className="block truncate text-muted-foreground">Open to see what it listens for</TypedSm>
+          {failureSentence ? <TypedSm className="block text-destructive">{failureSentence}</TypedSm> : null}
         </span>
         <div className="flex items-center gap-2">
           <Endorse

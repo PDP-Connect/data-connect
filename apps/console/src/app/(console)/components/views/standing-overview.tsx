@@ -314,7 +314,7 @@ function AppRow({ app }: { app: HomeData["apps"][number] }) {
       </Text>
       {app.lastRead ? (
         <Text as="span" className={`${SECOND_LINE} block tabular-nums`}>
-          last read {app.lastRead}
+          Last read {app.lastRead}
         </Text>
       ) : null}
     </Link>

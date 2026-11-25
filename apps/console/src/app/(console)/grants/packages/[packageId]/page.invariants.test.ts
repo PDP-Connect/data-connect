@@ -106,6 +106,13 @@ test("package detail page never renders secret-shaped fields", async () => {
   assert.doesNotMatch(src, FORBIDDEN_FIELDS_RE);
 });
 
+test("package access uses shared source names without connection identifiers", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, PAGE-RULES 6: Apps pages use data source names and keep raw IDs out of visible copy.
+  assert.match(src, /appSourceName\(child\.source\)/);
+  assert.doesNotMatch(src, /formatSourceWithConnectionForDisplay/);
+});
+
 test("revoke server action declares 'use server' and re-verifies the owner session", async () => {
   const src = await readFile(ACTION_FILE, "utf8");
   assert.match(src, SERVER_DIRECTIVE_RE);

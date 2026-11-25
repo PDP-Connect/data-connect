@@ -113,3 +113,17 @@ test("app removal is offered only on the full list, and Details opens when its o
   // A peek, next page, search or state filter lives in Details; it must not reload folded.
   assert.match(src, /open=\{Boolean\(params\.peek \|\| params\.cursor \|\| params\.q \|\| params\.status\)\}/);
 });
+
+test("the Apps list keeps stopped access out of the readable apps group and omits the owner sign-in hint", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // Round 6 item 3: stopped access is split from apps that can read.
+  assert.match(src, /splitAppAccessGroups\(apps\)/);
+  // DIRECTION.md, Home § Apps that can read your data: the readable group title stays accurate.
+  assert.match(src, /title="Apps that can read your data"/);
+  // Round 6 item 3: stopped access has its own group.
+  assert.match(src, /title="Access stopped"/);
+  // PAGE-RULES 6: the Apps detail label says "data source".
+  assert.match(src, /data source \{appSourceName\(grant\.source\)\}/);
+  // Round 6 item 4: the signed-in owner is not told to sign in again.
+  assert.doesNotMatch(src, /If you need to sign in before reviewing/);
+});

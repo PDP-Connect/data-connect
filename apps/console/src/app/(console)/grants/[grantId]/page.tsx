@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
-import { formatRelative, formatSourceForDisplay } from "@pdpp/display";
+import { formatRelative } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { TimelineDetailView } from "@pdpp/operator-ui/components/views/timeline-detail-view";
 import Link from "next/link";
@@ -12,6 +12,7 @@ import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getGrantTimeline, listGrants } from "../../lib/ref-client.ts";
 import { RemoveThisAccess } from "../remove-access-confirmation.tsx";
+import { appSourceName } from "../app-access.ts";
 import { revokeGrantAccessAction } from "./revoke-action.ts";
 
 export const dynamic = "force-dynamic";
@@ -65,7 +66,7 @@ export default async function GrantDetailPage({
 
   const revoked = envelope.events.some((e) => e.event_type === "grant.revoked" || e.status === "revoked");
   const appName = grant?.client?.client_name?.trim() || "App";
-  const what = grant?.source ? formatSourceForDisplay(grant.source) : "Not available";
+  const what = appSourceName(grant?.source) ?? "Not available";
   const canRemove = grant?.status === "active" || grant?.status === "issued";
   const relative = (value: string | null | undefined) => {
     if (!value) return "Not available";

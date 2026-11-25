@@ -1,7 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatRelative } from "@pdpp/display";
+import { formatRelative, humanizeFieldLabel } from "@pdpp/display";
+import { appNamesByClientId, appSourceName, pendingApprovalAppName } from "../../grants/app-access.ts";
 import type {
   DatasetSummary,
   GrantSummary,
@@ -13,39 +14,6 @@ import type {
 import { connectionDisplayName } from "../../lib/connection-display-name.ts";
 import { isUpToDateRow, type SourceStatusWords, sourceStatusWords } from "../../lib/source-status-words.ts";
 
-const SCOPE_HUMAN: Record<string, string> = {
-  browser_history: "your browsing",
-  browsing: "your browsing",
-  "consent.approved": "access decisions",
-  conversations: "your conversations",
-  current_activity: "your spending",
-  "disclosure.served": "data disclosures",
-  emails: "your email",
-  employment: "your employment history",
-  health: "your health records",
-  income: "your pay",
-  listening_history: "what you listen to",
-  location: "where you've been",
-  messages: "your messages",
-  orders: "your orders",
-  pay_statements: "your pay",
-  paystubs: "your pay",
-  purchases: "your purchases",
-  "query.received": "read requests",
-  "query.rejected": "rejected reads",
-  statements: "your statements",
-  tax_docs: "your tax documents",
-  tax_documents: "your tax documents",
-  "token.issued": "token activity",
-  transactions: "your spending",
-  watch_history: "what you watch",
-};
-
-const READ_SUFFIX_RE = /\.read$/;
-const STREAM_PREFIX_RE = /^[a-z0-9-]+:/;
-const UNDERSCORE_RE = /_/g;
-const PROTOCOL_KIND_PREFIX_RE = /^(grant|trace|run|event)\./;
-const PROTOCOL_KIND_WORDS = new Set(["read", "issued", "approved", "revoked", "denied"]);
 const HEX_TOKEN_RE = /^[a-f0-9]{16,}$/i;
 const LONG_MACHINE_TOKEN_RE = /^(?=.{32,}$)(?=.*\d)[A-Za-z0-9_-]+$/;
 const TECH_ID_PREFIX_RE = /^(cli|grt|trc|run|req|cin|dsrc|dexp|ldt)_[A-Za-z0-9_-]+$/;
@@ -173,13 +141,7 @@ interface PreparedApp {
   reads: string;
 }
 
-/** Humanize one permission scope, with an honest spaced-name fallback. */
-export function scopeHuman(name: string): string {
-  const bare = name.replace(READ_SUFFIX_RE, "").replace(STREAM_PREFIX_RE, "");
-  return SCOPE_HUMAN[bare] ?? (bare.replace(UNDERSCORE_RE, " ").trim() || name);
-}
-
-/** Join plain permission phrases without dropping any of them. */
+/** Join source names without dropping any of them. */
 export function joinHuman(parts: readonly string[]): string {
   const list = parts.filter(Boolean);
   if (list.length <= 1) return list[0] ?? "";
@@ -187,14 +149,12 @@ export function joinHuman(parts: readonly string[]): string {
   return `${list.slice(0, -1).join(", ")}, and ${list.at(-1)}`;
 }
 
-/** Reuse the existing permission-to-plain-words mapping. */
+/** Name the data source attached to an app's access. */
 export function grantReads(grant: GrantSummary): string {
-  const meaningfulKinds = grant.kinds
-    .map((kind) => kind.replace(PROTOCOL_KIND_PREFIX_RE, ""))
-    .filter((kind) => kind && !PROTOCOL_KIND_WORDS.has(kind));
-  const phrases = Array.from(new Set(meaningfulKinds.map(scopeHuman))).filter(Boolean);
-  if (phrases.length > 0) return `reads only ${joinHuman(phrases)}`;
-  if (grant.connector_id) return `reads only ${scopeHuman(grant.connector_id)}`;
+  const source =
+    appSourceName(grant.source) ??
+    (grant.connector_id ? appSourceName({ id: grant.connector_id, kind: "connector" }) : null);
+  if (source) return `reads only ${source}`;
   return "reads a scoped slice of your data";
 }
 
@@ -202,7 +162,7 @@ function approvalReads(approval: PendingApproval): string {
   const streams = (approval.grant_preview?.streams ?? [])
     .map((stream) => (typeof stream === "string" ? stream : (stream.name ?? "")))
     .filter(Boolean);
-  const phrases = Array.from(new Set(streams.map(scopeHuman)));
+  const phrases = Array.from(new Set(streams.map(humanizeFieldLabel)));
   return phrases.length > 0 ? joinHuman(phrases) : "parts of your data";
 }
 
@@ -230,22 +190,12 @@ function clientLabel(name: string | null, fallbackId: string): string {
   return looksLikeTechnicalId(raw) ? "Unnamed app" : raw;
 }
 
-function appNamesById(clients: readonly OwnerIssuedClient[]): Map<string, string> {
-  return new Map(
-    clients.flatMap((client) => {
-      const name = client.client_name?.trim();
-      return name ? [[client.client_id, name] as const] : [];
-    }),
-  );
-}
-
 function appAccesses(
   grants: readonly GrantSummary[],
-  clients: readonly OwnerIssuedClient[],
+  knownNames: ReadonlyMap<string, string>,
   hrefs: HomeHrefs,
 ): PreparedApp[] {
   const groups = new Map<string, { grantIds: string[]; name: string; phrases: Set<string> }>();
-  const knownNames = appNamesById(clients);
 
   for (const grant of grants) {
     if (REVOKED_STATES.has(grant.status.toLowerCase())) continue;
@@ -329,8 +279,13 @@ function prepareSources(sources: readonly RefConnectorSummary[], now: Date, href
   }));
 }
 
-function approvalRow(approval: PendingApproval, now: Date, hrefs: HomeHrefs): HomeNeedRow {
-  const name = clientLabel(approval.client_id ?? null, approval.approval_id);
+function approvalRow(
+  approval: PendingApproval,
+  now: Date,
+  hrefs: HomeHrefs,
+  knownNames: ReadonlyMap<string, string>,
+): HomeNeedRow {
+  const name = pendingApprovalAppName(knownNames.get(approval.client_id ?? ""));
   const when = relativeWhen(approval.created_at, now);
   const asksFor = approvalReads(approval);
   return {
@@ -380,6 +335,10 @@ function counted(value: number, one: string, many: string): string {
 export function buildHomeViewModel(input: HomeInputs): HomeData {
   const sourceReadFailed = input.sourcePage.kind === "error";
   const preparedSources = sourceReadFailed ? [] : prepareSources(input.sourcePage.sources, input.now, input.hrefs);
+  const knownNames = appNamesByClientId(
+    input.grants,
+    input.ownerClientsFailed ? [] : input.ownerClients,
+  );
   // Rows 1–3 are archived, disconnected or never set up. The direction keeps
   // those states on the data-sources page rather than treating them as active.
   const activeSources = preparedSources.filter(
@@ -399,7 +358,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     (source) => source.sortAt,
   );
   const approvals = oldestFirst(input.approvals, (approval) => approval.created_at).map((approval) =>
-    approvalRow(approval, input.now, input.hrefs),
+    approvalRow(approval, input.now, input.hrefs, knownNames),
   );
   const needs = [
     ...waitingSources.map((source) => sourceNeedRow(source, input.now, true)),
@@ -419,7 +378,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
   const syncingSources = activeSources.filter((source) => source.status.row === 11);
   const appAccessesPrepared = input.grantsFailed
     ? []
-    : appAccesses(input.grants, input.ownerClientsFailed ? [] : input.ownerClients, input.hrefs);
+    : appAccesses(input.grants, knownNames, input.hrefs);
   const apps = appAccessesPrepared.map((app) => ({
     ...app,
     lastRead: input.tracesFailed ? null : latestSuccessfulRead(input.traces, app.clientId, input.now),
@@ -497,12 +456,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
   const warning =
     input.summaryFailed ||
     input.summary?.projection?.state === "stale" ||
-    input.summary?.projection?.state === "failed" ||
-    sourceReadFailed ||
-    needsReadFailed ||
-    input.grantsFailed ||
-    input.tracesFailed ||
-    input.ownerClientsFailed;
+    input.summary?.projection?.state === "failed";
 
   const showMoreSources = !sourceReadFailed && (input.sourcePage.hasMore || sortedDataSources.length > 12);
   const sourceTotalLink =

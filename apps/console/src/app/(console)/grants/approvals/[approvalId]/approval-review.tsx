@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { humanizeFieldLabel } from "@pdpp/display";
 import Link from "next/link";
 import { appSourceName } from "../../app-access.ts";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
@@ -88,7 +89,7 @@ function StreamFacts({ streams }: { streams: readonly ReviewedStreamArtifact[] }
     <ul className="mt-3 list-disc space-y-3 pl-5">
       {streams.map((stream) => (
         <li key={`${stream.name}:${stream.instance_ids.join(",")}`}>
-          <span className="font-medium">{stream.name}</span>
+          <span className="font-medium">{humanizeFieldLabel(stream.name)}</span>
           <dl className="pdpp-caption mt-1 grid gap-x-4 gap-y-1 text-muted-foreground sm:grid-cols-[auto_minmax(0,1fr)]">
             <dt>Instance IDs</dt>
             <dd>{listLabel(stream.instance_ids, "No closed instance ids")}</dd>
@@ -134,17 +135,17 @@ function SingleArtifactFacts({ artifact, connectorIcons }: { artifact: SingleCon
           <DisplayLink label="Registered site" value={display.uri} />
           <DisplayLink label="App policy" value={display.policy_uri} />
           <DisplayLink label="Terms" value={display.tos_uri} />
-          <dt className="text-muted-foreground">Source</dt>
+          <dt className="text-muted-foreground">Data source</dt>
           <dd>
             {artifact.source.kind === "connector" ? (
               <ConnectorMark
                 spacing="after"
                 sourceId={artifact.source.id}
                 icon={connectorIcons[artifact.source.id]}
-                name={artifact.source.id}
+                name={appSourceName(artifact.source) ?? artifact.source.id}
               />
             ) : null}
-            {artifact.source.kind}: {artifact.source.id}
+            {appSourceName(artifact.source) ?? "Data source not available"}
           </dd>
           <dt className="text-muted-foreground">Source declaration</dt>
           <dd>{sourceDeclarationEvidenceLabel(artifact.source_declaration)}</dd>
@@ -209,10 +210,10 @@ function BatchArtifactFacts({ artifact, connectorIcons }: { artifact: BatchConse
                   spacing="after"
                   sourceId={source.source.id}
                   icon={connectorIcons[source.source.id]}
-                  name={source.source.id}
+                  name={appSourceName(source.source) ?? source.source.id}
                 />
               ) : null}
-              {source.source.kind}: {source.source.id}
+              {appSourceName(source.source) ?? "Data source not available"}
             </dd>
             <dt className="text-muted-foreground">Source declaration</dt>
             <dd>{sourceDeclarationEvidenceLabel(source.source_declaration)}</dd>

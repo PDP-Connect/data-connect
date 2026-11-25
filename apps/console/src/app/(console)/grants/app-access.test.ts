@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { GrantSummary } from "../lib/ref-client.ts";
-import { activePackageAccesses, appSourceName, formatAppLastRead, groupGrantAccessByApp, pendingApprovalAppName } from "./app-access.ts";
+import { activePackageAccesses, appSourceName, formatAppLastRead, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups } from "./app-access.ts";
 
 function grant(overrides: Partial<GrantSummary> = {}): GrantSummary {
   return {
@@ -67,6 +67,28 @@ test("app rows list only data sources with active access", () => {
   assert.deepEqual(removedRows[0]?.sources, []);
 });
 
+test("removed app history keeps the known name and removal time", () => {
+  const clientId = "https://chat.example/id";
+  const rows = groupGrantAccessByApp([
+    grant({
+      client: undefined,
+      client_id: clientId,
+      grant_id: "removed",
+      last_at: "2026-11-25T12:30:00.000Z",
+      status: "revoked",
+    }),
+    grant({
+      client: { client_id: clientId, client_name: "Listening recap", registration_mode: null },
+      client_id: clientId,
+      status: "revoked",
+    }),
+  ]);
+
+  // round5 item 2: history rows use the shared app name and the stopped grant's last event time.
+  assert.equal(rows[0]?.name, "Listening recap");
+  assert.equal(rows[0]?.stoppedAt, "2026-11-25T12:30:00.000Z");
+});
+
 test("only inactive access gets a plain status word", () => {
   assert.equal(groupGrantAccessByApp([grant({ status: "revoked" })])[0]?.status, "Removed");
   assert.equal(groupGrantAccessByApp([grant({ status: "denied" })])[0]?.status, "Not allowed");
@@ -81,8 +103,24 @@ test("relative read times use words and handle missing data", () => {
 });
 
 test("source names read as names, including provider-native sources", () => {
+  // DIRECTION.md, Home § Apps that can read your data: source names remain plain and readable.
   assert.equal(appSourceName({ id: "spotify", kind: "connector" }), "Spotify");
+  // PAGE-RULES 6: connector names use the shared display rule.
+  assert.equal(appSourceName({ id: "github", kind: "connector" }), "GitHub");
+  // DIRECTION.md, Home § Apps that can read your data: built-in sources use their display name.
   assert.equal(appSourceName({ id: "health", kind: "provider_native" }), "Health");
+});
+
+test("access groups separate apps with current access from stopped access", () => {
+  const apps = groupGrantAccessByApp([
+    grant(),
+    grant({ client_id: "old", client: { client_id: "old", client_name: "Travel notes", registration_mode: null }, grant_id: "stopped", status: "revoked" }),
+  ]);
+  const groups = splitAppAccessGroups(apps);
+  // Round 6 item 3: only current access belongs under "Apps that can read your data".
+  assert.deepEqual(groups.reading.map((app) => app.name), ["Chat helper"]);
+  // Round 6 item 3: revoked access belongs under the separate stopped group.
+  assert.deepEqual(groups.stopped.map((app) => app.name), ["Travel notes"]);
 });
 
 test("package access lists use the server's active child and membership states", () => {

@@ -28,6 +28,7 @@ test("app rows name the data they can read and offer a separate actions menu", (
     name: "ChatGPT",
     packageIds: [],
     sources: ["Gmail", "Spotify"],
+    stoppedAt: null,
     status: null,
   }]);
   assert.match(html, /ChatGPT/);
@@ -51,11 +52,15 @@ test("removed app rows do not say the app can still read data", () => {
     name: "ChatGPT",
     packageIds: [],
     sources: [],
+    stoppedAt: "2026-11-25T12:00:00.000Z",
     status: "Removed",
   }]);
   // apps-repair.md P2: only live accesses belong in the app's readable-data line.
   assert.match(html, /Removed/);
   assert.doesNotMatch(html, /Can read data from this server/);
+  // round5 item 2: history says when access stopped, not when the app last read.
+  assert.match(html, /Access stopped/);
+  assert.doesNotMatch(html, /Last read/);
 });
 
 test("app removal names what happens and requires opening a confirmation step", async () => {
