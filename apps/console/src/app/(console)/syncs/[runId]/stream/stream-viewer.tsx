@@ -430,20 +430,20 @@ function classifyMintError(err: unknown): ConnectionStatus {
     return {
       cause: "unavailable",
       display: "trouble",
-      troubleMessage: "The browser stream isn't available right now.",
+      troubleMessage: "The browser isn't available right now.",
     };
   }
   if (message.includes("expired") || message.includes("not_found")) {
     return {
       cause: "expired",
       display: "trouble",
-      troubleMessage: "Session expired. Try again to start a fresh one.",
+      troubleMessage: "This browser session expired. Try again.",
     };
   }
   return {
     cause: "network",
     display: "trouble",
-    troubleMessage: "Couldn't reach the browser stream.",
+    troubleMessage: "Couldn't reach the browser.",
   };
 }
 
@@ -1566,7 +1566,7 @@ export function StreamSurface({
   }
 
   // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const connectorName = connector?.displayName ?? "the connector";
+  const connectorName = connector?.displayName ?? "the data source";
 
   return (
     <main className="relative min-h-dvh">
@@ -1613,8 +1613,8 @@ export function StreamSurface({
 function WordmarkCorner() {
   return (
     <div className="pointer-events-none absolute top-3 left-3 z-10 flex items-center gap-2 opacity-65">
-      <PdppLogo className="block" size={14} title="PDPP" />
-      <span className="pdpp-caption font-medium text-foreground tracking-tight">pdpp</span>
+      <PdppLogo className="block" size={14} title="DataConnect" />
+      <span className="pdpp-caption font-medium text-foreground tracking-tight">DataConnect</span>
     </div>
   );
 }
@@ -1647,7 +1647,7 @@ function OrientationCard({
   // mid-flight when an earlier mint failure is still in `troubleMessage`.
   let label: string;
   if (isMinting) {
-    label = "Opening...";
+    label = "Opening…";
   } else if (troubleMessage) {
     label = "Try again";
   } else {
@@ -2120,7 +2120,7 @@ function StreamStage({
           onStatus({
             cause: "network",
             display: "trouble",
-            troubleMessage: "Stream attached but the handshake was malformed.",
+            troubleMessage: "The browser opened, but its connection was incomplete.",
           });
           return;
         }
@@ -2413,7 +2413,7 @@ function StreamStage({
             troubleMessage:
               typeof parsed.value.message === "string" && parsed.value.message.length > 0
                 ? parsed.value.message
-                : "The browser stream failed to start.",
+                : "The browser could not start.",
           });
           source.close();
           return;
@@ -2631,7 +2631,7 @@ function StreamStage({
         onStatus({
           cause: "network",
           display: "trouble",
-          troubleMessage: "Couldn't reach the browser stream after several tries.",
+          troubleMessage: "Couldn't open the browser after several tries.",
         });
         diagnoseGiveUp(viewerUrl).catch(() => {
           // Best-effort diagnostic: the generic give-up message is already shown.
@@ -2648,7 +2648,7 @@ function StreamStage({
       onStatus({
         cause: "network",
         display: "trouble",
-        troubleMessage: "Connecting to the browser stream…",
+        troubleMessage: "Opening the browser…",
       });
       const delayIndex = Math.min(preAttachFailures - 1, RECONNECT_BACKOFF_MS.length - 1);
       const delay = RECONNECT_BACKOFF_MS[delayIndex];
@@ -4066,7 +4066,7 @@ function NekoSurface({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "n.eko direct stream failed");
+          setError(err instanceof Error ? err.message : "The browser could not start. Try again.");
         }
       });
 
@@ -4675,7 +4675,7 @@ function NekoSurface({
   return (
     <div className="flex flex-1 items-center justify-center overflow-hidden">
       <div
-        aria-label="Connector browser stream"
+        aria-label="Data source browser"
         className="pdpp-stream-frame relative overflow-hidden"
         data-pdpp-stream-loading={showLoadingOverlay || undefined}
         ref={(node) => {
@@ -4690,7 +4690,7 @@ function NekoSurface({
             data-pdpp-stream-ui
           >
             <div className="max-w-sm">
-              <p className="font-medium text-foreground">The n.eko WebRTC stream did not attach.</p>
+              <p className="font-medium text-foreground">Can't show the browser.</p>
               <p className="mt-2">{error}</p>
               <button
                 className="mt-4 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs hover:bg-muted"
@@ -4702,7 +4702,7 @@ function NekoSurface({
                 }}
                 type="button"
               >
-                Retry secure browser
+                Try again
               </button>
             </div>
           </div>
@@ -4713,7 +4713,7 @@ function NekoSurface({
             className="absolute inset-0 z-20 flex items-center justify-center bg-black text-sm text-white/70"
             data-pdpp-stream-loading
           >
-            {status.display === "live" ? "Starting WebRTC stream..." : "Waiting for browser..."}
+            {status.display === "live" ? "Starting the browser…" : "Opening the browser…"}
           </div>
         ) : null}
         {/* Hidden soft-keyboard textarea — MobileTextInputController binds */}
@@ -4848,7 +4848,7 @@ function BrowserSurface({
   return (
     <div className="pdpp-stream-fit-host flex flex-1 items-center justify-center overflow-hidden">
       <div
-        aria-label="Connector browser stream"
+        aria-label="Data source browser"
         className="pdpp-stream-frame relative focus-within:ring-2 focus-within:ring-primary/40 focus-within:ring-inset"
         ref={surfaceRef}
         role="application"
@@ -5661,12 +5661,12 @@ function statusTone(state: DisplayState): string {
 
 function statusLabel(state: DisplayState): string {
   if (state === "live") {
-    return "Stream is live";
+    return "Live";
   }
   if (state === "trouble") {
-    return "Stream has trouble";
+    return "Can't show the browser";
   }
-  return "Stream is connecting";
+  return "Opening the browser";
 }
 
 function StatusDot({ status }: { status: ConnectionStatus }) {
@@ -5789,12 +5789,12 @@ function StreamInteractionDock({
     submitInteraction();
   }
 
-  let submitLabel = "Continue collection";
+  let submitLabel = "Done";
   if (interactionKind === "otp") {
     submitLabel = "Submit code";
   }
   if (isPending) {
-    submitLabel = "Continuing...";
+    submitLabel = interactionKind === "otp" ? "Submitting…" : "Saving…";
   }
 
   if (collapsed) {
@@ -5808,7 +5808,7 @@ function StreamInteractionDock({
           type="button"
           variant="ghost"
         >
-          Show continue controls
+          Show instructions
         </IcButton>
       </div>
     );
@@ -5817,7 +5817,7 @@ function StreamInteractionDock({
   return (
     <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-slot="interaction">
       <form
-        aria-label="Complete this connector step"
+        aria-label="Finish signing in"
         autoComplete="off"
         className="pdpp-stream-toast-bubble flex w-full flex-col gap-2 text-left"
         onSubmit={handleSubmit}
@@ -5826,7 +5826,7 @@ function StreamInteractionDock({
           <p className="pdpp-caption font-medium text-foreground">{message}</p>
           <IcButton
             aria-expanded="true"
-            aria-label="Hide connector step instructions"
+            aria-label="Hide sign-in instructions"
             className="shrink-0"
             onClick={() => setCollapsed(true)}
             size="sm"
@@ -5845,12 +5845,6 @@ function StreamInteractionDock({
             placeholder="6-digit code"
             value={code}
           />
-        ) : null}
-        {interactionKind === "manual_action" ? (
-          <p className="pdpp-caption text-muted-foreground">
-            When the browser page is logged in or the requested action is complete, press Continue collection. Hiding
-            this panel only moves it out of the way; it does not resume the run.
-          </p>
         ) : null}
         {error ? (
           <p className="pdpp-caption text-destructive" role="alert">
@@ -5915,7 +5909,7 @@ function PopupToast({ message }: { message: string }) {
  */
 export function ResolvedSurface({ connector, runId }: { connector: ConnectorContext | null; runId: string }) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const subject = connector?.displayName ?? "The connector";
+  const subject = connector?.displayName ?? "The data source";
 
   return (
     <main className="relative min-h-dvh">
@@ -5929,17 +5923,17 @@ export function ResolvedSurface({ connector, runId }: { connector: ConnectorCont
           <p className="pdpp-body-lg text-foreground" id="stream-resolved-title">
             <span className="flex items-center gap-2">
               {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
-              {subject} is back on it.
+              {subject} is ready.
             </span>
           </p>
           <p className="pdpp-body text-foreground">
-            The browser step is complete. You can close this tab with your browser controls, or view run details.
+            You're done here. DataConnect is continuing on its own; you can close this tab.
           </p>
           <Link
             className={buttonVariants({ className: "h-12 w-full justify-center", size: "lg", variant: "default" })}
             href={`/syncs/${encodeURIComponent(runId)}`}
           >
-            View run details (optional)
+            Sync details
           </Link>
         </section>
       </div>
@@ -5982,10 +5976,10 @@ function UnsupportedSurface({
           <p className="pdpp-body-lg text-foreground" id="stream-unsupported-title">
             {interactionMessage}
           </p>
-          <p className="pdpp-body text-foreground">This step takes a credential, not a browser.</p>
+          <p className="pdpp-body text-foreground">This step needs sign-in details. Use sync details to continue.</p>
           <Link className="block w-full" href={runHref}>
             <IcButton className="h-12 w-full" size="lg" type="button">
-              View run details (optional)
+              Sync details
             </IcButton>
           </Link>
         </section>

@@ -18,21 +18,34 @@ test("all run source links share the encoded resolved connection route", async (
   const src = await readFile(PAGE_FILE, "utf8");
   assert.ok(src.includes("const connectionId = resolveRunConnectionId(runStatus, events);"));
   assert.ok(src.includes('const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;'));
-  assert.equal((src.match(/href=\{sourceHref\}/g) ?? []).length, 1);
+  // DIRECTION.md, “What must stay true” #4: keep the source path but show one source breadcrumb.
+  assert.equal((src.match(/href: sourceHref/g) ?? []).length, 1);
   assert.ok(src.includes("{ href: sourceHref, label: connectorName }"));
   assert.equal((src.match(/\x2fsources\x2f\$\{/g) ?? []).length, 1);
   assert.ok(!src.includes("encodeURIComponent(connectorId)"));
 });
 
-test("description label stays visible without a source route", async () => {
+test("the header no longer duplicates the source breadcrumb in its description", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorLabel\}\s*<\/Link>\s*\) : \(\s*<span[^>]*>\{connectorLabel\}<\/span>/);
+  const headerStart = src.indexOf("<PageHeader");
+  const headerEnd = src.indexOf("<CurrentAssistanceSection", headerStart);
+  const header = src.slice(headerStart, headerEnd);
+  assert.match(header, /breadcrumbs=\{\[/);
+  assert.match(header, /description=\{/);
+  assert.doesNotMatch(header, /href=\{sourceHref\}|connectorLabel/);
+});
+
+test("the connector name stays visible in the title without a source route", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.ok(src.includes("<span>{connectorName} sync</span>"));
 });
 
 test("breadcrumbs include a source only when its connection route is known", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /breadcrumbs=\{\s*sourceHref\s*\? \[/);
-  assert.match(src, /: \[\{ href: dashboardRoutes\.section\.runs, label: "Syncs" \}, \{ label: "Sync" \}\]/);
+  // DIRECTION.md, “What must stay true” #4: the source breadcrumb remains conditional and singular.
+  assert.match(src, /breadcrumbs=\{\[[\s\S]*?\.\.\.\(sourceHref \? \[\{ href: sourceHref, label: connectorName \}\] : \[\]\)/);
+  assert.match(src, /label: "Sync history"/);
+  assert.match(src, /label: `\$\{connectorName\} sync`/);
 });
 
 // Collection Profile 0.2.0, Section 5.11: the run page MUST NOT present a

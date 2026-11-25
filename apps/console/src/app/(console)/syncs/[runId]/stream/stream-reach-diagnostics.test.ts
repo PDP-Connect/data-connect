@@ -54,7 +54,8 @@ test("503 with streaming_companion_unavailable code classifies as companion_unav
     probeStatus: 503,
   });
   assert.equal(reason, "companion_unavailable");
-  assert.equal(troubleMessage, "The browser session is no longer running on the server. Start the browser step again.");
+  // DIRECTION.md, “What must stay true” #3: keep system terms out of visible page copy.
+  assert.equal(troubleMessage, "The browser is no longer running. Try again.");
 });
 
 test("503 with an unrelated or absent code still classifies as unknown", () => {
@@ -87,7 +88,8 @@ test("unknown with a known status appends the status code to the generic give-up
   // way 503/streaming_companion_unavailable did before this fix — the status
   // is now visible in the message even though the reason stays `unknown`.
   const { troubleMessage } = classifyStreamReachFailure({ probeStatus: 500 });
-  assert.equal(troubleMessage, "Couldn't reach the browser stream after several tries. (server responded 500)");
+  // DIRECTION.md, “What must stay true” #3: use plain words in browser status messages.
+  assert.equal(troubleMessage, "Couldn't open the browser after several tries. (error 500)");
 });
 
 test("every reason yields a non-empty operator message that never claims success", () => {

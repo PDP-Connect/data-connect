@@ -1,16 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { Callout, MetaPill, StatusBadge } from "@pdpp/operator-ui/components/primitives";
+import { Callout, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
-import { TimelineDetailView } from "@pdpp/operator-ui/components/views/timeline-detail-view";
+import { exploreHrefFromEnvelope } from "@pdpp/operator-ui/components/views/timeline-detail-view";
+import { TimelineView } from "@pdpp/operator-ui/components/timeline-view";
+import { formatRelative } from "@pdpp/display";
+import { buttonVariants } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
-import { ServerUnreachable } from "../../components/server-unreachable.tsx";
-import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
+import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
   getRunStatus,
   getRunTimeline,
@@ -50,7 +52,6 @@ import {
   describeCheckpointStatLabel,
   describeInteractionStatLabel,
   describeProgressStatLabel,
-  describeTerminalRunStatus,
   resolveRunConnectionId,
 } from "./run-detail-labels.ts";
 import { RunDetailPoller } from "./run-detail-poller.tsx";
@@ -63,8 +64,6 @@ import {
 } from "./run-terminal-status.ts";
 
 export const dynamic = "force-dynamic";
-
-type RunStateTone = "protocol" | "human" | "success" | "danger";
 
 interface LatestProgress {
   count: number | null;
@@ -114,7 +113,20 @@ export default async function RunDetailPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <ServerUnreachable />
+          <section className="rounded-lg border border-destructive/30 p-6">
+            <h1 className="pdpp-heading text-foreground">Can't reach DataConnect right now.</h1>
+            <p className="mt-3 text-muted-foreground text-sm leading-6">
+              Check server settings if it still does not work.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-4 text-sm">
+              <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "outline" })} href={`/syncs/${encodeURIComponent(runId)}`}>
+                Try again
+              </Link>
+              <Link className="text-primary underline-offset-2 hover:underline" href="/deployment">
+                Server settings
+              </Link>
+            </div>
+          </section>
         </RecordroomShellWithPalette>
       );
     }
@@ -131,7 +143,7 @@ export default async function RunDetailPage({
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
   const connectorManifests = await listConnectorManifests().catch(() => []);
   const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
-  const connectorName = connectorManifest?.display_name ?? connectorId ?? "connector";
+  const connectorName = connectorManifest?.display_name ?? "Data source";
 
   const checkpoints = summarizeCheckpoints(events);
   const progress = summarizeProgress(events);
@@ -178,32 +190,12 @@ export default async function RunDetailPage({
       envelopeTerminal,
       inPageTerminalStatus,
     }) ?? mapRunHandleStatusToDisplay(runStatus?.status ?? null);
-  const stateTone = getRunStateTone({
-    active,
-    currentAssistance,
-    terminalStatus: displayTerminalStatus,
-  });
-  const stateValue = getRunStateValue({
-    active,
-    currentAssistance,
-    terminalStatus: displayTerminalStatus,
-  });
   const failureRows = summarizeFailure(failure, runStatus);
 
-  // The before-timeline stack, header meta pills, and description are assigned
-  // to locals and passed to TimelineDetailView's slot-named props
-  // (beforeTimelineContent / metaContent) so this once-per-request server render
-  // composes them in the component body rather than constructing JSX inline in
-  // the prop position.
-  const beforeTimeline = (
+  const detailsContent = (
     <>
-      <CurrentAssistanceSection
-        active={active}
-        credentialSetup={credentialSetup}
-        currentAssistance={currentAssistance}
-        runId={runId}
-      />
       {active ? <CancelRunControl runId={runId} /> : null}
+      {currentAssistance ? <AssistanceDetails active={active} assistance={currentAssistance} /> : null}
       <LatestProgressSection active={active} latestProgress={latestProgress} terminalStatus={displayTerminalStatus} />
       <StatsGrid
         checkpoints={checkpoints}
@@ -233,72 +225,93 @@ export default async function RunDetailPage({
       />
     </>
   );
-  // A connector identifies the integration, not a specific source connection.
-  // Keep the label visible even when this timeline window has no connection id.
-  const connectorLabel = (
-    <>
-      {connectorId ? (
-        <ConnectorMark
-          spacing="after"
-          connectorId={connectorId}
-          icon={connectorManifest?.icon}
-          name={connectorName}
-        />
-      ) : null}
-      {connectorId}
-    </>
-  );
-  const description = (
-    <>
-      {connectorId ? (
-        <>
-          connector{" "}
-          {sourceHref ? (
-            <Link className="font-mono text-foreground underline underline-offset-2" href={sourceHref}>
-              {connectorLabel}
-            </Link>
-          ) : (
-            <span className="font-mono text-foreground">{connectorLabel}</span>
-          )}
-          {" · "}
-        </>
-      ) : null}
-      {events.length} events
-    </>
-  );
-  const meta = (
-    <>
-      <MetaPill label="state" tone={stateTone} value={stateValue} />
-      {latestProgress?.percentLabel ? (
-        <MetaPill label="progress" tone="protocol" value={latestProgress.percentLabel} />
-      ) : null}
-    </>
-  );
+  const startedAt = runStatus?.started_at ?? events.find((event) => event.event_type === "run.started")?.occurred_at ?? null;
+  const stateSentence = describeRunState(active, currentAssistance, displayTerminalStatus);
+  const cliCommand = `pdpp ref run timeline ${runId}`;
+  const noInstallCommand = `npx -y @pdpp/cli ${cliCommand.slice("pdpp ".length)}`;
+  const exploreHref = exploreHrefFromEnvelope(dashboardRoutes, envelope);
+  const pivotLinks = getRunPivotLinks(events);
 
   return (
     <RecordroomShellWithPalette>
       <RunDetailPoller enabled={active} />
-      <TimelineDetailView
-        beforeTimelineContent={beforeTimeline}
-        breadcrumbs={
-          sourceHref
-            ? [
-                { href: dashboardRoutes.section.runs, label: "Syncs" },
-                { href: sourceHref, label: connectorName },
-                { label: "Sync" },
-              ]
-            : [{ href: dashboardRoutes.section.runs, label: "Syncs" }, { label: "Sync" }]
+      <PageHeader
+        breadcrumbs={[
+          { href: dashboardRoutes.section.runs, label: "Sync history" },
+          ...(sourceHref ? [{ href: sourceHref, label: connectorName }] : []),
+          { label: `${connectorName} sync` },
+        ]}
+        description={
+          <>
+            {stateSentence} Started {startedAt ? formatRelative(new Date(startedAt), Date.now()) : "at an unknown time"}.
+          </>
         }
-        cliCommand={`pdpp ref run timeline ${runId}`}
-        description={description}
-        envelope={envelope}
-        id={runId}
-        loadMoreHref={envelope.truncated && envelope.next_cursor ? runTimelineHref(runId, envelope.next_cursor) : null}
-        metaContent={meta}
-        rawUrl={`${getAsInternalUrl()}/_ref/runs/${encodeURIComponent(runId)}/timeline`}
-        routes={dashboardRoutes}
-        subject="run"
+        title={
+          <span className="inline-flex items-center gap-2">
+            {connectorId ? (
+              <ConnectorMark connectorId={connectorId} icon={connectorManifest?.icon} name={connectorName} />
+            ) : null}
+            <span>{connectorName} sync</span>
+          </span>
+        }
       />
+      <CurrentAssistanceSection
+        active={active}
+        credentialSetup={credentialSetup}
+        currentAssistance={currentAssistance}
+        runId={runId}
+      />
+      <details className="mb-8 pt-4" data-testid="sync-details">
+        <summary className="cursor-pointer text-sm font-medium text-muted-foreground">Details</summary>
+        <div className="pt-5">
+          {detailsContent}
+          <Section title="Related pages">
+            <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+              {pivotLinks.map(({ href, id, label }) => (
+                <Link className="text-primary underline-offset-2 hover:underline" href={href} key={`${label}:${id}`}>
+                  {label} {id} →
+                </Link>
+              ))}
+              {exploreHref ? (
+                <Link className="text-primary underline-offset-2 hover:underline" href={exploreHref}>
+                  View records in Explore →
+                </Link>
+              ) : null}
+            </div>
+          </Section>
+          <Section title="Timeline">
+            <dl className="pdpp-caption mb-3 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
+              <dt className="text-muted-foreground">events in this page</dt>
+              <dd className="tabular-nums">{events.length}</dd>
+            </dl>
+            <TimelineView
+              events={events}
+              loadMoreHref={envelope.truncated && envelope.next_cursor ? runTimelineHref(runId, envelope.next_cursor) : null}
+            />
+          </Section>
+          <Section title="Reference CLI">
+            <pre className="pdpp-caption overflow-x-auto rounded-md border border-border/80 bg-muted/30 p-3 font-mono">
+              {cliCommand}
+            </pre>
+            <pre className="pdpp-caption mt-2 overflow-x-auto rounded-md border border-border/80 bg-muted/20 p-3 font-mono">
+              {noInstallCommand}
+            </pre>
+            <p className="pdpp-caption mt-2 text-muted-foreground">
+              The top form requires{" "}
+              <a
+                className="underline underline-offset-2 hover:text-foreground"
+                href="https://www.npmjs.com/package/@pdpp/cli"
+                rel="noreferrer"
+                target="_blank"
+              >
+                @pdpp/cli
+              </a>{" "}
+              on PATH (or pnpm exec in this monorepo). The bottom form runs without an install via npx. Set
+              PDPP_OWNER_SESSION_COOKIE when owner sign-in is enabled.
+            </p>
+          </Section>
+        </div>
+      </details>
     </RecordroomShellWithPalette>
   );
 }
@@ -314,7 +327,13 @@ function CurrentAssistanceSection({
   currentAssistance: CurrentRunAssistance | null;
   runId: string;
 }) {
-  if (!currentAssistance) {
+  if (
+    !currentAssistance ||
+    !active ||
+    currentAssistance.responseContract !== "response_required" ||
+    currentAssistance.ownerAction === "act_elsewhere" ||
+    currentAssistance.ownerAction === "none"
+  ) {
     return null;
   }
   const credentialView =
@@ -335,45 +354,27 @@ function CurrentAssistanceSection({
 
   return (
     <Callout
-      action={<StatusBadge inline status={active ? "pending" : "cancelled"} />}
       className="mb-6 border border-[color:var(--warning)] bg-[color:var(--warning-wash)] shadow-[inset_3px_0_0_0_var(--warning)]"
-      description={getAssistanceDescription(currentAssistance, active, supportsStreaming)}
+      description={
+        supportsStreaming || requiresBrowserSurfaceAssistance(currentAssistance)
+          ? credentialView?.message ?? currentAssistance.message
+          : "Your response is needed to continue."
+      }
       surface="human"
-      title={getAssistanceTitle(currentAssistance, active)}
+      title="Waiting for your input"
     >
       {supportsStreaming ? (
-        <p className="pdpp-caption mb-2">
-          <a className="underline underline-offset-2" href={`/syncs/${encodeURIComponent(runId)}/stream`}>
-            Open the streaming companion →
-          </a>{" "}
-          to satisfy this step from your current device.
-        </p>
+        <Link
+          className={buttonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
+          href={`/syncs/${encodeURIComponent(runId)}/stream`}
+        >
+          Open the browser
+        </Link>
       ) : null}
-      <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <dt className="text-muted-foreground">message</dt>
-        <dd>{credentialView?.message ?? currentAssistance.message}</dd>
-        <dt className="text-muted-foreground">state</dt>
-        <dd>
-          {describeAssistanceProgressPosture(currentAssistance.progressPosture)} ·{" "}
-          {describeAssistanceOwnerAction(currentAssistance.ownerAction)} ·{" "}
-          {describeAssistanceResponseContract(currentAssistance.responseContract)}
-        </dd>
-        <dt className="text-muted-foreground">kind</dt>
-        <dd>{currentAssistance.kind}</dd>
-        {currentAssistance.attachments.length > 0 ? (
-          <>
-            <dt className="text-muted-foreground">attachments</dt>
-            <dd>{formatAssistanceAttachments(currentAssistance)}</dd>
-          </>
-        ) : null}
-        {currentAssistance.timeoutLabel ? (
-          <>
-            <dt className="text-muted-foreground">timeout</dt>
-            <dd>{currentAssistance.timeoutLabel}</dd>
-          </>
-        ) : null}
-      </dl>
-      {supportsSubmit ? (
+      {requiresBrowserSurfaceAssistance(currentAssistance) && !supportsStreaming ? (
+        <p className="pdpp-caption text-muted-foreground">The browser is getting ready.</p>
+      ) : null}
+      {!requiresBrowserSurfaceAssistance(currentAssistance) && supportsSubmit ? (
         <RunInteractionForm
           fields={credentialView?.fields ?? currentAssistance.fields}
           interactionId={currentAssistance.id}
@@ -388,56 +389,73 @@ function CurrentAssistanceSection({
   );
 }
 
-function getAssistanceTitle(assistance: CurrentRunAssistance, active: boolean): string {
-  if (!active) {
-    return "Assistance abandoned";
-  }
-  if (
-    assistance.progressPosture === "running" &&
-    assistance.ownerAction === "act_elsewhere" &&
-    assistance.responseContract === "none"
-  ) {
-    return "Waiting for approval outside this dashboard";
-  }
-  if (
-    assistance.progressPosture === "waiting_retry" &&
-    assistance.ownerAction === "none" &&
-    assistance.responseContract === "none"
-  ) {
-    return "Retry scheduled";
-  }
-  return "Waiting for your input";
+function AssistanceDetails({ active, assistance }: { active: boolean; assistance: CurrentRunAssistance }) {
+  return (
+    <Section title="Request details">
+      <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        <dt className="text-muted-foreground">message</dt>
+        <dd>{assistance.message}</dd>
+        <dt className="text-muted-foreground">state</dt>
+        <dd>
+          {active ? describeAssistanceProgressPosture(assistance.progressPosture) : "ended"} ·{" "}
+          {describeAssistanceOwnerAction(assistance.ownerAction)} · {describeAssistanceResponseContract(assistance.responseContract)}
+        </dd>
+        <dt className="text-muted-foreground">kind</dt>
+        <dd>{assistance.kind}</dd>
+        {assistance.attachments.length > 0 ? (
+          <>
+            <dt className="text-muted-foreground">attachments</dt>
+            <dd>{formatAssistanceAttachments(assistance)}</dd>
+          </>
+        ) : null}
+        {assistance.timeoutLabel ? (
+          <>
+            <dt className="text-muted-foreground">timeout</dt>
+            <dd>{assistance.timeoutLabel}</dd>
+          </>
+        ) : null}
+      </dl>
+    </Section>
+  );
 }
 
-function getAssistanceDescription(
-  assistance: CurrentRunAssistance,
+function describeRunState(
   active: boolean,
-  supportsStreaming: boolean,
+  assistance: CurrentRunAssistance | null,
+  status: TerminalRunStatus,
 ): string {
   if (!active) {
-    return "This assistance request was still open when the run ended.";
+    if (status === "cancelled") return "This sync was cancelled.";
+    if (status === "failed") return "This sync did not finish.";
+    if (status === "deferred") return "This sync could not start.";
+    return "This sync finished.";
   }
-  if (
-    assistance.progressPosture === "running" &&
-    assistance.ownerAction === "act_elsewhere" &&
-    assistance.responseContract === "none"
-  ) {
-    return "The source is still running and watching for completion. No dashboard response is required.";
+  if (assistance?.ownerAction === "act_elsewhere") {
+    return "Waiting for you to approve the request.";
   }
-  if (
-    assistance.progressPosture === "waiting_retry" &&
-    assistance.ownerAction === "none" &&
-    assistance.responseContract === "none"
-  ) {
-    return "The source will retry automatically. No action is needed right now.";
+  if (assistance?.progressPosture === "blocked") {
+    return requiresBrowserSurfaceAssistance(assistance) ? "Waiting for you to use the browser." : "Waiting for your response.";
   }
-  if (supportsStreaming) {
-    return "This run is blocked until the requested browser-surface action is completed.";
+  if (assistance?.progressPosture === "waiting_retry") {
+    return "Trying again on its own.";
   }
-  if (requiresBrowserSurfaceAssistance(assistance)) {
-    return "This run is waiting for a browser surface or stream target to register before browser control can open.";
+  return "Syncing now.";
+}
+
+function getRunPivotLinks(events: SpineEvent[]): { href: string; id: string; label: string }[] {
+  const pivots = new Map<string, { href: string; id: string; label: string }>();
+  for (const event of events) {
+    for (const [key, label, route] of [
+      ["trace_id", "Trace", dashboardRoutes.trace],
+      ["grant_id", "Access", dashboardRoutes.grant],
+    ] as const) {
+      const id = event[key];
+      if (id && !pivots.has(`${label}:${id}`)) {
+        pivots.set(`${label}:${id}`, { href: route(id), id, label });
+      }
+    }
   }
-  return "This run is blocked until the requested response is submitted.";
+  return [...pivots.values()];
 }
 
 function formatAssistanceAttachments(assistance: CurrentRunAssistance): string {
@@ -521,10 +539,10 @@ function StatsGrid({
   progress: [string, string][];
 }) {
   return (
-    <div className="mb-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      <Stat rows={checkpoints} title="Checkpoints" />
-      <Stat rows={progress} title="Progress" />
-      <Stat rows={interactions} title="Interactions" />
+    <div className="mb-8 divide-y divide-border border-y border-border">
+      <Stat rows={checkpoints} title="Checkpoints in this page" />
+      <Stat rows={progress} title="Progress in this page" />
+      <Stat rows={interactions} title="Interactions in this page" />
       <Stat emphasis={Boolean(failure)} rows={failureRows} title="Failure" />
     </div>
   );
@@ -1039,14 +1057,10 @@ function ConnectorStderrTailSection({ failure }: { failure: SpineEvent | undefin
 }
 
 function Stat({ title, rows, emphasis }: { title: string; rows: [string, string][]; emphasis?: boolean }) {
-  const className = emphasis
-    ? "rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 shadow-[inset_3px_0_0_0_color-mix(in_oklab,var(--destructive)_60%,transparent)]"
-    : "rounded-md border border-border/70 bg-muted/20 px-3 py-2.5";
-
   return (
-    <div className={className}>
-      <h3 className="pdpp-eyebrow mb-2">{title}</h3>
-      <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+    <section className={`py-3 ${emphasis ? "border-l-2 border-destructive pl-3" : ""}`}>
+      <h3 className="pdpp-eyebrow mb-2 text-muted-foreground">{title}</h3>
+      <dl className="pdpp-caption grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
         {rows.map(([k, v]) => (
           <Fragment key={k}>
             <dt className="text-muted-foreground">{k}</dt>
@@ -1054,56 +1068,8 @@ function Stat({ title, rows, emphasis }: { title: string; rows: [string, string]
           </Fragment>
         ))}
       </dl>
-    </div>
+    </section>
   );
-}
-
-function getRunStateTone({
-  active,
-  currentAssistance,
-  terminalStatus,
-}: {
-  active: boolean;
-  currentAssistance: CurrentRunAssistance | null;
-  terminalStatus: TerminalRunStatus;
-}): RunStateTone {
-  if (currentAssistance?.progressPosture === "blocked") {
-    return "human";
-  }
-  if (active) {
-    return "protocol";
-  }
-  if (terminalStatus === "succeeded_with_gaps") {
-    return "human";
-  }
-  if (terminalStatus === "deferred") {
-    return "protocol";
-  }
-  return terminalStatus === "failed" ? "danger" : "success";
-}
-
-function getRunStateValue({
-  active,
-  currentAssistance,
-  terminalStatus,
-}: {
-  active: boolean;
-  currentAssistance: CurrentRunAssistance | null;
-  terminalStatus: TerminalRunStatus;
-}): string | null {
-  if (!active) {
-    return terminalStatus ? describeTerminalRunStatus(terminalStatus) : null;
-  }
-  if (!currentAssistance) {
-    return "running";
-  }
-  if (currentAssistance.progressPosture === "blocked") {
-    return "awaiting input";
-  }
-  if (currentAssistance.progressPosture === "waiting_retry") {
-    return "waiting retry";
-  }
-  return "running";
 }
 
 function summarizeCheckpoints(events: SpineEvent[]): [string, string][] {

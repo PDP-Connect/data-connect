@@ -47,18 +47,18 @@ const STREAM_REACH_REASON_SET = new Set<string>(STREAM_REACH_REASONS);
  * case go unnoticed before this reason was mapped.
  */
 const STREAM_REACH_MESSAGE: Record<StreamReachReason, string> = {
-  companion_unavailable: "The browser session is no longer running on the server. Start the browser step again.",
-  invalid_token: "The browser stream link is no longer valid. Start the browser step again.",
-  session_consumed: "The browser stream was already opened elsewhere. Start the browser step again.",
-  session_expired: "The browser stream link expired. Start the browser step again.",
-  unknown: "Couldn't reach the browser stream after several tries.",
+  companion_unavailable: "The browser is no longer running. Try again.",
+  invalid_token: "This browser link isn't valid. Try again.",
+  session_consumed: "This browser was already opened elsewhere. Try again.",
+  session_expired: "This browser link expired. Try again.",
+  unknown: "Couldn't open the browser after several tries.",
   unreachable_origin:
-    "Couldn't reach the browser stream. Check that the reference server is reachable, then try again.",
+    "Couldn't reach DataConnect. Check your connection, then try again.",
 };
 
 function unknownTroubleMessage(probeStatus: number | null): string {
   const base = STREAM_REACH_MESSAGE.unknown;
-  return probeStatus === null ? base : `${base} (server responded ${probeStatus})`;
+  return probeStatus === null ? base : `${base} (error ${probeStatus})`;
 }
 
 export interface StreamReachProbeResult {

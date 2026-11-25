@@ -7,12 +7,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./stream-viewer.tsx", import.meta.url)), "utf8");
-const manualCompletionLabelPattern = /Continue collection/;
+const manualCompletionLabelPattern = /let submitLabel = "Done";/;
+const submitButtonUsesLabelPattern = /<IcButton disabled=\{isPending\} size="sm" type="submit">\s*\{submitLabel\}/;
 const hideInstructionsPattern = /Hide instructions/;
-const showInstructionsPattern = /Show continue controls/;
+const showInstructionsPattern = /Show instructions/;
 const oldCompletionLabelPattern = /I'm done/;
 const oldBrowserStepLabelPattern = /Mark browser step complete/;
-const manualResumeCopyPattern = /it does not resume the run/;
 const collapsedStatePattern = /const \[collapsed, setCollapsed\] = useState\(false\)/;
 const hideClickPattern = /onClick=\{\(\) => setCollapsed\(true\)\}/;
 const showClickPattern = /onClick=\{\(\) => setCollapsed\(false\)\}/;
@@ -52,10 +52,11 @@ const responseRequiredDockGatePattern =
   /if \(!\(interactionRequiresResponse && \(interactionKind === "otp" \|\| interactionKind === "manual_action"\)\)\) \{[\s\S]{0,80}return null;/;
 
 test("manual browser step controls distinguish hiding from completion", () => {
+  // Brief item 4: use the concise Done label and one short instruction line for the person.
   assert.match(source, manualCompletionLabelPattern);
+  assert.match(source, submitButtonUsesLabelPattern);
   assert.match(source, hideInstructionsPattern);
   assert.match(source, showInstructionsPattern);
-  assert.match(source, manualResumeCopyPattern);
   assert.doesNotMatch(source, oldCompletionLabelPattern);
   assert.doesNotMatch(source, oldBrowserStepLabelPattern);
 });
