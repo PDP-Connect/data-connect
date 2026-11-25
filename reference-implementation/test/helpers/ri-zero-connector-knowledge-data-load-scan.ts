@@ -255,17 +255,6 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // OS reauth handoff state, never connector/provider policy.
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
-  // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
-  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
-  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
-  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
-  // developer-supplied absolute directory path given to the public
-  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
-  // already allowlisted above (cache.ts:125, common.ts:35): the path is
-  // caller-supplied, the filename component is an RI-owned generic literal,
-  // and this feature is explicitly unsigned/unregistered developer tooling
-  // (see this file's own module doc comment), not connector catalog data.
-  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath, "utf8")',
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-dir>, entryName), where the dir is
   // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
