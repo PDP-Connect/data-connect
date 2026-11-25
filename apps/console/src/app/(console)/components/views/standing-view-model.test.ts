@@ -649,12 +649,15 @@ test("each seeded sample's counts agree with its own rows", () => {
 
   const calm = buildDemoInputs("calm", HREFS).sourcePage.sources;
   const words = calm.map((source) => sourceStatusWords(source, { now: NOW }));
-  // Lead decision (home-pictures 6): calm lists at least six rows mixing up to date, imported, syncing and one paused.
+  // Lead decision (home-pictures 6): calm lists at least six rows mixing up to date and imported.
   assert.ok(calm.length >= 6);
   assert.ok(words.some((status) => status.row === 19));
   assert.ok(words.some((status) => status.row === 18));
-  assert.ok(words.some((status) => status.row === 11));
-  assert.equal(words.filter((status) => status.row === 10).length, 1);
+  // Calm shows the calm title, so no calm row syncs; "Syncing <name>" stays pinned by its own test.
+  assert.ok(words.every((status) => status.row !== 11));
+  assert.equal(buildHomeViewModel(buildDemoInputs("calm", HREFS)).title, "Everything is up to date");
+  // A paused row would stop the calm title, so calm has none.
+  assert.ok(words.every((status) => status.row !== 10));
   assert.ok(words.every((status) => !status.needsYou));
 });
 

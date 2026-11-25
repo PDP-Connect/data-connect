@@ -414,8 +414,8 @@ function demoRows(scenario: DemoScenario): RefConnectorSummary[] {
       source(19, "Gmail", { connection_health: health({ last_success_at: ago(0.3), lateness: { state: "on_time" } }), total_records: 21_870 }),
       source(19, "Google Calendar", { connection_health: health({ last_success_at: ago(0.8), lateness: { state: "on_time" } }), total_records: 1_964 }),
       source(18, "Pocket", { total_records: 846 }),
-      source(10, "Reddit", { total_records: 2_310 }),
-      source(11, "Slack", { total_records: 9_528 }),
+      source(19, "Reddit", { connection_health: health({ last_success_at: ago(3), lateness: { state: "on_time" } }), total_records: 2_310 }),
+      source(19, "Slack", { connection_health: health({ last_success_at: ago(1.5), lateness: { state: "on_time" } }), total_records: 9_528 }),
       source(19, "Spotify", { connection_health: health({ last_success_at: ago(2), lateness: { state: "on_time" } }), total_records: 7_205 }),
       source(19, "Strava", { connection_health: health({ last_success_at: ago(5), lateness: { state: "on_time" } }), total_records: 418 }),
     ];

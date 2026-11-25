@@ -147,8 +147,8 @@ function NeedLines({ need }: { need: HomeNeedRow }) {
           </span>
           {need.syncNote ? (
             <span className={`${FAINT_TEXT} tabular-nums`}>
-              {" "}
-              · <span className="whitespace-nowrap">{need.syncNote}</span>
+              <span className="hidden min-[560px]:inline"> · </span>
+              <span className="block whitespace-nowrap min-[560px]:inline">{need.syncNote}</span>
             </span>
           ) : null}
         </Text>
@@ -222,11 +222,24 @@ function DataSourceRow({ source }: { source: HomeSourceRow }) {
     >
       <span className="flex min-w-0 items-center gap-3">
         <LogoTile iconId={source.source.connector_id} name={source.name} />
-        <Text as="span" className="truncate text-[15px] font-medium text-foreground">
-          {source.name}
-        </Text>
+        <span className="min-w-0">
+          <Text as="span" className="block truncate text-[15px] font-medium text-foreground">
+            {source.name}
+          </Text>
+          <span
+            className="block text-[13px] leading-5 min-[560px]:hidden"
+            data-source-id={source.source.connection_id}
+            data-status-row={source.status.row}
+          >
+            <SourceStatusText status={source.status} />
+          </span>
+        </span>
       </span>
-      <span data-source-id={source.source.connection_id} data-status-row={source.status.row}>
+      <span
+        className="hidden min-[560px]:inline"
+        data-source-id={source.source.connection_id}
+        data-status-row={source.status.row}
+      >
         <SourceStatusText className="whitespace-nowrap" status={source.status} />
       </span>
     </Link>
