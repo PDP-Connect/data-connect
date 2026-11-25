@@ -10,12 +10,12 @@ import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
-import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
-import { RemoteAccessSetting } from "./remote-access-setting.tsx"
-import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
-import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
 import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
 import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
+import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
+import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
+import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
+import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -37,10 +37,7 @@ export default async function SettingsPage() {
   return (
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
-        <PageHeader
-          description="Control optional features for this browser and the way this Personal Server can be reached."
-          title="Settings"
-        />
+        <PageHeader title="Settings" />
         <Section
           description="Reveal connector surfaces intended for local development and connector testing."
           title="Developer mode"

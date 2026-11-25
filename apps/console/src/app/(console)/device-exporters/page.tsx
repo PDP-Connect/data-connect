@@ -7,8 +7,8 @@ import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { EmptyState } from "@pdpp/operator-ui/components/empty-state";
 import { Callout, DataList, MetaPill, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
-import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { formatSourceOutboxState } from "../lib/connection-evidence.ts";
 import { loadBrowserBoundVerdict } from "../lib/load-browser-connect-support.ts";
@@ -104,14 +104,13 @@ export default async function DeviceExportersPage({
         <PageHeader
           breadcrumbs={addConnectionBreadcrumbs}
           count={`${devices.length}`}
-          description="Connect a supported local collector to send data from the machine where it is stored. The collector controls when it runs; this server manages enrollment, data receipt, and connection health."
           meta={
             <>
               <MetaPill label="surface" tone="protocol" value="reference-experimental" />
               <MetaPill label="source instances" value={sourceInstances.data.length} />
             </>
           }
-          title="Local device exporters"
+          title="Collectors on your devices"
         />
 
         {browserBoundRequest ? (

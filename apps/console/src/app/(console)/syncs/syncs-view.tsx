@@ -16,6 +16,7 @@ import {
   BandCell,
   buttonVariants,
   Caption,
+  type ConnectorIconLike,
   Endorse,
   IcButton,
   IcSelect,
@@ -27,14 +28,12 @@ import {
   TableCell,
   TableHeader,
   TableHeaderRow,
-  type ConnectorIconLike,
 } from "@pdpp/brand-react";
 import { formatCoverageAxis, humanizeFieldLabel } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
-
-import { SOURCE_WORK_GROUP_COPY } from "../lib/source-actionability.ts";
 import { ConnectorMark } from "../components/connector-mark.tsx";
+import { SOURCE_WORK_GROUP_COPY } from "../lib/source-actionability.ts";
 import {
   type DuplicateSyncGroup,
   describeRecentSyncOutcome,
@@ -739,8 +738,7 @@ export function SyncsView({
   return (
     <div className="rr-sync">
       <header className="rr-sync__masthead">
-        <h1 className="rr-sync__title">Syncs</h1>
-        <p className="rr-sync__sub">What ran recently and what needs your attention.</p>
+        <h1 className="rr-sync__title">Sync history</h1>
         {seeded ? <Endorse className="rr-sync__seeded" label="seeded demo" status="continuous" /> : null}
       </header>
 

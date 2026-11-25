@@ -69,7 +69,6 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
     <RecordroomShellWithPalette>
       <SchedulesPoller enabled={hasActiveRun} />
       <SchedulesView
-        description="Set automatic refresh cadences for your connectors. Keep high-friction ones (banks, browser-based) manual or infrequent."
         renderRow={(summary) => (
           <ScheduleRow
             connectorIcon={connectorIcons[summary.connector_id]}

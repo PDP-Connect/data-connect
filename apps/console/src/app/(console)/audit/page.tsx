@@ -150,7 +150,7 @@ function TracesHeader() {
   return (
     <header style={{ marginBottom: 24, maxWidth: 640 }}>
       <h1 className="pdpp-heading text-foreground" style={{ margin: "0 0 4px" }}>
-        Audit
+        Activity
       </h1>
       <p
         style={{

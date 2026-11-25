@@ -9,7 +9,7 @@ import { EmptyState } from "../empty-state.tsx";
 import { DataList, PageHeader, Section } from "../primitives.tsx";
 
 export interface SchedulesViewProps {
-  description: string;
+  description?: string;
   readOnlyNotice?: ReactNode;
   renderRow: (summary: RefConnectorSummary) => ReactNode;
   scheduledEmptyHint?: string;

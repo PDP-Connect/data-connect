@@ -86,7 +86,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
       if (err instanceof ReferenceServerUnreachableError) {
         return (
           <RecordroomShellWithPalette>
-            <PageHeader title="Grants" />
+            <PageHeader title="Apps" />
             <ServerUnreachable />
           </RecordroomShellWithPalette>
         );
@@ -140,7 +140,6 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     active: "grants",
     activeFilterChips: activeFilters,
     buildListHref: (overrides) => listHref(params, overrides),
-    description: "Issued authorizations and lifecycle decisions for client access to owner data.",
     emptyHint: "Grants appear after a connected app requests access and the request is approved, denied, or fails.",
     emptyTitle: "No grants yet",
     filters: {
@@ -183,7 +182,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     routes: dashboardRoutes,
     rowKey: (grant) => grant.grant_id,
     subject: "grant",
-    title: "Grants",
+    title: "Apps",
   };
 
   return (

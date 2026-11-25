@@ -43,8 +43,9 @@ const FORBIDDEN_DEV_STRINGS_RE = /pnpm --dir|packages\/[a-z]|PDPP monorepo check
 const NAV_SOURCES_RE = /\{\s*label: "Data sources",\s*href: "\/sources"/;
 const NAV_APPS_RE = /\{\s*label: "Apps",\s*href: "\/grants"/;
 const NAV_CONNECT_APP_CHILD_RE = /\{ label: "Connect an app", href: "\/connect" \}/;
-const CONNECT_PAGE_TITLE_RE = /title="Connect apps"/;
-const CONNECT_PAGE_DESCRIPTION_RE = /grant-scoped read access[\s\S]*?go to Sources/;
+const CONNECT_PAGE_TITLE_RE = /title="Connect an app"/;
+// The heading subtitle left (it used banned words); the "Need more data first?" note now points setup to Sources.
+const CONNECT_PAGE_SETUP_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}[\s\S]*?title="Need more data first\?"/;
 
 async function sourceFile(name: string): Promise<string> {
   return readFile(`${SOURCES}${name}`, "utf8");
@@ -239,7 +240,7 @@ test("shared navigation distinguishes Data sources from app access", async () =>
 test("Connect apps stays a read-access page that points setup to Sources", async () => {
   const connect = await readFile(CONNECT_PAGE_FILE, "utf8");
   assert.match(connect, CONNECT_PAGE_TITLE_RE);
-  assert.match(connect, CONNECT_PAGE_DESCRIPTION_RE);
+  assert.match(connect, CONNECT_PAGE_SETUP_POINTER_RE);
   assert.doesNotMatch(connect, LIST_CONNECTOR_MANIFESTS_RE);
   assert.doesNotMatch(connect, SOURCE_SETUP_SECTION_RE);
 });

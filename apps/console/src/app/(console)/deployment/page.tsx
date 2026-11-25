@@ -155,6 +155,7 @@ export default async function DeploymentPage({ searchParams }: { searchParams: P
         sources={sources}
         sourcesTruncated={sourcesTruncated}
         streamSizes={streamSizes}
+        title="Server"
         topBlobs={topBlobs}
         topRecords={topRecords}
       />
