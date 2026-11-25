@@ -148,12 +148,10 @@ interface OptionalModuleMap {
   readonly credentialProbe: Record<string, unknown> | null;
   readonly credentialProbeTransport: Record<string, unknown> | null;
   readonly coverage: Record<string, unknown> | null;
-  readonly injection: Record<string, unknown> | null;
   readonly manifests: Record<string, unknown> | null;
   readonly manualUpload: Record<string, unknown> | null;
   readonly ntfy: Record<string, unknown> | null;
   readonly options: Record<string, unknown> | null;
-  readonly roster: Record<string, unknown> | null;
 }
 
 type OptionalRequire = (specifier: string) => unknown;
@@ -220,21 +218,16 @@ const optionalModules: OptionalModuleMap = {
   credentialProbe: requireOptional("@pdpp/polyfill-connectors/credential-probe"),
   credentialProbeTransport: requireOptional("@pdpp/polyfill-connectors/credential-probe-transport"),
   coverage: requireOptional("@pdpp/polyfill-connectors/local-source-inventory"),
-  injection: requireOptional("@pdpp/polyfill-connectors/static-secret-injection"),
   manifests: requireOptional("@pdpp/polyfill-connectors/manifests"),
   manualUpload: requireOptional("@pdpp/polyfill-connectors/manual-upload-validation"),
   ntfy: requireOptional("@pdpp/polyfill-connectors/ntfy"),
   options: requireOptional("@pdpp/polyfill-connectors/connector-options-schema"),
-  roster: requireOptional("@pdpp/polyfill-connectors/connector-conformance-roster"),
 };
 
 export function readPolyfillManifests(): readonly PolyfillManifestEntry[] {
   const read = optionalModules.manifests?.readPolyfillManifests;
   return typeof read === "function" ? (read() as readonly PolyfillManifestEntry[]) : [];
 }
-
-export const PRODUCTION_READY_CONNECTORS: Readonly<Record<string, { readonly testFile: string }>> =
-  (optionalModules.roster?.PRODUCTION_READY_CONNECTORS as Readonly<Record<string, { readonly testFile: string }>> | undefined) ?? {};
 
 function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -349,26 +342,6 @@ export function parseCoverageDiagnosticsStateSnapshot(
         rows: [],
         unexpectedStores: [],
       };
-}
-
-export async function loadStaticSecretInjectionHelpers(): Promise<{
-  readonly buildConnectionScopedSecretEnv: (connectorId: string, recovered: unknown, sourceBinding?: unknown) => Record<string, string>;
-  readonly isStaticSecretCaptureOptional: (connectorId: string) => boolean;
-  readonly isStaticSecretConnector: (connectorId: string) => boolean;
-}> {
-  const module = optionalModules.injection;
-  return {
-    buildConnectionScopedSecretEnv:
-      (module?.buildConnectionScopedSecretEnv as
-        | ((connectorId: string, recovered: unknown, sourceBinding?: unknown) => Record<string, string>)
-        | undefined) ??
-      (() => {
-        throw new Error("Static-secret connector runtime support is unavailable until a connector is installed.");
-      }),
-    isStaticSecretCaptureOptional:
-      (module?.isStaticSecretCaptureOptional as ((connectorId: string) => boolean) | undefined) ?? (() => false),
-    isStaticSecretConnector: (module?.isStaticSecretConnector as ((connectorId: string) => boolean) | undefined) ?? (() => false),
-  };
 }
 
 export async function loadCredentialProbeHelpers(): Promise<{
