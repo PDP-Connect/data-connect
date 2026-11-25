@@ -88,13 +88,13 @@ function buildNavigationCommands(basePath: string, segments: DashboardSegments):
       title: "Explore",
     },
     {
-      description: "Go straight to a sync, an app's access or an activity entry by its ID.",
+      description: "Find a sync, app access or activity entry by its ID.",
       href: `${basePath}/search`,
       id: "nav-search",
       keywords: ["jump", "trace", "grant", "run", "id"],
       kind: "jump",
       section: "Navigate",
-      title: "Find by ID",
+      title: "Search",
     },
     {
       description: "Who read what, when, and anything that failed.",
@@ -250,24 +250,6 @@ function buildLiveOnlyQuickActions(basePath: string, segments: DashboardSegments
       kind: "action",
       section: "Quick action",
       title: "Failed syncs",
-    },
-    {
-      description: "Recent records by date, in Explore.",
-      href: `${basePath}/explore`,
-      id: "quick-records-timeline",
-      keywords: ["records", "timeline", "activity", "history", "explore"],
-      kind: "action",
-      section: "Quick action",
-      title: "Record activity",
-    },
-    {
-      description: "Each data source and the kinds of records it holds.",
-      href: `${basePath}/${segments.records}`,
-      id: "quick-connector-inventory",
-      keywords: ["source", "sources", "connector", "inventory", "streams", "records"],
-      kind: "action",
-      section: "Quick action",
-      title: "Records by data source",
     },
   ];
 }

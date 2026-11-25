@@ -53,6 +53,16 @@ const DETECTS_HTTP_404_410 =
   /err\s+instanceof\s+ResourceServerHttpError\s*&&\s*\(err\.status\s*===\s*404\s*\|\|\s*err\.status\s*===\s*410\)/;
 const BOUNDED_STATE_COPY = /not\s+available/i;
 const RETHROWS_UNKNOWN = /throw\s+err;/;
+const HUMAN_KIND_RE = /humanizeFieldLabel\(streamName\)/;
+const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
+const HEALTH_TITLE_RE = /what arrived/;
+const TECHNICAL_SECTIONS_FOLDED_RE =
+  /<details[\s\S]*?<Section title="Summary">[\s\S]*?<Section title="Freshness">[\s\S]*?<\/details>/;
+const BANNED_MAIN_WORDS_RE = /\b(?:manifest|cursor|sample|has_many|run|connector|grant|trace|projection)\b/i;
+const MISSING_FIELD_SENTENCE_RE = /checked record\$\{field\.nullCount === 1 \? " is" : "s are"\} missing/;
+const ZERO_SAMPLE_GUARD_RE = /health\.sampled === 0 \? <p[^>]*>No records to check yet\.<\/p>[\s\S]*?health\.sampled > 0 && fields\.length > 0/;
+const EVERY_FIELD_SENTENCE_RE = /Every checked record has/;
+const PLAIN_DETAILS_LEAD_IN_RE = /Here is how we checked these records\./;
 
 test("stream health page imports the typed ResourceServerHttpError so it can branch on status", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -73,4 +83,23 @@ test("stream health page detects a 404 or 410 from the resource server and rende
 test("stream health page still rethrows unknown errors so the segment error boundary catches them", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, RETHROWS_UNKNOWN);
+});
+
+test("the health page humanizes the kind name and keeps technical checks inside Details", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, "Kind health page": use the human kind name and keep technical facts folded.
+  assert.match(src, HUMAN_KIND_RE);
+  // data-pages.md, decision 1: use the data source label in the breadcrumb.
+  assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
+  assert.match(src, HEALTH_TITLE_RE);
+  assert.match(src, TECHNICAL_SECTIONS_FOLDED_RE);
+
+  const mainChecks = src.slice(src.indexOf('<Section title="What the records show">'), src.indexOf("<details"));
+  assert.doesNotMatch(mainChecks, BANNED_MAIN_WORDS_RE);
+  assert.match(mainChecks, MISSING_FIELD_SENTENCE_RE);
+  assert.match(mainChecks, EVERY_FIELD_SENTENCE_RE);
+  // RAISE-RULES 6 and deputy repair: with nothing checked, do not claim "Every checked record has" a field.
+  assert.match(mainChecks, ZERO_SAMPLE_GUARD_RE);
+  // DIRECTION.md, "Kind health page": give the folded technical facts a plain lead-in.
+  assert.match(src, PLAIN_DETAILS_LEAD_IN_RE);
 });

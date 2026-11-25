@@ -10,6 +10,7 @@ import {
   formatDeclaredAmount,
   formatStructuredCell,
   humanizeFieldLabel,
+  parseTimestampValue,
   type RecordPreview,
 } from "@pdpp/display";
 import { DataList, PageHeader, Pager, Section } from "@pdpp/operator-ui/components/primitives";
@@ -61,6 +62,7 @@ import {
   reverseChildListLinksFromManifest,
 } from "../../lib/relationships.ts";
 import { ColumnsMenu } from "./columns-menu.tsx";
+import { RecordOrderSelect } from "./record-order-select.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -69,6 +71,11 @@ const TH = "pdpp-eyebrow border-border/70 border-b px-3 py-2 text-left text-mute
 const TD = "pdpp-caption border-border/70 border-b px-3 py-2";
 
 const FILTER_PARAM_RE = /^filter\[(.+)\]$/;
+const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}(?:$|[T ])/;
+
+function isDateValue(value: unknown): value is string {
+  return typeof value === "string" && DATE_PREFIX_RE.test(value) && parseTimestampValue(value) !== null;
+}
 
 function formatStreamPageCount(input: {
   filtered: boolean;
@@ -286,7 +293,7 @@ export default async function StreamPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Sources" />
+          <PageHeader title="Data sources" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -300,24 +307,22 @@ export default async function StreamPage({
         <RecordroomShellWithPalette>
           <PageHeader
             breadcrumbs={[
-              { href: "/sources", label: "Sources" },
+              { href: "/sources", label: "Data sources" },
               { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
               { label: humanizeFieldLabel(streamName) },
             ]}
-            title={<span title={streamName}>{humanizeFieldLabel(streamName)}</span>}
+            title={humanizeFieldLabel(streamName)}
           />
-          <div className="rounded-md border border-border/70 bg-muted/30 p-4">
+          <div className="border-border/70 border-y py-4">
             <p className="pdpp-caption text-foreground">
-              This stream is not available for <span title={connectionId}>{sourceLabel}</span>.
+              This kind of record is not available for {sourceLabel}.
             </p>
             <p className="pdpp-caption mt-2 text-muted-foreground">
-              The connector's current manifest no longer lists{" "}
-              <span title={streamName}>{humanizeFieldLabel(streamName)}</span> — it was likely renamed or retired, or
-              this link is a stale entry. Open{" "}
+              The data source no longer provides {humanizeFieldLabel(streamName)}. Open{" "}
               <Link className="underline underline-offset-2" href={`/sources/${encodeURIComponent(connectionId)}`}>
-                the connection page
+                the data source
               </Link>{" "}
-              for the streams available now.
+              to see what it has now.
             </p>
           </div>
         </RecordroomShellWithPalette>
@@ -334,7 +339,7 @@ export default async function StreamPage({
   const prevHref = trail.length ? hrefFor(streamPath, trail.slice(0, -1), hrefState) : null;
   const nextHref = page.next_cursor ? hrefFor(streamPath, [...trail, page.next_cursor], hrefState) : null;
   const recordHref = (id: string) => `${streamPath}/${encodeURIComponent(id)}`;
-  const headerCount = formatStreamPageCount({
+  const pageCount = formatStreamPageCount({
     filtered,
     hasMore: page.has_more,
     matchingCount: matchingCountForHeader(filtered, page),
@@ -445,43 +450,54 @@ export default async function StreamPage({
               />
             )}
             <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={`${streamPath}/health`}>
-              Stream health →
+              What arrived →
             </Link>
           </>
         }
         breadcrumbs={[
-          { href: "/sources", label: "Sources" },
+          { href: "/sources", label: "Data sources" },
           { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
           { label: humanizeFieldLabel(streamName) },
         ]}
-        count={headerCount}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
             <span>
-              Source <span className="text-foreground">{sourceLabel}</span>
+              {streamRecordTotal === null
+                ? "Record count unavailable"
+                : `${streamRecordTotal.toLocaleString()} record${streamRecordTotal === 1 ? "" : "s"}`}{" "}
+              · <span className="text-foreground">{sourceLabel}</span>
             </span>
           </span>
         }
-        title={<span title={streamName}>{humanizeFieldLabel(streamName)}</span>}
+        title={humanizeFieldLabel(streamName)}
       />
 
-      <StreamEvidenceSection
-        filtered={filtered}
-        filters={exactFilters}
-        hasMore={page.has_more}
-        latestSourceRun={latestSourceRun}
-        pageNumber={trail.length + 1}
-        shown={page.data.length}
-        sourceHref={`/sources/${encodeURIComponent(connectionId)}`}
-        sourceLabel={sourceLabel}
-        streamCollectionFacts={streamCollectionFacts}
-        streamName={streamName}
-        syncsHref={`/syncs?connection_id=${encodeURIComponent(connectionId)}`}
-        totalHeld={streamRecordTotal}
-      />
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <p className="pdpp-caption text-muted-foreground">{pageCount}</p>
+        <RecordOrderSelect
+          currentOrder={order ?? "desc"}
+          pathname={streamPath}
+        />
+      </div>
 
-      <WarningsBanner warnings={page.warnings} />
+      <details className="mb-6 border-border/70 border-y py-3">
+        <summary className="pdpp-caption cursor-pointer font-medium text-foreground">Details</summary>
+        <div className="pt-3">
+          <WarningsBanner warnings={page.warnings} />
+          <StreamEvidenceSection
+            filtered={filtered}
+            filters={exactFilters}
+            hasMore={page.has_more}
+            latestSourceRun={latestSourceRun}
+            pageNumber={trail.length + 1}
+            shown={page.data.length}
+            streamCollectionFacts={streamCollectionFacts}
+            syncsHref={`/syncs?connection_id=${encodeURIComponent(connectionId)}`}
+            totalHeld={streamRecordTotal}
+          />
+        </div>
+      </details>
 
       {page.data.length === 0 ? (
         <p className="pdpp-caption text-muted-foreground italic">No records.</p>
@@ -515,7 +531,7 @@ export default async function StreamPage({
           </ul>
 
           {/* Desktop table */}
-          <div className="hidden overflow-x-auto rounded-md border border-border/70 sm:block">
+          <div className="hidden overflow-x-auto sm:block">
             <table className="min-w-full">
               <thead className="bg-muted/40">
                 <tr>
@@ -527,7 +543,7 @@ export default async function StreamPage({
                       quiet mono token + the row link. */}
                   <th className={TH}>record</th>
                   {columns.map((c) => (
-                    <th className={TH} key={c} title={c}>
+                    <th className={TH} key={c}>
                       {humanizeFieldLabel(c)}
                     </th>
                   ))}
@@ -567,7 +583,7 @@ export default async function StreamPage({
                               <Link
                                 className="block max-w-[24rem] truncate font-mono text-foreground underline underline-offset-2 hover:no-underline"
                                 href={parentLink.href}
-                                title={`${parentLink.parentStream} · ${stringifyCell(r.data?.[c])}`}
+                                title={`${humanizeFieldLabel(parentLink.parentStream)} · ${stringifyCell(r.data?.[c])}`}
                               >
                                 {stringifyCell(r.data?.[c])}
                               </Link>
@@ -575,6 +591,8 @@ export default async function StreamPage({
                           );
                         }
                         const display = cellText(r, c);
+                        const rawValue = r.data?.[c];
+                        const dateValue = isDateValue(rawValue) ? rawValue : null;
                         return (
                           <td className={`${TD} align-top`} key={c}>
                             <Link
@@ -582,8 +600,8 @@ export default async function StreamPage({
                               className="block"
                               href={recordHref(r.id)}
                             >
-                              <span className="block max-w-[24rem] truncate" title={display}>
-                                {display}
+                              <span className="block max-w-[24rem] truncate">
+                                {dateValue ? <IcTimestamp value={dateValue} /> : display}
                               </span>
                             </Link>
                           </td>
@@ -615,10 +633,7 @@ function StreamEvidenceSection({
   latestSourceRun,
   pageNumber,
   shown,
-  sourceHref,
-  sourceLabel,
   streamCollectionFacts,
-  streamName,
   syncsHref,
   totalHeld,
 }: {
@@ -628,26 +643,17 @@ function StreamEvidenceSection({
   latestSourceRun: RefConnectorRunSummary | null;
   pageNumber: number;
   shown: number;
-  sourceHref: string;
-  sourceLabel: string;
   streamCollectionFacts: StreamCollectionFacts | null;
-  streamName: string;
   syncsHref: string;
   totalHeld: number | null;
 }) {
   const latestStreamRun = latestStreamRunEvidence(streamCollectionFacts, latestSourceRun);
   return (
     <Section
-      description="Every saved record in this stream, paginated, plus the latest stream-level collection fact the runtime reported."
-      title="Stream evidence"
+      description="The page and collection information used to show these records."
+      title="Record details"
     >
-      <DataList ariaLabel="Stream evidence">
-        <StreamEvidenceRow
-          detail={`Source ${sourceLabel} · stream ${humanizeFieldLabel(streamName)}`}
-          href={sourceHref}
-          label="Scope"
-          value="Open source"
-        />
+      <DataList ariaLabel="Record details">
         <StreamEvidenceRow
           detail={streamTotalEvidenceLabel(totalHeld)}
           label="Record total"
@@ -661,7 +667,7 @@ function StreamEvidenceSection({
         <StreamEvidenceRow
           detail={latestStreamRun.detail}
           href={latestStreamRun.href}
-          label="Latest stream run"
+          label="Latest collection"
           value={latestStreamRun.value}
         />
         <StreamEvidenceRow
@@ -672,8 +678,8 @@ function StreamEvidenceSection({
         <StreamEvidenceRow
           detail="Scoped to this exact source, not every source of the same connector type."
           href={syncsHref}
-          label="Run history"
-          value="Open source-scoped Syncs"
+          label="Sync history"
+          value="Open sync history"
         />
       </DataList>
     </Section>
@@ -770,7 +776,7 @@ function ReverseChildLinks({ links }: { links: ReverseChildListLink[] }) {
           href={link.href}
           key={`reverse:${link.childStream}:${link.foreignKey}`}
         >
-          {link.childStream} (has_many) →
+          {humanizeFieldLabel(link.childStream)} →
         </Link>
       ))}
     </div>
@@ -849,13 +855,16 @@ function RecordCard({
         {cardTs.secondary ? (
           <>
             <dt className="text-muted-foreground">{cardTs.secondary.label}</dt>
-            <dd className="break-all text-muted-foreground">{cardTs.secondary.value}</dd>
+            <dd className="break-all text-muted-foreground">
+              <IcTimestamp value={cardTs.secondary.value} />
+            </dd>
           </>
         ) : null}
         {columns.map((c) => {
           const raw = record.data?.[c];
           const amount = formatDeclaredAmount(raw, declaredFieldTypes[c]);
           const structured = amount ? null : formatStructuredCell(raw);
+          const dateValue = isDateValue(raw) ? raw : null;
           let v: string;
           if (amount) {
             v = amount.text;
@@ -869,11 +878,11 @@ function RecordCard({
           }
           return (
             <Fragment key={c}>
-              <dt className="truncate text-muted-foreground" title={c}>
+              <dt className="truncate text-muted-foreground">
                 {humanizeFieldLabel(c)}
               </dt>
               <dd className="break-words" title={structured?.detail}>
-                {truncate(v, 120)}
+                {dateValue ? <IcTimestamp value={dateValue} /> : truncate(v, 120)}
               </dd>
             </Fragment>
           );

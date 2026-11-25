@@ -49,6 +49,17 @@ const DETECTS_HTTP_404 =
 const BOUNDED_STATE_COPY = /not\s+available/i;
 const RETHROWS_UNKNOWN = /throw\s+err;/;
 const RS_CLIENT_THROWS_TYPED_HTTP_ERROR = /throw\s+new\s+ResourceServerHttpError\(path,\s*res\.status,\s*body\)/;
+const HUMAN_KIND_RE = /humanizeFieldLabel\(streamName\)/;
+const HUMAN_PAGE_TITLE_RE = /title=\{humanizeFieldLabel\(streamName\)\}/;
+const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
+const DETAILS_WRAP_EVIDENCE_RE = /<details[\s\S]*?<StreamEvidenceSection[\s\S]*?<\/details>/;
+const REMOVED_DUPLICATE_SOURCE_LINK_RE = /value="Open source"/;
+const SECONDARY_TIMESTAMP_FORMATTED_RE = /<IcTimestamp value=\{cardTs\.secondary\.value\} \/>/;
+const SECONDARY_TIMESTAMP_RAW_RE = /<dd[^>]*>\s*\{cardTs\.secondary\.value\}\s*<\/dd>/;
+const CARD_DATE_FIELD_FORMATTED_RE = /const dateValue = isDateValue\(raw\)[\s\S]*?<IcTimestamp value=\{dateValue\} \/>/;
+const TABLE_DATE_FIELD_FORMATTED_RE = /const rawValue = r\.data\?\.\[c\][\s\S]*?<IcTimestamp value=\{dateValue\} \/>/;
+const KIND_MAIN_COPY_RE = /<PageHeader\n {8}actions=[\s\S]*?(?=<details)/;
+const BANNED_VISIBLE_KIND_WORDS_RE = /\b(?:stream|run|connector|manifest|cursor|grant|trace|projection)\b|Raw JSON|Source-scoped Syncs/i;
 
 test("stream page imports the typed ResourceServerHttpError so it can branch on status", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -69,6 +80,35 @@ test("stream page detects a 404 or 410 from the resource server and renders a bo
 test("stream page still rethrows unknown errors so the segment error boundary catches them", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, RETHROWS_UNKNOWN);
+});
+
+test("the kind page uses a human name in its title and breadcrumb and keeps technical facts folded", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, "What must stay true": no raw names; technical facts stay in Details.
+  assert.match(src, HUMAN_KIND_RE);
+  assert.match(src, HUMAN_PAGE_TITLE_RE);
+  // data-pages.md, decision 1: show the data source label instead of its ID.
+  assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
+  assert.match(src, DETAILS_WRAP_EVIDENCE_RE);
+  assert.doesNotMatch(src, REMOVED_DUPLICATE_SOURCE_LINK_RE);
+});
+
+test("the kind page formats the secondary card timestamp instead of showing raw ISO text", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, "What must stay true": no raw dates on these pages.
+  assert.match(src, SECONDARY_TIMESTAMP_FORMATTED_RE);
+  assert.doesNotMatch(src, SECONDARY_TIMESTAMP_RAW_RE);
+  assert.match(src, CARD_DATE_FIELD_FORMATTED_RE);
+  assert.match(src, TABLE_DATE_FIELD_FORMATTED_RE);
+});
+
+test("the kind page keeps technical words out of the visible header and controls", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const mainCopy = src.match(KIND_MAIN_COPY_RE)?.[0];
+
+  // DIRECTION.md, "What must stay true": banned terms stay folded under Details.
+  assert.ok(mainCopy, "the page header and controls should precede the folded details");
+  assert.doesNotMatch(mainCopy, BANNED_VISIBLE_KIND_WORDS_RE);
 });
 
 test("rs-client.authedFetch throws the typed ResourceServerHttpError on non-OK responses", async () => {

@@ -15,7 +15,7 @@ import { DetailLoadingSkeleton } from "../../../../components/route-loading.tsx"
 export default function StreamHealthLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="this stream's coverage" />
+      <DetailLoadingSkeleton label="these checks" />
     </RecordroomShellWithPalette>
   );
 }

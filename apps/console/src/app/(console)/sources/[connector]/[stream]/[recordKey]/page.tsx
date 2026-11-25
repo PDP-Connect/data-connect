@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcTimestamp } from "@pdpp/brand-react";
-import { buildRecordPreview, classifyRecordKind, deriveDeclaredFieldTypes } from "@pdpp/display";
+import { buildRecordPreview, classifyRecordKind, deriveDeclaredFieldTypes, humanizeFieldLabel } from "@pdpp/display";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
 import { buildBlobAffordance, buildPeekFields } from "@pdpp/operator-ui/components/views/explorer-utils";
@@ -45,6 +45,7 @@ import {
   reverseChildListDedupKey,
   reverseChildListLinksFromManifest,
 } from "../../../lib/relationships.ts";
+import { recordCrumbLabel, recordTitlePreview } from "./record-title.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -77,10 +78,7 @@ export default async function RecordDetailPage({
   let connectorStreams: ManifestStream[] = [];
   let connectorIcon: ConnectorManifest["icon"] = null;
   try {
-    const connection = await resolveConnectionForRecordsRoute(routeId);
-    if (!connection) {
-      notFound();
-    }
+    const connection = await resolveRecordsConnection(routeId);
     connectionId = connection.connection_id;
     connectorId = connection.connector_id;
     sourceLabel = sourceLabelForConnection(connection);
@@ -118,7 +116,7 @@ export default async function RecordDetailPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Sources" />
+          <PageHeader title="Data sources" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -130,9 +128,7 @@ export default async function RecordDetailPage({
     // for both, so this surfaces as the standard not-found page. Branch on the
     // typed `ResourceServerHttpError.status` — authoritative and 410-aware —
     // rather than substring-matching the wrapped message.
-    if (err instanceof ResourceServerHttpError && (err.status === 404 || err.status === 410)) {
-      notFound();
-    }
+    notFoundIfRecordGone(err);
     throw err;
   }
 
@@ -192,7 +188,12 @@ export default async function RecordDetailPage({
   const declaredRoles = declaredRolesFromCapabilities(fieldCapabilities);
   const declaredTypes = deriveDeclaredFieldTypes({ field_capabilities: recordMetadata?.field_capabilities });
   const detailKind = classifyRecordKind(streamName, record.data, declaredTypes, undefined, declaredRoles).kind;
-  const detailPreview = buildRecordPreview(detailKind, record.data, declaredTypes, declaredRoles);
+  const detailPreview = recordTitlePreview(
+    buildRecordPreview(detailKind, record.data, declaredTypes, declaredRoles),
+    detailKind,
+    streamName
+  );
+  const recordCrumb = recordCrumbLabel(detailPreview, streamName);
   // The reliable, server-declared image signal (declared blob field with a usable
   // fetch_url) — the SAME signal the inspector resolves; passed to the cell so the H1
   // shows the image mark from a reliable signal, never a preview sniff.
@@ -231,10 +232,10 @@ export default async function RecordDetailPage({
     <RecordroomShellWithPalette>
       <PageHeader
         breadcrumbs={[
-          { href: "/sources", label: "Sources" },
+          { href: "/sources", label: "Data sources" },
           { href: connectorHref, label: sourceLabel },
-          { href: streamHref, label: streamName },
-          { label: recordId },
+          { href: streamHref, label: humanizeFieldLabel(streamName) },
+          ...(recordCrumb ? [{ label: recordCrumb }] : []),
         ]}
         description={
           <>
@@ -256,7 +257,14 @@ export default async function RecordDetailPage({
         }
       />
 
-      <WarningsBanner warnings={record.warnings} />
+      {record.warnings.length > 0 ? (
+        <details className="mb-6 border-border/70 border-y py-3">
+          <summary className="pdpp-caption cursor-pointer font-medium text-foreground">Details</summary>
+          <div className="pt-3">
+            <WarningsBanner warnings={record.warnings} />
+          </div>
+        </details>
+      ) : null}
 
       <RecordInspector
         record={inspectorRecord}
@@ -269,4 +277,18 @@ export default async function RecordDetailPage({
       />
     </RecordroomShellWithPalette>
   );
+}
+
+async function resolveRecordsConnection(routeId: string) {
+  const connection = await resolveConnectionForRecordsRoute(routeId);
+  if (!connection) {
+    notFound();
+  }
+  return connection;
+}
+
+function notFoundIfRecordGone(err: unknown): void {
+  if (err instanceof ResourceServerHttpError && (err.status === 404 || err.status === 410)) {
+    notFound();
+  }
 }

@@ -86,6 +86,15 @@ const PALETTE_IMPL_FILE_RE = /command-palette.*\.tsx$/;
 const CLEAN_SANDBOX_SEGMENT_LEAK_RE = /\/(sources|syncs|audit)(\b|\/|\?|#)/;
 const NAV_HREF_RE = (href: string) => new RegExp(`href:\\s*["']${href.replaceAll("/", "\\/")}["']`);
 
+const BANNED_VISIBLE_COMMAND_WORDS_RE = /\b(?:trace|grant|run|connector|manifest|cursor|projection)\b/i;
+const APPS_NAV_LINK_RE = /label:\s*["']Apps["'],\s*href:\s*["']\/grants["']/;
+const SHELL_JUMP_BUTTON_RE = /<span>Search or jump to…<\/span>/;
+const SHELL_JUMP_KEY_LABEL_RE = /<span className="rr-kbd">\{label\}<\/span>/;
+const SECTION_CHILDREN_RE = /item\.children && item\.section === section/;
+const PRODUCT_IDENTITY_RE = /const identity = DATACONNECT_PRODUCT_IDENTITY/;
+const PRODUCT_MARK_VIEWBOX_RE = /viewBox="0 0 832 832"/;
+const HOST_BUILD_CRUMB_RE = /\{host\}\s*·\s*\{build\}/;
+
 const TODAY_MENU_HREFS = [
   "/",
   "/explore",
@@ -208,6 +217,24 @@ test("empty query returns the full mode-scoped command list (sensible default se
   assert.equal(empty.length, all.length);
 });
 
+test("the jump list keeps one entry for Explore and Data sources, using their menu names", () => {
+  const commands = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS });
+  const explore = commands.filter((command) => command.href === "/explore");
+  const sources = commands.filter((command) => command.href === "/sources");
+
+  // DIRECTION.md, "The frame and the menu": use menu names and avoid duplicate destinations.
+  assert.deepEqual(explore.map((command) => command.title), ["Explore"]);
+  assert.deepEqual(sources.map((command) => command.title), ["Data sources"]);
+  assert.equal(commands.some((command) => command.title === "Record activity"), false);
+  assert.equal(commands.some((command) => command.title === "Records by data source"), false);
+  assert.equal(commands.find((command) => command.href === "/search")?.title, "Search");
+  // data-pages.md, decision 6: visible command names and descriptions use plain words.
+  assert.doesNotMatch(
+    commands.map(({ title, description }) => `${title} ${description}`).join(" "),
+    BANNED_VISIBLE_COMMAND_WORDS_RE
+  );
+});
+
 // ── The shared menu uses the current owner vocabulary ──────────────────────
 
 test("live shell menu uses the requested five destinations and section children", async () => {
@@ -232,10 +259,10 @@ test("live shell menu uses the requested five destinations and section children"
   ]) {
     assert.match(src, new RegExp(`label(?::|Before:)\\s*["']${label}["']`));
   }
-  assert.match(src, /label:\s*["']Apps["'],\s*href:\s*["']\/grants["']/);
-  assert.match(src, /<span>Search or jump to…<\/span>/);
-  assert.match(src, /<span className="rr-kbd">\{label\}<\/span>/);
-  assert.match(src, /item\.children && item\.section === section/);
+  assert.match(src, APPS_NAV_LINK_RE);
+  assert.match(src, SHELL_JUMP_BUTTON_RE);
+  assert.match(src, SHELL_JUMP_KEY_LABEL_RE);
+  assert.match(src, SECTION_CHILDREN_RE);
   assert.doesNotMatch(src, NAV_LABEL_STANDING_RE, "Standing must not ship as owner-facing nav");
   assert.doesNotMatch(src, NAV_LABEL_JUMP_RE, "Jump is command-palette chrome, not primary nav");
   assert.doesNotMatch(src, NAV_LABEL_RUNS_RE, "Runs must be renamed to Syncs in the live nav");
@@ -277,8 +304,8 @@ test("the owner-visible wordmark and mark are DataConnect", async () => {
   // shared shell renders DataConnect artwork in each corresponding position.
   assert.equal(src.match(IDENTITY_WORDMARK_RE)?.length, 2);
   assert.equal(src.match(DATACONNECT_MARK_RE)?.length, 3);
-  assert.match(src, /const identity = DATACONNECT_PRODUCT_IDENTITY/);
-  assert.match(src, /viewBox="0 0 832 832"/);
+  assert.match(src, PRODUCT_IDENTITY_RE);
+  assert.match(src, PRODUCT_MARK_VIEWBOX_RE);
   // No owner-visible JSX text node renders the internal component name.
   assert.doesNotMatch(src, RECORDROOM_AS_COPY_RE, "Recordroom must not appear as owner-visible copy");
 });
@@ -290,7 +317,7 @@ test("the sidebar footer shows the version without a host crumb", async () => {
   // DIRECTION.md "The frame and the menu": show the version at the bottom.
   assert.match(src, VERSION_IN_FOOTBLOCK_RE);
   // DIRECTION.md "The frame and the menu": the footer contains the version, not a host address.
-  assert.doesNotMatch(src, /\{host\}\s*·\s*\{build\}/);
+  assert.doesNotMatch(src, HOST_BUILD_CRUMB_RE);
   assert.doesNotMatch(src, HEAD_CRUMB_CLASS_RE, "the header crumb must be removed");
 });
 

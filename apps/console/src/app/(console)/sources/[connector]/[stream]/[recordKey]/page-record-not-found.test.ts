@@ -50,6 +50,10 @@ const DETECTS_HTTP_404_410 =
 const CALLS_NOT_FOUND = /notFound\(\)/;
 const RETHROWS_UNKNOWN = /throw\s+err;/;
 const BRITTLE_REGEX = /\/\\\(404\\\)\//;
+const HUMAN_KIND_RE = /humanizeFieldLabel\(streamName\)/;
+const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
+const KIND_TITLE_FALLBACK_RE = /const detailPreview = recordTitlePreview\(/;
+const OMITS_REDUNDANT_KIND_CRUMB_RE = /\.\.\.\(recordCrumb \? \[\{ label: recordCrumb \}\] : \[\]\)/;
 
 test("record detail page imports the typed ResourceServerHttpError so it can branch on status", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -79,4 +83,16 @@ test("record detail page does not reintroduce the brittle message-substring 404 
     BRITTLE_REGEX,
     "Branch on the typed ResourceServerHttpError.status, not on a substring of the wrapped message"
   );
+});
+
+test("the record page humanizes the kind breadcrumb and uses the kind name when no declared title exists", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // data-pages.md, decision 1: use the human kind name in titles and breadcrumbs.
+  assert.match(src, HUMAN_KIND_RE);
+  // data-pages.md, decision 1: show the data source label instead of its ID.
+  assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
+  // data-pages.md, decision 3: the title rule lives in record-title.ts (behaviour pinned by record-title.test.ts).
+  assert.match(src, KIND_TITLE_FALLBACK_RE);
+  // data-pages.md, decision 3: avoid repeating the kind label for the fallback title.
+  assert.match(src, OMITS_REDUNDANT_KIND_CRUMB_RE);
 });
