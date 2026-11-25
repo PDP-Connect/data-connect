@@ -86,3 +86,11 @@ export function buildGrantsDemoData(): {
     },
   };
 }
+
+export function buildEmptyGrantsDemoData(): ReturnType<typeof buildGrantsDemoData> {
+  const data = buildGrantsDemoData();
+  return {
+    approvals: { ...data.approvals, data: [] },
+    grants: { ...data.grants, data: [] },
+  };
+}

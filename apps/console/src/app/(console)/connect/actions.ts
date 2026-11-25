@@ -47,8 +47,8 @@ export async function createCimdClientIdentityAction(formData: FormData) {
 export async function deleteCimdClientIdentityAction(formData: FormData) {
   await requireDashboardAccess(CONNECT_PATH);
   const documentId = asString(formData.get("document_id"));
-  if (!documentId) {
-    redirect(href({ error: "Client identity id is required" }));
+  if (!documentId || asString(formData.get("confirm_delete")) !== "yes") {
+    redirect(href({ error: "Confirm which identity to remove." }));
   }
   let target: string;
   try {

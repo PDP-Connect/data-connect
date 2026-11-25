@@ -24,11 +24,11 @@ const PAGE_FILE = `${HERE}page.tsx`;
 
 const SUBSCRIPTIONS_HREF_RE = /\/event-subscriptions\?grant_id=/;
 const ENCODE_URI_RE = /encodeURIComponent\(grantId\)/;
-const COPY_RE = /Event subscriptions for this grant/i;
+const COPY_RE = /Event subscriptions →/i;
 
-const PACKAGE_PIVOT_LOOKUP_RE = /lookupGrantPackageIdForGrant\(/;
-const PACKAGE_PIVOT_HREF_RE = /\/grants\/packages\/\$\{encodeURIComponent\(packageId\)\}/;
-const PACKAGE_PIVOT_COPY_RE = /Parent grant package/i;
+const PACKAGE_PIVOT_LOOKUP_RE = /grant\?\.grant_package_id/;
+const PACKAGE_PIVOT_HREF_RE = /\/grants\/packages\/\$\{encodeURIComponent\(grant\.grant_package_id\)\}/;
+const PACKAGE_PIVOT_COPY_RE = /Parent access package/i;
 
 test("grant detail page links to filtered event-subscriptions list", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -39,12 +39,18 @@ test("grant detail page links to filtered event-subscriptions list", async () =>
 
 test("grant detail page surfaces a parent-package pivot link when the grant is package-bound", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // The page MUST resolve the parent package via the typed helper, render
-  // the pivot href through encodeURIComponent, and only show the link
-  // when `packageId` is non-null (a conditional render around the helper
-  // result). The copy below is the operator-visible affordance pinned
-  // against silent drift.
+  // DIRECTION.md §The frame and the menu: keep package access reachable from the app's access details.
   assert.match(src, PACKAGE_PIVOT_LOOKUP_RE);
   assert.match(src, PACKAGE_PIVOT_HREF_RE);
   assert.match(src, PACKAGE_PIVOT_COPY_RE);
+});
+
+test("access detail confirms the effect before removing one access", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const action = await readFile(`${HERE}revoke-action.ts`, "utf8");
+  // RAISE-RULES 5: destructive actions name what is removed and require server-checked confirmation.
+  assert.match(src, /will no longer read your data\. It keeps what it already read\./);
+  assert.match(src, /name="confirm_revoke"[^>]*value="yes"/);
+  assert.match(action, /confirm_revoke"\)\) !== "yes"/);
+  assert.match(action, /\/grants\/\$\{encodeURIComponent\(grantId\)\}\/revoke/);
 });

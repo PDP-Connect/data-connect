@@ -2,12 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
-import { formatSourceForDisplay } from "@pdpp/display";
-import { StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type { PendingApproval } from "../lib/ref-client.ts";
-import { technicalClientCaption } from "./client-caption.ts";
+import { appSourceName } from "./app-access.ts";
 
 /** Queue row only. It can route to review or deny; grant issuance is absent. */
 export function PendingApprovalRow({
@@ -25,45 +23,50 @@ export function PendingApprovalRow({
         return name ? [name] : [];
       })
     : [];
-  const denialTarget = approval.kind === "consent" ? "data-access request" : "owner-device authorization";
   const connectorId = approval.grant_preview?.source?.kind === "connector" ? approval.grant_preview.source.connector_id ?? approval.grant_preview.source.id : null;
+  const appName = "App";
 
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">
-        <div className="flex flex-wrap items-baseline gap-2">
-          <code className="pdpp-caption break-all font-medium font-mono text-foreground">{approval.approval_id}</code>
-          <span className="pdpp-caption text-muted-foreground">
+        <p className="text-[15px] font-medium text-foreground">{appName}</p>
+        <p className="mt-1 text-[13px] text-muted-foreground">
+          {approval.grant_preview?.source ? `Can read ${appSourceName(approval.grant_preview.source)}` : "Waiting for your choice"}
+          {previewStreams.length ? ` · Kinds of records: ${previewStreams.join(", ")}` : ""}
+        </p>
+        <details className="mt-1">
+          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+          <div className="pdpp-caption flex flex-wrap gap-3 text-muted-foreground">
+            <span>{approval.approval_id}</span>
             <IcTimestamp value={approval.created_at} />
-          </span>
-          <StatusBadge status={approval.kind} />
-        </div>
-        <div className="pdpp-caption mt-1 break-words text-muted-foreground">
-          {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={connectorId} /> : null}
-          {technicalClientCaption(approval.client_id) ?? "client —"}
-          {approval.grant_preview?.source ? ` · source ${formatSourceForDisplay(approval.grant_preview.source)}` : ""}
-          {previewStreams.length ? ` · streams ${previewStreams.join(", ")}` : ""}
-        </div>
+            <span>{approval.kind}</span>
+            {approval.client_id ? <span>App id: {approval.client_id}</span> : null}
+            {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={connectorId} /> : null}
+          </div>
+        </details>
       </div>
-      <form className="flex flex-wrap gap-2">
-        <input name="kind" type="hidden" value={approval.kind} />
-        <input name="approval_id" type="hidden" value={approval.approval_id} />
+      <div className="flex flex-wrap items-start gap-2">
         <Link
-          className={buttonVariants({ size: "sm", variant: "human" })}
+          className={buttonVariants({ size: "sm", variant: "ghost" })}
           href={`/grants/approvals/${encodeURIComponent(approval.approval_id)}`}
         >
-          Review request
+          Review
         </Link>
-        <IcButton
-          aria-label={`Deny ${denialTarget} ${approval.approval_id}`}
-          formAction={denyAction}
-          size="sm"
-          type="submit"
-          variant="destructive"
-        >
-          Deny request
-        </IcButton>
-      </form>
+        <details>
+          <summary className="flex min-h-11 cursor-pointer items-center rounded-[6px] px-3 text-[13px] text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Don't allow</summary>
+          <div className="mt-2 rounded-md border border-border-strong p-3">
+            <p className="pdpp-caption text-foreground">
+              {approval.kind === "consent" ? "The app will not get access to your data." : "This device will not get owner access."}
+            </p>
+            <form action={denyAction} className="mt-3">
+              <input name="kind" type="hidden" value={approval.kind} />
+              <input name="approval_id" type="hidden" value={approval.approval_id} />
+              <input name="deny_confirmation" type="hidden" value="yes" />
+              <IcButton size="sm" type="submit" variant="destructive">Don't allow</IcButton>
+            </form>
+          </div>
+        </details>
+      </div>
     </div>
   );
 }

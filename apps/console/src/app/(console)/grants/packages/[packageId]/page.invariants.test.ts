@@ -66,6 +66,15 @@ test("package detail page wires its revoke form to the server action with a conf
   assert.match(src, CONFIRM_FIELD_RE);
 });
 
+test("package detail presents app facts and confirms the effect in plain words", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES 2 and 5: the app name is the page title and removal names what happens.
+  assert.match(src, /<PageHeader title=\{appName\}/);
+  assert.match(src, /title="What it can read"/);
+  assert.match(src, /title="Remove access"/);
+  assert.match(src, /will no longer read your data\. It keeps what it already read\./);
+});
+
 test("package detail page round-trips the package id through decodeURIComponent on the URL segment", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, PACKAGE_ID_DECODE_RE);

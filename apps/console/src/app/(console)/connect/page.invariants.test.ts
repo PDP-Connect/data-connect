@@ -45,7 +45,7 @@ const BUILD_CONNECTOR_CATALOG_RE = /buildConnectorCatalog\(manifests\)/;
 const SOURCE_SETUP_SECTION_RE = /title="Add data sources"/;
 const SOURCE_SEARCH_RE = /name="source_q"[\s\S]*?Search source name or connector key/;
 const SOURCE_CARD_RE = /data-testid=\{`source-setup-\$\{entry\.connectorKey\}`\}/;
-const ADD_SOURCE_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}[\s\S]*Add a source/;
+const ADD_SOURCE_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}[\s\S]*Add a data source/;
 const SOURCE_FORBIDDEN_NORMAL_COPY_RE =
   /CLI preview|pdpp owner-agent connectors explain|Manual setup|Ready with provider secret|Track only|No setup path yet|Needs browser proof/;
 
@@ -89,6 +89,35 @@ test("connect page does not render the data-source setup catalog", async () => {
 test("connect page has no owner source-setup vocabulary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.doesNotMatch(src, SOURCE_FORBIDDEN_NORMAL_COPY_RE);
+});
+
+test("assistant address and short ChatGPT and Claude steps lead the page before connected apps", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES 1: the assistant address is the first task, followed by ChatGPT and Claude.
+  assert.ok(src.indexOf('title="Assistant address"') < src.indexOf('title="ChatGPT"'));
+  assert.ok(src.indexOf('title="ChatGPT"') < src.indexOf('title="Claude"'));
+  assert.ok(src.indexOf('title="Claude"') < src.indexOf('title="Connected apps"'));
+  assert.match(src, /Other apps/);
+  assert.match(src, /<AppAccessList/);
+  assert.match(src, /\/settings#remote-access/);
+});
+
+test("identity removal requires an explicit confirmation value", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  const actions = await readFile(`${HERE}actions.ts`, "utf8");
+  // RAISE-RULES 5: destructive actions require a confirmation step naming the effect.
+  assert.match(page, /confirm_delete/);
+  assert.match(page, /access issued through it will stop working/);
+  assert.match(actions, /confirm_delete"\)\) !== "yes"/);
+});
+
+test("empty demo state skips server reads and leaves connected apps and identities empty", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES 8: keep a demo scenario for the page's empty state without a server.
+  assert.match(src, /params\.demo === "atlas" \|\| params\.demo === "empty"/);
+  assert.match(src, /let identities: CimdClientDocument\[\] = \[\]/);
+  assert.match(src, /let grants: GrantSummary\[\] = \[\]/);
+  assert.match(src, /if \(params\.demo === "atlas"\)/);
 });
 
 test("connect page exposes instructions without advertising an unavailable CLI flow", async () => {

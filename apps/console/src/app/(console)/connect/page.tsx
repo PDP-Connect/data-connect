@@ -3,13 +3,17 @@
 
 import { buttonVariants, IcButton, IcField, IcInput } from "@pdpp/brand-react";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
-import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
+import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
-import { type CimdClientDocument, listCimdClientDocuments } from "../lib/ref-client.ts";
+import { type CimdClientDocument, type GrantSummary, listCimdClientDocuments, listGrants } from "../lib/ref-client.ts";
+import { AppAccessList } from "../grants/app-access-list.tsx";
+import { groupGrantAccessByApp } from "../grants/app-access.ts";
+import { revokeGrantAccessAction } from "../grants/[grantId]/revoke-action.ts";
+import { needsRemoteAccess } from "./remote-access.ts";
 import { createCimdClientIdentityAction, deleteCimdClientIdentityAction } from "./actions.ts";
 
 export const dynamic = "force-dynamic";
@@ -17,10 +21,12 @@ export const dynamic = "force-dynamic";
 const TRAILING_SLASH_RE = /\/+$/;
 
 interface PageParams {
+  access_removed?: string;
   client_identity?: string;
   demo?: string;
   error?: string;
   notice?: string;
+  remove_error?: string;
 }
 
 interface SetupEntry {
@@ -90,10 +96,10 @@ function InlineNotice({ kind, message }: { kind: "error" | "notice"; message: st
 
 function noticeText(code?: string): string | null {
   if (code === "client_identity_created") {
-    return "Client identity created. Copy the explicit command for the MCP client you are configuring.";
+    return "Identity created.";
   }
   if (code === "client_identity_deleted") {
-    return "Client identity revoked. Its metadata URL is gone and issued access was revoked server-side.";
+    return "Identity removed. Access issued through it was also removed.";
   }
   return null;
 }
@@ -161,12 +167,21 @@ function ClientIdentityList({
               >
                 {selected ? "Selected" : "Use"}
               </Link>
-              <form action={deleteCimdClientIdentityAction}>
-                <input name="document_id" type="hidden" value={identity.document_id} />
-                <IcButton size="sm" type="submit" variant="destructive">
-                  Revoke
-                </IcButton>
-              </form>
+              <details className="min-w-0">
+                <summary className="flex min-h-11 cursor-pointer items-center rounded-[6px] px-3 text-[13px] text-destructive underline-offset-2 hover:bg-muted hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  Remove identity
+                </summary>
+                <div className="mt-2 rounded-md border border-border-strong p-3">
+                  <p className="pdpp-caption text-foreground">
+                    {identity.client_name ?? "This app"} will lose its saved setup and access issued through it will stop working.
+                  </p>
+                  <form action={deleteCimdClientIdentityAction} className="mt-3">
+                    <input name="document_id" type="hidden" value={identity.document_id} />
+                    <input name="confirm_delete" type="hidden" value="yes" />
+                    <IcButton size="sm" type="submit" variant="destructive">Remove identity</IcButton>
+                  </form>
+                </div>
+              </details>
             </div>
           </li>
         );
@@ -235,29 +250,54 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
   const params = await searchParams;
   let origin: string;
   let identities: CimdClientDocument[] = [];
-  if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
+  let grants: GrantSummary[] = [];
+  let grantsHaveMore = false;
+  let grantsUnavailable = false;
+  if (process.env.NODE_ENV !== "production" && (params.demo === "atlas" || params.demo === "empty")) {
     origin = "https://pdpp.example.test";
-    identities = [
-      {
-        client_id: "https://pdpp.example.test/oauth/clients/cli-demo",
-        client_name: "Claude Code on workstation",
-        created_at: "2026-07-01T12:00:00.000Z",
-        document_id: "cimd_demo_cli",
-        logo_uri: null,
-        object: "cimd_client_metadata_document",
-        redirect_uris: ["http://localhost:3118/callback"],
-        token_endpoint_auth_method: "none",
-        updated_at: "2026-07-01T12:00:00.000Z",
-      },
-    ];
+    if (params.demo === "atlas") {
+      grants = [
+        {
+          client: { client_id: "https://chatgpt.example/client", client_name: "ChatGPT", registration_mode: null },
+          client_id: "https://chatgpt.example/client",
+          connector_id: "spotify",
+          event_count: 2,
+          failure: null,
+          first_at: "2026-11-24T12:00:00.000Z",
+          grant_id: "demo-chatgpt-spotify",
+          kinds: ["tracks"],
+          last_at: "2026-11-25T12:00:00.000Z",
+          object: "grant_summary",
+          source: { id: "spotify", kind: "connector" },
+          status: "issued",
+        },
+      ];
+      identities = [
+        {
+          client_id: "https://pdpp.example.test/oauth/clients/cli-demo",
+          client_name: "Claude Code on workstation",
+          created_at: "2026-07-01T12:00:00.000Z",
+          document_id: "cimd_demo_cli",
+          logo_uri: null,
+          object: "cimd_client_metadata_document",
+          redirect_uris: ["http://localhost:3118/callback"],
+          token_endpoint_auth_method: "none",
+          updated_at: "2026-07-01T12:00:00.000Z",
+        },
+      ];
+    }
   } else {
     try {
-      const [resolvedOrigin, resolvedIdentities] = await Promise.all([
+      const [resolvedOrigin, resolvedIdentities, resolvedGrants] = await Promise.all([
         getReferencePublicOrigin(),
         listCimdClientDocuments(),
+        listGrants({ limit: 50 }).catch(() => null),
       ]);
       origin = resolvedOrigin;
       identities = resolvedIdentities.data;
+      grants = resolvedGrants?.data ?? [];
+      grantsHaveMore = resolvedGrants?.has_more ?? false;
+      grantsUnavailable = resolvedGrants === null;
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
@@ -273,29 +313,21 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
   const selected =
     identities.find((identity) => identity.document_id === params.client_identity) ?? identities[0] ?? null;
   const notice = noticeText(params.notice);
-  const primaryEntries: SetupEntry[] = [
+  const otherEntries: SetupEntry[] = [
     {
-      body: "Use this for ChatGPT, Claude.ai, and remote MCP clients. Browser clients use PKCE; some clients use the device-code flow.",
-      label: "MCP server URL",
-      title: "MCP URL",
-      value: targets.mcpUrl,
-    },
-    {
-      body: "Adds the remote Streamable HTTP MCP server.",
+      body: "Add this address as a remote server in Claude Code.",
       label: "Claude Code command",
       title: "Claude Code",
       value: targets.claudeCodeCommand,
     },
     {
-      body: "Adds the same remote MCP endpoint without a separate bearer token.",
+      body: "Add this address as a remote server in Codex.",
       label: "Codex command",
       title: "Codex",
       value: targets.codexCommand,
     },
-  ];
-  const secondaryEntries: SetupEntry[] = [
     {
-      body: "For clients that read the public instructions before choosing MCP or CLI.",
+      body: "For apps that read setup instructions first.",
       label: "Instructions URL",
       title: "Instructions",
       value: targets.agentEntrypoint,
@@ -304,83 +336,91 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
 
   return (
     <RecordroomShellWithPalette host="this server">
-      <PageHeader
-        actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
-            Deployment readiness
-          </Link>
-        }
-        breadcrumbs={[{ href: "/", label: "Overview" }, { label: "Connect apps" }]}
-        title="Connect an app"
-      />
+      <PageHeader title="Connect an app" />
 
-      <div className="mb-5 grid gap-2">
-        {params.error ? <InlineNotice kind="error" message={params.error} /> : null}
+      <div className="grid gap-2">
+        {params.error ? <InlineNotice kind="error" message="The change could not be saved. Try again." /> : null}
+        {params.remove_error ? <InlineNotice kind="error" message="Access could not be removed. Try again." /> : null}
+        {params.access_removed ? <InlineNotice kind="notice" message="Access removed." /> : null}
         {notice ? <InlineNotice kind="notice" message={notice} /> : null}
       </div>
 
-      <Section
-        description="Use these when an app or local client needs read access to records already collected in this DataConnect instance."
-        title="Connect apps"
-      >
-        <ul className="divide-y divide-border/70 border-border/70 border-y">
-          {primaryEntries.map((entry) => (
-            <CopyRow key={entry.title} {...entry} />
-          ))}
-        </ul>
+      <Section title="Assistant address">
+        <CopyRow
+          body="Copy this address into an assistant to connect it to your data."
+          label="assistant address"
+          title="DataConnect address"
+          value={targets.mcpUrl}
+        />
+        {needsRemoteAccess(origin) ? (
+          <p className="text-[13px] text-muted-foreground">
+            This address is only available on this network. Set up{" "}
+            <Link className="text-primary underline-offset-2 hover:underline" href="/settings#remote-access">Remote access</Link>{" "}
+            to use it elsewhere.
+          </p>
+        ) : null}
       </Section>
 
-      <Callout
-        action={
-          <Link className="underline-offset-2 hover:underline" href={dashboardRoutes.section.addSource}>
-            Add a source →
-          </Link>
-        }
-        title="Need more data first?"
-        tone="info"
-      >
-        <p className="pdpp-caption text-callout-info-fg/80">
-          Source accounts are managed under Sources. Use this page to set up app and local-client read access.
-        </p>
-      </Callout>
+      <Section title="ChatGPT">
+        <ol className="list-decimal space-y-1 pl-5 text-[13px] text-muted-foreground">
+          <li>In ChatGPT, open Settings and choose Apps.</li>
+          <li>Add a custom app and paste the address above.</li>
+        </ol>
+      </Section>
 
-      <Section
-        description="Create one only when a local client needs an explicit URL-shaped client_id. The redirect URI must match the client callback exactly."
-        title="Stable local client identity"
-      >
-        <div className="grid gap-4">
-          <ClientIdentityForm />
-          <ClientIdentityList identities={identities} selectedId={selected?.document_id ?? null} />
+      <Section title="Claude">
+        <ol className="list-decimal space-y-1 pl-5 text-[13px] text-muted-foreground">
+          <li>In Claude, open Settings and choose Connectors.</li>
+          <li>Add a custom connector and paste the address above.</li>
+        </ol>
+      </Section>
+
+      <details className="group border-y border-border py-3">
+        <summary className="min-h-11 cursor-pointer text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          Other apps
+        </summary>
+        <ul className="divide-y divide-border/70 border-border/70 border-y">
+          {otherEntries.map((entry) => <CopyRow key={entry.title} {...entry} />)}
+        </ul>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href={dashboardRoutes.section.addSource}>Add a data source</Link>
+          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/deployment/tokens">Owner credentials</Link>
         </div>
-        <SelectedIdentityCommands mcpUrl={targets.mcpUrl} selected={selected} targets={targets} />
-      </Section>
+        <details className="mt-4 border-t border-border pt-3">
+          <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+          <Section title="Connection details">
+            <p className="pdpp-caption text-muted-foreground">
+              Use the address for ChatGPT, Claude.ai, and remote MCP clients. Browser clients use PKCE; some clients use the device-code flow.
+              Claude Code adds a remote Streamable HTTP MCP server. Codex uses the same endpoint without a separate bearer token.
+            </p>
+            <p className="pdpp-caption mt-3 text-muted-foreground">
+              Owner credentials stay out of ordinary MCP setup. Assistants use the scoped OAuth flow at <code className="font-mono">/mcp</code>.
+              That flow returns a scoped client token, never the owner bearer. Trusted local access for the owner uses a separate flow.
+            </p>
+          </Section>
+          <Section title="Stable local client identity">
+            <p className="pdpp-caption mb-3 text-muted-foreground">Create one only when a local app needs a fixed identity. The return address must match the app's callback.</p>
+            <div className="grid gap-4">
+              <ClientIdentityForm />
+              <ClientIdentityList identities={identities} selectedId={selected?.document_id ?? null} />
+            </div>
+            <SelectedIdentityCommands mcpUrl={targets.mcpUrl} selected={selected} targets={targets} />
+          </Section>
+          <Section title="Owner credentials">
+            <p className="pdpp-caption text-muted-foreground">Owner credentials are for your own trusted tools. Assistants use the address above.</p>
+            <Link className="mt-2 inline-block text-[13px] text-primary underline-offset-2 hover:underline" href="/deployment/tokens">Manage owner credentials</Link>
+          </Section>
+        </details>
+      </details>
 
-      <Section
-        description="Use these for local clients or for reading the public instructions."
-        title="Other client entrypoints"
-      >
-        <ul className="divide-y divide-border/70 border-border/70 border-y">
-          {secondaryEntries.map((entry) => (
-            <CopyRow key={entry.title} {...entry} />
-          ))}
-        </ul>
+      <Section title="Connected apps">
+        {grantsUnavailable ? <p className="py-4 text-[13px] text-muted-foreground">Connected apps could not be loaded. <Link className="text-primary underline-offset-2 hover:underline" href="/connect">Try again</Link>.</p> : <AppAccessList
+          apps={groupGrantAccessByApp(grants.filter((grant) => grant.status === "active" || grant.status === "issued"))}
+          canRemove={!grantsHaveMore}
+          removeAction={revokeGrantAccessAction}
+          returnTo="/connect"
+        />}
       </Section>
-
-      <Callout
-        action={
-          <Link className="underline-offset-2 hover:underline" href="/deployment/tokens">
-            Owner credentials →
-          </Link>
-        }
-        title="Owner credentials stay out of ordinary MCP setup"
-        tone="info"
-      >
-        <p className="pdpp-caption text-callout-info-fg/80">
-          Claude, ChatGPT, Codex, Claude Code, and other MCP clients should use the scoped OAuth flow at{" "}
-          <code className="font-mono">/mcp</code>. That flow returns a scoped client token, never the owner bearer.
-          Trusted local access for the owner uses a separate flow.
-        </p>
-      </Callout>
     </RecordroomShellWithPalette>
   );
 }

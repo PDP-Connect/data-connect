@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { formatSourceForDisplay } from "@pdpp/display";
+import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type {
   ApprovalReview as ApprovalReviewData,
@@ -164,7 +166,7 @@ function SingleArtifactFacts({ artifact, connectorIcons }: { artifact: SingleCon
       </section>
       <section aria-labelledby="resolved-streams" className="mb-8">
         <h2 className="pdpp-title" id="resolved-streams">
-          Resolved streams
+          Kinds of records
         </h2>
         <StreamFacts streams={artifact.resolved_streams} />
       </section>
@@ -197,10 +199,10 @@ function BatchArtifactFacts({ artifact, connectorIcons }: { artifact: BatchConse
       {artifact.sources.map((source) => (
         <section aria-labelledby={`source-${source.index}`} className="mb-8" key={source.index}>
           <h2 className="pdpp-title" id={`source-${source.index}`}>
-            Source {source.index}
+            Data source {source.index}
           </h2>
           <dl className="pdpp-body mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-[auto_minmax(0,1fr)]">
-            <dt className="text-muted-foreground">Source</dt>
+            <dt className="text-muted-foreground">Data source</dt>
             <dd>
               {source.source.kind === "connector" ? (
                 <ConnectorMark
@@ -270,33 +272,30 @@ export function ApprovalReview({
   const reviewHref = `/grants/approvals/${encodeURIComponent(detail.approval_id)}`;
   const artifact = detail.kind === "consent" ? detail.approval_review : undefined;
   const isBatch = artifact?.version === "reference.batch-approval-review.v1";
-  const appName =
-    detail.kind === "consent"
-      ? (detail.approval_review.client.client_display?.name ?? detail.approval_review.client.client_id)
-      : detail.client_id;
+  const appName = detail.kind === "consent" ? detail.approval_review.client.client_display?.name?.trim() || "This app" : "This app";
+  const sourceNames = artifact
+    ? artifact.version === "reference.batch-approval-review.v1"
+      ? artifact.sources.map((source) => formatSourceForDisplay(source.source))
+      : [formatSourceForDisplay(artifact.source)]
+    : [];
+  const what = sourceNames.length ? sourceNames.join(", ") : "your data";
   let decisionControl = (
-    <div className="mt-3 flex flex-wrap gap-2">
-      <a
-        className="inline-flex h-9 items-center rounded-md bg-primary px-3 font-medium text-primary-foreground text-sm"
-        href={`${reviewHref}?confirm=1`}
-      >
-        Continue to approval
-      </a>
+    <div className="mt-3 grid gap-3">
+      <Link className="inline-flex min-h-11 w-fit items-center rounded-[6px] bg-foreground px-3 text-[13px] font-medium text-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={`${reviewHref}?confirm=1`}>Allow</Link>
+      <p className="text-[13px] text-muted-foreground">If you don't allow it, {appName} will not get access to your data.</p>
       <form action={denyAction}>
         <input name="approval_id" type="hidden" value={detail.approval_id} />
         <input name="kind" type="hidden" value={detail.kind} />
-        <IcButton aria-label={`Deny request from ${appName}`} size="sm" type="submit" variant="destructive">
-          Deny request
-        </IcButton>
+        <input name="deny_confirmation" type="hidden" value="yes" />
+        <IcButton size="sm" type="submit" variant="ghost">Don't allow</IcButton>
       </form>
     </div>
   );
   if (confirm) {
     decisionControl = (
-      <form action={approveAction} className="mt-3 grid gap-3 rounded-md border border-border p-4">
-        <p className="pdpp-body">
-          Approve {appName} for the exact request shown above. This action issues the grant only if the reviewed
-          revision is still current.
+      <form action={approveAction} className="mt-3 grid gap-3 rounded-md border border-border-strong p-4">
+        <p className="text-[13px] text-foreground">
+          {detail.kind === "consent" ? `${appName} will be able to read ${what}. It keeps what it has already read if you remove access later.` : `${appName} will be able to control this device.`}
         </p>
         <input name="approval_confirmation" type="hidden" value="approve" />
         <input name="approval_id" type="hidden" value={detail.approval_id} />
@@ -308,11 +307,11 @@ export function ApprovalReview({
           </>
         ) : null}
         <div className="flex flex-wrap gap-2">
-          <IcButton aria-label={`Approve and issue grant to ${appName}`} size="sm" type="submit">
-            Approve and issue grant
+          <IcButton aria-label={`Allow ${appName}`} size="sm" type="submit">
+            Allow
           </IcButton>
           <a className="pdpp-caption self-center underline-offset-2 hover:underline" href={reviewHref}>
-            Return to review
+            Back
           </a>
         </div>
       </form>
@@ -321,8 +320,7 @@ export function ApprovalReview({
   if (detail.kind === "consent" && isBatch) {
     decisionControl = (
       <p className="pdpp-body mt-3 rounded-md border border-border p-4">
-        Batch approval is not available from this console review. Use the hosted source-review ceremony for this
-        request.
+          Open this request in the hosted approval page to choose which data sources to share.
       </p>
     );
   }
@@ -330,45 +328,30 @@ export function ApprovalReview({
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
       <header className="mb-6 border-border/80 border-b pb-5">
-        <p className="pdpp-eyebrow">Pending approval</p>
-        <h1 className="pdpp-heading mt-1">{confirm ? "Confirm approval" : "Review request"}</h1>
-        <p className="pdpp-body mt-2 text-muted-foreground">
-          {detail.kind === "consent"
-            ? `${appName} requests access to your data.`
-            : `${appName} requests owner-device authorization.`}
-        </p>
+        <h1 className="pdpp-heading mt-1">
+          {detail.kind === "consent" ? `${appName} wants to read ${what}` : `${appName} wants control of this device`}
+        </h1>
       </header>
       {error ? (
         <p
           className="mb-5 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-destructive"
           role="alert"
         >
-          Approval was not issued. Review the newly materialized request before trying again: {error}
+          This request could not be updated. Review it again before trying.
         </p>
       ) : null}
-      {artifact ? (
-        <>
-          <ConsentFacts artifact={artifact} connectorIcons={connectorIcons} />
-          <ExactArtifactJson artifact={artifact} />
-        </>
-      ) : (
-        <section aria-labelledby="owner-device-warning" className="mb-8">
-          <h2 className="pdpp-title" id="owner-device-warning">
-            Owner device control
-          </h2>
-          <p className="pdpp-body mt-3">
-            This authorizes owner-level control for this device flow. It is not a scoped third-party data grant, so
-            there is no data scope or purpose to review.
-          </p>
-          <p className="pdpp-body mt-2">
-            Request expires at {detail.kind === "owner_device" ? <IcTimestamp value={detail.expires_at} /> : null}.
-          </p>
-        </section>
-      )}
+      <details className="mb-6 border-y border-border py-2">
+        <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+        {artifact ? <><ConsentFacts artifact={artifact} connectorIcons={connectorIcons} /><ExactArtifactJson artifact={artifact} /></> : (
+          <section aria-labelledby="owner-device-warning" className="mb-8">
+            <h2 className="pdpp-title" id="owner-device-warning">Owner device control</h2>
+            <p className="pdpp-body mt-3">This request authorizes control of the owner's device. There is no data access to review.</p>
+            <p className="pdpp-body mt-2">Request expires at {detail.kind === "owner_device" ? <IcTimestamp value={detail.expires_at} /> : null}.</p>
+          </section>
+        )}
+      </details>
       <section aria-labelledby="decision">
-        <h2 className="pdpp-title" id="decision">
-          Decision
-        </h2>
+        <h2 className="pdpp-title" id="decision">Choose</h2>
         {decisionControl}
       </section>
     </div>

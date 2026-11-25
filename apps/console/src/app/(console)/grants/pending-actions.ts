@@ -54,9 +54,12 @@ export async function approveReviewedPendingApprovalAction(formData: FormData) {
 }
 
 export async function denyPendingApprovalAction(formData: FormData) {
-  await requireDashboardAccess("/grants#pending-approvals");
   const kind = asString(formData.get("kind")) as "consent" | "owner_device";
   const approvalId = asString(formData.get("approval_id"));
+  if (asString(formData.get("deny_confirmation")) !== "yes") {
+    redirect(kind === "consent" ? `/grants/approvals/${encodeURIComponent(approvalId)}` : "/grants#pending-approvals");
+  }
+  await requireDashboardAccess("/grants#pending-approvals");
   const subjectId = asString(formData.get("subject_id")) || undefined;
   let error: string | undefined;
 

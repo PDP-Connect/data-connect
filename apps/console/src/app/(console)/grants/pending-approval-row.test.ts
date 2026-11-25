@@ -10,16 +10,16 @@ import { PendingApprovalRow } from "./pending-approval-row.tsx";
 
 (globalThis as { React?: typeof React }).React = React;
 
-const DENY_LABEL_RE = /Deny request/;
-const DENY_TARGET_RE = /Deny data-access request apr_queue_only/;
+const DENY_LABEL_RE = /Don(?:&#x27;|')t allow/;
+const DENY_CONFIRM_RE = /name="deny_confirmation"[^>]*value="yes"/;
 const NO_APPROVAL_RE = /Approve|issue grant/;
-const REVIEW_LABEL_RE = /Review request/;
+const REVIEW_LABEL_RE = />Review</;
 
 function noAction(): void {
   // Rendering proof only.
 }
 
-test("pending approval queue renders review and request-specific denial, never approval", () => {
+test("pending approval queue renders Review and a confirmed Don't allow action, never approval", () => {
   const approval: PendingApproval = {
     approval_id: "apr_queue_only",
     batch: false,
@@ -32,6 +32,10 @@ test("pending approval queue renders review and request-specific denial, never a
   const html = renderToStaticMarkup(PendingApprovalRow({ approval, denyAction: noAction }));
   assert.match(html, REVIEW_LABEL_RE);
   assert.match(html, DENY_LABEL_RE);
-  assert.match(html, DENY_TARGET_RE);
+  // DIRECTION.md §What must stay true: destructive actions need a confirmation step that names the effect.
+  assert.match(html, DENY_CONFIRM_RE);
+  assert.match(html, /The app will not get access to your data\./);
   assert.doesNotMatch(html, NO_APPROVAL_RE);
+  const visible = html.replace(/<details\b[\s\S]*?<\/details>/g, "");
+  assert.doesNotMatch(visible, /\b(grant|bearer|scope|manifest|stream|connector|OAuth|PKCE)\b/i);
 });

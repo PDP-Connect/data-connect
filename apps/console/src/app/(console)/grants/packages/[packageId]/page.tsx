@@ -16,6 +16,7 @@
  */
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { formatRelative } from "@pdpp/display";
 import { formatSourceWithConnectionForDisplay } from "@pdpp/display";
 import { DataList, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { GRANT_LIFECYCLE_VOCABULARY } from "@pdpp/operator-ui/components/status-vocabularies";
@@ -29,6 +30,7 @@ import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
   type CumulativeClientAccess,
   type GrantPackageChild,
+  listGrants,
   getCumulativeClientAccess,
   getGrantPackage,
 } from "../../../lib/ref-client.ts";
@@ -39,7 +41,7 @@ import { revokePackageAction } from "./revoke-action.ts";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Grant package",
+  title: "App access",
 };
 
 interface DetailParams {
@@ -72,7 +74,7 @@ export default async function GrantPackageDetailPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Grant package" />
+          <PageHeader title="Apps" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -83,6 +85,12 @@ export default async function GrantPackageDetailPage({
   if (!pkg) {
     notFound();
   }
+
+  const summaries = await listGrants({ client_id: pkg.client_id, limit: 50 }).catch(() => null);
+  const appName = summaries?.data.find((grant) => grant.client?.client_name?.trim())?.client?.client_name?.trim() ?? "App";
+  const sources = [...new Set(pkg.children.flatMap((child) => child.source ? [formatSourceWithConnectionForDisplay(child.source)] : []))];
+  const childIds = new Set(pkg.children.map((child) => child.grant_id));
+  const lastRead = summaries?.data.filter((grant) => childIds.has(grant.grant_id)).map((grant) => grant.last_at).sort().at(-1) ?? null;
 
   // Reference-experimental cumulative per-client view across the lineage this
   // package belongs to (linked by parent_package_id). Best-effort: a failure
@@ -108,28 +116,52 @@ export default async function GrantPackageDetailPage({
   const isRevocable = (pkg.persisted_status ?? pkg.status) === "active";
   const childCount = pkg.children.length;
   const subscriptionsHref = "/event-subscriptions";
+  const relative = (value: string | null) => {
+    if (!value) return "Not available";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Not available" : formatRelative(date, Date.now());
+  };
 
   return (
     <RecordroomShellWithPalette>
-      <div className="pdpp-caption mb-2 text-muted-foreground">
-        <Link className="underline-offset-2 hover:underline" href="/grants/packages">
-          ← Grant packages
-        </Link>
+      <div className="mb-2 text-[13px] text-muted-foreground">
+        <Link className="min-h-11 inline-flex items-center underline-offset-2 hover:underline" href="/grants">← Apps</Link>
       </div>
-      <PageHeader title="Grant package" />
+      <PageHeader title={appName} />
 
       {sp.revoke_error ? (
-        <div className="pdpp-caption mb-6 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">Revoke error:</span> <span>{sp.revoke_error}</span>
-        </div>
+        <p className="mb-4 text-[13px] text-destructive">Access could not be removed. Try again.</p>
       ) : null}
 
       {sp.revoked === "yes" ? (
-        <div className="pdpp-caption mb-6 rounded-md border border-emerald-500/30 border-l-4 border-l-emerald-500/60 bg-emerald-500/5 px-4 py-2.5">
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">Package revoked.</span>{" "}
-          <span>Every child grant has been cascaded to revoked. The package's MCP refresh token is invalidated.</span>
-        </div>
+        <p className="mb-4 text-[13px] text-muted-foreground">Access removed.</p>
       ) : null}
+
+      <Section title="What it can read">
+        <dl className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-[13px]">
+          <dt className="text-muted-foreground">Data</dt><dd>{sources.length ? sources.join(", ") : "Not available"}</dd>
+          <dt className="text-muted-foreground">Since</dt><dd>{relative(pkg.approved_at ?? pkg.created_at)}</dd>
+          <dt className="text-muted-foreground">Last read</dt><dd>{relative(lastRead)}</dd>
+          <dt className="text-muted-foreground">How often</dt><dd>Not shown</dd>
+        </dl>
+      </Section>
+
+      {isRevocable ? (
+        <Section title="Remove access">
+          <details className="rounded-md border border-border-strong p-3">
+            <summary className="flex min-h-11 cursor-pointer items-center text-[13px] font-medium text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Remove access</summary>
+            <p className="my-2 text-[13px] text-foreground">{appName} will no longer read your data. It keeps what it already read.</p>
+            <form action={revokePackageAction}>
+              <input name="package_id" type="hidden" value={pkg.package_id} />
+              <input name="confirm_revoke" type="hidden" value="yes" />
+              <IcButton size="sm" type="submit" variant="destructive">Remove access</IcButton>
+            </form>
+          </details>
+        </Section>
+      ) : null}
+
+      <details className="mt-5 border-t border-border pt-2">
+        <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
 
       <Section title="Identity">
         <dl className="pdpp-caption grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-1 text-muted-foreground">
@@ -263,6 +295,7 @@ export default async function GrantPackageDetailPage({
           </form>
         </Section>
       ) : null}
+      </details>
     </RecordroomShellWithPalette>
   );
 }
