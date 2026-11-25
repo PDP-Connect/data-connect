@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { readEarlierSetup } from "../server/reachability/configuration-compatibility.ts";
 import { ReachabilityService } from "../server/reachability/service.ts";
-import { projectInventory } from "../server/reachability/projection.ts";
+import { projectInventory, projectRoute } from "../server/reachability/projection.ts";
 import { createGozar } from "@tnunamak/gozar";
 import { ReachabilityOperations } from "../server/reachability/operations.ts";
 import { loadHostIdentity } from "../server/reachability/identity.ts";
@@ -117,4 +117,37 @@ test("unreadable or corrupt embedding state still refuses setup", async () => {
       await assert.rejects(readEarlierSetup(root, []), { code: "configuration_migration_required" });
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("route cleanup projects app copy without SDK instructions or changing binding remedies", () => {
+  const instructions = "Call closeRoute again with the retained route handle (session).";
+  const remedyInstructions = "Copy the provider verification value exactly.";
+  const action = { id: "retry-close", label: "SDK instruction", instructions,
+    disclosure: { links: [], revision: "fixture", text: "Fixture" } };
+  const unresolved = { known: false, reason: "not-observed" };
+  const route = {
+    binding: { target: unresolved, remedy: { ...action, id: "provider-remedy", instructions: remedyInstructions } },
+    cleanup: { state: "unconfirmed", nextAction: action },
+    expiresAt: unresolved,
+    facts: [],
+    handle: { generation: 1, id: "fixture", kind: "session" },
+    hostConfiguration: { target: unresolved, localPort: unresolved, bindTarget: unresolved, origin: unresolved },
+    verification: { results: [], validUntil: unresolved },
+  } as unknown as Parameters<typeof projectRoute>[0];
+
+  const projected = projectRoute(route);
+  assert.deepEqual(projected.cleanup, {
+    state: "unconfirmed", nextAction: { id: "retry-route-cleanup", label: "Turn off again" },
+  });
+  assert.equal(projected.binding.remedy?.instructions, remedyInstructions);
+  assert.doesNotMatch(JSON.stringify(projected), /closeRoute|retained route handle/);
+
+  const other = projectRoute({ ...route, cleanup: {
+    ...route.cleanup, nextAction: { ...route.cleanup.nextAction!, id: "fixture-cleanup-code" },
+  } });
+  assert.deepEqual(other.cleanup.nextAction, {
+    id: "retry-route-cleanup", label: "Turn off again", supportCode: "fixture-cleanup-code",
+  });
+  assert.doesNotMatch(JSON.stringify(other), /closeRoute|retained route handle/);
 });

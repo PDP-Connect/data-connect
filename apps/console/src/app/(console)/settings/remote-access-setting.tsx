@@ -1279,7 +1279,8 @@ export function RemoteAccessSetting({
               ) : null}
               {route.cleanup.nextAction ? (
                 <p className="pdpp-caption whitespace-pre-wrap break-words">
-                  {route.cleanup.nextAction.instructions ?? plain(route.cleanup.nextAction.label)}
+                  {plain(route.cleanup.nextAction.label)}
+                  {route.cleanup.nextAction.supportCode ? <> (support code: {route.cleanup.nextAction.supportCode})</> : null}
                 </p>
               ) : null}
             </>

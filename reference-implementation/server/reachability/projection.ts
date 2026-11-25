@@ -282,6 +282,14 @@ export function projectInventory(list: ProviderList & { earlierSetup?: import(".
 }
 // `journaled` is what the host's own start record says about this exact route: the provider that
 // created it and the digest of the facts the owner approved. Null when no verified record exists.
+function projectCleanupAction(action: SetupAction) {
+  return {
+    id: "retry-route-cleanup",
+    label: "Turn off again",
+    ...(action.id === "retry-close" ? {} : { supportCode: action.id }),
+  };
+}
+
 export function projectRoute(
   route: Route,
   journaled?: { providerId: string | null; approvedConsentFactsDigest: string | null } | null,
@@ -297,7 +305,7 @@ export function projectRoute(
       target: observation(route.binding.target),
     },
     cleanup: {
-      nextAction: route.cleanup.nextAction ? projectAction(route.cleanup.nextAction) : null,
+      nextAction: route.cleanup.nextAction ? projectCleanupAction(route.cleanup.nextAction) : null,
       state: route.cleanup.state,
     },
     expiresAt: observation(route.expiresAt),
