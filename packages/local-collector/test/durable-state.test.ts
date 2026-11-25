@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -316,7 +317,7 @@ test("an underscore-named queue beside the hyphen-named queue is left in place, 
   });
 });
 
-test("an unreadable underscore-named queue beside the hyphen-named queue does not stop the hyphen one resolving", () => {
+test("an underscore-named file that is not a queue, beside a hyphen-named queue with rows, does not stop the hyphen one resolving", () => {
   withTempRoot("pdpp-durable-state-underscore-unreadable-", (root) => {
     const stateRoot = join(root, "state");
     const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
@@ -335,6 +336,61 @@ test("an unreadable underscore-named queue beside the hyphen-named queue does no
     assert.match(resolved.stderr, /could not be read .* may still hold pending rows/);
     assert.ok(resolved.stderr.includes(`--queue ${underscorePath}`));
     assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1);
+  });
+});
+
+// The empty-canonical rule ("an empty canonical file is not allowed to hide" a
+// legacy store, below) applies to an underscore-named queue too: an empty
+// hyphen queue cannot be proven authoritative while a file beside it might hold
+// this source's rows. A file that is not SQLite holds none, so it is skipped; a
+// file that cannot be opened might, so resolution fails closed and names it.
+test("an empty hyphen-named queue beside an underscore-named queue that cannot be opened fails closed", {
+  skip: process.platform === "win32" || process.getuid?.() === 0 ? "needs POSIX permissions and a non-root user" : false,
+}, () => {
+  withTempRoot("pdpp-durable-state-underscore-unopenable-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_B);
+    seedOutbox(underscorePath, SOURCE_A);
+    chmodSync(underscorePath, 0o000);
+    try {
+      captureStderr(() =>
+        assert.throws(
+          () => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+          (error: unknown) =>
+            error instanceof CollectorStateResolutionError &&
+            error.code === "legacy_state_unreadable" &&
+            error.message.includes(underscorePath)
+        )
+      );
+    } finally {
+      chmodSync(underscorePath, 0o600);
+    }
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 1, "the underscore-named queue is left as it was");
+  });
+});
+
+test("an empty hyphen-named queue beside an underscore-named file that is not SQLite resolves to the hyphen one", () => {
+  withTempRoot("pdpp-durable-state-underscore-junk-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_B);
+    writeFileSync(underscorePath, "this is not a SQLite database, but it is long enough to have a header\n");
+
+    const resolved = captureStderr(() =>
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
+    );
+    assert.equal(resolved.result, hyphenPath);
   });
 });
 

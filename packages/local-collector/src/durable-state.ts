@@ -519,8 +519,10 @@ function abandonMigrationForExistingCanonical(
 /**
  * The canonical queue is authoritative, so a legacy queue beside it is never
  * drained by the resolver. Its pending rows are not lost, but only the
- * operator can deliver them; say where they are. This is a diagnostic: a
- * legacy file that cannot be read must not stop the canonical queue resolving.
+ * operator can deliver them; say where they are. This count is a diagnostic,
+ * so a legacy file it cannot read does not stop resolution here. An empty
+ * canonical queue is different: the legacy scan in resolveCollectorQueuePath
+ * fails closed on a file it cannot open, because that file may hold the rows.
  */
 function warnLegacyQueuePending(input: {
   canonicalPath: string;
