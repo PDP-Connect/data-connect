@@ -3,7 +3,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveSourceDisplayNameFallback, isFallbackConnectionLabel } from "./connector-display.ts";
+import {
+  deriveSourceDisplayNameFallback,
+  formatConnectionDisplayName,
+  isFallbackConnectionLabel,
+} from "./connector-display.ts";
 
 test("absent display name is a fallback", () => {
   assert.equal(isFallbackConnectionLabel({ connectorId: "gmail", displayName: null }), true);
@@ -121,4 +125,21 @@ test("deriveSourceDisplayNameFallback converts underscores/hyphens to spaces for
     }),
     "my new connector source"
   );
+});
+
+test("a connection name the server saved, not a person, falls back to the connector name", () => {
+  for (const saved of [
+    "github",
+    "GitHub",
+    "legacy",
+    "local-device:github:abc123",
+    "https://registry.pdpp.dev/connectors/github",
+  ]) {
+    assert.equal(formatConnectionDisplayName(saved, "GitHub", "github"), "GitHub", saved);
+    assert.equal(formatConnectionDisplayName(saved, null, "github"), "this data source", saved);
+  }
+});
+
+test("a connection name a person gave is shown as written", () => {
+  assert.equal(formatConnectionDisplayName("  Work email ", "Gmail", "gmail"), "Work email");
 });

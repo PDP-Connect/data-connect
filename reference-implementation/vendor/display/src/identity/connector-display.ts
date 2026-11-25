@@ -77,10 +77,13 @@ export function formatConnectionDisplayName(
   connectorId: string | null | undefined
 ): string {
   const connectorKey = normalizeText(connectorId).toLowerCase();
-  const savedName = normalizeText(connectionName) || null;
+  const rawSavedName = normalizeText(connectionName) || null;
   const manifestName = normalizeText(connectorDisplayName) || null;
-  const savedNameIsConnectorKey = savedName !== null && savedName.toLowerCase() === connectorKey;
-  return (savedName && !savedNameIsConnectorKey ? savedName : null) ?? manifestName ?? "this data source";
+  const savedNameIsConnectorKey = rawSavedName !== null && rawSavedName.toLowerCase() === connectorKey;
+  // A "legacy" placeholder, a `local-device:` binding id or a registry URL is
+  // also not a name a person gave this connection.
+  const savedName = savedNameIsConnectorKey ? null : displayNameCandidate(rawSavedName);
+  return savedName ?? manifestName ?? "this data source";
 }
 
 /**
