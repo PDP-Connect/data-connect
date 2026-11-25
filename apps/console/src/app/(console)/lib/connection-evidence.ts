@@ -146,8 +146,13 @@ export interface ForwardDispositionSummary {
   /** Long-form hover/title describing what the next run does. */
   title: string;
   tone: EvidenceTone;
-  /** The bare disposition value, kept for data-attributes and tooltips. */
-  value: RefForwardDisposition;
+  /**
+   * The bare disposition value, kept for data-attributes and tooltips.
+   * `connector_not_installed` is console-local: it replaces the reference's
+   * disposition when the connection's connector has no implementation to run,
+   * because no next run can happen until it is installed.
+   */
+  value: RefForwardDisposition | "connector_not_installed";
 }
 
 const FORWARD_DISPOSITION_LABELS: Record<RefForwardDisposition, ForwardDispositionSummary> = {

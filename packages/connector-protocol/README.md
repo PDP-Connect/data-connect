@@ -61,10 +61,14 @@ arrives as `unknown` JSON.
 | new connector emitting `STREAM_EVIDENCE` | old fail-closed runtime | incompatible; pre-spawn gate rejects it |
 | new connector | new runtime advertising `STREAM_EVIDENCE` | compatible |
 
-Connectors declare required protocol capabilities with
-`protocol_capabilities`. The runtime advertises `protocolVersion` and
-`protocolCapabilities`, and rejects missing capabilities before spawning a
-connector. `SKIP_RESULT.boundary_claim` is optional, does not require a
+Connectors declare protocol capabilities with `protocol_capabilities`. The
+runtime advertises `protocolVersion` and `protocolCapabilities`, and rejects
+unknown names and missing required capabilities before spawning a connector
+(`unsupportedRequiredProtocolCapabilities`). `DETAIL_COVERAGE_KEY_SETS` is
+advisory: a runtime that does not advertise it still starts the connector.
+A manifest `protocol_version` is the Collection Profile version, `0.1.0` or
+`0.2.0`; a manifest that declares `DETAIL_COVERAGE_KEY_SETS` or `OBSERVATION`
+declares `0.2.0` (`collectionProfileDeclarationError`). `SKIP_RESULT.boundary_claim` is optional, does not require a
 protocol capability, and is disclosure-only: it never affects, reduces, or
 excludes anything from the servable denominator, coverage calculation, or
 connection/system health rollup, even when an independently recorded

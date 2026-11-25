@@ -17,8 +17,6 @@ import {
 
 import { classifyConnectorIntentModality, type ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { BROWSER_BOUND_KEYS } from "../server/generated/connector-registry.generated.ts";
-import { connectorRetainsSurfaceProcess } from "./browser-surface/retained-surface-connectors.ts";
 
 export const DEFAULT_NEKO_READINESS_TIMEOUT_MS = 120_000;
 /**
@@ -282,7 +280,6 @@ export function parseNekoBrowserSurfaceRuntimeConfig(
   }
   enforceDynamicModeInvariants(shape);
   const dynamic = parseDynamicRuntimeConfig(env);
-  assertRetainedManagedConnectorReserve(shape.surfaceCap, shape.managedConnectorIds);
   return {
     dynamic,
     leaseConfig,
@@ -298,23 +295,18 @@ function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrows
   const manifestManagedConnectors = configuredConnectorIds.length > 0 ? undefined : new ManifestManagedConnectors();
   const managedConnectors =
     manifestManagedConnectors ?? new Set(configuredConnectorIds.flatMap(managedConnectorAliases));
-  // Cap sizing only, not eligibility: the bundled browser connectors are the
-  // ones whose surface-retention policy is known, so they size the reserve.
-  const managedConnectorIds = configuredConnectorIds.length > 0 ? configuredConnectorIds : BROWSER_BOUND_KEYS;
   const managesConnectors = manifestManagedConnectors !== undefined || managedConnectors.size > 0;
-  const defaultSurfaceCap = managesConnectors
-    ? Math.max(1, countRetainedManagedConnectors(managedConnectorIds) + 1)
-    : 0;
+  // Two browser runs at once: the desktop app's long-standing host default.
+  const defaultSurfaceCap = managesConnectors ? 2 : 0;
   const surfaceCap = parseIntegerEnv(env.PDPP_NEKO_SURFACE_CAP, "PDPP_NEKO_SURFACE_CAP", defaultSurfaceCap);
   if (managesConnectors && surfaceCap < 1) {
     throw new Error("PDPP_NEKO_SURFACE_CAP must be an integer >= 1 when browser host mode manages connectors");
   }
-  assertRetainedManagedConnectorReserve(surfaceCap, managedConnectorIds);
   const leaseEnv = readLeaseConfigEnv(env);
   const leaseConfig = buildLeaseConfig(
     {
       configuredStaticProfileKey: undefined,
-      managedConnectorIds,
+      managedConnectorIds: configuredConnectorIds,
       managedConnectors,
       requestedSurfaceMode: "dynamic",
       staticCdpHttpUrl: undefined,
@@ -358,35 +350,6 @@ function splitCsv(value: string | undefined): string[] {
         .filter(Boolean)
     ),
   ];
-}
-
-function assertRetainedManagedConnectorReserve(surfaceCap: number, managedConnectorIds: readonly string[]): void {
-  const retainedManagedConnectorCount = countRetainedManagedConnectors(managedConnectorIds);
-  if (retainedManagedConnectorCount === 0 || surfaceCap > retainedManagedConnectorCount) {
-    return;
-  }
-  // Fair-slot invariant. Credential-boundary connectors (ChatGPT) retain their
-  // surface process across routine idle/capacity reap, so each retained managed
-  // connector permanently holds at least one slot. The cap MUST leave at least
-  // one transient slot for non-retained scheduled work, or the other connectors
-  // could never acquire a surface. This is an explicit operating invariant, not
-  // an operator tuning suggestion: fail config closed rather than deadlock at
-  // runtime. Per-connection retained demand is enforced by the lease manager
-  // against live surfaces and queued requests, including restart reconciliation.
-  throw new Error(
-    `PDPP_NEKO_SURFACE_CAP (${surfaceCap}) must exceed the number of retained credential-boundary managed connectors ` +
-      `(${retainedManagedConnectorCount}) so at least one transient surface slot remains for non-retained scheduled work`
-  );
-}
-
-function countRetainedManagedConnectors(managedConnectorIds: readonly string[]): number {
-  const retained = new Set<string>();
-  for (const connectorId of managedConnectorIds) {
-    if (connectorRetainsSurfaceProcess(connectorId)) {
-      retained.add(canonicalConnectorKey(connectorId) ?? connectorId);
-    }
-  }
-  return retained.size;
 }
 
 function managedConnectorAliases(connectorId: string): string[] {

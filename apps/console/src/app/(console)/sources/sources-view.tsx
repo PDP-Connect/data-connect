@@ -80,6 +80,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import { ConnectorMark } from "../components/connector-mark.tsx";
+import { connectorNotInstalledCopy } from "../lib/connector-implementation.ts";
 import { type RunNowResult, runConnectorNowAction } from "./actions.ts";
 import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
 import {
@@ -416,7 +417,17 @@ function InstanceListItem({
       >
         {instance.fusedStatus.line}
       </span>
-      {instance.ownerActionCue ? (
+      {/* Not installed outranks a suggested action: no action can run until
+          the connector is installed, and both cues share one grid row. */}
+      {instance.connectorNotInstalled ? (
+        <span
+          className="rr-s-item__cue"
+          data-testid="sources-not-installed-cue"
+          title={`${connectorNotInstalledCopy(instance.kind)} Open the source to install it.`}
+        >
+          Not installed · can't sync
+        </span>
+      ) : instance.ownerActionCue ? (
         <span
           className="rr-s-item__cue"
           data-testid="sources-owner-action-cue"
@@ -677,9 +688,16 @@ function PassportActions({
         router.refresh();
         return;
       }
+      if (res.reason === "connector_not_installed") {
+        setToast({
+          kind: "error",
+          message: `${connectorNotInstalledCopy(instance.kind)} Open the source to install it.`,
+        });
+        return;
+      }
       setToast({ kind: "error", message: res.message });
     });
-  }, [instance.connectorId, instance.connectionId, instance.connectorInstanceId, manualUploadHref, router]);
+  }, [instance.connectorId, instance.connectionId, instance.connectorInstanceId, instance.kind, manualUploadHref, router]);
 
   // Push-mode connections can't be remotely pulled — Sync is inert for them.
   const syncDisabled =

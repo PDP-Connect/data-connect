@@ -105,7 +105,6 @@ function resolvedGrantInput(info: JsonObject, pdpp: JsonObject, detail: JsonObje
   return {
     access_mode: detail.access_mode,
     client: { client_id: pdpp.client_id },
-    ...(detail.extensions !== undefined ? { extensions: detail.extensions } : {}),
     // Absent-only expiry: omit the field when the token carries no `exp`.
     ...(typeof info.exp === "number" ? { expires_at: new Date(info.exp * 1000).toISOString() } : {}),
     grant_id: pdpp.grant_id,
@@ -118,7 +117,7 @@ function resolvedGrantInput(info: JsonObject, pdpp: JsonObject, detail: JsonObje
     source_declaration: pdpp.source_declaration,
     streams: detail.streams,
     subject: { id: pdpp.subject_id },
-    version: "0.1.0",
+    version: pdpp.grant_version ?? "0.1.0",
   };
 }
 
@@ -186,6 +185,7 @@ export function projectSourceIntrospectionWireContext(value: unknown): JsonObjec
       client_id: info.client_id,
       context_kind: "oauth_rar_0_1",
       grant_id: info.grant_id,
+      ...(grant.version === "0.2.0" ? { grant_version: grant.version } : {}),
       issued_at: grant.issued_at,
       source: grant.source,
       source_declaration: grant.source_declaration,

@@ -4,6 +4,7 @@
 import { createRequire } from "node:module";
 import {
   type ResolvedGrant,
+  type FilterField,
   ResolvedGrantSchema,
   type SelectionRequest,
   SelectionRequestSchema,
@@ -31,63 +32,8 @@ export interface CoreStreamSelection {
   view?: string | undefined;
 }
 
-export type ResolvedGrantWithExtensions = ResolvedGrant & { extensions?: Record<string, unknown> };
-
-export type FrozenRangeType = "integer" | "number" | "date" | "date-time";
-
-export interface FrozenRangeFilterMember {
-  streams: Record<string, Record<string, { type: FrozenRangeType; ops: Array<"gte" | "gt" | "lte" | "lt"> }>>;
-}
-
-/** Freeze only the final granted fields from the retained consent declaration. */
-export function freezeClientRangeFilters(input: {
-  requestedStreams: ReadonlyArray<{ name: string; pdpp_range_filters?: unknown }>;
-  resolvedStreams: ReadonlyArray<CoreStreamSelection>;
-  declaration: SourceDeclaration;
-  selectionPreset?: string | undefined;
-  ownerSelected?: boolean | undefined;
-}): FrozenRangeFilterMember | undefined {
-  for (const request of input.requestedStreams) {
-    if (Object.hasOwn(request, "pdpp_range_filters") &&
-        request.pdpp_range_filters !== undefined && typeof request.pdpp_range_filters !== "boolean") {
-      fail(`Stream '${request.name}' pdpp_range_filters must be a boolean`);
-    }
-  }
-  if (input.selectionPreset !== undefined || input.ownerSelected === true) return undefined;
-  const requested = new Set(input.requestedStreams
-    .filter((request) => Object.hasOwn(request, "pdpp_range_filters") && request.pdpp_range_filters === true)
-    .map((request) => request.name));
-  const streams = new Map<string, FrozenRangeFilterMember["streams"][string]>();
-  for (const resolved of input.resolvedStreams) {
-    if (!requested.has("*") && !requested.has(resolved.name)) continue;
-    const declared = input.declaration.streams.find((stream) => stream.name === resolved.name);
-    const query: unknown = (declared as unknown as JsonObject | undefined)?.query;
-    const ranges: unknown = isObject(query) ? query.range_filters : undefined;
-    const properties: unknown = declared?.schema.properties;
-    if (!isObject(ranges) || !isObject(properties)) continue;
-    const fields = new Map<string, FrozenRangeFilterMember["streams"][string][string]>();
-    for (const field of resolved.fields ?? []) {
-      if (!Object.hasOwn(ranges, field) || !Object.hasOwn(properties, field)) continue;
-      const schema = properties[field];
-      if (!isObject(schema)) continue;
-      const types = typeof schema.type === "string" ? [schema.type] :
-        Array.isArray(schema.type) ? schema.type.filter((type) => type !== "null") : [];
-      if (types.length !== 1) continue;
-      const baseType = types[0];
-      const type: FrozenRangeType | undefined = baseType === "integer" || baseType === "number" ? baseType :
-        baseType === "string" && (schema.format === "date" || schema.format === "date-time") ? schema.format : undefined;
-      const declaredOps = ranges[field];
-      if (!type || !Array.isArray(declaredOps)) continue;
-      const ops = [...new Set(declaredOps.filter((op): op is "gte" | "gt" | "lte" | "lt" =>
-        op === "gte" || op === "gt" || op === "lte" || op === "lt"))];
-      if (ops.length > 0) fields.set(field, { type, ops });
-    }
-    if (fields.size > 0) streams.set(resolved.name, Object.fromEntries(fields));
-  }
-  return streams.size > 0 ? { streams: Object.fromEntries(streams) } : undefined;
-}
-
 export interface CoreSelection {
+  grant_version?: "0.1.0" | "0.2.0";
   access_mode: string;
   purpose_code: string;
   purpose_description?: string | undefined;
@@ -219,7 +165,7 @@ function manifestStreams(declaration: SourceDeclaration): SourceDeclaration["str
 function requiredFields(stream: SourceDeclaration["streams"][number]): string[] {
   const required = stream.schema.required ?? [];
   if (!(Array.isArray(required) && required.every(isNonEmptyString)) || new Set(required).size !== required.length) {
-    fail(`Stream '${stream.name}' schema.required must contain unique field names`);
+    fail(`Stream '${stream.name}' schema.required must contain unique field names`, [stream.name]);
   }
   return required;
 }
@@ -237,12 +183,12 @@ function resolveFields(
   stream: SourceDeclaration["streams"][number]
 ): Pick<CoreStreamSelection, "fields" | "view"> {
   if (request.view && request.fields) {
-    fail(`Stream '${stream.name}' view and fields are mutually exclusive`);
+    fail(`Stream '${stream.name}' view and fields are mutually exclusive`, [stream.name]);
   }
   if (request.view) {
     const view = stream.views?.find((candidate) => candidate.id === request.view);
     if (!(view && isNonEmptyStringArray(view.fields))) {
-      fail(`Unknown view '${request.view}' on stream '${stream.name}'`);
+      fail(`Unknown view '${request.view}' on stream '${stream.name}'`, [stream.name]);
     }
     return { fields: includeRequiredFields(view.fields, stream), view: request.view };
   }
@@ -253,16 +199,16 @@ function resolveFields(
     // persistence backend.
     const fields = Object.keys(properties).sort();
     if (fields.length === 0) {
-      fail(`Stream '${stream.name}' snapshot has no fields to authorize`);
+      fail(`Stream '${stream.name}' snapshot has no fields to authorize`, [stream.name]);
     }
     return { fields };
   }
   if (!(stream.selection.fields && isNonEmptyStringArray(request.fields))) {
-    fail(`Stream '${stream.name}' does not support the requested field selection`);
+    fail(`Stream '${stream.name}' does not support the requested field selection`, [stream.name]);
   }
   const unknown = request.fields.filter((field) => !(field in properties));
   if (unknown.length > 0) {
-    fail(`Unknown fields on stream '${stream.name}': ${unknown.join(", ")}`);
+    fail(`Unknown fields on stream '${stream.name}': ${unknown.join(", ")}`, [stream.name]);
   }
   return { fields: includeRequiredFields(request.fields, stream) };
 }
@@ -278,7 +224,7 @@ function resolveResources(
     !(stream.selection.resources && isNonEmptyStringArray(resources)) ||
     new Set(resources).size !== resources.length
   ) {
-    fail(`Stream '${stream.name}' resources are not a supported unique non-empty selection`);
+    fail(`Stream '${stream.name}' resources are not a supported unique non-empty selection`, [stream.name]);
   }
   if (stream.primary_key.length === 1) {
     return [...resources];
@@ -288,7 +234,7 @@ function resolveResources(
     try {
       components = JSON.parse(resource);
     } catch {
-      fail(`Stream '${stream.name}' compound resource keys must be minified JSON string arrays`);
+      fail(`Stream '${stream.name}' compound resource keys must be minified JSON string arrays`, [stream.name]);
     }
     if (
       !Array.isArray(components) ||
@@ -296,7 +242,7 @@ function resolveResources(
       !components.every((component) => typeof component === "string") ||
       JSON.stringify(components) !== resource
     ) {
-      fail(`Stream '${stream.name}' compound resource key has the wrong shape`);
+      fail(`Stream '${stream.name}' compound resource key has the wrong shape`, [stream.name]);
     }
   }
   return [...resources];
@@ -310,10 +256,10 @@ function resolveTimeConstraint(
     return;
   }
   if (!stream.consent_time_field) {
-    fail(`Stream '${stream.name}' does not support time_range`);
+    fail(`Stream '${stream.name}' does not support time_range`, [stream.name]);
   }
   if (timeRange.since && timeRange.until && Date.parse(timeRange.since) > Date.parse(timeRange.until)) {
-    fail(`Stream '${stream.name}' time_range.since must not follow time_range.until`);
+    fail(`Stream '${stream.name}' time_range.since must not follow time_range.until`, [stream.name]);
   }
   return {
     field: stream.consent_time_field,
@@ -370,10 +316,18 @@ export function resolveCoreSelection(
     requests = cloneJson(preset.streams) as CoreStreamSelection[];
   }
   if (requests.length === 1 && requests[0]?.name === "*") {
-    const instanceIds = requests[0].instance_ids;
+    // Core §6 wildcard note (spec-core.md "Note on wildcards") and §5 selection rules: the requested parameters apply to every expanded
+    // stream and each expansion is validated like a concrete request, so a
+    // stream that cannot honor a constraint rejects the request instead of
+    // being silently broadened.
+    const wildcard = requests[0];
     requests = manifestStreams(declaration).map((stream) => ({
-      ...(instanceIds ? { instance_ids: [...instanceIds] } : {}),
+      ...(wildcard.fields ? { fields: [...wildcard.fields] } : {}),
+      ...(wildcard.instance_ids ? { instance_ids: [...wildcard.instance_ids] } : {}),
       name: stream.name,
+      ...(wildcard.resources ? { resources: [...wildcard.resources] } : {}),
+      ...(wildcard.time_range ? { time_range: { ...wildcard.time_range } } : {}),
+      ...(wildcard.view ? { view: wildcard.view } : {}),
     }));
   }
   return requests.map((request) => {
@@ -384,7 +338,7 @@ export function resolveCoreSelection(
     const fields = resolveFields(request, stream);
     const instanceIds = request.instance_ids ?? [];
     if (instanceIds.some((id) => !isNonEmptyString(id)) || new Set(instanceIds).size !== instanceIds.length) {
-      fail(`Stream '${stream.name}' instance_ids must be unique opaque handles`);
+      fail(`Stream '${stream.name}' instance_ids must be unique opaque handles`, [stream.name]);
     }
     const resources = resolveResources(request.resources, stream);
     const timeConstraint = resolveTimeConstraint(request.time_range, stream);
@@ -401,41 +355,8 @@ export function resolveCoreSelection(
   });
 }
 
-/**
- * Take the profile's `pdpp_range_filters` member off each stream request entry
- * so the closed Core request schema validates the rest, and hand back the
- * entries that asked for a frozen set. A present non-boolean value is rejected
- * (spec-client-range-filters.md Section 3); `false` and absence mean no set.
- */
-function takeRangeFilterRequests(candidate: unknown): Set<number> {
-  const requested = new Set<number>();
-  if (!(isObject(candidate) && Array.isArray(candidate.streams))) {
-    return requested;
-  }
-  for (const [index, stream] of candidate.streams.entries()) {
-    if (!(isObject(stream) && Object.hasOwn(stream, "pdpp_range_filters"))) {
-      continue;
-    }
-    const flag = stream.pdpp_range_filters;
-    if (flag !== undefined && typeof flag !== "boolean") {
-      fail(`Stream '${String(stream.name)}' pdpp_range_filters must be a boolean`);
-    }
-    Reflect.deleteProperty(stream, "pdpp_range_filters");
-    if (flag === true) {
-      requested.add(index);
-    }
-  }
-  return requested;
-}
-
-export function validateCoreSelectionRequest(
-  value: unknown,
-  options: { clientRangeFilters?: boolean } = {}
-): SelectionRequest {
+export function validateCoreSelectionRequest(value: unknown): SelectionRequest {
   const candidate = cloneJson(value);
-  // Without the profile the member stays on the entry, and Core's closed
-  // schema rejects it as any other unknown member.
-  const rangeFilterRequests = options.clientRangeFilters ? takeRangeFilterRequests(candidate) : new Set<number>();
   if (!validateSelectionRequestSchema(candidate)) {
     const details = (validateSelectionRequestSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
@@ -446,14 +367,6 @@ export function validateCoreSelectionRequest(
   const semantic = validateSelectionRequestSemantics(request);
   if (!semantic.ok) {
     fail(`Selection request semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
-  }
-  // Keep the intent on the validated entries; the freezing step reads it at
-  // approval, from the retained request, not from the wire again.
-  for (const index of rangeFilterRequests) {
-    const stream = request.streams?.[index];
-    if (stream) {
-      Object.assign(stream, { pdpp_range_filters: true });
-    }
   }
   return request;
 }
@@ -604,12 +517,43 @@ export function resolveCoreEligibleInstanceIds({
   return kept;
 }
 
+function freezeClientFilterFields(
+  declaration: SourceDeclaration["streams"][number],
+  fields: readonly string[]
+): Record<string, FilterField> | undefined {
+  const filterEntries: [string, FilterField][] = [];
+  for (const field of fields) {
+    const fieldSchema = (declaration.schema.properties as Record<string, unknown> | undefined)?.[field] as
+      | { type?: string | string[]; format?: string }
+      | undefined;
+    const types = [
+      ...new Set(
+        (Array.isArray(fieldSchema?.type) ? fieldSchema.type : [fieldSchema?.type]).filter((type) => type !== "null")
+      ),
+    ];
+    const [scalar] = types;
+    if (types.length !== 1 || !["string", "integer", "number", "boolean"].includes(scalar ?? "")) {
+      continue;
+    }
+    const filterType =
+      scalar === "string" && (fieldSchema?.format === "date" || fieldSchema?.format === "date-time")
+        ? fieldSchema.format
+        : (scalar as FilterField["type"]);
+    const range = ["integer", "number", "date", "date-time"].includes(filterType)
+      ? ([...new Set(declaration.query?.range_filters?.[field] ?? [])] as FilterField["range"])
+      : [];
+    filterEntries.push([field, { range, type: filterType }]);
+  }
+  const filters = Object.fromEntries(filterEntries);
+  return Object.keys(filters).length ? filters : undefined;
+}
+
 export function materializeCoreResolvedGrant({
   accessMode,
   clientId,
   expiresAt,
-  extensions,
   grantId,
+  grantVersion,
   issuedAt,
   purposeCode,
   purposeDescription,
@@ -622,8 +566,8 @@ export function materializeCoreResolvedGrant({
   accessMode: string;
   clientId: string;
   expiresAt: string | null;
-  extensions?: Record<string, unknown>;
   grantId: string;
+  grantVersion?: "0.1.0" | "0.2.0" | undefined;
   issuedAt: string;
   purposeCode: string;
   purposeDescription?: string | undefined;
@@ -632,14 +576,13 @@ export function materializeCoreResolvedGrant({
   selectionPreset?: string | undefined;
   snapshot: RetainedCoreConsentSnapshot;
   subjectId: string;
-}): ResolvedGrantWithExtensions {
+}): ResolvedGrant {
   const candidate = {
     access_mode: accessMode,
     client: { client_id: clientId },
     // Absent-only expiry: a grant with no expiry omits the field entirely
     // rather than carrying an explicit `null` (spec-core.md, Grant fields).
     ...(expiresAt === null || expiresAt === undefined ? {} : { expires_at: expiresAt }),
-    ...(extensions === undefined ? {} : { extensions: cloneJson(extensions) }),
     grant_id: grantId,
     issued_at: issuedAt,
     purpose_code: purposeCode,
@@ -648,9 +591,17 @@ export function materializeCoreResolvedGrant({
     ...(selectionPreset ? { selection_preset: selectionPreset } : {}),
     source: cloneJson(snapshot.source),
     source_declaration: { version: snapshot.declaration_version },
-    streams: resolvedStreams.map((stream) => projectResolvedStream(stream, true)),
+    streams: resolvedStreams.map((stream) => {
+      const projected = projectResolvedStream(stream, true);
+      if (grantVersion !== "0.2.0") {
+        return projected;
+      }
+      const declaration = snapshot.declaration.streams.find((entry) => entry.name === stream.name);
+      const filters = declaration ? freezeClientFilterFields(declaration, projected.fields ?? []) : undefined;
+      return filters ? { ...projected, filter_fields: filters } : projected;
+    }),
     subject: { id: subjectId },
-    version: "0.1.0" as const,
+    version: grantVersion === "0.2.0" ? ("0.2.0" as const) : ("0.1.0" as const),
   };
   return parseCoreResolvedGrant(candidate);
 }
@@ -683,27 +634,7 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
 }
 
 /**
- * A grant may carry an `extensions` object keyed by absolute profile URI
- * (spec-client-range-filters.md Section 4.2). The vendored Core grant schema is
- * closed and has no such member, so it is validated here and the remainder goes
- * through the Core schema unchanged. Core preserves the members and does not
- * interpret them; a profile's own reader validates its member.
- */
-export function splitGrantExtensions(candidate: unknown): { extensions?: Record<string, unknown>; rest: unknown } {
-  if (!(isObject(candidate) && "extensions" in candidate)) {
-    return { rest: candidate };
-  }
-  const { extensions, ...rest } = candidate;
-  if (!(isObject(extensions) && Object.keys(extensions).every((key) => URL.canParse(key)))) {
-    fail("Resolved grant extensions must be an object keyed by absolute URI");
-  }
-  return Object.keys(extensions).length === 0 ? { rest } : { extensions, rest };
-}
-
-/**
  * Parse the closed Source resolved-grant contract used by every binding.
- * URI-keyed profile extensions are detached before Core validation and then
- * restored on the validated clone; Core fields retain their closed schema.
  *
  * TOLERANT BY DESIGN, AND PERSISTED-STATE ONLY. This function deliberately
  * accepts one shape the current JSON Schema rejects: a legacy explicit
@@ -747,21 +678,20 @@ export function splitGrantExtensions(candidate: unknown): { extensions?: Record<
  * the documented restriction the review asked for, so the migration exception
  * does not silently become permanent protocol acceptance.
  */
-export function parseCoreResolvedGrant(value: unknown): ResolvedGrantWithExtensions {
-  const { extensions, rest } = splitGrantExtensions(normalizeAbsentOnlyExpiry(cloneJson(value)));
-  const candidate = rest;
+export function parseCoreResolvedGrant(value: unknown): ResolvedGrant {
+  const candidate = normalizeAbsentOnlyExpiry(cloneJson(value));
   if (!validateResolvedGrantSchema(candidate)) {
     const details = (validateResolvedGrantSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
       .join("; ");
     fail(`Resolved grant is invalid: ${details}`);
   }
-  const grant = candidate as ResolvedGrantWithExtensions;
+  const grant = candidate as ResolvedGrant;
   const semantic = validateResolvedGrantSemantics(grant);
   if (!semantic.ok) {
     fail(`Resolved grant semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
   }
-  return extensions === undefined ? grant : { ...grant, extensions };
+  return grant;
 }
 
 export function servePrecollectedCoreRecords({

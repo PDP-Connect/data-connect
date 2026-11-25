@@ -1052,9 +1052,10 @@ test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", a
     const initializeServerInfo = resultOf(initialize).serverInfo as Record<string, unknown>;
     assert.equal(initializeServerInfo.name, "pdpp-reference-mcp");
     assert.deepEqual(initializeServerInfo.icons, [
-      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon.svg` },
+      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon` },
+      { mimeType: "image/png", sizes: ["180x180"], src: `${rsUrl}/apple-icon` },
     ]);
-    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
 
     const tools = await postMcpJson(rsUrl, accessToken, {
       id: 2,
@@ -1927,8 +1928,25 @@ test("/mcp rejects missing and owner bearers", async () => {
   try {
     const missing = await fetchJson(`${rsUrl}/mcp`, { method: "POST" });
     assert.equal(missing.status, 401);
-    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(
+      missing.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp"`
+    );
+    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
     assert.equal(errorOf(missing).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
+
+    const badToken = await postMcpJson(rsUrl, "not-a-real-token", {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(badToken.status, 401);
+    assert.equal(
+      badToken.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`
+    );
+    assert.equal(errorOf(badToken).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
 
     const mcpMetadata = await fetchProtectedResourceMetadata(stringField(errorOf(missing), "resource_metadata"));
     assert.equal(mcpMetadata.resource, `${rsUrl}/mcp`);
@@ -1972,6 +1990,74 @@ test("/mcp rejects missing and owner bearers", async () => {
     assert.equal(errorOf(owner).code, "permission_error");
     assert.match(stringField(errorOf(owner), "message"), /grant-scoped client or MCP package token/);
     assert.match(stringField(errorOf(owner), "message"), /owner-agent REST onboarding/);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/mcp challenges revoked grants as invalid tokens", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource/mcp`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const revoked = await completeOauthCodeFlow({ asUrl, client, manifest });
+    await revokeGrant(mustExist(revoked.grantId, "authorization code flow must issue a grant id"), {
+      request_id: "mcp-invalid-token-revoked-test",
+    });
+    const revokedResponse = await postMcpJson(rsUrl, revoked.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(revokedResponse.status, 401);
+    assert.equal(
+      revokedResponse.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
+    assert.equal(errorOf(revokedResponse).code, "grant_revoked");
+    assert.equal(errorOf(revokedResponse).resource_metadata, metadataUrl);
+
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/mcp challenges expired grants as invalid tokens", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource/mcp`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const expired = await completeOauthCodeFlow({ asUrl, client, manifest });
+    const expiredGrantId = mustExist(expired.grantId, "authorization code flow must issue a grant id");
+    const expiredAt = new Date(Date.now() - 60_000).toISOString();
+    getDb()
+      .prepare("UPDATE grants SET expires_at = ?, grant_json = json_set(grant_json, '$.expires_at', ?) WHERE grant_id = ?")
+      .run(expiredAt, expiredAt, expiredGrantId);
+    getDb().prepare("UPDATE tokens SET expires_at = ? WHERE grant_id = ?").run(expiredAt, expiredGrantId);
+
+    const expiredResponse = await postMcpJson(rsUrl, expired.accessToken, {
+      id: 2,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+
+    assert.equal(expiredResponse.status, 401);
+    assert.equal(
+      expiredResponse.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
+    assert.equal(errorOf(expiredResponse).code, "grant_expired");
+    assert.equal(errorOf(expiredResponse).resource_metadata, metadataUrl);
   } finally {
     await closeServer(server);
   }
@@ -2704,6 +2790,50 @@ test("revoking one child grant silently removes that source from the package /mc
   }
 });
 
+test("revoking a package's last child challenges its token as invalid", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id],
+    });
+    const packageAccess = await introspectAccessToken(asUrl, accessToken);
+    const packageId = stringField(packageAccess, "grant_package_id");
+    const packageMembers = (await getGrantPackageAccess(packageId)) as { members?: Array<{ grant_id?: string }> } | null;
+    const packageMember = packageMembers?.members?.[0];
+    assert.ok(packageMember?.grant_id);
+    assert.equal(packageMembers?.members?.length, 1);
+    await revokeGrant(packageMember.grant_id, {
+      request_id: "mcp-package-last-child-revoked-test",
+    });
+    assert.equal((await introspectAccessToken(asUrl, accessToken)).active, true);
+    const emptyPackageAccess = await getGrantPackageAccess(packageId);
+    assert.equal((emptyPackageAccess?.members as unknown[] | undefined)?.length, 0);
+
+    const after = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(after.status, 401);
+    assert.equal(
+      after.resp.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`
+    );
+    assert.equal(errorOf(after).code, "authentication_error");
+    assert.equal(errorOf(after).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("revoking the package invalidates /mcp access and the refresh-token exchange", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
@@ -2737,9 +2867,8 @@ test("revoking the package invalidates /mcp access and the refresh-token exchang
     await revokeGrantPackage(packageId, { request_id: "multi-source-package-revoke-test" });
 
     // /mcp must now reject the package bearer. introspection marks the
-    // token inactive with `inactive_reason = 'package_revoked'`; that
-    // does not map to a grant_revoked/grant_expired/grant_invalid 403,
-    // so requireToken falls through to a 401 challenge.
+    // token inactive with `inactive_reason = 'package_revoked'`; requireToken
+    // reports the generic authentication error with an invalid-token challenge.
     const after = await postMcpJson(rsUrl, accessToken, {
       id: 2,
       jsonrpc: "2.0",
@@ -7077,6 +7206,7 @@ test("a stream declared after review is not added to the issued grant", async ()
       }
     ).manifest;
     const widened = structuredClone(manifest) as typeof manifest & { streams: Record<string, unknown>[] };
+    widened.version = "widened";
     widened.streams.push({ ...structuredClone(widened.streams[0]), name: "late_declared_stream" });
     assert.equal(
       (
@@ -7130,6 +7260,63 @@ test("a stream declared after review is not added to the issued grant", async ()
     } finally {
       getDb().exec("DROP TRIGGER widen_declaration_at_consume");
     }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+
+test("hosted package member failure rolls back all authority and permits one retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "atomic-package-retry");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const body = consentChallengeAcceptBody({
+      chosen: model.sources.map((source) => ({ source, streams: source.streams })),
+      client,
+      model,
+    });
+    const db = getDb();
+    const authorityCounts = () => ({
+      grants: db.prepare("SELECT count(*) AS n FROM grants WHERE client_id = ?").get(client.client_id),
+      packages: db.prepare("SELECT count(*) AS n FROM grant_packages WHERE client_id = ?").get(client.client_id),
+      tokens: db.prepare("SELECT count(*) AS n FROM tokens WHERE client_id = ?").get(client.client_id),
+      members: db.prepare("SELECT count(*) AS n FROM grant_package_members").get(),
+    });
+    const before = authorityCounts();
+    db.exec(`
+      CREATE TRIGGER fail_hosted_package_member
+      AFTER INSERT ON grant_package_members
+      BEGIN
+        SELECT RAISE(ABORT, 'injected hosted member failure');
+      END
+    `);
+    let failed: JsonResponse;
+    try {
+      failed = await postConsentChallenge(asUrl, challenge, "accept", body);
+    } finally {
+      db.exec("DROP TRIGGER fail_hosted_package_member");
+    }
+    assert.equal(failed.status, 400, JSON.stringify(failed.body));
+    assert.deepEqual(authorityCounts(), before, "failed issuance must leave no authority rows");
+    assert.deepEqual(
+      db.prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?").get(challenge),
+      { decision_digest: null, status: "pending" }
+    );
+    const retried = await postConsentChallenge(asUrl, challenge, "accept", body);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.deepEqual(authorityCounts(), {
+      grants: { n: 2 },
+      packages: { n: 1 },
+      tokens: { n: 3 },
+      members: { n: 2 },
+    });
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", body)).status, 404);
+    assert.equal(await countGrantPackagesForOwner(), 1);
   } finally {
     await closeServer(server);
   }
@@ -7637,3 +7824,58 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
     }
   });
 }
+
+test("live authorization code rejects bad bindings without burning the honest retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const otherClient = await registerAuthCodeClient(asUrl);
+    const prepared = await prepareOauthCodeFlow({ asUrl, client, manifest });
+    // Same shape as a valid verifier, so only the S256 comparison can reject it.
+    const wrongVerifier = `${prepared.verifier[0] === "A" ? "B" : "A"}${prepared.verifier.slice(1)}`;
+    const defaults: Record<string, string> = {
+      client_id: client.client_id,
+      code: prepared.code,
+      code_verifier: prepared.verifier,
+      grant_type: "authorization_code",
+      redirect_uri: "https://client.example/callback",
+    };
+    const redeem = (changes: Record<string, string> = {}) =>
+      fetchJson(`${asUrl}/oauth/token`, {
+        body: new URLSearchParams({ ...defaults, ...changes }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+    const refreshCount = () =>
+      (getDb().prepare("SELECT COUNT(*) AS n FROM oauth_refresh_tokens").get() as { n: number }).n;
+    const beforeRefresh = refreshCount();
+    const cases: Array<{ changes: Record<string, string>; message: RegExp }> = [
+      { changes: { code_verifier: wrongVerifier }, message: /PKCE verification failed/ },
+      { changes: { client_id: otherClient.client_id }, message: /client_id mismatch/ },
+      { changes: { redirect_uri: "https://client.example/other" }, message: /redirect_uri mismatch/ },
+    ];
+    for (const entry of cases) {
+      const rejected = await redeem(entry.changes);
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.error, "invalid_grant");
+      assert.match(String(rejected.body.error_description), entry.message);
+      const stored = getDb()
+        .prepare("SELECT status, consumed_at FROM oauth_authorization_codes WHERE code = ?")
+        .get(prepared.code) as { consumed_at: string | null; status: string };
+      assert.deepEqual({ ...stored }, { consumed_at: null, status: "issued" });
+      assert.equal(refreshCount(), beforeRefresh);
+    }
+    const accepted = await redeem();
+    assert.equal(accepted.status, 200);
+    assert.equal(typeof accepted.body.access_token, "string");
+    assert.equal(typeof accepted.body.refresh_token, "string");
+    assert.equal(refreshCount(), beforeRefresh + 1);
+    const replay = await redeem();
+    assert.equal(replay.status, 400);
+    assert.equal(replay.body.error, "invalid_grant");
+  } finally {
+    await closeServer(server);
+  }
+});

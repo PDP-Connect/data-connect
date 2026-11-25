@@ -157,25 +157,39 @@ ENABLED_FEATURES="${ENABLED_FEATURES:-CDPScreenshotNewSurface}"
   ${CHROMIUM_MOBILE_FLAGS} &
 CHROME_PID=$!
 
-resize_browser_to_active_screen() {
-  screen_size="$(xwininfo -root -display "${DISPLAY}" 2>/dev/null | awk '/Width:/ { width = $2 } /Height:/ { height = $2 } END { if (width && height) print width "x" height }')"
+read_screen_size() {
+  xwininfo -root -display "${DISPLAY}" 2>/dev/null | awk '/Width:/ { width = $2 } /Height:/ { height = $2 } END { if (width && height) print width "x" height }'
+}
+
+# Keep every visible browser window at least screen-sized. A window opened
+# after launch (a connector's new tab opens a new window under --app) comes
+# up a pixel or two smaller than the screen, and the window-settle probe
+# then reports the surface unsettled. So compare each visible window on
+# every tick, not only when the screen size changes.
+fit_browser_windows_to_screen() {
+  screen_size="$(read_screen_size)"
   case "${screen_size}" in
-    *[!0-9x]*|x*) return 1 ;;
+    ''|*[!0-9x]*|x*) return ;;
   esac
-  window_ids="$(xdotool search --class RemoteBrowserApp 2>/dev/null || true)"
-  [ -n "${window_ids}" ] || return 1
+  window_ids="$(xdotool search --onlyvisible --class RemoteBrowserApp 2>/dev/null || true)"
   for window_id in ${window_ids}; do
-    xdotool windowsize --sync "${window_id}" "${screen_size%x*}" "${screen_size#*x}" 2>/dev/null || true
+    window_size="$(xdotool getwindowgeometry "${window_id}" 2>/dev/null | awk '/Geometry:/ { print $2 }')"
+    case "${window_size}" in
+      ''|*[!0-9x]*|x*) continue ;;
+    esac
+    # Only an undersized window leaves part of the screen uncovered. An
+    # oversized one is clipped to the screen and still settles, and Chromium
+    # refuses widths under 500 px (phone screens), so shrinking it would be
+    # retried forever without effect.
+    if [ "${window_size%x*}" -lt "${screen_size%x*}" ] || [ "${window_size#*x}" -lt "${screen_size#*x}" ]; then
+      xdotool windowsize "${window_id}" "${screen_size%x*}" "${screen_size#*x}" 2>/dev/null || true
+    fi
   done
 }
 
 trap 'kill "${CHROME_PID}" 2>/dev/null || true; wait "${CHROME_PID}"; exit 0' INT TERM
-last_screen_size=""
 while kill -0 "${CHROME_PID}" 2>/dev/null; do
-  current_screen_size="$(xwininfo -root -display "${DISPLAY}" 2>/dev/null | awk '/Width:/ { width = $2 } /Height:/ { height = $2 } END { if (width && height) print width "x" height }')"
-  if [ -n "${current_screen_size}" ] && [ "${current_screen_size}" != "${last_screen_size}" ] && resize_browser_to_active_screen; then
-    last_screen_size="${current_screen_size}"
-  fi
+  fit_browser_windows_to_screen
   sleep 1
 done
 wait "${CHROME_PID}"

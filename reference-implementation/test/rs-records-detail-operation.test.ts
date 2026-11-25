@@ -319,3 +319,36 @@ test("rs.records.get awaits async dependency promises", async () => {
   assert.equal(resolved, true);
   assert.equal(result.record.id, "rec_1");
 });
+
+test("rs.records.get keeps schema-required fields in an owner sparse read but never widens a client read", async () => {
+  // spec-core §8 `fields`: schema-required fields are always included. Owner
+  // reads use the current schema; client grants froze their fields at issuance.
+  const deps = makeDeps({
+    getManifest: () => ({
+      streams: [
+        {
+          name: "pay_statements",
+          schema: { properties: { employer: {}, id: {}, net_pay_minor: {} }, required: ["id", "employer"] },
+        },
+      ],
+    }),
+    getRecord: (stream, recordId) =>
+      Promise.resolve({
+        data: { employer: "Acme", id: recordId, net_pay_minor: 1 },
+        id: recordId,
+        object: "record",
+        stream,
+      }),
+  });
+  const owner = await executeRecordDetail(
+    { actor: ownerActor, expandOptions: { fields: ["net_pay_minor"] }, recordId: "rec_1", streamName: "pay_statements" },
+    deps
+  );
+  assert.deepEqual(owner.record.data, { employer: "Acme", id: "rec_1", net_pay_minor: 1 });
+
+  const client = await executeRecordDetail(
+    { actor: clientActor, expandOptions: { fields: ["net_pay_minor"] }, recordId: "rec_1", streamName: "pay_statements" },
+    deps
+  );
+  assert.deepEqual(client.record.data, { net_pay_minor: 1 });
+});

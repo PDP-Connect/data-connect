@@ -19,7 +19,7 @@
  */
 
 import { filterFreshPressureRows, resolveRecoveryFirstMode } from "../recovery-decision.ts";
-import { type BackoffDecision, computeNextRunWithBackoff } from "../scheduler-backoff.ts";
+import { type BackoffDecision, computeNextRunWithBackoff, endsFailureStreak } from "../scheduler-backoff.ts";
 import type {
   ConnectorSchedule,
   GetForwardEvidenceDebtHandler,
@@ -308,9 +308,11 @@ function readSchedulerEventReasonClass(record: RunRecord, prefix: string): strin
 }
 
 function currentStreakHasSchedulerEvent(history: readonly RunRecord[], prefix: string, reasonClass: string): boolean {
-  const lastSuccessIndex = history.findLastIndex((record) => record.status === "succeeded");
+  // The current streak starts after the newest record that ends one: a success
+  // or certified partial progress (the same boundary the counter walk uses).
+  const lastBoundaryIndex = history.findLastIndex(endsFailureStreak);
   return history
-    .slice(lastSuccessIndex + 1)
+    .slice(lastBoundaryIndex + 1)
     .some((record) => readSchedulerEventReasonClass(record, prefix) === reasonClass);
 }
 

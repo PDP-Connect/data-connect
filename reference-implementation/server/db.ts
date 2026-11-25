@@ -21,8 +21,8 @@
  * call sites to hoist statements to module scope.
  */
 
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -32,7 +32,11 @@ import {
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
-import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
+import {
+  openSqliteDatabase,
+  resolveDatabaseEncryptionKey,
+  type SqliteEncryptionOptions,
+} from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
@@ -58,6 +62,7 @@ interface SqliteDatabase {
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (sql: string) => SqliteStatement;
   transaction: <T>(fn: () => T) => (() => T) & { immediate: () => T };
+  serialize: () => Buffer;
 }
 type VectorIndexKind = "sqlite-vec" | "blob-flat";
 type DatabaseHandle = SqliteDatabase & { vectorIndexKind: VectorIndexKind };
@@ -277,6 +282,13 @@ const BROWSER_SURFACE_LEASE_CREATE_TABLE_NAME_PATTERN =
   /^(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"browser_surface_leases"|browser_surface_leases)/i;
 
 let db: DatabaseHandle | null = null;
+let sqliteMemorySchemaSnapshot: Buffer | null = null;
+let sqliteSchemaSnapshotRestores = 0;
+
+/** How many databases this process opened from a schema snapshot (tests only). */
+export function sqliteSchemaSnapshotRestoreCountForTests(): number {
+  return sqliteSchemaSnapshotRestores;
+}
 let sqliteStoreCacheGeneration = 0;
 let sqliteStoreCacheIdentity = "sqlite:closed:0";
 
@@ -519,6 +531,16 @@ CREATE TABLE IF NOT EXISTS connectors (
   connector_id TEXT PRIMARY KEY,
   manifest     TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Content digest of the manifest first accepted under each (connector, version),
+-- kept independent of which revision is current so a superseded version's
+-- accepted content is still protected from equivocation.
+CREATE TABLE IF NOT EXISTS connector_accepted_declarations (
+  connector_id        TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  content_digest      TEXT NOT NULL,
+  PRIMARY KEY (connector_id, declaration_version)
 );
 
 CREATE TABLE IF NOT EXISTS connector_installs (
@@ -1431,6 +1453,8 @@ CREATE TABLE IF NOT EXISTS browser_surfaces (
   profile_dir      TEXT,
   profile_volume   TEXT,
   browser_generation_hash TEXT,
+  allocator_metadata_json TEXT,
+  retained INTEGER CHECK (retained IS NULL OR retained IN (0, 1)),
   active_lease_id  TEXT,
   created_at       TEXT NOT NULL,
   last_used_at     TEXT NOT NULL,
@@ -2050,11 +2074,31 @@ CREATE TABLE IF NOT EXISTS stream_evidence_run_registry (
 CREATE INDEX IF NOT EXISTS idx_stream_evidence_run_registry_instance
   ON stream_evidence_run_registry(connector_instance_id);
 
+-- Consecutive runs each staged checkpoint was withheld for the same reason
+-- (server/stores/checkpoint-withhold-store.ts). Scheduling state only: a
+-- commit keeps the row as a tombstone (last_run_id holds a versioned run
+-- ledger), and a lost row only delays a stall report.
+CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  grant_id              TEXT NOT NULL,
+  state_stream          TEXT NOT NULL,
+  reason_key            TEXT NOT NULL,
+  consecutive_runs      INTEGER NOT NULL CHECK(consecutive_runs >= 1),
+  last_run_id           TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
+);
+
+-- changes_floor: the oldest changes_since watermark whose delta can still be
+-- reconstructed. History pruning advances it; see pruneRecordChangeHistory.
+-- Lives on the counter row so a bulk reset (which deletes the row) clears it.
 CREATE TABLE IF NOT EXISTS version_counter (
   connector_id  TEXT NOT NULL,
   connector_instance_id TEXT NOT NULL,
   stream        TEXT NOT NULL,
   max_version   INTEGER NOT NULL DEFAULT 0,
+  changes_floor INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 
@@ -2584,6 +2628,21 @@ CREATE TABLE IF NOT EXISTS search_index_dirty (
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_dirty_pending
   ON search_index_dirty(dirty);
+
+-- Pending re-derivation of manifest-derived record columns for one stream of
+-- one connection, queued with a manifest publication; deleted once done.
+CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+  connector_instance_id TEXT NOT NULL,
+  connector_id          TEXT NOT NULL,
+  stream                TEXT NOT NULL,
+  job_id                TEXT NOT NULL,
+  after_record_key      TEXT,
+  marked_at             TEXT NOT NULL,
+  attempts              INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at       TEXT,
+  last_error            TEXT,
+  PRIMARY KEY(connector_instance_id, stream)
+);
 
 -- Deployment-scoped provider app config (e.g. a shared OAuth client
 -- id/secret), keyed generically by (identity_group, logical_key) -- never
@@ -6200,33 +6259,36 @@ function loadVectorExtension(raw: SqliteDatabase): VectorIndexKind {
   }
 }
 
-export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
-  // Detach, don't close: a previously-returned handle belongs to whoever
-  // holds it. See `detachDb()` for why closing here was a cross-instance
-  // interference defect.
-  detachDb();
-  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
-  if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true });
+/**
+ * Publish `bytes` as a new database file at `path`, or throw if `path` cannot be
+ * published: EEXIST when anything already exists there, or another error from
+ * `link` when the filesystem has no hard links. The bytes are written in full to
+ * a unique temporary file in the same directory first, so no other process can
+ * open a partly written database. The hard link then makes the file visible at
+ * `path` in one step, and it never replaces a competing database. The temporary
+ * file is removed either way.
+ */
+export function publishSchemaSnapshotFile(
+  path: string,
+  bytes: Buffer,
+  link: (existingPath: string, newPath: string) => void = linkSync,
+): void {
+  const temporaryPath = `${path}.snapshot-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temporaryPath, bytes, { flag: "wx" });
+    link(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
   }
-  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
-  sqliteStoreCacheGeneration += 1;
-  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
-  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+}
 
-  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
-  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
-  // invalid on in-memory DBs.
-  if (path !== ":memory:") {
-    raw.pragma("journal_mode = WAL");
-    raw.pragma("synchronous = NORMAL");
-    raw.pragma("temp_store = MEMORY");
-    raw.pragma("mmap_size = 268435456");
-    raw.pragma("cache_size = -65536");
-  }
-
-  const vectorIndexKind = loadVectorExtension(raw);
-
+/**
+ * Create the schema on `raw`, a connection to a database with no schema yet.
+ * It does not read or write the module's database handle or store-cache
+ * identity, so `initDb` can run it on a private `:memory:` connection (see
+ * `buildPrivateSchemaSnapshot`) as well as on the connection it returns.
+ */
+function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // The first non-trivial write on the freshly opened DB. On Docker dev
   // restart the previous process may still be closing its WAL writer;
   // wrap with the same bounded retry policy used by
@@ -6445,6 +6507,10 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_dir", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_volume", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "browser_generation_hash", "TEXT"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "allocator_metadata_json", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "browser_surfaces", "retained", "INTEGER CHECK (retained IS NULL OR retained IN (0, 1))")
+  );
   // Dataset summary projection fencing: a `generation` column lets rebuild
   // and reconcile writers guard their final summary write against
   // concurrent record/blob delta writers. Pre-existing rows seed with 0;
@@ -6549,6 +6615,32 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
+  // Pre-existing DBs predate changes_floor. Seed it at each stream's head so
+  // every older changes_since token expires once (clients re-sync from
+  // `beginning`): history may already have been pruned or compacted, and the
+  // floor cannot tell. The column and seed commit together so an interrupted
+  // seed cannot leave a column that makes the next startup skip it.
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+        raw.exec(
+          `UPDATE version_counter
+              SET changes_floor = MAX(max_version,
+                COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                           WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                             AND rc.stream = version_counter.stream), 0),
+                COALESCE((SELECT MAX(r.version) FROM records r
+                           WHERE r.connector_instance_id = version_counter.connector_instance_id
+                             AND r.stream = version_counter.stream), 0))`
+        );
+      }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
+    }
+  });
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
   // A legacy vector has no evidence that it was produced from the current
@@ -6785,6 +6877,125 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
   runWithSqliteBusyRetrySync(() =>
     raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
   );
+}
+
+/**
+ * The schema as a serialized database image, built on a private `:memory:`
+ * connection that no other code can reach. The build starts from an empty
+ * database, so a file created from the image holds no rows from any other
+ * database.
+ */
+function buildPrivateSchemaSnapshot(opts: InitDbOptions): Buffer {
+  const seed = openSqliteDatabase(
+    Database,
+    ":memory:",
+    resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs),
+    opts,
+  ) as unknown as SqliteDatabase;
+  try {
+    loadVectorExtension(seed);
+    buildSqliteSchema(seed, opts);
+    return seed.serialize();
+  } finally {
+    seed.close();
+  }
+}
+
+/**
+ * Create `path` from the schema image, so a fresh database file starts with its
+ * schema built. The image is built privately and is never copied from `path`,
+ * because another process may be writing to `path` at this moment. Returns false
+ * when `path` was not published, and the caller then opens it and builds the
+ * schema in place: another process created `path` first (EEXIST), or the
+ * filesystem has no hard links. Any other error also returns false; the in-place
+ * build then reports a real problem.
+ */
+function publishFileSchemaSnapshot(path: string, opts: InitDbOptions): boolean {
+  if (sqliteMemorySchemaSnapshot === null) {
+    sqliteMemorySchemaSnapshot = buildPrivateSchemaSnapshot(opts);
+  }
+  try {
+    publishSchemaSnapshotFile(path, sqliteMemorySchemaSnapshot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
+  // Detach, don't close: a previously-returned handle belongs to whoever
+  // holds it. See `detachDb()` for why closing here was a cross-instance
+  // interference defect.
+  detachDb();
+  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true });
+  }
+  const hasMigrationCallback =
+    opts.onSchemaMigration !== undefined ||
+    opts.onSchemaRetry !== undefined ||
+    opts.onEncryptionMigrationStep !== undefined;
+  // Test runs only (the RI runner requires PDPP_TEST_PROFILE): a test process
+  // opens many fresh databases, and rebuilding the schema for each one cost
+  // about 6.6% of the memory gate's CPU. Production opens one database per
+  // process and never takes this path. Anything that must observe or change
+  // the schema build bypasses it: migration callbacks, encryption, and the
+  // test-only source-revision install marker.
+  const canUseSchemaSnapshot =
+    process.env.PDPP_TEST_PROFILE !== undefined &&
+    !hasMigrationCallback &&
+    !process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH &&
+    resolveDatabaseEncryptionKey(opts.encryptionKey) === null;
+  const restoredMemorySchema =
+    path === ":memory:" && canUseSchemaSnapshot && sqliteMemorySchemaSnapshot !== null;
+  let restoredFileSchema = false;
+  if (path !== ":memory:" && canUseSchemaSnapshot) {
+    if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
+      restoredFileSchema = publishFileSchemaSnapshot(path, opts);
+    }
+  }
+  const raw = (restoredMemorySchema
+    ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
+    : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
+  sqliteStoreCacheGeneration += 1;
+  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
+  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+
+  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
+  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
+  // invalid on in-memory DBs.
+  if (path !== ":memory:") {
+    raw.pragma("journal_mode = WAL");
+    raw.pragma("synchronous = NORMAL");
+    raw.pragma("temp_store = MEMORY");
+    raw.pragma("mmap_size = 268435456");
+    raw.pragma("cache_size = -65536");
+  }
+
+  const vectorIndexKind = loadVectorExtension(raw);
+
+  // SQLite connection settings are not part of a serialized database. The
+  // schema-building path restores foreign_keys during its migrations; a
+  // deserialized connection must restore it explicitly.
+  if (restoredMemorySchema || restoredFileSchema) {
+    sqliteSchemaSnapshotRestores += 1;
+    raw.pragma("foreign_keys = ON");
+    db = withCachedPrepare(raw);
+    Object.defineProperty(raw, "vectorIndexKind", {
+      configurable: false,
+      enumerable: true,
+      value: vectorIndexKind,
+      writable: false,
+    });
+    return db;
+  }
+
+  buildSqliteSchema(raw, opts);
+  if (
+    path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
+  ) {
+    sqliteMemorySchemaSnapshot = raw.serialize();
+  }
   db = withCachedPrepare(raw);
   // Stamp the chosen vector-index backend onto the wrapped db so
   // search-semantic.js can select without re-probing. The Proxy's

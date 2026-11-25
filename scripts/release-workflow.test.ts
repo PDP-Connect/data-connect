@@ -12,7 +12,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, matchesGlob, resolve } from "node:path"
+import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
 const releaseWorkflowPath = resolve(
@@ -22,6 +23,57 @@ const releaseWorkflowPath = resolve(
 
 function readReleaseWorkflow() {
   return readFileSync(releaseWorkflowPath, "utf8")
+}
+
+type ReleaseWorkflow = {
+  on: { pull_request: { paths: string[] } }
+  jobs: { build: { steps: { run?: string; "working-directory"?: string }[] } }
+}
+
+// Repository files a pull-request installer build executes: every script a
+// build step runs with node or bash (resolved against the step's
+// working-directory), the scripts in Tauri's beforeBuildCommand, and their
+// relative imports, followed transitively. A missing file throws, naming it.
+function filesRunByInstallerBuild() {
+  const workflow = load(readReleaseWorkflow()) as ReleaseWorkflow
+  const tauriConfig = JSON.parse(
+    readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8")
+  ) as { build: { beforeBuildCommand: string } }
+  const commands = workflow.jobs.build.steps.flatMap(step =>
+    step.run ? [{ dir: step["working-directory"] ?? ".", text: step.run }] : []
+  )
+  commands.push({ dir: ".", text: tauriConfig.build.beforeBuildCommand })
+  const pending = commands.flatMap(({ dir, text }) =>
+    [...text.matchAll(/\b(?:node|bash)\s+(scripts\/[\w./-]+)/g)].map(match =>
+      join(dir, match[1])
+    )
+  )
+  const seen = new Set<string>()
+  for (let file = pending.pop(); file; file = pending.pop()) {
+    if (seen.has(file)) continue
+    seen.add(file)
+    const source = readFileSync(resolve(process.cwd(), file), "utf8")
+    for (const match of source.matchAll(
+      /\b(?:from|import|require)\s*\(?\s*["'](\.{1,2}\/[^"']+)["']/g
+    )) {
+      pending.push(join(dirname(file), match[1]))
+    }
+  }
+  return [...seen].sort()
+}
+
+// GitHub's `paths` rule: patterns apply in order, a `!` pattern excludes what
+// earlier patterns included, and a file is included if the last pattern that
+// matches it is positive.
+function includedByPaths(file: string, paths: readonly string[]) {
+  let included = false
+  for (const pattern of paths) {
+    const negated = pattern.startsWith("!")
+    if (matchesGlob(file, negated ? pattern.slice(1) : pattern)) {
+      included = !negated
+    }
+  }
+  return included
 }
 
 function readWorkflowStep(workflow: string, name: string) {
@@ -279,6 +331,26 @@ describe("release workflow", () => {
     expect(scripts[3].script).toContain("pwsh -NoProfile")
   })
 
+  it("builds installers on a pull request whenever it changes a file the build runs", () => {
+    const { paths } = (load(readReleaseWorkflow()) as ReleaseWorkflow).on
+      .pull_request
+    const files = filesRunByInstallerBuild()
+
+    expect(files).toContain("scripts/ensure-reference-stack.js")
+    expect(files).toContain("scripts/is-main-module.js")
+    expect(files).toContain(
+      "personal-server/scripts/verify-artifact-relocatable.js"
+    )
+    expect(files.filter(file => !includedByPaths(file, paths))).toEqual([])
+    // Build steps also reach scripts through npm scripts and child
+    // processes, which the scan above cannot follow, so every file under
+    // scripts/ counts, whatever its name.
+    expect(includedByPaths("scripts/lib/helper.mjs", paths)).toBe(true)
+    expect(includedByPaths("scripts/lib/package-input.test.mjs", paths)).toBe(
+      true
+    )
+  })
+
   it("builds manual-install artifacts on demand without an updater", () => {
     const workflow = readReleaseWorkflow()
 
@@ -300,7 +372,7 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
-    expect(workflow).toContain('node-version: "24.21.0"')
+    expect(workflow).toContain('node-version: "24.22.1"')
     expect(workflow).toContain("Stage Node.js runtime sidecar")
     expect(workflow).toContain(
       'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'
@@ -319,7 +391,7 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       "node scripts/verify-reference-stack.mjs --profile release"
     )
-    expect(workflow).toContain("if: github.event_name == 'release'")
+    expect(workflow).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i
     )
@@ -423,7 +495,7 @@ describe("release workflow", () => {
     }
   })
 
-  it("refuses a release checkout whose HEAD is not the release event commit", () => {
+  it("refuses a release checkout whose HEAD is not the selected release commit", () => {
     const workflow = readReleaseWorkflow()
     const marker = "      - name: Verify checked-out release identity\n"
     const scripts = workflow
@@ -481,13 +553,15 @@ describe("release workflow", () => {
             env: {
               ...process.env,
               GITHUB_SHA: githubSha,
+              EXPECTED_SHA: githubSha,
+              AUTOMATIC_TAG: "",
               RELEASE_TAG: "v1.2.3",
             },
           })
         const moved = run(eventSha)
         expect(moved.status).toBe(1)
         expect(moved.stdout).toContain(
-          `Checked-out commit ${movedSha} is not the release event commit ${eventSha}`
+          `Checked-out commit ${movedSha} is not the selected release commit ${eventSha}`
         )
         expect(moved.stdout).not.toContain("verify-release-ref ran")
 
@@ -603,10 +677,10 @@ describe("release workflow", () => {
 
     expect(workflow).toContain("permissions:\n  contents: read")
     expect(workflow).toContain(
-      "publish:\n    if: github.event_name == 'release'\n    needs: build"
+      "publish:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: build"
     )
     expect(workflow).toContain("permissions:\n      contents: write")
-    expect(stagedArtifacts).toContain("if: github.event_name == 'release'")
+    expect(stagedArtifacts).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(stagedArtifacts).toContain(
       "manual-install-${{ matrix.artifact_key }}"
     )
@@ -638,7 +712,7 @@ describe("release workflow", () => {
     )
 
     expect(workflow).toContain(
-      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
+      "publish-core-image:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: [build, publish]"
     )
     expect(publishCoreImage).toContain("packages: write")
     expect(publishCoreImage).not.toContain("id-token:")
@@ -654,12 +728,12 @@ describe("release workflow", () => {
     expect(buildCore).toContain("push: false")
     expect(buildCore).toContain("target: core")
     expect(buildCore).toContain("platforms: linux/amd64,linux/arm64")
-    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ github.sha }}")
+    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}")
   })
 
   it("runs clean-install instead of build only on a dispatch that names a release", () => {
     const workflow = readReleaseWorkflow()
-    type Trigger = { event: string; releaseTag?: string }
+    type Trigger = { event: string; releaseTag?: string; publishTag?: string }
     // Evaluates the simple ==, !=, &&, || job gates this workflow uses.
     const runs = (job: string, trigger: Trigger) => {
       const gate = new RegExp(`\\n  ${job}:\\n(?:    #.*\\n)*    if: (.*)\\n`)
@@ -668,18 +742,25 @@ describe("release workflow", () => {
       const expression = match[1]
         .replaceAll("github.event_name", "event")
         .replaceAll("inputs.release_tag", "releaseTag")
+        .replaceAll("inputs.publish_tag", "publishTag")
+        .replaceAll("startsWith(github.ref_name, 'v')", "true")
         .replaceAll("!github.event.release.prerelease", "true")
         .replaceAll("!=", "!==")
         .replaceAll(/([^!=])==/g, "$1===")
-      return new Function("event", "releaseTag", `return ${expression}`)(
+      return new Function("event", "releaseTag", "publishTag", `return ${expression}`)(
         trigger.event,
-        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : ""
+        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : "",
+        trigger.publishTag ?? ""
       )
     }
     const scenarios: Array<[Trigger, string[]]> = [
       [{ event: "workflow_dispatch", releaseTag: "v2.4.0" }, ["clean-install"]],
       [{ event: "workflow_dispatch", releaseTag: "" }, ["build"]],
       [{ event: "pull_request" }, ["build"]],
+      [
+        { event: "workflow_run", publishTag: "v1.2.3" },
+        ["build", "publish", "publish-core-image", "promote-core-latest"],
+      ],
       [
         { event: "release" },
         ["build", "publish", "publish-core-image", "promote-core-latest"],
@@ -793,8 +874,8 @@ describe("release workflow", () => {
     )
 
     const secretArg = workflow.replace(
-      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
-      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
     )
     expect(secretArg).not.toBe(workflow)
     expect(coreImageScanGaps(secretArg)).toContain(
@@ -1011,7 +1092,7 @@ describe("release workflow", () => {
     )
     expect(workflow.match(/concurrency:/g)).toHaveLength(1)
     expect(promoter).toContain(
-      "promote-core-latest:\n    if: github.event_name == 'release' && !github.event.release.prerelease\n    needs: publish-core-image"
+      "promote-core-latest:\n    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)\n    needs: publish-core-image"
     )
     expect(promoter).toContain(
       "concurrency:\n      group: core-image-latest-promotion\n      cancel-in-progress: false"

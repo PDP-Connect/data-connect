@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const tauriFetch = vi.fn()
@@ -455,7 +456,7 @@ describe("production Timeline PDPP data source", () => {
                 message: "The grant is no longer valid",
               },
             },
-            403
+            401
           )
         )
       const consent = await dataSource.requestConsent?.()

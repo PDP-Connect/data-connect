@@ -1,7 +1,42 @@
 name: Release manual-install artifacts
 
 on:
+  workflow_call:
+    inputs:
+      publish_tag:
+        required: true
+        type: string
+      build_sha:
+        required: true
+        type: string
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
+    # The installer matrix takes 20 to 50 minutes per platform, so a pull
+    # request builds it only when it changes an input of the packaging itself.
+    # Every merge to main still builds all four installers through the
+    # automatic desktop release, and workflow_dispatch builds any branch.
+    # All of scripts/ counts, tests included: build steps reach helpers
+    # through npm scripts and child processes as well as direct imports, and
+    # neither a per-file list nor a test-file exclusion can be checked
+    # against those edges.
+    # scripts/release-workflow.test.ts checks that every file the build job
+    # runs, with its local imports, falls under these paths.
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/desktop-release.yml
+      - package.json
+      - package-lock.json
+      - index.html
+      - tsconfig*.json
+      - vite.config.ts
+      - src/**
+      - src-tauri/**
+      - playwright-runner/**
+      - personal-server/**
+      - pdpp-runtime/**
+      - scripts/**
   release:
     types: [created]
   workflow_dispatch:
@@ -22,14 +57,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
 
 jobs:
   build:
     # A dispatch with release_tag only runs clean-install against that release.
-    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
+    if: inputs.publish_tag != '' || github.event_name == 'pull_request' || (github.event_name == 'release' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +111,8 @@ jobs:
           # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
           # during `npm ci`, ignoring that config (npm/cli#2839).
           #
-          # That blocker is gone. This workflow runs Node 24.21.0, which bundles npm
-          # 11.19.0 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
+          # That blocker is gone. This workflow runs Node 24.22.1, which bundles npm
+          # 11.19.1 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
           # detection. (The old note here said to wait for Node 22 LTS to bundle
           # npm>=11.6.3; that will not happen, because a Node line does not take a major
           # npm bump mid-life and npm 11 shipped with Node 24.) The runner is therefore
@@ -99,30 +137,35 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+          ref: ${{ inputs.build_sha || (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
-        if: github.event_name == 'release'
+        if: inputs.publish_tag != '' || github.event_name == 'release'
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
-          # The checkout resolves the tag name when it runs, but the
-          # attestation records GITHUB_SHA from the release event. Refuse if
-          # the tag moved in between, so the attested commit is the built one.
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
           head_sha="$(git rev-parse 'HEAD^{commit}')"
-          if [ "$head_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
             exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
           fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Setup Rust
@@ -131,14 +174,19 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # Cargo 1.100's per-crate search paths exceed Windows' command-line limit
+      # for sigstore. Keep intermediate paths short without moving the bundles.
+      - name: Shorten Windows Rust build paths
+        if: matrix.os_family == 'windows'
+        shell: pwsh
+        run: '"CARGO_BUILD_BUILD_DIR=C:\t" >> $env:GITHUB_ENV'
+
       - name: Cache Rust dependencies and build output
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+          cache-directories: ${{ matrix.os_family == 'windows' && 'C:\t' || '' }}
 
       - name: Stage Node.js runtime sidecar
         shell: bash
@@ -298,8 +346,8 @@ jobs:
           fi
 
       - name: Stage verified release artifacts
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.publish_tag != '' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: manual-install-${{ matrix.artifact_key }}
           path: |
@@ -324,12 +372,12 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download branch-built Windows installer
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: manual-install-windows-x64
           path: installer
@@ -376,7 +424,7 @@ jobs:
 
       - name: Upload clean-install evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clean-install-branch-windows-latest
           path: clean-install-evidence
@@ -384,7 +432,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: build
     runs-on: ubuntu-22.04
     permissions:
@@ -394,7 +442,7 @@ jobs:
       attestations: write
     steps:
       - name: Download verified release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: manual-install-*
           path: release-artifacts
@@ -411,7 +459,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -438,7 +486,7 @@ jobs:
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
 
   publish-core-image:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: [build, publish]
     runs-on: ubuntu-22.04
     outputs:
@@ -452,22 +500,27 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.build_sha || github.ref_name }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
-          # The checkout resolves the tag name when it runs, but the
-          # attestation records GITHUB_SHA from the release event. Refuse if
-          # the tag moved in between, so the attested commit is the built one.
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
           head_sha="$(git rev-parse 'HEAD^{commit}')"
-          if [ "$head_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
             exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
           fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
@@ -497,7 +550,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -515,7 +568,7 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ inputs.publish_tag || github.ref_name }}
 
       # Build once into an OCI archive; nothing reaches GHCR until the scan
       # below has read every layer of every platform manifest in it.
@@ -530,7 +583,7 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
-            PDPP_REFERENCE_REVISION=${{ github.sha }}
+            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar,tar=true
           platforms: linux/amd64,linux/arm64
@@ -607,7 +660,7 @@ jobs:
   # above. GitHub keeps one pending run per group and cancels a replaced pending
   # run. Re-running a cancelled promoter is safe: it moves latest only forward.
   promote-core-latest:
-    if: github.event_name == 'release' && !github.event.release.prerelease
+    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)
     needs: publish-core-image
     runs-on: ubuntu-22.04
     concurrency:
@@ -621,7 +674,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -703,9 +756,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download release installer
         shell: bash
@@ -810,7 +863,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clean-install-${{ matrix.platform }}
           path: clean-install-evidence

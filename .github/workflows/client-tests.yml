@@ -6,7 +6,7 @@ name: client-tests
 # nothing ran `vitest` over src/, src-tauri/, scripts/ or playwright-runner/, so the
 # 88 client test files in vite.config.ts's `test.include` were only ever run locally.
 #
-# Node is pinned to 24.21.0 to match every other workflow in this directory and to
+# Node is pinned to 24.22.1 to match every other workflow in this directory and to
 # stay inside the root package.json `engines` range (>=24.15.0).
 #
 # Two jobs, not one: the root `npm test` script is `npm run typecheck && vitest run`,
@@ -26,8 +26,21 @@ name: client-tests
 # own change, not smuggled into CI wiring. Promote this workflow to a required check once
 # that test passes on main; until then it reports honestly and does not block merges.
 
+env:
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
+
 on:
-  pull_request: {}
+  push:
+    branches: [main]
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   merge_group: {}
   workflow_dispatch: {}
 
@@ -50,9 +63,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -72,9 +85,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Check vendored build serialization
@@ -82,6 +95,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test desktop release version rules
+        run: node --test scripts/desktop-release.test.mjs scripts/npm-release-tags.test.mjs
 
       - name: Typecheck console
         run: npm run types:check --workspace=apps/console
@@ -91,13 +107,22 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build --workspace=apps/console
 
+      # The hosted runner is a disposable VM, which is the isolation boundary here;
+      # test-sandbox runs the command directly.
       - name: Test console Node suite
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm test --workspace=apps/console
 
       - name: Test copied standalone skill routes
         env:
           REQUIRE_STANDALONE: "1"
         run: node --test apps/console/packaged-agent-skill-routes.test.mjs
+
+      - name: Test e2e harness (no browser)
+        run: |
+          npm --prefix e2e ci --no-audit --no-fund
+          node --test e2e/harness.test.mjs e2e/harness-cleanup.test.mjs
 
       # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
       # so a vite.config.ts `test.include` that silently stops matching fails the job
@@ -131,7 +156,7 @@ jobs:
 
       - name: Upload Vitest results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: client-vitest-results
           path: ${{ runner.temp }}/vitest-results.json

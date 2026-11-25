@@ -56,3 +56,8 @@ test("coerceSemanticTimeValue yields null for non-positive, non-finite, and non-
   assert.equal(coerceSemanticTimeValue({}), null);
   assert.equal(coerceSemanticTimeValue(true), null);
 });
+
+test("coerceSemanticTimeValue yields null for a string that is not a date", () => {
+  assert.equal(coerceSemanticTimeValue("not-a-date"), null);
+  assert.equal(coerceSemanticTimeValue("yesterday"), null);
+});

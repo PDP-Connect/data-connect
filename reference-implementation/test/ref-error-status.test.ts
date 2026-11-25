@@ -10,7 +10,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { codeToStatus, recoveryAdmissionExtrasForWire, typeFor } from "../server/routes/ref-error-status.ts";
+import {
+  codeToStatus,
+  connectorNotInstalledExtrasForWire,
+  recoveryAdmissionExtrasForWire,
+  typeFor,
+} from "../server/routes/ref-error-status.ts";
 
 function statusFor(code: string): number {
   const status = codeToStatus[code];
@@ -45,15 +50,11 @@ test("codeToStatus pins the acceptance-target typed-error envelope codes", () =>
   assert.equal(codeToStatus.connector_invalid, 400);
 });
 
-test("codeToStatus pins grant/auth and connector-instance code statuses", () => {
-  for (const code of [
-    "grant_expired",
-    "grant_revoked",
-    "grant_consumed",
-    "grant_invalid",
-    "field_not_granted",
-    "connector_instance_owner_mismatch",
-  ]) {
+test("codeToStatus pins inactive grant and permission error statuses", () => {
+  for (const code of ["grant_expired", "grant_revoked"]) {
+    assert.equal(codeToStatus[code], 401, `${code} must be 401`);
+  }
+  for (const code of ["grant_consumed", "grant_invalid", "field_not_granted", "connector_instance_owner_mismatch"]) {
     assert.equal(codeToStatus[code], 403, `${code} must be 403`);
   }
   assert.equal(codeToStatus.connector_instance_busy, 503);
@@ -105,4 +106,14 @@ test("recoveryAdmissionExtrasForWire omits malformed fields", () => {
     }),
     {}
   );
+});
+
+test("connectorNotInstalledExtrasForWire names the connector only for connector_not_installed", () => {
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "connector_not_installed", connectorId: "chase" }), {
+    connector_id: "chase",
+  });
+  // Another code carrying a connectorId must not leak the field into its envelope.
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "not_found", connectorId: "chase" }), {});
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "connector_not_installed", connectorId: "" }), {});
+  assert.deepEqual(connectorNotInstalledExtrasForWire(null), {});
 });

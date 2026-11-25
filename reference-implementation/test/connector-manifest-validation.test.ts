@@ -39,6 +39,9 @@ const TOP_LEVEL_REGEX_27 =
   /capabilities\.proven\.local_collector=true requires runtime_requirements\.bindings\.filesystem/;
 const TOP_LEVEL_REGEX_28 = /credential_capture field 'password' is a secret field .* with no label/;
 const TOP_LEVEL_REGEX_29 = /credential_capture field 'password' is a secret field with zero env aliases/;
+const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
+const PROFILE_0_2_0_CAPABILITY_PATTERN = /protocol_capabilities DETAIL_COVERAGE_KEY_SETS require protocol_version 0\.2\.0/;
+const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
 
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -212,6 +215,33 @@ test("validateBlobRefSchemaDeclaration rejects non-object, missing props, wrong 
   const noRequired = validBlobRefSchema();
   noRequired.required = [];
   assert.throws(() => validateBlobRefSchemaDeclaration(stream, noRequired, "invalid_request"), TOP_LEVEL_REGEX_5);
+});
+
+// Collection Profile Sections 3.1 and 3.4 at registration: 0.1.0 or 0.2.0,
+// known capability names, and a 0.2.0 capability only at 0.2.0. A manifest
+// without protocol_version is checked as 0.1.0. The stored-manifest read path
+// skips this check so a manifest already stored stays readable.
+test("validateConnectorManifest enforces the Collection Profile declaration at registration only", () => {
+  const keySets = { protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
+  assert.doesNotThrow(() =>
+    validateConnectorManifest({ ...manifestWithStream(), ...keySets, protocol_version: "0.2.0" })
+  );
+  assert.doesNotThrow(() => validateConnectorManifest({ ...manifestWithStream(), protocol_capabilities: ["BLOB"] }));
+  const rejected: [Record<string, unknown>, RegExp][] = [
+    [{ protocol_version: "0.3.0" }, PROFILE_VERSION_PATTERN],
+    [{ ...keySets, protocol_version: "0.1.0" }, PROFILE_0_2_0_CAPABILITY_PATTERN],
+    [keySets, PROFILE_0_2_0_CAPABILITY_PATTERN],
+    [{ protocol_capabilities: ["FORGED"], protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
+    [{ protocol_capabilities: null, protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
+  ];
+  for (const [fields, pattern] of rejected) {
+    const manifest = { ...manifestWithStream(), ...fields };
+    assert.throws(() => validateConnectorManifest(manifest), pattern, JSON.stringify(fields));
+    assert.doesNotThrow(
+      () => validateConnectorManifest(manifest, "connector_invalid", { skipCollectionProfileCheck: true }),
+      JSON.stringify(fields)
+    );
+  }
 });
 
 test("validateConnectorManifest accepts valid stream evidence declarations", () => {

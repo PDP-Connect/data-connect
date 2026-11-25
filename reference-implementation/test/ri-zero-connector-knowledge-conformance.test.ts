@@ -743,8 +743,7 @@ test("falsifiability: a genuinely unresolvable JSON.parse(readFileSync(...)) cal
 // --- Rule (5) fix: a path argument reached through a PROVEN validated-path
 // helper (safePath/safeLeasePath-shaped) is not "unresolvable" -----------
 //
-// test-accounting/packet.ts:267/580/637 and test-accounting/inventory.ts:719
-// all read through same-file helpers (safePath/safeLeasePath/
+// test-accounting/inventory.ts:719 (and the since-deleted packet.ts) read through same-file helpers (safePath/safeLeasePath/
 // authorityContained) that resolve a REAL root via realpathSync(root),
 // resolve() a candidate against it, and REJECT (fail()) any candidate not
 // prefixed by the real root. The scanner cannot know the ACTUAL file (root

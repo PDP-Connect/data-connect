@@ -287,7 +287,8 @@ test("Postgres bootstrap lock contention waits for release without a crash-loop 
   const delays: number[] = [];
   const logs: string[] = [];
   const client = {
-    query: async () => ({ rows: [{ locked: outcomes.shift() ?? false }] }),
+    query: async (sql: string) =>
+      sql.includes("pg_try_advisory_lock") ? { rows: [{ locked: outcomes.shift() ?? false }] } : { rows: [] },
   };
 
   await __acquirePostgresBootstrapLockForTest(client as never, {
@@ -305,6 +306,45 @@ test("Postgres bootstrap lock contention waits for release without a crash-loop 
   assert.equal(outcomes.length, 0);
   assert.ok(logs.some((line) => line.includes("bootstrap lock waiting")));
   assert.ok(logs.some((line) => line.includes("bootstrap lock acquired")));
+});
+
+test("Postgres bootstrap lock loser cancels derived-index maintenance on every failed poll", async () => {
+  const outcomes = [false, false, true];
+  let now = 0;
+  const logs: string[] = [];
+  const cancelQueries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) {
+        return { rows: [{ locked: outcomes.shift() ?? false }] };
+      }
+      cancelQueries.push(sql);
+      // A cancel that lands between two maintenance statements has no effect,
+      // so the same holder is signalled again on the next poll.
+      return { rows: [{ cancelled: true, pid: 4242 }] };
+    },
+  };
+
+  await __acquirePostgresBootstrapLockForTest(client as never, {
+    budget: { databaseSizeBytes: 128 * 1024 * 1024, timeoutMs: 10_000 },
+    log: (line) => logs.push(line),
+    now: () => now,
+    sleep: (delayMs) => {
+      now += delayMs;
+      return Promise.resolve();
+    },
+  });
+
+  assert.equal(cancelQueries.length, 2, "one cancel attempt per failed poll");
+  for (const sql of cancelQueries) {
+    assert.match(sql, /mode = 'ShareLock'/, "only shared holders, which are maintenance runs, are cancelled");
+    assert.match(sql, /current_database\(\)/, "only holders in this database are cancelled");
+  }
+  assert.equal(
+    logs.filter((line) => line.includes("cancelled derived-index maintenance in backend pid 4242")).length,
+    1,
+    "each cancelled backend is logged once"
+  );
 });
 
 test("Postgres bootstrap lock loser has one bounded outer deadline", async () => {
@@ -830,14 +870,27 @@ if (POSTGRES_URL) {
         ["b"]
       );
 
+      // Supersede `a` so its version-1 row is no longer the current anchor, then
+      // drop it the way pruning would.
+      await ingestRecord(connectorId, {
+        data: {
+          created_at: "2026-04-01T00:00:00.000Z",
+          "event-time": "2026-04-01T00:00:00.000Z",
+          id: "a",
+          mutable_time: "2026-04-02T12:00:00.000Z",
+          title: "Alpha relaunch",
+        },
+        key: "a",
+        stream,
+      });
       await postgresQuery("DELETE FROM record_changes WHERE connector_id = $1 AND stream = $2 AND version = 1", [
         connectorId,
         stream,
       ]);
-      await assert.rejects(
-        () => queryRecords(connectorId, stream, fullGrant, { changes_since: "beginning" }, manifest),
-        { code: "cursor_expired" }
-      );
+      // `beginning` holds no consumer state, so history pruned below it must not
+      // fail the recovery request; it returns the live records.
+      const afterPrune = await queryRecords(connectorId, stream, fullGrant, { changes_since: "beginning" }, manifest);
+      assert.deepEqual(afterPrune.data.map((row) => row.id).sort(), ["a", "b"]);
     } finally {
       await postgresQuery("DELETE FROM record_changes WHERE connector_id = $1", [connectorId]);
       await postgresQuery("DELETE FROM records WHERE connector_id = $1", [connectorId]);

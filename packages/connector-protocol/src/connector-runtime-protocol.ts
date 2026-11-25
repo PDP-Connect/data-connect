@@ -101,8 +101,26 @@ function isRecordKey(value: unknown): value is string | readonly string[] {
 /** Capability required by a connector that emits STREAM_EVIDENCE. */
 export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 
+/**
+ * DETAIL_COVERAGE key sets. A host lists it in START when it accepts
+ * `empty_keys` and `unchanged_keys`. A connector declares it in its manifest
+ * `protocol_capabilities` to opt into evidence-based crediting of
+ * `hydrated_keys` (see {@link DetailCoverageMessage.hydrated_keys}).
+ * Collection Profile 0.2.0, Section 3.4. It is the one advisory capability:
+ * a runtime that does not advertise it still starts a connector that declares
+ * it, and that connector reports those keys in `hydrated_keys`.
+ */
+export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as const;
+
+/** Capability required by a connector that emits OBSERVATION (Collection Profile 0.2.0, Section 5.10). */
+export const OBSERVATION_CAPABILITY = "OBSERVATION" as const;
+
 /** Protocol capabilities that can be advertised by a connector or runtime. */
-export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | typeof HOST_BLOB_CAPABILITY;
+export type ConnectorProtocolCapability =
+  | typeof STREAM_EVIDENCE_CAPABILITY
+  | typeof HOST_BLOB_CAPABILITY
+  | typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY
+  | typeof OBSERVATION_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -116,6 +134,17 @@ export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | ty
 export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   STREAM_EVIDENCE_CAPABILITY,
   HOST_BLOB_CAPABILITY,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  OBSERVATION_CAPABILITY,
+];
+
+/**
+ * Capabilities a runtime need not advertise to start a connector that
+ * declares them (Collection Profile Section 3.4). Every other declared
+ * capability is required.
+ */
+const ADVISORY_CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
 ];
 
 function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
@@ -134,6 +163,62 @@ function isConnectorProtocolCapability(value: unknown): value is ConnectorProtoc
  */
 export function isConnectorProtocolCapabilityArray(value: unknown): value is readonly ConnectorProtocolCapability[] {
   return Array.isArray(value) && value.every(isConnectorProtocolCapability);
+}
+
+/**
+ * The declared capabilities a runtime that advertises `advertised` cannot
+ * satisfy, in declaration order. An advisory capability is never in the
+ * result. A runtime MUST NOT start a connector for which this is non-empty
+ * (Collection Profile Sections 3.4 and 4).
+ */
+export function unsupportedRequiredProtocolCapabilities(
+  declared: readonly ConnectorProtocolCapability[],
+  advertised: Iterable<ConnectorProtocolCapability>
+): ConnectorProtocolCapability[] {
+  const supported = new Set<ConnectorProtocolCapability>(advertised);
+  return declared.filter(
+    (capability) => !(supported.has(capability) || ADVISORY_CONNECTOR_PROTOCOL_CAPABILITIES.includes(capability))
+  );
+}
+
+/**
+ * Collection Profile versions a manifest `protocol_version` may name
+ * (Collection Profile Sections 3.1 and 8). This is the profile version. It is
+ * independent of {@link CONNECTOR_PROTOCOL_VERSION} and of the Core
+ * SourceDeclaration `protocol_version`, which Core fixes at 0.1.0.
+ */
+export const COLLECTION_PROFILE_VERSIONS = ["0.1.0", "0.2.0"] as const;
+
+/** Capabilities that Collection Profile 0.2.0 adds (Section 8). */
+const PROFILE_0_2_0_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  OBSERVATION_CAPABILITY,
+];
+
+/**
+ * Why a manifest's `protocol_version` and `protocol_capabilities` are not a
+ * valid Collection Profile declaration, or null when they are. An absent
+ * (`undefined`) capability list declares none. The version must be one of
+ * {@link COLLECTION_PROFILE_VERSIONS}, every capability name must be known,
+ * and a manifest that declares a capability added in 0.2.0 must declare
+ * 0.2.0 (Section 3.1).
+ */
+export function collectionProfileDeclarationError(
+  protocolVersion: unknown,
+  protocolCapabilities: unknown
+): string | null {
+  if (!(COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(protocolVersion)) {
+    return `protocol_version must be one of ${COLLECTION_PROFILE_VERSIONS.join(", ")}, received ${String(protocolVersion)}`;
+  }
+  const declared = protocolCapabilities === undefined ? [] : protocolCapabilities;
+  if (!isConnectorProtocolCapabilityArray(declared)) {
+    return "protocol_capabilities must be an array of known capability names";
+  }
+  const profile020Only = declared.filter((capability) => PROFILE_0_2_0_CAPABILITIES.includes(capability));
+  if (protocolVersion === "0.1.0" && profile020Only.length > 0) {
+    return `protocol_capabilities ${profile020Only.join(", ")} require protocol_version 0.2.0`;
+  }
+  return null;
 }
 
 /** Largest integer a conformant `STREAM_EVIDENCE` count field may carry. */
@@ -223,6 +308,13 @@ export interface StartMessage {
    */
   collection_mode?: "full_refresh" | "incremental";
   detail_gaps?: readonly DetailGapStartEntry[];
+  /**
+   * The host advertises the protocol capabilities it implements. Absent means
+   * none (an older host). A connector MUST NOT emit empty_keys/unchanged_keys
+   * unless START lists DETAIL_COVERAGE_KEY_SETS, and must otherwise keep its
+   * previous coverage behavior.
+   */
+  protocol_capabilities?: readonly ConnectorProtocolCapability[];
   /**
    * SLVP-ideal §4.3 recovery-only launch mode. When true, the connector drains
    * pending non-source-pressure detail gaps and MUST NOT perform the forward
@@ -415,7 +507,23 @@ export interface DetailCoverageMessage {
    * reads `partial`. NEVER inferred from the collected count.
    */
   covered?: number;
+  /**
+   * Required keys the connector verified have no detail at all this run (an
+   * account with no transactions, an order with no items). A key with no
+   * detail record belongs here, not in `hydrated_keys`.
+   */
+  empty_keys?: Array<string | number>;
   gap_keys?: Array<string | number>;
+  /**
+   * Required keys whose detail the run emitted. For a connector whose manifest
+   * declares DETAIL_COVERAGE_KEY_SETS, the runtime credits a hydrated key only
+   * when an accepted record of `stream` answers for it this run: a record
+   * whose primary key is the key, or whose foreign key in a manifest
+   * `relationships` entry to `state_stream` holds it. A hydrated key with no
+   * such record withholds the `state_stream` checkpoint. For any other
+   * connector the declaration alone credits the key. For every connector, a
+   * key with a record the store rejected withholds the checkpoint.
+   */
   hydrated_keys: Array<string | number>;
   /**
    * Required keys accepted by an explicit optional-detail policy. A provider
@@ -428,6 +536,11 @@ export interface DetailCoverageMessage {
   state_stream: string;
   stream: string;
   type: "DETAIL_COVERAGE";
+  /**
+   * Required keys whose detail the connector verified is unchanged since a
+   * prior run and so did not re-emit (a fingerprint or sync-token match).
+   */
+  unchanged_keys?: Array<string | number>;
 }
 
 export interface RuntimeContinuationFact {

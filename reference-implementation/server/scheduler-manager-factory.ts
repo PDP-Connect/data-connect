@@ -65,6 +65,7 @@ interface Logger {
 
 interface Controller {
   awaitRun: (runId: string) => Promise<string>;
+  blobUploadCredentialHooks?: SchedulerOptions["blobUploadCredentialHooks"];
   browserSurfaceLeaseManager?: {
     isManagedConnector: (connectorId: string) => boolean;
   };
@@ -88,6 +89,7 @@ interface Controller {
 }
 
 interface ManagedRunHandle {
+  readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: Record<string, unknown> | null;
   readonly failure_reason?: string | null;
   readonly known_gaps?: readonly Record<string, unknown>[] | null;
@@ -417,9 +419,28 @@ function projectManagedControllerTerminalRun(
     terminalEvent?.data && typeof terminalEvent.data === "object"
       ? (terminalEvent.data as Record<string, unknown>)
       : {};
+  // The runtime writes the connector error to the terminal event as flat
+  // `connector_error_*` fields, never as a nested `connector_error` object, so
+  // the object form below is `null` for every real run. Carry ONLY the code
+  // from the flat form: the streak walk (`scheduler-backoff.ts`) needs it to
+  // recognize a certified stream-scoped failure. `message` and `retryable`
+  // stay absent on purpose; adding them would change which managed failures
+  // `shouldRetryRunFailure` retries in-tick, which is out of scope here.
+  const connectorErrorCode =
+    typeof terminalData.connector_error_code === "string" && terminalData.connector_error_code.length > 0
+      ? terminalData.connector_error_code
+      : null;
   const connectorError =
     terminalData.connector_error && typeof terminalData.connector_error === "object"
       ? (terminalData.connector_error as ConnectorError)
+      : connectorErrorCode === null
+        ? null
+        : ({ code: connectorErrorCode } as ConnectorError);
+  // Same flat-field shape for the checkpoint outcome: the runtime reports it as
+  // `checkpoint_commit_status`; scheduler records read `commit_status`.
+  const checkpointSummary =
+    typeof terminalData.checkpoint_commit_status === "string"
+      ? { commit_status: terminalData.checkpoint_commit_status }
       : null;
   const failureReason = typeof terminalData.reason === "string" ? terminalData.reason : null;
   const knownGaps = Array.isArray(terminalData.known_gaps)
@@ -428,6 +449,7 @@ function projectManagedControllerTerminalRun(
   const terminalReason =
     typeof terminalData.terminal_reason === "string" ? (terminalData.terminal_reason as TerminalReason) : null;
   return {
+    checkpoint_summary: checkpointSummary,
     connector_error: connectorError,
     failure_reason: failureReason,
     known_gaps: knownGaps,
@@ -605,6 +627,7 @@ export function createReferenceSchedulerManager({
         : runtimeContext.referenceBaseUrl;
     const schedulerRsUrl = "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext.rsUrl;
     scheduler = createScheduler({
+      ...(controller.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: requestedOwnerSubjectId }) => {
         if (typeof requestedOwnerSubjectId !== "string" || requestedOwnerSubjectId.trim().length === 0) {
           throw new Error("scheduler ownerSubjectId is required for connection admission");

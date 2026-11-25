@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { cleanup, fireEvent, render } from "@testing-library/react"
 import { AsteriskIcon } from "lucide-react"
 import { afterEach, describe, expect, it } from "vitest"

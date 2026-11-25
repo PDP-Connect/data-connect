@@ -26,7 +26,8 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { readLocalCollectorProfile } from "../server/local-collector-profiles.ts";
-import { closeServer, fetchJson, type TestServer } from "./helpers/legacy-upgrade.ts";
+import { fetchJson, type TestServer } from "./helpers/legacy-upgrade.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-05-18T12:00:00.000Z";
@@ -147,6 +148,6 @@ test("a device enrolled at the target pushes a signal-style connector with no pr
       0
     );
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });

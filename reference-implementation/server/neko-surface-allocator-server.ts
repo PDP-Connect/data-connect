@@ -300,6 +300,7 @@ export class NekoSurfaceAllocatorServiceError extends Error {
     | "docker_malformed_response"
     | "docker_request_failed"
     | "foreign_resource"
+    | "image_missing"
     | "not_found"
     | "port_capacity_exhausted"
     | "profile_path_invalid"
@@ -394,6 +395,8 @@ export class NekoSurfaceAllocatorService {
         // Chromium boots, and replacing on that signal would cause a boot loop.
         // "unhealthy" only appears after StartPeriod + failing retries.
         if (isInspectUnhealthy(existing)) {
+          // Replacing needs the image: check it before destroying anything.
+          await this.assertImageReady();
           await this.#removeContainer(existing.Id);
         } else {
           await this.#migrateContainerNetworkIfNeeded(existing.Id);
@@ -406,6 +409,7 @@ export class NekoSurfaceAllocatorService {
         // than re-binding clients to a dead CDP socket and is the only way
         // an allocator-aware boot reconcile can make progress when prior
         // surfaces were OOM/network-evicted across restarts.
+        await this.assertImageReady();
         await this.#removeContainer(existing.Id);
       } else {
         await this.#startContainer(existing.Id);
@@ -414,6 +418,10 @@ export class NekoSurfaceAllocatorService {
       }
     }
 
+    if (existing === null) {
+      // Before port reclamation, which removes stopped containers.
+      await this.assertImageReady();
+    }
     const skippedPorts = new Set<number>();
     for (;;) {
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
@@ -421,33 +429,49 @@ export class NekoSurfaceAllocatorService {
       const names = this.#resourceNames(request);
       await this.#prepareProfileDirectory(names.profilePath, rootIdentity);
       const labels = this.#labelsForRequest(request, names, port);
-      const created = await this.#docker.requestJson("/containers/create", {
-        body: {
-          Env: this.#containerEnv(request, port),
-          ExposedPorts: {
-            [`${String(this.#options.containerHttpPort)}/tcp`]: {},
-            [`${String(this.#options.containerCdpPort)}/tcp`]: {},
-            [`${String(port)}/tcp`]: {},
-            [`${String(port)}/udp`]: {},
-          },
-          Healthcheck: this.#containerHealthcheck(),
-          HostConfig: {
-            Binds: [`${names.profilePath}:/home/user/.config/chromium`],
-            // Docker takes these option values as strings only.
-            LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
-            NetworkMode: this.#options.network,
-            PortBindings: {
-              [`${String(port)}/tcp`]: [{ HostPort: String(port) }],
-              [`${String(port)}/udp`]: [{ HostPort: String(port) }],
+      const created = await this.#docker
+        .requestJson("/containers/create", {
+          body: {
+            Env: this.#containerEnv(request, port),
+            ExposedPorts: {
+              [`${String(this.#options.containerHttpPort)}/tcp`]: {},
+              [`${String(this.#options.containerCdpPort)}/tcp`]: {},
+              [`${String(port)}/tcp`]: {},
+              [`${String(port)}/udp`]: {},
             },
+            Healthcheck: this.#containerHealthcheck(),
+            HostConfig: {
+              Binds: [`${names.profilePath}:/home/user/.config/chromium`],
+              // Docker takes these option values as strings only.
+              LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
+              NetworkMode: this.#options.network,
+              PortBindings: {
+                [`${String(port)}/tcp`]: [{ HostPort: String(port) }],
+                [`${String(port)}/udp`]: [{ HostPort: String(port) }],
+              },
+            },
+            Image: this.#options.image,
+            Labels: labels,
           },
-          Image: this.#options.image,
-          Labels: labels,
-        },
-        method: "POST",
-        okStatuses: [201],
-        query: { name: names.containerName },
-      });
+          method: "POST",
+          okStatuses: [201],
+          query: { name: names.containerName },
+        })
+        .catch(async (cause: unknown) => {
+          // A create 404 can also name a missing network; inspect the image
+          // and replace the create error only when the image is missing, so
+          // unrelated (or inspect-time) Docker failures keep the create error.
+          if (isDockerNotFoundError(cause)) {
+            try {
+              await this.assertImageReady();
+            } catch (inspectError) {
+              if (inspectError instanceof NekoSurfaceAllocatorServiceError && inspectError.code === "image_missing") {
+                throw inspectError;
+              }
+            }
+          }
+          throw cause;
+        });
       const containerId = readCreatedContainerId(created);
       try {
         await this.#startContainer(containerId);
@@ -741,6 +765,21 @@ export class NekoSurfaceAllocatorService {
       okStatuses: [204, 404, 409],
       query: { force: "true", v: "false" },
     });
+  }
+
+  async assertImageReady(): Promise<void> {
+    try {
+      await this.#docker.requestJson(`/images/${encodeURIComponent(this.#options.image)}/json`);
+    } catch (cause) {
+      if (!isDockerNotFoundError(cause)) {
+        throw cause;
+      }
+      throw new NekoSurfaceAllocatorServiceError(
+        "image_missing",
+        `n.eko container image is missing: ${this.#options.image}`,
+        { cause }
+      );
+    }
   }
 
   /**
@@ -1299,6 +1338,7 @@ async function routeAllocatorRequest(
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts.length === 1 && parts[0] === "readyz" && req.method === "GET") {
     await service.assertProfileStorageReady();
+    await service.assertImageReady();
     sendJson(res, 200, { ready: true });
     return;
   }
@@ -1360,10 +1400,11 @@ export async function startNekoSurfaceAllocatorServer(
   options: NekoSurfaceAllocatorServerOptions
 ): Promise<{ close: () => Promise<void>; url: string }> {
   const service = new NekoSurfaceAllocatorService(options);
-  // Fail before listening: an allocator that cannot write profiles must exit
+  // Fail before listening: an allocator without profiles or its image must exit
   // (visible to the container restart policy) instead of accepting requests
   // it can only fail.
   await service.assertProfileStorageReady();
+  await service.assertImageReady();
   await service.ensureNetworkExists();
   const server = createServer(createNekoSurfaceAllocatorHttpHandler(service));
   const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1512,7 +1553,11 @@ function statusForError(error: Error): number {
   if (error.code === "foreign_resource" || error.code === "profile_path_invalid") {
     return 409;
   }
-  if (error.code === "port_capacity_exhausted" || error.code === "profile_storage_unavailable") {
+  if (
+    error.code === "port_capacity_exhausted" ||
+    error.code === "profile_storage_unavailable" ||
+    error.code === "image_missing"
+  ) {
     return 503;
   }
   return 502;

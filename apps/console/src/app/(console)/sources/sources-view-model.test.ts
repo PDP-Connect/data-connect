@@ -730,6 +730,46 @@ test("toSourceInstanceView surfaces server-owned collection report facts per str
   assert.equal(threads?.collection, null, "streams without collection report facts stay explicitly unavailable");
 });
 
+test("toSourceInstanceView marks a source whose connector is not installed and says why its next run is blocked", () => {
+  const refreshDue = {
+    checkpoint: "advanced" as const,
+    collected: 36,
+    considered: 36,
+    coverage_condition: "complete" as const,
+    forward_disposition: "owner_refresh_due" as const,
+    pending_detail_gaps: 0,
+    skipped: null,
+    stream: "messages",
+  };
+  const notInstalled = toSourceInstanceView(
+    summary({
+      collection_report: [refreshDue],
+      connector_implementation: { connector_id: "gmail", state: "not_installed" },
+    })
+  );
+  assert.equal(notInstalled.connectorNotInstalled, true);
+  assert.equal(
+    notInstalled.streams.find((stream) => stream.name === "messages")?.collection?.dispositionLabel,
+    "Next run: blocked, connector not installed"
+  );
+
+  // Only an explicit "not_installed" counts: installed, unknown, and absent
+  // evidence keep the reference's own disposition.
+  for (const connector_implementation of [
+    { connector_id: "gmail", state: "installed" as const },
+    { connector_id: "gmail", state: "unknown" as const },
+    null,
+    undefined,
+  ]) {
+    const view = toSourceInstanceView(summary({ collection_report: [refreshDue], connector_implementation }));
+    assert.equal(view.connectorNotInstalled, false);
+    assert.equal(
+      view.streams.find((stream) => stream.name === "messages")?.collection?.dispositionLabel,
+      "Next run: refresh due"
+    );
+  }
+});
+
 test("toSourceInstanceView surfaces retained stream counts without conflating them with latest collection", () => {
   const view = toSourceInstanceView(
     summary({

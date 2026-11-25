@@ -7,6 +7,26 @@ const EVENT_PREFIX = "PDPP_TEST_ACCOUNTING_EVENT ";
 function fail(message: string): never {
   throw new Error(`test accounting result: ${message}`);
 }
+
+/** Why a file's structured events could not be accounted. */
+export type StructuredSummaryErrorKind = "malformed-events" | "todo-rejected" | "unexplained-skip";
+
+/**
+ * A file's events could not be accounted. `kind` is fixed text and safe to
+ * print anywhere; `message` can hold test-controlled text (a test name), so it
+ * belongs only in private diagnostics.
+ */
+export class StructuredSummaryError extends Error {
+  readonly kind: StructuredSummaryErrorKind;
+  constructor(kind: StructuredSummaryErrorKind, message: string) {
+    super(`test accounting result: ${message}`);
+    this.kind = kind;
+  }
+}
+
+function failSummary(kind: StructuredSummaryErrorKind, message: string): never {
+  throw new StructuredSummaryError(kind, message);
+}
 function compareStrings(a: string, b: string): number {
   if (a < b) {
     return -1;
@@ -22,6 +42,29 @@ export function accountingResultLine(result: unknown): string {
 }
 export function accountingEventLine(event: unknown): string {
   return `${EVENT_PREFIX}${JSON.stringify(event)}`;
+}
+
+/** A started test's name is cut to this many characters, by the reporter and again when read. */
+export const MAX_STARTED_TEST_NAME_LENGTH = 200;
+
+/**
+ * The reporter swallows test output, so it emits this content-free event when
+ * output arrives. The runner's idle watchdog counts it as progress.
+ */
+export const PROGRESS_EVENT_LINE = accountingEventLine({ type: "test:progress" });
+
+const RUNNING_EVENT_LINE_START = `${EVENT_PREFIX}{"type":"test:running"`;
+
+/**
+ * Drop the progress and test-running events, which matter only while a file
+ * runs (to the watchdog, and to name a killed file's last test), so a file that
+ * exits on its own prints only its terminal events.
+ */
+export function withoutProgressEvents(output: string): string {
+  return output
+    .split("\n")
+    .filter((line) => line !== PROGRESS_EVENT_LINE && !line.startsWith(RUNNING_EVENT_LINE_START))
+    .join("\n");
 }
 
 // Node's boolean `skip: !X` tests carry no reason on the wire, only their name.
@@ -398,6 +441,7 @@ export interface StructuredSummary {
 interface NodeTestEventDetails {
   name?: string;
   skip?: boolean | string;
+  todo?: boolean | string;
   type?: string;
 }
 interface NodeTestEvent {
@@ -428,6 +472,27 @@ function resolveEmittedSkipReason(
   return mapping ? { reason: mapping.reason, consumedIdentity: mapping.identity } : { reason: undefined };
 }
 
+/** Name of the last test the reporter announced as started, or undefined when it announced none. */
+export function lastStartedTestName(output: string): string | undefined {
+  const lines = output.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (!line.startsWith(EVENT_PREFIX)) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line.slice(EVENT_PREFIX.length));
+      if (event?.type === "test:running" && typeof event.details?.name === "string") {
+        // The test process wrote this line and can forge it; cap it here too.
+        return event.details.name.slice(0, MAX_STARTED_TEST_NAME_LENGTH);
+      }
+    } catch {
+      // A line cut off by the kill: read the one before it.
+    }
+  }
+  return undefined;
+}
+
 export function structuredNodeSummary(output: string): StructuredSummary {
   const events: NodeTestEvent[] = output
     .split("\n")
@@ -436,11 +501,11 @@ export function structuredNodeSummary(output: string): StructuredSummary {
       try {
         return JSON.parse(line.slice(EVENT_PREFIX.length));
       } catch {
-        return fail("reporter emitted malformed structured event");
+        return failSummary("malformed-events", "reporter emitted malformed structured event");
       }
     });
   if (events.length === 0) {
-    fail("runner emitted no structured node events");
+    failSummary("malformed-events", "runner emitted no structured node events");
   }
   const skipReasons: Record<string, number> = {};
   const consumedMappingIdentities: string[] = [];
@@ -449,15 +514,29 @@ export function structuredNodeSummary(output: string): StructuredSummary {
   let failed = 0;
   let skipped = 0;
   for (const event of events) {
-    if (!["test:pass", "test:fail"].includes(event.type) || event.details?.type !== "test") {
+    if (!["test:pass", "test:fail"].includes(event.type)) {
       continue;
     }
-    assertions += 1;
+    // `node --test` counts a passing `todo` as a pass and exits 0 when a `todo`
+    // fails, so a todo test is neither a real pass nor a real failure. Reject
+    // it outright, before the suite filter below so a todo `describe` is
+    // rejected too: a placeholder must be a named skip.
+    const todo = event.details?.todo;
+    if (todo !== false && todo !== undefined && todo !== null) {
+      failSummary(
+        "todo-rejected",
+        `todo test rejected (${event.type === "test:pass" ? "body passed" : "body failed"}): ${event.details?.name ?? "unnamed test"}; use a named skip instead`
+      );
+    }
+    if (event.details?.type !== "test") {
+      continue;
+    }
     const { skip } = event.details;
+    assertions += 1;
     if (skip !== false && skip !== undefined && skip !== null) {
       const { reason, consumedIdentity } = resolveEmittedSkipReason(skip, event.details.name);
       if (!reason) {
-        fail(`unexplained skip: ${event.details.name ?? "unnamed test"}`);
+        failSummary("unexplained-skip", `unexplained skip: ${event.details.name ?? "unnamed test"}`);
       }
       if (consumedIdentity !== undefined) {
         consumedMappingIdentities.push(consumedIdentity);

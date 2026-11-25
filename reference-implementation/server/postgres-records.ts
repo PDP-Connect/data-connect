@@ -11,6 +11,7 @@
  * Spec: openspec/changes/add-postgres-runtime-storage/
  */
 
+import { parseFilterRecordJson, type FilterField } from "./client-request-filters.ts";
 import { createHash } from "node:crypto";
 import {
   buildLimitClampedWarning,
@@ -20,6 +21,7 @@ import {
   resolveRequestConnectionId,
 } from "./connection-id-request.ts";
 import { assertConnectorInstanceWritableStatus } from "./connector-instance-admission.ts";
+import { crashPoint } from "./crash-point.ts";
 import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
@@ -28,8 +30,12 @@ import { canonicalConnectorKey } from "./connector-key.ts";
 import { assertConnectorManifestStreamSubsetWithClient } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import {
+  type BulkChunkBudget,
   isPostgresStorageBackend,
   postgresQuery as rawPostgresQuery,
+  runBulkChunksWithinStatementBudget,
+  withPostgresBulkTransaction,
+  withPostgresSnapshotRead,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
 import {
@@ -54,6 +60,7 @@ import {
   nonNullSchemaTypes,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
 } from "./record-filters.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import {
@@ -68,6 +75,12 @@ import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-stor
 import { markSearchIndexDirtyPostgres } from "./stores/search-index-dirty-store.ts";
 
 type JsonObject = Record<string, unknown>;
+function filterRecordData(value: unknown): JsonObject | null {
+  if (typeof value === "string") {
+    return parseFilterRecordJson(value);
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
+}
 
 async function sequentially<T>(items: readonly T[], visit: (item: T) => Promise<void>): Promise<void> {
   const item = items.at(0);
@@ -111,6 +124,7 @@ interface ConnectorManifest {
 }
 
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   fields?: string[] | null;
   instance_ids?: string[];
   name: string;
@@ -134,6 +148,7 @@ interface PgRow {
   blob_bytes?: number | string;
   blob_id?: string;
   bytes?: number | string;
+  changes_floor?: number | string;
   connector_count?: number | string;
   connector_id?: string;
   connector_instance_id?: string;
@@ -167,6 +182,7 @@ interface PgRow {
   record_json: unknown;
   record_json_bytes?: number | string;
   record_key: string;
+  reset_generation?: string;
   semantic_time?: string | null;
   sha256?: string;
   size_bytes?: number | string;
@@ -766,6 +782,122 @@ export async function postgresBackfillRecordCursorValuesForManifest(
   return { updated };
 }
 
+const RECORD_DERIVED_REPAIR_PAGE = 256;
+
+/** The manifest-derived record columns for one stream, as `postgresRepairRecordDerivedColumnsPage` reads them. */
+export function recordDerivedColumnsStream(manifestStream: unknown): ManifestStream {
+  const candidate = (manifestStream ?? {}) as ManifestStream;
+  return manifestStreamFromFacts({
+    consentTimeField: nonEmptyJsonField(candidate.consent_time_field),
+    cursorField: nonEmptyJsonField(candidate.cursor_field),
+    primaryKey: primaryKeyFieldsFor(candidate),
+  });
+}
+
+/**
+ * Re-derive `cursor_value`, `primary_key_text` and `semantic_time` for up to
+ * one page of a stream's records after `afterRecordKey`, in record-key order.
+ * Each chunk is one fenced, set-based UPDATE in its own bulk transaction, and
+ * unchanged rows are filtered out, so a rerun rewrites nothing it already
+ * repaired. `withinChunk` runs inside each chunk's transaction (a durable
+ * cursor advances with the rows it covers); throwing rolls that chunk back.
+ *
+ * The page read outside the transaction picks only record keys. Each chunk
+ * reads `record_json` again under the connector-instance lock that every
+ * record write takes, with the rows locked, and derives from that. A payload
+ * read before the lock could be older than one an ingestion commits while the
+ * repair waits, and would overwrite the newer payload's derived columns.
+ */
+export async function postgresRepairRecordDerivedColumnsPage(input: {
+  readonly afterRecordKey: string | null;
+  readonly budget: BulkChunkBudget;
+  readonly connectorId: string;
+  readonly connectorInstanceId: string;
+  readonly manifest: Record<string, unknown>;
+  readonly manifestStream: ManifestStream;
+  readonly stream: string;
+  readonly withinChunk?: (client: PostgresTransactionClient, lastRecordKey: string) => Promise<void>;
+}): Promise<{ readonly done: boolean; readonly lastRecordKey: string | null; readonly updated: number }> {
+  const { connectorId, connectorInstanceId, manifestStream, stream } = input;
+  const page = await postgresQuery(
+    `SELECT record_key
+       FROM records
+      WHERE connector_id = $1
+        AND connector_instance_id = $2
+        AND stream = $3
+        AND deleted = FALSE
+        AND ($4::text IS NULL OR record_key > $4)
+      ORDER BY record_key
+      LIMIT ${String(RECORD_DERIVED_REPAIR_PAGE)}`,
+    [connectorId, connectorInstanceId, stream, input.afterRecordKey]
+  );
+  const recordKeys = page.rows.map((row) => String(row.record_key));
+  let updated = 0;
+  await runBulkChunksWithinStatementBudget(recordKeys, input.budget, async (chunk) => {
+    const result = await withPostgresBulkTransaction(
+      async (client) => {
+        await assertConnectorManifestStreamSubsetWithClient(client, connectorId, input.manifest);
+        const current = await client.query(
+          `SELECT record_key, record_json::text AS record_json
+             FROM records
+            WHERE connector_id = $1
+              AND connector_instance_id = $2
+              AND stream = $3
+              AND record_key = ANY($4::text[])
+              AND deleted = FALSE
+            FOR UPDATE`,
+          [connectorId, connectorInstanceId, stream, chunk]
+        );
+        const derived = current.rows.map((row) => {
+          const data = filterRecordData(row.record_json);
+          return {
+            cursor: cursorValue(data, manifestStream),
+            primary: primaryKeyText(data, row.record_key, manifestStream),
+            recordKey: String(row.record_key),
+            semanticTime: semanticTimeValue(data, manifestStream),
+          };
+        });
+        const applied = await client.query(
+          `UPDATE records r
+              SET cursor_value = v.cursor_value, primary_key_text = v.primary_key_text, semantic_time = v.semantic_time
+             FROM unnest($4::text[], $5::text[], $6::text[], $7::text[])
+               AS v(record_key, cursor_value, primary_key_text, semantic_time)
+            WHERE r.connector_id = $1
+              AND r.connector_instance_id = $2
+              AND r.stream = $3
+              AND r.record_key = v.record_key
+              AND r.deleted = FALSE
+              AND (r.cursor_value IS DISTINCT FROM v.cursor_value
+                OR r.primary_key_text IS DISTINCT FROM v.primary_key_text
+                OR r.semantic_time IS DISTINCT FROM v.semantic_time)`,
+          [
+            connectorId,
+            connectorInstanceId,
+            stream,
+            derived.map((entry) => entry.recordKey),
+            derived.map((entry) => entry.cursor),
+            derived.map((entry) => entry.primary),
+            derived.map((entry) => entry.semanticTime),
+          ]
+        );
+        const lastRecordKey = chunk.at(-1);
+        if (input.withinChunk && lastRecordKey !== undefined) {
+          await input.withinChunk(client, lastRecordKey);
+        }
+        return applied;
+      },
+      { lockConnectorInstanceId: connectorInstanceId }
+    );
+    updated += Number(result.rowCount || 0);
+  });
+  invalidatePostgresRecordManifestCache(connectorId);
+  return {
+    done: page.rows.length < RECORD_DERIVED_REPAIR_PAGE,
+    lastRecordKey: recordKeys.at(-1) ?? input.afterRecordKey,
+    updated,
+  };
+}
+
 export async function postgresBackfillRecordSortPositionsForManifest(
   manifest: ConnectorManifest
 ): Promise<{ updated: number }> {
@@ -798,60 +930,26 @@ export async function postgresBackfillRecordSortPositionsForManifest(
       ORDER BY connector_instance_id`,
     [connectorId, streamFacts.map(({ stream }) => stream)]
   );
-  const backfillStream = (connectorInstanceId: string, facts: (typeof streamFacts)[number]): Promise<number> => {
-    const manifestStream = manifestStreamFromFacts(facts);
-    const backfillPage = async (afterRecordKey: string | null): Promise<number> => {
-      const page = await postgresQuery(
-        `SELECT record_key, record_json::text AS record_json, emitted_at,
-                cursor_value, primary_key_text, semantic_time
-           FROM records
-          WHERE connector_id = $1
-            AND connector_instance_id = $2
-            AND stream = $3
-            AND deleted = FALSE
-            AND ($4::text IS NULL OR record_key > $4)
-          ORDER BY record_key
-          LIMIT 256`,
-        [connectorId, connectorInstanceId, facts.stream, afterRecordKey]
-      );
-      if (page.rows.length === 0) {
-        return 0;
+  const repairBudget: BulkChunkBudget = { chunkSize: RECORD_DERIVED_REPAIR_PAGE };
+  const backfillStream = async (connectorInstanceId: string, facts: (typeof streamFacts)[number]): Promise<number> => {
+    let afterRecordKey: string | null = null;
+    let updated = 0;
+    for (;;) {
+      const page = await postgresRepairRecordDerivedColumnsPage({
+        afterRecordKey,
+        budget: repairBudget,
+        connectorId,
+        connectorInstanceId,
+        manifest: manifest as unknown as Record<string, unknown>,
+        manifestStream: manifestStreamFromFacts(facts),
+        stream: facts.stream,
+      });
+      updated += page.updated;
+      if (page.done) {
+        return updated;
       }
-      const updatedInPage = await page.rows.reduce(async (previous, row) => {
-        const total = await previous;
-        await withPostgresTransaction((client) =>
-          assertConnectorManifestStreamSubsetWithClient(
-            client,
-            connectorId,
-            manifest as unknown as Record<string, unknown>
-          )
-        );
-        const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
-        const cursor = cursorValue(data, manifestStream);
-        const primary = primaryKeyText(data, row.record_key, manifestStream);
-        const semanticTime = semanticTimeValue(data, manifestStream);
-        const result = await postgresQuery(
-          `UPDATE records
-              SET cursor_value = $5, primary_key_text = $6, semantic_time = $7
-            WHERE connector_id = $1
-              AND connector_instance_id = $2
-              AND record_key = $3
-              AND stream = $4
-              AND deleted = FALSE
-              AND (cursor_value IS DISTINCT FROM $5
-                OR primary_key_text IS DISTINCT FROM $6
-                OR semantic_time IS DISTINCT FROM $7)`,
-          [connectorId, connectorInstanceId, row.record_key, facts.stream, cursor, primary, semanticTime]
-        );
-        return total + Number(result.rowCount || 0);
-      }, Promise.resolve(0));
-      const lastRow = page.rows.at(-1);
-      if (page.rows.length < 256 || !lastRow?.record_key) {
-        return updatedInPage;
-      }
-      return updatedInPage + (await backfillPage(lastRow.record_key));
-    };
-    return backfillPage(null);
+      afterRecordKey = page.lastRecordKey;
+    }
   };
   const updated = await instances.rows.reduce(async (previous, { connector_instance_id: connectorInstanceId }) => {
     const total = await previous;
@@ -1060,6 +1158,10 @@ function decorateRecordWithConnectionIdentity(record: JsonObject | null, identit
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -1123,6 +1225,9 @@ function buildFilterClause(
   const clauses: string[] = [];
   for (const filter of compiledFilters) {
     assertNonEmptyJsonField(filter.field, "filter");
+    if (filter.kind === "client") {
+      continue;
+    }
     if (filter.kind === "range") {
       clauses.push(...buildRangeFilterClauses(filter, rawFilter, params));
       continue;
@@ -1191,6 +1296,7 @@ function isVisiblePostgresSnapshot(snapshot: RecordSnapshot | null, effective: E
 }
 
 async function getPostgresSnapshotAtVersion(
+  client: PgClient,
   connectorInstanceId: string,
   stream: string,
   recordKey: string,
@@ -1199,8 +1305,8 @@ async function getPostgresSnapshotAtVersion(
   if (!Number.isInteger(version) || version < 0) {
     return null;
   }
-  const result = await postgresQuery(
-    `SELECT version, record_json, emitted_at, deleted, deleted_at
+  const result = await client.query(
+    `SELECT version, record_json::text AS record_json, emitted_at, deleted, deleted_at
        FROM record_changes
       WHERE connector_instance_id = $1
         AND stream = $2
@@ -1215,7 +1321,7 @@ async function getPostgresSnapshotAtVersion(
     return null;
   }
   return {
-    data: row.record_json && typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json,
+    data: filterRecordData(row.record_json),
     deleted: row.deleted === true,
     deleted_at: row.deleted_at ?? null,
     emitted_at: row.emitted_at,
@@ -1284,7 +1390,7 @@ function childResponseRecord({
   row: PgRow;
   fields: string[] | null;
 }): ResponseRecord {
-  const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+  const rawData = filterRecordData(row.record_json);
   return {
     data: projectFields(rawData, fields),
     emitted_at: row.emitted_at,
@@ -1670,9 +1776,29 @@ async function prunePostgresRecordChanges({
              AND r.stream = rc.stream
              AND r.record_key = rc.record_key
              AND r.version = rc.version
+        )
+        AND EXISTS (
+          SELECT 1 FROM record_changes n
+           WHERE n.connector_instance_id = rc.connector_instance_id
+             AND n.stream = rc.stream
+             AND n.record_key = rc.record_key
+             AND n.version > rc.version
+             AND n.version <= $3
         )`,
     [connectorInstanceId, stream, cutoff]
   );
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
+    await client.query(
+      `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
+        WHERE connector_instance_id = $1 AND stream = $2`,
+      [connectorInstanceId, stream, cutoff]
+    );
+  }
   await client.query(
     `DELETE FROM record_changes rc
      WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.version <= $3
@@ -1682,6 +1808,14 @@ async function prunePostgresRecordChanges({
             AND r.stream = rc.stream
             AND r.record_key = rc.record_key
             AND r.version = rc.version
+       )
+       AND EXISTS (
+         SELECT 1 FROM record_changes n
+          WHERE n.connector_instance_id = rc.connector_instance_id
+            AND n.stream = rc.stream
+            AND n.record_key = rc.record_key
+            AND n.version > rc.version
+            AND n.version <= $3
        )`,
     [connectorInstanceId, stream, cutoff]
   );
@@ -1929,6 +2063,7 @@ export async function postgresIngestRecord(
   // keeps the row's existing semantic_time). Falls back to emitted_at.
   const storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
 
+  crashPoint("ingest:before-write-transaction");
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
       if (options.requireConnectionAdmission) {
@@ -1991,6 +2126,7 @@ export async function postgresIngestRecord(
       const selfHeal = ingestDisposition === "self_heal";
 
       const nextVersion = await allocateNextVersion(client, resolvedConnectorId, connectorInstanceId, stream);
+      crashPoint("ingest:after-version-allocation");
       const currentRecordJsonBytes = current && !current.deleted ? Number(current.record_json_bytes || 0) : 0;
       const nextRecordJsonBytes = await writePostgresIngestMutation({
         client,
@@ -2007,6 +2143,7 @@ export async function postgresIngestRecord(
         storedSemanticTime,
         stream,
       });
+      crashPoint("ingest:after-record-write");
 
       // Scope-keyed dirty mark, inside the SAME transaction/client as the
       // record mutation above: this scope's lexical/semantic index may now be
@@ -2016,6 +2153,7 @@ export async function postgresIngestRecord(
         { connectorId: resolvedConnectorId, connectorInstanceId, stream },
         nowIso()
       );
+      crashPoint("ingest:after-dirty-mark");
 
       const insertedChangeJsonBytes = op === "delete" ? currentRecordJsonBytes : nextRecordJsonBytes;
       const { bytes: prunedBytesForDelta, rows: prunedRowsForDelta } = await prunePostgresRecordChanges({
@@ -2026,6 +2164,7 @@ export async function postgresIngestRecord(
         stream,
       });
 
+      crashPoint("ingest:before-commit");
       return finishDurableOutcome({
         kind: "changed",
         op,
@@ -2053,6 +2192,7 @@ export async function postgresIngestRecord(
     },
     { lockConnectorInstanceId: connectorInstanceId }
   );
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
@@ -2097,6 +2237,7 @@ interface RecordListResponse extends JsonObject {
 }
 
 async function visiblePostgresChange({
+  client,
   row,
   connectorInstanceId,
   stream,
@@ -2105,6 +2246,7 @@ async function visiblePostgresChange({
   compiledFilters,
   identity,
 }: {
+  client: PgClient;
   row: PgRow;
   connectorInstanceId: string;
   stream: string;
@@ -2113,8 +2255,20 @@ async function visiblePostgresChange({
   compiledFilters: Parameters<typeof passesRequestFilters>[1];
   identity: RecordIdentity | null;
 }): Promise<ResponseRecord | null> {
-  const previous = await getPostgresSnapshotAtVersion(connectorInstanceId, stream, row.record_key, decodedVersion);
-  const current = await getPostgresSnapshotAtVersion(connectorInstanceId, stream, row.record_key, Number(row.version));
+  const previous = await getPostgresSnapshotAtVersion(
+    client,
+    connectorInstanceId,
+    stream,
+    row.record_key,
+    decodedVersion
+  );
+  const current = await getPostgresSnapshotAtVersion(
+    client,
+    connectorInstanceId,
+    stream,
+    row.record_key,
+    Number(row.version)
+  );
   const previousVisible = isVisiblePostgresSnapshot(previous, effective);
   const currentVisible = isVisiblePostgresSnapshot(current, effective);
   if (row.deleted) {
@@ -2123,10 +2277,21 @@ async function visiblePostgresChange({
       : null;
   }
   if (!(current && currentVisible && passesRequestFilters(current.data, compiledFilters))) {
+    if (
+      compiledFilters?.some((filter) => filter.kind === "client") &&
+      previous &&
+      previousVisible &&
+      passesRequestFilters(previous.data, compiledFilters)
+    ) {
+      return deletedResponseRecord({ identity, row: { ...row, deleted_at: row.emitted_at }, stream });
+    }
     return null;
   }
   const fields = effective.fields ?? null;
-  const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
+  const previousProjection =
+    previous && previousVisible && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, fields)
+      : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;
@@ -2137,6 +2302,26 @@ async function visiblePostgresChange({
     row: { ...row, record_json: currentProjection },
     stream,
   });
+}
+
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+async function readPostgresRecordResetGeneration(client: PgClient, connectorInstanceId: string): Promise<string> {
+  const result = await client.query(
+    "SELECT record_reset_generation::text AS reset_generation FROM connector_instances WHERE connector_instance_id = $1",
+    [connectorInstanceId]
+  );
+  return String(result.rows[0]?.reset_generation ?? "0");
+}
+
+type PostgresChangesSinceReadHook = (point: string, context: Record<string, unknown>) => Promise<void> | void;
+let postgresChangesSinceReadHook: PostgresChangesSinceReadHook | null = null;
+
+/**
+ * Test-only seam: runs between the changes feed's epoch/floor read and its
+ * history reads, so a test can land a concurrent prune at exactly that point.
+ */
+export function __setPostgresChangesSinceReadHookForTest(hook: unknown): void {
+  postgresChangesSinceReadHook = typeof hook === "function" ? (hook as PostgresChangesSinceReadHook) : null;
 }
 
 async function queryPostgresChangesSince({
@@ -2160,63 +2345,92 @@ async function queryPostgresChangesSince({
   const changesSince = requestParams.changes_since;
   const decoded = changesSince === "beginning" ? { v: 0 } : decodeCursor(changesSince ?? "");
   const decodedVersion = decoded && typeof decoded.v === "number" ? decoded.v : null;
-  if (decodedVersion === null || !Number.isInteger(decodedVersion)) {
+  const tokenEpoch = decoded && "e" in decoded ? decoded.e : undefined;
+  if (
+    decodedVersion === null ||
+    !Number.isInteger(decodedVersion) ||
+    (tokenEpoch !== undefined && typeof tokenEpoch !== "string")
+  ) {
     const err: PgQueryError = new Error("Malformed changes_since cursor");
     err.code = "invalid_cursor";
     throw err;
   }
-  const maxResult = await postgresQuery(
-    "SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
-    [connectorInstanceId, stream]
-  );
-  const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
-  const minChangeResult = await postgresQuery(
-    `SELECT MIN(version)::bigint AS min_version
-       FROM record_changes
-      WHERE connector_instance_id = $1 AND stream = $2`,
-    [connectorInstanceId, stream]
-  );
-  const minVersion =
-    minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
-      ? null
-      : Number(minChangeResult.rows[0].min_version);
-  if (minVersion !== null && decodedVersion < minVersion - 1) {
-    const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
-    err.code = "cursor_expired";
-    throw err;
-  }
-  const rows = await postgresQuery(
-    `SELECT DISTINCT ON (record_key)
-            record_key, record_json, deleted, deleted_at, emitted_at, version
-     FROM record_changes
-     WHERE connector_instance_id = $1 AND stream = $2
-       AND version > $3 AND version <= $4
-     ORDER BY record_key, version DESC`,
-    [connectorInstanceId, stream, decodedVersion, sessionMax]
-  );
-  const sorted = [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
-  const visibleChanges: ResponseRecord[] = [];
-  await sorted.reduce(async (previous, row) => {
-    await previous;
-    const visible = await visiblePostgresChange({
-      compiledFilters,
-      connectorInstanceId,
-      decodedVersion,
-      effective,
-      identity,
-      row,
-      stream,
-    });
-    if (visible) {
-      visibleChanges.push(visible);
+  // One REPEATABLE READ snapshot covers the epoch, counter/floor, change groups
+  // and every predecessor/current snapshot lookup. Separate pool queries let a
+  // concurrent ingest prune a baseline and raise the floor between them: the
+  // reader would then drop a tombstone yet return a token at the new floor,
+  // which stays valid and so never repairs the loss.
+  const response = await withPostgresSnapshotRead(async (client): Promise<RecordListResponse> => {
+    // A bulk reset deletes the stream's records, history and version counter and
+    // advances the connection's reset generation in one transaction, so versions
+    // can be reissued afterwards. A token minted under an earlier generation
+    // names a version space that no longer exists. `beginning` and version-0
+    // tokens hold no consumer state and stay valid.
+    const epoch = await readPostgresRecordResetGeneration(client, connectorInstanceId);
+    if (decodedVersion !== 0 && (tokenEpoch ?? "0") !== epoch) {
+      const err: PgQueryError = new Error("changes_since cursor predates a stream reset; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
     }
-  }, Promise.resolve());
-  const response: RecordListResponse = {
-    data: visibleChanges,
-    has_more: false,
-    next_changes_since: encodeCursor({ v: sessionMax }),
-    object: "list",
-  };
+    const maxResult = await client.query(
+      "SELECT max_version, changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+      [connectorInstanceId, stream]
+    );
+    const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
+    const changesFloor = maxResult.rows[0] ? Number(maxResult.rows[0].changes_floor) : 0;
+    await postgresChangesSinceReadHook?.("after-floor-read", { connectorInstanceId, stream });
+    // `changes_floor` is the horizon below which history was pruned or compacted:
+    // a cursor below it would get its deletions silently suppressed. `beginning`
+    // needs no predecessor.
+    if (decodedVersion > 0 && decodedVersion < changesFloor) {
+      const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
+    }
+    // The counter only grows within a generation, so a token past the head names
+    // versions this database never issued, as after restoring an older backup.
+    // Answering it would return an empty page and a token at the older head,
+    // which cannot tell the client to drop what it learned after that head.
+    if (decodedVersion > sessionMax) {
+      const err: PgQueryError = new Error("changes_since cursor is ahead of the stream's history; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
+    }
+    const rows = await client.query(
+      `SELECT DISTINCT ON (record_key)
+              record_key, record_json, deleted, deleted_at, emitted_at, version
+       FROM record_changes
+       WHERE connector_instance_id = $1 AND stream = $2
+         AND version > $3 AND version <= $4
+       ORDER BY record_key, version DESC`,
+      [connectorInstanceId, stream, decodedVersion, sessionMax]
+    );
+    const sorted = [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
+    const visibleChanges: ResponseRecord[] = [];
+    await sorted.reduce(async (previous, row) => {
+      await previous;
+      const visible = await visiblePostgresChange({
+        client,
+        compiledFilters,
+        connectorInstanceId,
+        decodedVersion,
+        effective,
+        identity,
+        row,
+        stream,
+      });
+      if (visible) {
+        visibleChanges.push(visible);
+      }
+    }, Promise.resolve());
+    const response: RecordListResponse = {
+      data: visibleChanges,
+      has_more: false,
+      next_changes_since: encodeCursor({ e: epoch, v: sessionMax }),
+      object: "list",
+    };
+    return response;
+  });
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }
@@ -2267,18 +2481,28 @@ async function queryPostgresRecordPage({
   }
   const params: unknown[] = [...countParams];
   let where = countWhere;
+  // The seek selects rows strictly after the cursor in the ORDER BY below.
+  // The null-cursor group comes after present rows in asc and before them in
+  // desc, ordered by primary key. `cursor = NULL` is never true, so a cursor
+  // that ends inside the null group needs its own predicate.
+  const cmp = order === "asc" ? ">" : "<";
+  const nullGroupFollowsPresent = order === "asc";
   if (cursorPosition) {
-    params.push(cursorPosition.cursor_value, cursorPosition.primary_key_text);
-    if (order === "asc") {
-      where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} > $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} > $${params.length - 1})
-        OR (${cursorSql} IS NULL AND $${params.length - 1} IS NOT NULL)
-      )`;
+    const cursorValue = cursorPosition.cursor_value ?? null;
+    if (cursorValue === null) {
+      params.push(cursorPosition.primary_key_text);
+      const laterInNullGroup = `(${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length})`;
+      where += nullGroupFollowsPresent
+        ? ` AND ${laterInNullGroup}`
+        : ` AND (${laterInNullGroup} OR ${cursorSql} IS NOT NULL)`;
     } else {
+      params.push(cursorValue, cursorPosition.primary_key_text);
+      const cursorParam = `$${params.length - 1}`;
+      const keyParam = `$${params.length}`;
       where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} < $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} < $${params.length - 1})
+        (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
+        OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
+        ${nullGroupFollowsPresent ? `OR ${cursorSql} IS NULL` : ""}
       )`;
     }
   }
@@ -2404,6 +2628,7 @@ export async function postgresQueryRecords(
   );
 
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
+    rejectFiltersWithChangesFeed(compiledFilters);
     return queryPostgresChangesSince({
       compiledFilters,
       connectorInstanceId,
@@ -2420,6 +2645,30 @@ export async function postgresQueryRecords(
   appendGrantVisibilityClauses(whereParts, params, effective);
   let where = `WHERE ${whereParts.join(" AND ")}`;
   where += buildFilterClause(compiledFilters, requestParams.filter, params);
+  if (compiledFilters.some((filter) => filter.kind === "client")) {
+    const keys: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      // Each keyset batch starts after the previous batch's terminal key.
+      // biome-ignore lint/performance/noAwaitInLoops: The next batch depends on this result.
+      const batch = await postgresQuery(
+        "SELECT record_key, record_json::text AS record_json FROM records WHERE connector_instance_id = $1 AND stream = $2 AND deleted = FALSE AND ($3::text IS NULL OR record_key > $3) ORDER BY record_key LIMIT 500",
+        [connectorInstanceId, stream, after]
+      );
+      for (const row of batch.rows) {
+        if (passesRequestFilters(filterRecordData(row.record_json), compiledFilters)) {
+          keys.push(row.record_key);
+        }
+      }
+      const last = batch.rows.at(-1);
+      if (batch.rows.length < 500 || !last) {
+        break;
+      }
+      after = last.record_key;
+    }
+    params.push(keys);
+    where += ` AND record_key = ANY($${params.length}::text[])`;
+  }
   // Snapshot the filter-only WHERE clause / params for the graded-count
   // query. The count MUST reflect matching visible rows BEFORE pagination
   // or the cursor — matching the SQLite semantics in
@@ -2686,7 +2935,7 @@ export async function postgresGetRecord(
     throw err;
   }
   if (effective.timeConstraint) {
-    const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+    const rawData = filterRecordData(row.record_json);
     if (!passesTimeConstraint(rawData, effective.timeConstraint)) {
       const err: PgQueryError = new Error("Record not found");
       err.code = "not_found";
@@ -2890,18 +3139,40 @@ export async function postgresListStreams(
   manifest: ConnectorManifest | null = null
 ): Promise<JsonObject[]> {
   assertGrantedManifestReadAuthority(manifest, grant, null);
-  const rows = await postgresListAllStreams(storageTarget);
+  const connectorId = resolveStorageConnectorId(storageTarget);
+  const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId ?? "");
+  const entries = grant.streams.map((streamGrant) => ({
+    streamGrant,
+    effective: buildEffectiveFilter(streamGrant, {}) as unknown as EffectiveFilter,
+  }));
+  // Only unrestricted entries can use the connection-wide grouped summary.
+  const rows = entries.some(({ effective }) => !effective.resources && !effective.timeConstraint)
+    ? await postgresListAllStreams(storageTarget)
+    : [];
   const byName = new Map(rows.map((row) => [row.name, row]));
-  return grant.streams.map((streamGrant) => {
+  const summaries: JsonObject[] = [];
+  await sequentially(entries, async ({ streamGrant, effective }) => {
     const manifestStream = getManifestStream(manifest, streamGrant.name);
-    const stored = byName.get(streamGrant.name);
-    return {
+    let stored = byName.get(streamGrant.name);
+    if (effective.resources || effective.timeConstraint) {
+      const params: unknown[] = [connectorInstanceId, streamGrant.name];
+      const whereParts = ["connector_instance_id = $1", "stream = $2", "deleted = FALSE"];
+      appendGrantVisibilityClauses(whereParts, params, effective);
+      const result = await postgresQuery(
+        `SELECT COUNT(*)::int AS record_count, MAX(emitted_at) AS last_updated
+         FROM records WHERE ${whereParts.join(" AND ")}`,
+        params
+      );
+      stored = result.rows[0];
+    }
+    summaries.push({
       last_updated: stored?.last_updated || null,
       name: streamGrant.name,
       record_count: stored?.record_count || 0,
       schema: manifestStream?.schema || null,
-    };
+    });
   });
+  return summaries;
 }
 
 export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: string): Promise<number> {
@@ -2917,6 +3188,7 @@ export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: s
       const deletedRecordCount = Number(countResult.rows[0]?.count || 0);
       await advancePostgresRecordResetGenerationForStreams(client, connectorInstanceId, [stream]);
       await deletePostgresRecordTailForPair(client, connectorInstanceId, stream);
+      crashPoint("connector-teardown:before-commit");
       return deletedRecordCount;
     },
     { lockConnectorInstanceId: connectorInstanceId }

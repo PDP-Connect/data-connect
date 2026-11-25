@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
@@ -36,6 +37,7 @@ import {
   writeConnectorUninstallJournal,
   type ConnectorUninstallRootMove,
 } from "../connector-uninstall-journal.ts";
+import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
   type LocalConnectorSourceRecord,
@@ -119,11 +121,18 @@ export async function reconcileConnectorUninstalls(
 ): Promise<void> {
   for (const connectorId of listConnectorUninstallJournalIds(dataDir)) {
     await withConnectorLifecycleLock(dataDir, connectorId, async () => {
-      await reconcileConnectorUninstallJournal(dataDir, connectorId, {
+      const result = await reconcileConnectorUninstallJournal(dataDir, connectorId, {
         clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
+        cleanupActivation: async (id) => {
+          await store.deactivate(id);
+          await removeActivation(id);
+        },
         getActive: (id) => store.getActive(id),
         restoreActive: (record) => store.activate(record),
       });
+      if (result.status === "cleaned") {
+        return;
+      }
       if (!(await store.getActive(connectorId))) {
         await store.deactivate(connectorId);
         await removeActivation(connectorId);
@@ -317,7 +326,19 @@ export function createConnectorInstallStore(): ConnectorInstallStore {
           .map(parse)
           .filter((row): row is ConnectorInstallRecord => row !== null);
       }
-      const db = await sqlite();
+      // Read-only: owner summary GETs list installs and must stay write-free,
+      // so this path never runs the CREATE TABLE in `sqlite()`. A missing
+      // table means nothing was ever installed.
+      const db = await import("../../lib/db.ts");
+      const tableExists =
+        [
+          ...db.iterateDynamicSqlAcknowledged<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connector_installs'"
+          ),
+        ].length > 0;
+      if (!tableExists) {
+        return [];
+      }
       return [
         ...db.iterateDynamicSqlAcknowledged<InstallRow>(
           "SELECT record_json FROM connector_installs ORDER BY connector_id"
@@ -419,79 +440,15 @@ function assertStoredFileHashes(root: string, active: ConnectorInstallRecord): v
   }
 }
 
-function readLockOwner(lockDir: string): number | null {
-  try {
-    const parsed = Number.parseInt(readFileSync(join(lockDir, "pid"), "utf8").trim(), 10);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-  } catch {
-    // A process may have created the directory but not written its pid yet.
-    return null;
-  }
-}
-
-function reclaimStaleLock(lockDir: string, ownerPid: number): boolean {
-  try {
-    process.kill(ownerPid, 0);
-    return false;
-  } catch (probeError) {
-    if ((probeError as NodeJS.ErrnoException).code !== "ESRCH") {
-      throw probeError;
-    }
-    const staleLockDir = `${lockDir}.stale.${ownerPid}.${Date.now()}`;
-    try {
-      renameSync(lockDir, staleLockDir);
-    } catch (renameError) {
-      if ((renameError as NodeJS.ErrnoException).code === "ENOENT") {
-        return false;
-      }
-      throw renameError;
-    }
-    rmSync(staleLockDir, { force: true, recursive: true });
-    return true;
-  }
-}
-
-function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): () => void {
+function acquireInstallLock(dataDir: string): DirectoryLock {
   assertNoSymlinkComponents(dataDir);
-  mkdirSync(dataDir, { recursive: true });
-  const lockDir = join(dataDir, lockName);
-  for (;;) {
-    try {
-      mkdirSync(lockDir);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
-      }
-      const ownerPid = readLockOwner(lockDir);
-      if (ownerPid === null) {
-        throw new Error(busyMessage, { cause: error });
-      }
-      if (reclaimStaleLock(lockDir, ownerPid)) {
-        continue;
-      }
-      throw new Error(busyMessage, { cause: error });
-    }
-  }
-  writeFileSync(join(lockDir, "pid"), `${String(process.pid)}\n`, {
-    mode: 0o600,
-  });
-  let released = false;
-  return () => {
-    if (released) {
-      return;
-    }
-    released = true;
-    rmSync(lockDir, { force: true, recursive: true });
-  };
-}
-
-function acquireInstallLock(dataDir: string): () => void {
   return acquireDirectoryLock(dataDir, ".connector-install.lock", "Another connector installation is in progress.");
 }
 
 function acquireCatalogStateLock(dataDir: string): () => void {
-  return acquireDirectoryLock(dataDir, ".connector-catalog.lock", "Another connector catalog refresh is in progress.");
+  assertNoSymlinkComponents(dataDir);
+  return acquireDirectoryLock(dataDir, ".connector-catalog.lock", "Another connector catalog refresh is in progress.")
+    .release;
 }
 
 function sha256(path: string): string {
@@ -712,7 +669,8 @@ async function reuseExistingInstall(
   previousActive: ConnectorInstallRecord | null,
   dataDir: string,
   registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
-  store: ConnectorInstallStore
+  store: ConnectorInstallStore,
+  signal: AbortSignal
 ): Promise<ConnectorInstallRecord> {
   if (existing) {
     if (
@@ -725,9 +683,16 @@ async function reuseExistingInstall(
   }
   const reusable = existing ?? { ...readVerifiedRecord(root, entry), root };
   const verified = verifyStoredRecord(root, reusable, dataDir);
+  signal.throwIfAborted();
   await store.activate(verified);
+  crashPoint("connector-install:after-activate");
   try {
+    // Last abort point. registerManifest commits the registry manifest on its
+    // own connection; rolling back the activation after that would leave the
+    // two disagreeing, so a deadline during or after it lets the install finish.
+    signal.throwIfAborted();
     await registerManifest(verified.manifest);
+    crashPoint("connector-install:after-register");
   } catch (error) {
     if (previousActive) {
       await store.activate(previousActive);
@@ -739,8 +704,12 @@ async function reuseExistingInstall(
   return verified;
 }
 
-// biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
-type InstallArtifact = (root: string, entry: ConnectorCatalogEntry) => Promise<string | void> | string | void;
+type InstallArtifact = (
+  root: string,
+  entry: ConnectorCatalogEntry,
+  signal: AbortSignal
+  // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
+) => Promise<string | void> | string | void;
 
 async function installStagedEntry(options: {
   readonly connectorId: string;
@@ -750,13 +719,15 @@ async function installStagedEntry(options: {
   readonly installArtifact: InstallArtifact;
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
   readonly root: string;
+  readonly signal: AbortSignal;
   readonly store: ConnectorInstallStore;
 }): Promise<ConnectorInstallRecord> {
   const transaction = mkdtempSync(join(dirname(options.root), `.${options.entry.digest.replace(":", "-")}-install-`));
   const staged = join(transaction, "next");
   let published = false;
   try {
-    const discoveredConfigDigest = await options.installArtifact(staged, options.entry);
+    const discoveredConfigDigest = await options.installArtifact(staged, options.entry, options.signal);
+    options.signal.throwIfAborted();
     const verifiedEntry = discoveredConfigDigest
       ? { ...options.entry, config_digest: discoveredConfigDigest }
       : options.entry;
@@ -767,7 +738,11 @@ async function installStagedEntry(options: {
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
+    crashPoint("connector-install:after-activate");
+    // Last abort point: see reuseExistingInstall.
+    options.signal.throwIfAborted();
     await options.registerManifest(verifiedActive.manifest);
+    crashPoint("connector-install:after-register");
     return verifiedActive;
   } catch (error) {
     if (published) {
@@ -805,7 +780,17 @@ export function createConnectorInstallService(options: {
   /** Test seam; production always delegates OCI verification to the pinned core. */
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
+  /** Runs inside the install locks, so it must be bounded: persist the manifest, nothing O(records). */
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Repairs state derived from the connector's existing records. It is
+   * O(records), so it runs after the install locks are released and the
+   * install has returned. A failure is reported, not rolled back.
+   */
+  readonly repairManifestDerivedState?: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly onDerivedRepairError?: (connectorId: string, error: unknown) => void;
+  /** Wall-clock bound for one install or update, lock waits included. */
+  readonly installTimeoutMs?: number;
   readonly assertUninstallAllowed?: (connectorId: string) => Promise<void>;
   readonly removeActivation?: (connectorId: string) => Promise<void>;
 }): ConnectorInstallService {
@@ -873,7 +858,8 @@ export function createConnectorInstallService(options: {
   };
   const installEntryCore = async (
     connectorId: string,
-    entry: ConnectorCatalogEntry
+    entry: ConnectorCatalogEntry,
+    signal: AbortSignal
   ): Promise<ConnectorInstallRecord> => {
       const root = join(dataDir, "connectors", connectorId, entry.digest);
       const existing = await store.getActive(connectorId);
@@ -881,14 +867,32 @@ export function createConnectorInstallService(options: {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
           const inspected = await inspectActiveConnector(store, connectorId);
           if (inspected.status === "active") {
-          return await reuseExistingInstall(root, entry, existing, existing, dataDir, options.registerManifest, store);
+          return await reuseExistingInstall(
+            root,
+            entry,
+            existing,
+            existing,
+            dataDir,
+            options.registerManifest,
+            store,
+            signal
+          );
           }
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");
           }
         } else if (existing) {
-          return await reuseExistingInstall(root, entry, null, existing, dataDir, options.registerManifest, store);
+          return await reuseExistingInstall(
+            root,
+            entry,
+            null,
+            existing,
+            dataDir,
+            options.registerManifest,
+            store,
+            signal
+          );
         } else {
           // A crash can leave the published directory between rename and the
           // active-record commit. Do not delete a valid retained root only
@@ -926,20 +930,64 @@ export function createConnectorInstallService(options: {
         installArtifact: options.installArtifact ?? installPinnedArtifact,
         registerManifest: options.registerManifest,
         root,
+        signal,
         store,
       });
   };
-  const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
-    const release = acquireInstallLock(dataDir);
-    try {
-      return await withConnectorLifecycleLock(dataDir, connectorId, async () => {
-        const record = await installEntryCore(connectorId, entry);
-        clearConnectorLifecycleUninstalled(dataDir, connectorId);
-        return record;
-      });
-    } finally {
-      release();
+  const installTimeoutMs = options.installTimeoutMs ?? connectorInstallTimeoutMs();
+  const derivedRepairs = new Map<string, Promise<void>>();
+  const scheduleDerivedRepair = (record: ConnectorInstallRecord): void => {
+    const repair = options.repairManifestDerivedState;
+    if (!repair) {
+      return;
     }
+    // One repair per connector at a time; a newer install queues behind the older one.
+    const previous = derivedRepairs.get(record.connectorId) ?? Promise.resolve();
+    const next = previous
+      .then(() => repair(record.manifest))
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          (options.onDerivedRepairError ?? reportDerivedRepairError)(record.connectorId, error);
+        }
+      );
+    derivedRepairs.set(record.connectorId, next);
+    void next.finally(() => {
+      if (derivedRepairs.get(record.connectorId) === next) derivedRepairs.delete(record.connectorId);
+    });
+  };
+  const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
+    const lock = acquireInstallLock(dataDir);
+    const deadline = new AbortController();
+    // A deadline that passes while the install still waits for the lifecycle
+    // lock ends the wait, and the install fence goes with it. Once the work
+    // has started, the fence is released only when the work settles: an
+    // operation still in flight must keep the one-install-at-a-time fence.
+    const work = (async () => {
+      try {
+        return await withConnectorLifecycleLock(
+          dataDir,
+          connectorId,
+          async () => {
+            deadline.signal.throwIfAborted();
+            const record = await installEntryCore(connectorId, entry, deadline.signal);
+            clearConnectorLifecycleUninstalled(dataDir, connectorId);
+            return record;
+          },
+          { signal: deadline.signal }
+        );
+      } finally {
+        lock.release();
+      }
+    })();
+    // Registered here, outside the lifecycle lock, so the repair never inherits it.
+    work.then(scheduleDerivedRepair, () => undefined);
+    return await settleBeforeDeadline(work, installTimeoutMs, () => {
+      const error = new ConnectorInstallTimeoutError(connectorId, installTimeoutMs);
+      lock.markTimedOut();
+      deadline.abort(error);
+      return error;
+    });
   };
   const install = async (connectorId: string, digest: string): Promise<ConnectorInstallRecord> => {
     const entry = (await catalog()).find(
@@ -958,7 +1006,7 @@ export function createConnectorInstallService(options: {
     }
     const assertUninstallAllowed = options.assertUninstallAllowed;
     const removeActivation = options.removeActivation;
-    const release = acquireInstallLock(dataDir);
+    const lock = acquireInstallLock(dataDir);
     try {
       const record = (await store.listActive()).find(
         (candidate) =>
@@ -986,6 +1034,7 @@ export function createConnectorInstallService(options: {
           rootMoves,
         });
         markConnectorLifecycleUninstalled(dataDir, connectorId);
+        crashPoint("connector-uninstall:after-marker");
         const staged: Array<{ original: string; moved: string }> = [];
         let restoreActiveRecord = false;
         try {
@@ -993,6 +1042,7 @@ export function createConnectorInstallService(options: {
             assertNoSymlinkComponents(move.original);
             renameSync(move.original, move.moved);
             staged.push(move);
+            crashPoint("connector-uninstall:after-root-move");
           }
           if (store.deactivateAndRemoveActivation) {
             await store.deactivateAndRemoveActivation(connectorId);
@@ -1001,6 +1051,7 @@ export function createConnectorInstallService(options: {
             restoreActiveRecord = true;
             await removeActivation(connectorId);
           }
+          crashPoint("connector-uninstall:after-active-removed");
         } catch (error) {
           for (const item of [...staged].reverse()) {
             if (existsSync(item.moved)) renameSync(item.moved, item.original);
@@ -1043,10 +1094,11 @@ export function createConnectorInstallService(options: {
         } catch {
           // The install and activation pointers are gone; an empty parent is inert.
         }
+        crashPoint("connector-uninstall:after-staged-removal");
         deleteConnectorUninstallJournal(dataDir, connectorId);
       });
     } finally {
-      release();
+      lock.release();
     }
   };
   const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
@@ -1116,6 +1168,49 @@ export function createConnectorInstallService(options: {
       return await installEntry(connectorId, candidate);
     },
   };
+}
+
+const DEFAULT_CONNECTOR_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+function connectorInstallTimeoutMs(): number {
+  const configured = Number(process.env.PDPP_CONNECTOR_INSTALL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CONNECTOR_INSTALL_TIMEOUT_MS;
+}
+
+export class ConnectorInstallTimeoutError extends Error {
+  readonly code = "connector_install_timeout";
+  constructor(connectorId: string, timeoutMs: number) {
+    super(`Connector installation of ${connectorId} exceeded ${String(timeoutMs)} ms and was aborted.`);
+    this.name = "ConnectorInstallTimeoutError";
+  }
+}
+
+/** Reject at the deadline; the work keeps running until it observes the abort. */
+async function settleBeforeDeadline<T>(work: Promise<T>, timeoutMs: number, onTimeout: () => Error): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), timeoutMs);
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } catch (error) {
+    if (error instanceof ConnectorInstallTimeoutError) {
+      work.then(
+        () => console.error(`[connector-install] ${error.message} It then completed and stays installed.`),
+        (lateError: unknown) =>
+          lateError === error
+            ? console.error(`[connector-install] ${error.message} It then stopped without activating.`)
+            : console.error(`[connector-install] ${error.message} It then failed:`, lateError)
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function reportDerivedRepairError(connectorId: string, error: unknown): void {
+  console.error(`[connector-install] Derived-state repair for ${connectorId} failed after install:`, error);
 }
 
 async function loadPinnedCore(): Promise<InstallerCore> {
@@ -1296,8 +1391,14 @@ export function createConfigLimitedFetch(
   return { configDigest: () => discoveredConfigDigest, fetchImpl };
 }
 
-async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry): Promise<string> {
+async function installPinnedArtifact(
+  root: string,
+  entry: ConnectorCatalogEntry,
+  signal: AbortSignal
+): Promise<string> {
   const core = await loadPinnedCore();
+  const abortableFetch: FetchLike = (input, init) =>
+    fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
   if (!core.fetchResolvedArtifact) {
     throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
   }
@@ -1307,7 +1408,7 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
     }
     return null;
   };
-  const preflightTransport = createConfigLimitedFetch(fetch, entry.digest);
+  const preflightTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
     { doc: {}, mode: "locked" },
     {
@@ -1344,7 +1445,7 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
       `OCI preflight config digest does not match the verified install identity (catalog=${entry.config_digest ?? "none"}, manifest=${configDigest ?? "none"}).`
     );
   }
-  const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
+  const limitedTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   await core.installFromLock({
     artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,

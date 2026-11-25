@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
-import { type ClientRangeFilter, exactStoredRecord, matchesClientRangeFilters } from "./client-range-filters.ts";
-import { recordSourceText } from "./record-source-text.ts";
+import { type ClientFilter, type FilterField, compileClientRequestFilters, parseFilterRecordJson, passesClientFilter } from "./client-request-filters.ts";
 
 export interface Schema {
   format?: string;
@@ -12,6 +11,7 @@ export interface Schema {
 }
 type JsonObject = Record<string, unknown>;
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   fields?: string[] | null;
   resources?: string[];
   time_constraint?: TimeConstraint | null;
@@ -26,16 +26,14 @@ interface ManifestStream {
   schema?: { properties?: Record<string, Schema> };
 }
 export type CompiledFilter =
+  | (ClientFilter & { fieldSchema?: never; operators?: never })
   | { field: string; kind: "exact"; value: string }
-  | { field: string; kind: "range"; fieldSchema: Schema; operators: Record<string, number | string> }
-  // Experimental client range filters (spec-client-range-filters.md). One entry
-  // holds every filter of the request: they combine with AND and are bound to
-  // cursors as a set, so they are never split per field.
-  | { field: ""; filters: ClientRangeFilter[]; kind: "client_range" };
+  | { field: string; kind: "range"; fieldSchema: Schema; operators: Record<string, number | string> };
 interface CompiledFilterInput {
+  type?: FilterField["type"];
+  operator?: string | null;
   field: string;
   fieldSchema?: Schema;
-  filters?: ClientRangeFilter[];
   kind?: string;
   operators?: Record<string, number | string | null>;
   value?: string;
@@ -84,12 +82,11 @@ export function invalidQueryError(message: string, code = "invalid_request"): Er
 }
 
 /**
- * v0.1 client grants do not expose request-time filters or retain relationship
- * authorization. Keep this guard independent from manifest parsing so current
- * declaration metadata cannot reinterpret an issued grant. Owner reads retain
- * the current-capability query paths.
+ * Only list and aggregate reads pass a stream's frozen filter capability.
+ * Other client endpoints continue rejecting filters. Expansion is unsupported
+ * for all client grants. Keep these checks independent of current metadata.
  */
-export function rejectUnsupportedClientQuery(tokenKind: string | null | undefined, requestParams: unknown): void {
+export function rejectUnsupportedClientQuery(tokenKind: string | null | undefined, requestParams: unknown, streamGrant?: StreamGrant): void {
   if (tokenKind !== "client" || !requestParams || typeof requestParams !== "object" || Array.isArray(requestParams)) {
     return;
   }
@@ -97,7 +94,7 @@ export function rejectUnsupportedClientQuery(tokenKind: string | null | undefine
   const unsupported = [
     { keys: ["expand", "expand[]"], message: "expand[]", param: "expand" },
     { keys: ["expand_limit", "expand_limit[]"], message: "expand_limit[...]", param: "expand_limit" },
-    { keys: ["filter"], message: "filter[...]", param: "filter" },
+    ...(streamGrant?.filter_fields ? [] : [{ keys: ["filter"], message: "filter[...]", param: "filter" }]),
   ].find(({ keys }) => keys.some((key) => Object.hasOwn(params, key)));
   if (!unsupported) {
     return;
@@ -211,6 +208,22 @@ export function requireTimeConstraint(value: unknown): TimeConstraint | null {
   };
 }
 
+const LEADING_CALENDAR_DAY = /^\s*(\d{4}-\d{2}-\d{2})/;
+
+/**
+ * False when a value starts with a YYYY-MM-DD day that does not exist.
+ * Date.parse rolls such a day into the next month ("2023-02-29" parses as
+ * 1 March), so a range filter on it would silently match the wrong window.
+ */
+function hasRealCalendarDay(value: unknown): boolean {
+  const day = typeof value === "string" ? LEADING_CALENDAR_DAY.exec(value)?.[1] : undefined;
+  if (day === undefined) {
+    return true;
+  }
+  const midnight = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(midnight) && new Date(midnight).toISOString().startsWith(day);
+}
+
 export function coerceComparableValue(
   value: unknown,
   fieldSchema: Schema | null | undefined,
@@ -240,7 +253,7 @@ export function coerceComparableValue(
   }
 
   if (only === "string" && (fieldSchema?.format === "date" || fieldSchema?.format === "date-time")) {
-    const parsed = parseDateValue(value);
+    const parsed = strict && !hasRealCalendarDay(value) ? null : parseDateValue(value);
     if (parsed === null && strict) {
       throw invalidQueryError(`Invalid date value for '${String(value)}'`);
     }
@@ -300,6 +313,9 @@ export function compileRequestFilters(
   streamGrant: StreamGrant,
   manifestStream: ManifestStream
 ): CompiledFilter[] {
+  if (streamGrant.filter_fields) {
+    return compileClientRequestFilters(filter, streamGrant);
+  }
   if (isNullish(filter)) {
     return [];
   }
@@ -342,19 +358,16 @@ export function compileRequestFilters(
   return compiled;
 }
 
-// Stored numbers are compared from their JSON lexemes when the record's source
-// text is known, so no binary64 rounding decides a client range filter. If the
-// text cannot be read exactly the record fails the filter: comparing the
-// rounded value instead could admit a record the exact value excludes.
-function passesClientRangeFilters(data: JsonObject | null, filters: ClientRangeFilter[]): boolean {
-  const text = data ? recordSourceText(data) : undefined;
-  if (text === undefined) {
-    return matchesClientRangeFilters(data, filters);
-  }
-  try {
-    return matchesClientRangeFilters(exactStoredRecord(text), filters);
-  } catch {
-    return false;
+/**
+ * Owner filters retain their existing changes-feed rejection. Client filters
+ * use the frozen visibility rules, including tombstones for membership exits.
+ */
+export function rejectFiltersWithChangesFeed(filters: readonly CompiledFilter[]): void {
+  if (filters.some((filter) => filter.kind !== "client")) {
+    throw invalidQueryError(
+      "filter is not supported with changes_since: a filtered feed cannot report records that leave the filter. " +
+        "Re-read the filtered set in full, or use changes_since without filter"
+    );
   }
 }
 
@@ -368,8 +381,8 @@ export function passesRequestFilters(
   }
 
   for (const filter of filters) {
-    if (filter.kind === "client_range") {
-      if (!passesClientRangeFilters(data, filter.filters ?? [])) {
+    if (filter.kind === "client") {
+      if (!passesClientFilter(data, filter as ClientFilter)) {
         return false;
       }
       continue;
@@ -562,7 +575,7 @@ export function allowedCandidateRecordKeysFromRows(
     // biome-ignore lint/suspicious/noImplicitAnyLet: This runtime value is intentionally narrowed after assignment.
     let data;
     try {
-      data = row.record_json ? JSON.parse(row.record_json) : null;
+      data = row.record_json ? parseFilterRecordJson(row.record_json) : null;
     } catch {
       continue;
     }

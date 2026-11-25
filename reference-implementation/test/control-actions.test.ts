@@ -83,7 +83,7 @@ interface SpineTimelineBody {
 }
 
 interface ErrorBody {
-  error: { code: string; message: string };
+  error: { code: string; connector_id?: string; message: string };
 }
 
 interface RunSummary {
@@ -905,8 +905,11 @@ test("run-now refuses an uninstalled catalog manifest that shares an id with the
     assert.equal(registerResp.status, 201, "register catalog GitHub manifest");
 
     const { status, body } = await fetchJson<ErrorBody>(`${asUrl}/_ref/connectors/github/run`, { method: "POST" });
-    assert.equal(status, 404, "an uninstalled catalog connector must not start a run");
-    assert.equal(body?.error.code, "not_found");
+    // 409 + a dedicated code: the connection exists, the server state (no
+    // install) blocks the run, and `connector_id` names what to install.
+    assert.equal(status, 409, "an uninstalled catalog connector must not start a run");
+    assert.equal(body?.error.code, "connector_not_installed");
+    assert.equal(body?.error.connector_id, "github");
     assert.equal(
       (getDb().prepare("SELECT COUNT(*) AS count FROM records WHERE connector_id = 'github'").get() as CountRow).count,
       0,

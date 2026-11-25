@@ -141,7 +141,6 @@ export interface ProviderAuthAdapter {
 }
 
 interface OptionalModuleMap {
-  readonly browserPolicy: Record<string, unknown> | null;
   readonly browserHandoff: Record<string, unknown> | null;
   readonly browserLaunch: Record<string, unknown> | null;
   readonly capture: Record<string, unknown> | null;
@@ -216,7 +215,6 @@ function requireOptional(specifier: string): Record<string, unknown> | null {
 const optionalModules: OptionalModuleMap = {
   browserHandoff: requireOptional("@pdpp/polyfill-connectors/browser-handoff"),
   browserLaunch: requireOptional("@pdpp/polyfill-connectors/browser-launch"),
-  browserPolicy: requireOptional("@pdpp/polyfill-connectors/browser-surface-policy"),
   capture: requireOptional("@pdpp/polyfill-connectors/static-secret-credential-capture"),
   configKinds: requireOptional("@pdpp/polyfill-connectors/connector-config-option-kind-registry"),
   credentialProbe: requireOptional("@pdpp/polyfill-connectors/credential-probe"),
@@ -440,11 +438,6 @@ export function isBundledStaticSecretCredentialKind(kind: string): boolean {
 export function isFullyBundledStaticSecretCredentialKind(kind: string): boolean {
   const value = optionalModules.capture?.isFullyBundledStaticSecretCredentialKind;
   return typeof value === "function" ? value(kind) === true : kind === "secret_bundle";
-}
-
-export function connectorRetainsSurfaceProcess(connectorId: string): boolean {
-  const policy = optionalModules.browserPolicy?.connectorRetainsSurfaceProcess;
-  return typeof policy === "function" ? policy(connectorId) === true : false;
 }
 
 export async function notifyNtfy(args: Record<string, unknown>): Promise<void> {

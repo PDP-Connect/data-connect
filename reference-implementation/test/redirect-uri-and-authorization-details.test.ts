@@ -57,6 +57,7 @@ test("buildHostedMcpAuthorizationDetailsForConnector: wildcard continuous read d
   assert.deepEqual(details, [
     {
       access_mode: "continuous",
+      grant_version: "0.2.0",
       purpose_code: "https://pdpp.dev/purpose/agent_context",
       purpose_description:
         "Provide selected personal data as context to this MCP client acting as your personal AI agent.",

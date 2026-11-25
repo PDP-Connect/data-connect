@@ -264,7 +264,10 @@ test("unexpected child exit fences and rejects the generation after confirmed ex
 
 test("deadline fences immediately, then rejects only after confirmed TERM exit", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children, { deadlineMs: 5, termGraceMs: 30 });
+  // The grace period never elapses here: the test confirms the exit by hand, so
+  // a slow host cannot push the executor from TERM to KILL. The KILL-after-grace
+  // path is covered by the TERM-ignore test below.
+  const executor = executorFor(children, { deadlineMs: 5, termGraceMs: 60_000 });
   const work = executor.embed("input", "backend-a", {});
   // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
   const child = children[0];
@@ -283,12 +286,15 @@ test("deadline fences immediately, then rejects only after confirmed TERM exit",
 
 test("TERM-ignore uses KILL and still waits for confirmed exit before cleanup", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children, { deadlineMs: 5, killGraceMs: 15, termGraceMs: 5 });
+  const termGraceMs = 50;
+  const executor = executorFor(children, { deadlineMs: 5, killGraceMs: 15, termGraceMs });
   const work = executor.embed("input", "backend-a", {});
   // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
   const child = children[0];
   assert.ok(child);
+  const sentAt = new Map<NodeJS.Signals, number>();
   child.onKill = (signal) => {
+    sentAt.set(signal, performance.now());
     if (signal === "SIGKILL") {
       child.exit(0, signal);
     }
@@ -296,6 +302,13 @@ test("TERM-ignore uses KILL and still waits for confirmed exit before cleanup", 
 
   await assert.rejects(work, assertCode("transformer_deadline"));
   assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  // A lower bound only: a slow host can delay KILL, never bring it forward.
+  // Timers may fire up to 1 ms early, hence the 1 ms allowance.
+  const graceObservedMs = (sentAt.get("SIGKILL") ?? 0) - (sentAt.get("SIGTERM") ?? 0);
+  assert.ok(
+    graceObservedMs >= termGraceMs - 1,
+    `KILL came ${graceObservedMs.toFixed(1)} ms after TERM, before the ${termGraceMs} ms grace ended`
+  );
   assert.equal(executor.telemetry().childPid, null, "KILL exit is confirmed before child state is released");
 });
 
@@ -635,14 +648,24 @@ test("spawn and stdin failure fence safely without exposing source input", async
 test("KILL-unconfirmed invokes fail-stop and deliberately retains generation promises", async () => {
   const children: FakeChild[] = [];
   const failStops: string[] = [];
+  let failStopped!: () => void;
+  // Wait for the fail-stop itself rather than a fixed delay: under CPU
+  // contention the deadline -> TERM -> KILL -> fail-stop timer chain can take
+  // longer than any fixed sleep.
+  const failStopReached = new Promise<void>((resolve) => {
+    failStopped = resolve;
+  });
   const executor = executorFor(children, {
     deadlineMs: 5,
-    failStop: (reason) => failStops.push(reason),
+    failStop: (reason) => {
+      failStops.push(reason);
+      failStopped();
+    },
     killGraceMs: 5,
     termGraceMs: 5,
   });
   const work = executor.embed("input", "backend-a", {});
-  await delay(30);
+  await failStopReached;
   assert.deepEqual(children[0]?.signals, ["SIGTERM", "SIGKILL"]);
   assert.deepEqual(failStops, ["transformer_exit_unconfirmed"]);
   assert.equal(await promiseState(work), "pending", "unconfirmed compute must retain its permit-bearing promise");
@@ -653,15 +676,23 @@ test("KILL-unconfirmed invokes fail-stop and deliberately retains generation pro
 
 test("close handles an already-exited child without waiting a full grace period", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children, { termGraceMs: 80 });
+  // A grace far longer than the bound below: a close that waited for it would
+  // lose the race no matter how loaded the host is.
+  const executor = executorFor(children, { termGraceMs: 60_000 });
   const work = executor.embed("input", "backend-a", {});
   // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
   const child = children[0];
   assert.ok(child);
   child.onEnd = () => child.exit();
-  const started = performance.now();
-  await executor.close();
-  assert.ok(performance.now() - started < 40, "already-exited child must not consume a full termination grace");
+  let bound: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    executor.close().then(() => "closed"),
+    new Promise<string>((resolve) => {
+      bound = setTimeout(() => resolve("waited for the grace"), 10_000);
+    }),
+  ]);
+  clearTimeout(bound);
+  assert.equal(outcome, "closed", "already-exited child must not consume a full termination grace");
   await assert.rejects(work, assertCode("transformer_closed"));
   await assert.rejects(executor.embed("new input", "backend-a", {}), assertCode("transformer_closed"));
   assert.equal(executor.telemetry().childPid, null);

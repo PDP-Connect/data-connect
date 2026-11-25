@@ -76,6 +76,8 @@ export type RunStatus = "abandoned" | "cancelled" | "failed" | "skipped" | "succ
 export type GrantAccessMode = "continuous" | "single_use";
 
 export interface ConnectorError {
+  /** Connector-declared DONE.error.code, when the run reported one. */
+  readonly code?: string | null;
   readonly message?: string;
   readonly retryable?: boolean | null;
 }
@@ -373,6 +375,7 @@ export type HumanRequiredStateEscalationHandler = (info: {
  * through to the direct runConnector path unchanged.
  */
 interface ManagedConnectorRun {
+  readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: ConnectorError | null;
   readonly failure_reason?: string | null;
   readonly known_gaps?: readonly Record<string, unknown>[] | null;
@@ -487,6 +490,13 @@ export interface SchedulerOptions {
    * remain unaffected.
    */
   runManagedConnectorViaController?: RunManagedConnectorViaController | null;
+  /**
+   * Mints a run-scoped blob upload credential for each attempt that
+   * `runConnector` launches directly (non-managed scheduled runs). The child
+   * gets it as `PDPP_BLOB_UPLOAD_TOKEN`; it is revoked when the attempt ends.
+   * Absent: the child gets no blob upload credential.
+   */
+  blobUploadCredentialHooks?: import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks | null;
   schedulerStore?: Pick<
     SchedulerStore,
     | "appendRunHistory"

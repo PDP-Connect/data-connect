@@ -118,7 +118,12 @@ operator bootstrap), `dataconnect-console` (the console's owner bearer) and
 console and the connector runtime hold one owner bearer per subject: an owner
 device approval for either client returns the live bearer that client already
 has while it has at least half its lifetime left, and the runtime keeps that
-bearer in memory between runs. The pre-registered set
+bearer in memory between runs. The
+runtime keeps the bearer in its own process: connector child processes never
+receive it. Each admitted run gets a random run-scoped credential
+(`PDPP_BLOB_UPLOAD_TOKEN`) that is valid only for `POST /v1/blobs`, only for
+that run's connector and connection, and only until the run ends. Connectors
+built before that name read the same credential as `PDPP_OWNER_TOKEN`. The pre-registered set
 is reference-local convenience; production deployments should supply their
 own `preRegisteredPublicClients` option.
 
@@ -161,6 +166,36 @@ it under Settings > Owner password. `POST /owner/logout` is listed under
 
 - `/v1/streams/...`
 - owner and client queries under the current reference contract
+
+### Change-history retention and `changes_since`
+
+A `changes_since` token says "I hold every change up to version V". The server
+answers it exactly or refuses it with `410 cursor_expired`; the client then
+re-syncs from `beginning`, which is always accepted.
+
+`PDPP_CHANGE_HISTORY_LIMIT` (default `0`, unbounded) bounds each stream's
+`record_changes` history. A write at version `V` prunes rows at or below the
+horizon `V - L`, keeping each live key's current row and its newest row at or
+below the horizon. The horizon is stored per stream as
+`version_counter.changes_floor`. A token below the floor, or a changes page
+cursor whose snapshot is below it, expires. A bulk stream reset expires earlier
+nonzero tokens: they carry the connection's `record_reset_generation`. A token
+past the stream's head, as after restoring an older backup, also expires. If
+writes after such a restore pass the old head before the client returns, its
+token looks valid again, so a restore must also advance
+`record_reset_generation` for every connection it rolls back.
+
+Each request reads from one database snapshot (one read transaction on SQLite,
+one `REPEATABLE READ` transaction on PostgreSQL), so a concurrent prune cannot
+remove a baseline mid-read.
+
+`scripts/compact-record-history.ts` raises the floor, in the same transaction as
+its deletes, to the newest version that superseded a row it removes. It takes the
+connection's write lock first. Run plan and apply back to back.
+
+The first start after the upgrade adds the column and seeds every stream's floor
+at its head: each stream's consumers re-sync once. Tokens issued before epochs
+existed read as generation `0`, so they expire after any earlier reset.
 
 ### Expandable records
 
@@ -481,7 +516,7 @@ reference stack. The quickest self-hosted path uses the public GHCR images:
 
 ```bash
 cp .env.docker.example .env.docker
-bash scripts/generate-secrets.sh --write  # fills PDPP_OWNER_PASSWORD and VAPID keys
+# Set PDPP_OWNER_PASSWORD and PDPP_CREDENTIAL_ENCRYPTION_KEY in .env.docker
 # set PDPP_REFERENCE_ORIGIN in .env.docker to your deployment URL
 docker compose --env-file .env.docker pull
 pnpm docker:reference:quick

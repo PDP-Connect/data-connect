@@ -169,12 +169,16 @@ function planDetailGapPageRead({
   };
 }
 
-function serializedDetailGapBytes(entry: PendingStartDetailGap): number {
+function serializedDetailGapBytes(entry: PendingStartDetailGap | StartDetailGap): number {
   try {
     return Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
   } catch {
     return DETAIL_GAP_PAGE_ASSUMED_AVG_BYTES;
   }
+}
+
+function detailGapLeaseId(runId: string, pageId: number, gapId: string): string {
+  return `${runId}:detail-gap-page:${pageId}:gap:${gapId}`;
 }
 
 function buildStartDetailGap(gap: DetailGap): PendingStartDetailGap {
@@ -189,7 +193,11 @@ function buildStartDetailGap(gap: DetailGap): PendingStartDetailGap {
   };
 }
 
-function trimDetailGapPageToByteBudget(pendingGaps: DetailGap[], byteBudget: number): DetailGapPageReadResult {
+function trimDetailGapPageToByteBudget(
+  pendingGaps: DetailGap[],
+  byteBudget: number,
+  leaseIdForGap: (gap: DetailGap) => string
+): DetailGapPageReadResult {
   const detailGaps: PendingStartDetailGap[] = [];
   const servedGapIds: string[] = [];
   let serializedBytes = 2; // JSON array brackets; exact enough for page sizing.
@@ -197,7 +205,7 @@ function trimDetailGapPageToByteBudget(pendingGaps: DetailGap[], byteBudget: num
 
   for (const gap of pendingGaps) {
     const entry = buildStartDetailGap(gap);
-    const entryBytes = serializedDetailGapBytes(entry);
+    const entryBytes = serializedDetailGapBytes({ ...entry, lease_id: leaseIdForGap(gap) });
     if (detailGaps.length > 0 && serializedBytes + entryBytes > byteBudget) {
       break;
     }
@@ -319,6 +327,7 @@ export function createDetailGapPageReader({
       maxBytes,
       observedAverageBytes,
     });
+    const pageId = pageSequence + 1;
     const pendingGaps =
       (await detailGapStore.listPendingGaps({
         connectorId,
@@ -328,7 +337,11 @@ export function createDetailGapPageReader({
         streams,
       })) ?? [];
     const admission = summarizeDetailGapAdmission(pendingGaps);
-    const { detailGaps, serializedBytes, entryBytesTotal } = trimDetailGapPageToByteBudget(pendingGaps, byteBudget);
+    const { detailGaps, serializedBytes, entryBytesTotal } = trimDetailGapPageToByteBudget(
+      pendingGaps,
+      byteBudget,
+      (gap) => detailGapLeaseId(runId, pageId, gap.gap_id)
+    );
 
     if (detailGaps.length === 0) {
       return {
@@ -341,6 +354,8 @@ export function createDetailGapPageReader({
       };
     }
 
+    pageSequence = pageId;
+
     const pageAverage = entryBytesTotal / detailGaps.length;
     observedAverageBytes = Math.max(1, Math.round(observedAverageBytes * 0.65 + pageAverage * 0.35));
 
@@ -352,36 +367,42 @@ export function createDetailGapPageReader({
     if (typeof detailGapStore.claimPendingGaps !== "function") {
       throw new Error("detail-gap store must support CAS recovery leases");
     }
-    // biome-ignore lint/style/noIncrementDecrement: The explicit counter update preserves this loop’s evaluation order.
-    const pageId = ++pageSequence;
     const leaseExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const leasesByGapId = new Map<string, string>();
-    await Promise.all(
+    const claimResults = await Promise.allSettled(
       detailGaps.map(async (gap) => {
-        const leaseId = `${runId}:detail-gap-page:${pageId}:gap:${gap.gap_id}`;
+        const leaseId = detailGapLeaseId(runId, pageId, gap.gap_id);
         const claimed = await detailGapStore.claimPendingGaps([gap.gap_id], { leaseExpiresAt, leaseId, runId });
         if (claimed.includes(gap.gap_id)) {
           leasesByGapId.set(gap.gap_id, leaseId);
         }
       })
     );
+    if (allServedGapLeases) {
+      for (const gap of detailGaps) {
+        const leaseId = leasesByGapId.get(gap.gap_id);
+        if (leaseId) {
+          allServedGapLeases.set(gap.gap_id, {
+            attempted: false,
+            gapId: gap.gap_id,
+            leaseId,
+            parentStream: gap.parent_stream ?? null,
+            recordKey: gap.record_key === null ? null : String(gap.record_key),
+            runId,
+            // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+            stream: gap.stream ?? null,
+          });
+        }
+      }
+    }
+    const failedClaim = claimResults.find((result) => result.status === "rejected");
+    if (failedClaim?.status === "rejected") {
+      throw failedClaim.reason;
+    }
+
     const claimedDetailGaps: StartDetailGap[] = detailGaps
       .filter((gap) => leasesByGapId.has(gap.gap_id))
       .map((gap) => ({ ...gap, lease_id: leasesByGapId.get(gap.gap_id) as string }));
-    if (allServedGapLeases) {
-      for (const gap of claimedDetailGaps) {
-        allServedGapLeases.set(gap.gap_id, {
-          attempted: false,
-          gapId: gap.gap_id,
-          leaseId: gap.lease_id,
-          parentStream: gap.parent_stream ?? null,
-          recordKey: gap.record_key === null ? null : String(gap.record_key),
-          runId,
-          // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-          stream: gap.stream ?? null,
-        });
-      }
-    }
 
     return {
       admission,

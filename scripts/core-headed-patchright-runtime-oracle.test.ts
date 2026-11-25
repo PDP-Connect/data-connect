@@ -28,7 +28,8 @@ test("Core image packages the managed display, durable profile root, and full Ch
   // container replacement — the defect that restarted the Slack sync from zero.
   assert.ok(dockerfile.includes("PDPP_CONNECTOR_ARTIFACT_ROOT=/var/lib/pdpp/connector-artifacts"));
   assert.ok(dockerfile.includes("chrome-linux64/chrome"));
-  assert.ok(!dockerfile.includes("chromium_headless_shell"));
+  // No Chrome Headless Shell; scripts/chrome-distrust-policy.test.ts covers why.
+  assert.ok(dockerfile.includes("npx patchright install --with-deps --no-shell chromium"));
   const headlessOverride = ["PDPP_BROWSER_HEADLESS: $", "{PDPP_BROWSER_HEADLESS:-}"].join("");
   assert.ok(compose.includes(headlessOverride));
 });
@@ -68,4 +69,17 @@ test("production runtime oracle discriminates full Chromium, profile, CDP stream
   assert.ok(wrapper.includes("docker run --rm"));
   assert.ok(wrapper.includes("PDPP_CORE_RUNTIME_ORACLE_EXPECT_PERSISTED=1"));
   assert.ok(wrapper.includes("docker ps -aq"));
+});
+
+test("Core image hoists the reference implementation's exact Patchright as a production dependency", () => {
+  // The browsers stage installs Chromium for reference-implementation's exact
+  // pin, and the image installs with --omit=dev. browser-launch.ts and the demo
+  // smoke resolve patchright from /app/node_modules. The vendored dev tarball
+  // pins its own version, so without a root pin npm can hoist that dev-only
+  // copy, which --omit=dev then drops.
+  const root = JSON.parse(read("package.json"));
+  const reference = JSON.parse(read("reference-implementation/package.json"));
+
+  assert.match(reference.dependencies.patchright, /^\d+\.\d+\.\d+$/u);
+  assert.equal(root.dependencies.patchright, reference.dependencies.patchright);
 });

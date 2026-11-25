@@ -263,7 +263,10 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectionPrimaryAction: renderedVerdict.required_actions[0] ?? null,
     connectionRenderedVerdict: renderedVerdict,
     connectorId: "claude_code",
+    connectorInstallKey: "claude_code",
     connectorInstanceId: connectionId,
+    // A local-device source: the reference reports no install state for it.
+    connectorNotInstalled: false,
     coverageHorizons: [],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",

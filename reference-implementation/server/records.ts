@@ -1,10 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { parseFilterRecordJson, type FilterField } from "./client-request-filters.ts";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */
+import { crashPoint } from "./crash-point.ts";
 import { getDb } from "./db.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
@@ -41,6 +43,7 @@ import {
   iterate,
   iterateDynamicSqlAcknowledged,
   referenceQueries,
+  transaction,
   writeTransaction,
 } from "../lib/db.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
@@ -112,13 +115,13 @@ import {
   normalizeWindowSelector,
   sqliteFieldJsonPath,
 } from "./record-field-window.ts";
-import { clientRangeReadOf } from "./client-range-read.ts";
 import {
   type CompiledFilter,
   compileRequestFilters,
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -127,10 +130,13 @@ import {
   markRetainedSizeStreamDirty,
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
-import { rememberRecordSourceText } from "./record-source-text.ts";
-import { resolveRequestedFields } from "./requested-fields.ts";
 import { createStorageBackend } from "./storage-backend.ts";
-import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+  StaleStorageGenerationError,
+} from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
   nowIso,
@@ -299,6 +305,7 @@ interface ManifestStream {
 }
 type RequestParams = Record<string, unknown>;
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   connection_id?: string;
   fields?: string[] | null;
   instance_ids?: string[];
@@ -352,6 +359,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -390,9 +398,12 @@ interface RecordSnapshot {
   version: number;
 }
 interface ChangesSinceCursor {
-  // The `beginning` bootstrap token carries no filter binding by design.
-  bootstrap?: true;
-  filters?: string;
+  /**
+   * `connector_instances.record_reset_generation` (decimal text) when the
+   * token was issued. Absent on `beginning` and on tokens issued before the
+   * epoch was added; an absent epoch is generation "0".
+   */
+  epoch?: string;
   kind?: "changes_since";
   version: number;
 }
@@ -415,10 +426,8 @@ interface ChangeGroupRow {
   record_key: string;
 }
 interface VersionCounterRow {
+  changes_floor: number;
   max_version: number;
-}
-interface MinVersionRow {
-  min_version: number | null;
 }
 interface AggregateRecordRow {
   record_json: string;
@@ -514,6 +523,7 @@ interface ReadWarning {
   param?: string;
 }
 interface FanInOptions {
+  streamStore?: { listStreams: typeof listStreams };
   concurrency?: unknown;
   extraWarnings?: ReadWarning[];
   onInFlightChange?: unknown;
@@ -640,7 +650,7 @@ type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
   after_version?: number;
   cursor_value?: unknown;
-  filters?: unknown;
+  epoch?: unknown;
   order?: unknown;
   primary_key?: unknown;
   session?: unknown;
@@ -750,11 +760,11 @@ function requireStreamList(value: unknown): StreamListEntry[] {
 }
 
 function parseStoredRecordData(recordJson: string): RecordData {
-  const parsed: unknown = JSON.parse(recordJson);
+  const parsed: unknown = parseFilterRecordJson(recordJson);
   if (!isRecordData(parsed)) {
     throw new Error("[records] stored record_json must contain an object");
   }
-  return rememberRecordSourceText(parsed, recordJson);
+  return parsed;
 }
 
 function asSqliteBindValue(value: unknown): BindValue {
@@ -1060,13 +1070,6 @@ function releaseIndexWork(generation: number): void {
  * and then queue behind another generation's held admission permit for an
  * arbitrarily long time before actually running its operation.
  */
-class StaleStorageGenerationError extends Error {
-  constructor() {
-    super("storage generation changed while queued for index-work admission");
-    this.name = "StaleStorageGenerationError";
-  }
-}
-
 async function withIndexWork<T>(operation: () => Promise<T>, generation = currentStorageGeneration()): Promise<T> {
   await acquireIndexWork(generation);
   try {
@@ -1391,11 +1394,12 @@ function writeRecordChange({
 }
 
 // The retained-size delta accounting MUST count/sum exactly the rows the prune
-// DELETE will remove. Both helpers therefore carry the SAME anchor-preserving
-// `NOT EXISTS` clause as `recordsIngestPruneRecordChanges` (see
-// queries/records/ingest/prune-record-changes.sql). If these predicates ever
-// diverge, the retained-size read model would over-report pruned bytes/rows
-// for keys whose anchor we now keep. Kept in lockstep on purpose.
+// DELETE will remove. Both helpers therefore carry the SAME anchor- and
+// baseline-preserving clauses as `recordsIngestPruneRecordChanges` (see
+// queries/records/ingest/prune-record-changes.sql); each takes the horizon
+// twice. If these predicates ever diverge, the retained-size read model would
+// over-report pruned bytes/rows for keys whose anchor or baseline we keep.
+// Kept in lockstep on purpose.
 const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
   AND NOT EXISTS (
     SELECT 1
@@ -1404,6 +1408,14 @@ const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+  )
+  AND EXISTS (
+    SELECT 1 FROM record_changes n
+     WHERE n.connector_instance_id = record_changes.connector_instance_id
+       AND n.stream = record_changes.stream
+       AND n.record_key = record_changes.record_key
+       AND n.version > record_changes.version
+       AND n.version <= ?
   )`;
 
 function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: string, versionBefore: number): number {
@@ -1415,7 +1427,7 @@ function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: str
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.bytes || 0);
 }
 
@@ -1428,7 +1440,7 @@ function getPrunedRecordChangeCount(connectorInstanceId: string, stream: string,
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.count || 0);
 }
 
@@ -1825,7 +1837,7 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, scheduledGeneration),
         scheduledGeneration
       );
     } catch (err) {
@@ -2252,7 +2264,20 @@ function pruneRecordChangeHistory(
   const cutoff = nextVersion - changeHistoryLimit;
   const prunedBytesForDelta = getPrunedRecordChangeJsonBytes(connectorInstanceId, stream, cutoff);
   const prunedRowsForDelta = getPrunedRecordChangeCount(connectorInstanceId, stream, cutoff);
-  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff]);
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
+    getDb()
+      .prepare(
+        `UPDATE version_counter SET changes_floor = MAX(changes_floor, ?)
+          WHERE connector_instance_id = ? AND stream = ?`
+      )
+      .run(cutoff, connectorInstanceId, stream);
+  }
+  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff, cutoff]);
   return { prunedBytesForDelta, prunedRowsForDelta };
 }
 
@@ -2319,6 +2344,7 @@ async function ingestSqliteRecord(
 
   // Durable mutation unit: returns the operation outcome so derived index
   // maintenance can run *after* the commit succeeds.
+  crashPoint("ingest:before-write-transaction");
   const outcome = writeTransaction<DurableIngestOutcome>(() => {
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {
@@ -2381,10 +2407,15 @@ async function ingestSqliteRecord(
       connectorId,
       connectorInstanceId,
       stream,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
     ]);
     const nextVersion = allocated.max_version;
 
     maybeFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordKey, stream });
+    crashPoint("ingest:after-version-allocation");
 
     writeRecordChange({
       connectorId,
@@ -2401,6 +2432,7 @@ async function ingestSqliteRecord(
     maybeFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
 
     maybeFault("after-record-changes-append", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
+    crashPoint("ingest:after-record-write");
 
     // Scope-keyed dirty mark, inside the SAME transaction as the record
     // mutation above: this scope's lexical/semantic index may now be stale,
@@ -2409,6 +2441,7 @@ async function ingestSqliteRecord(
     // writes -- so the mark must be atomic with the write, not best-effort
     // after it. See server/stores/search-index-dirty-store.ts.
     markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, nowIso());
+    crashPoint("ingest:after-dirty-mark");
 
     const insertedChangeJsonBytes = byteLength(op === "delete" ? current?.record_json : recordJson);
     const { prunedBytesForDelta, prunedRowsForDelta } = pruneRecordChangeHistory(
@@ -2433,8 +2466,10 @@ async function ingestSqliteRecord(
       stream,
     });
 
+    crashPoint("ingest:before-commit");
     return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });
   });
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
@@ -2507,7 +2542,7 @@ export async function maintainRecordIndexes(
   generation: number = currentStorageGeneration()
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, generation),
     generation
   );
 }
@@ -2792,7 +2827,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  generation: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2844,6 +2880,7 @@ async function maintainRecordIndexesWithinPermit(
       connectorInstanceId,
       data,
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
+      generation,
       recordKey,
       stream,
     });
@@ -2864,9 +2901,14 @@ async function maintainRecordIndexesWithinPermit(
     stream,
   });
 
+  // withIndexWork checked the generation before this operation started, but the
+  // compute awaits above can span a storage close and re-init. The version check
+  // below cannot tell the new database from the old one: the same key can sit at
+  // the same version there with different content.
   if (isPostgresStorageBackend()) {
     return withPostgresTransaction(
       async (client) => {
+        assertCurrentStorageGeneration(generation);
         // Match repair's instance -> publication -> derived DML order, including deletes.
         await lockConnectorManifestPublication(client, connectorId);
         const current = await client.query<{ version: string | number; deleted: boolean }>(
@@ -2906,6 +2948,7 @@ async function maintainRecordIndexesWithinPermit(
     );
   }
 
+  assertCurrentStorageGeneration(generation);
   return writeTransaction(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,
@@ -4060,7 +4103,7 @@ function fetchVisibleRecordRowsInMemory({
   cursorPosition,
   limit,
   order,
-}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number; underread: false } {
+}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number } {
   // Access-control pushdown: keep the same WHERE shape the SQL path uses, just
   // without ORDER BY / LIMIT / cursor-seek.
   const whereParts = ["connector_instance_id = ?", "stream = ?", "deleted = 0"];
@@ -4103,7 +4146,7 @@ function fetchVisibleRecordRowsInMemory({
 
   const hasMore = afterCursor.length > limit;
   const rows = hasMore ? afterCursor.slice(0, limit) : afterCursor;
-  return { hasMore, rows, scanned: visible.length, underread: false };
+  return { hasMore, rows, scanned: visible.length };
 }
 
 interface PaginatedSqlParts {
@@ -4136,7 +4179,9 @@ function buildPaginatedSqlParts(
 
   const selectParts = ["record_key", "record_json", "emitted_at"];
   if (cursorField) {
-    selectParts.push(`${jsonExtractExpr(cursorField)} AS __cursor_val`);
+    // NULLIF folds '' into NULL so the missing bucket ties on the cursor and
+    // orders by pk alone, which is what buildCursorSeekClause seeks by.
+    selectParts.push(`NULLIF(${jsonExtractExpr(cursorField)}, '') AS __cursor_val`);
     selectParts.push(
       `CASE WHEN ${jsonExtractExpr(cursorField)} IS NULL OR ${jsonExtractExpr(cursorField)} = '' ` +
         "     THEN 1 ELSE 0 END AS __cursor_missing"
@@ -4180,7 +4225,7 @@ function fetchVisibleRecordRowsPaginated({
   cursorPosition,
   limit,
   order,
-}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number; underread: boolean } {
+}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number } {
   // Graceful per-stream fallback for manifests whose cursor_field is not
   // compatible with the SQL sort path. Registration-time validation catches
   // this for freshly-registered connectors (see auth.js), but stale DB rows
@@ -4215,75 +4260,47 @@ function fetchVisibleRecordRowsPaginated({
   const orderBySql = `ORDER BY ${orderByParts.join(", ")}`;
 
   // --- SQL LIMIT strategy ---
-  // Post-SQL we run request-side filters in JS. When request-filters reject
-  // rows, we need to keep reading from the driver until we've collected
-  // `limit + 1` post-filter rows. Use iterate() with a generous batch bound —
-  // if the driver's LIMIT cuts us off before filling the page, we re-issue
-  // with the offset advanced. For the no-request-filter case (the overwhelming
-  // majority of traffic) one batch of `limit + 1` is enough.
+  // Request filters run in JS after SQL, so a fixed SQL window could end
+  // before the page fills and report has_more=false while matches remain.
+  // With request filters, read without a limit: iterate() streams rows and
+  // the loop stops after `limit + 1` matches. SQLite treats LIMIT -1 as none.
   const hasRequestFilters = compiledFilters && compiledFilters.length > 0;
-  const sqlLimit = hasRequestFilters
-    ? Math.max(limit * 4, 100) // headroom for rejections
-    : limit + 1;
-  // Client range filters must not under-fill a page (Section 6.10): page
-  // boundaries and has_more come from the filtered result, so keep reading
-  // batches until the page fills or the visible set is exhausted.
-  const scanToFill = compiledFilters.some((filter) => filter.kind === "client_range");
+  const sqlLimit = hasRequestFilters ? -1 : limit + 1;
 
   const sql = `
     SELECT ${selectParts.join(", ")}
     FROM records
     ${whereSqlPart}
     ${orderBySql}
-    LIMIT ?${scanToFill ? " OFFSET ?" : ""}
+    LIMIT ?
   `;
 
   // REVIEWED-DYNAMIC: WHERE clause varies with grant time_range / resources
   // / cursor seek; SQL composed in JS as today; LIMIT N+1 included.
   const collected: VisibleRecordRow[] = [];
   let scanned = 0;
-  let offset = 0;
 
-  scan: while (true) {
-    let batchRows = 0;
-    const binds = [...whereBinds, ...seekBinds, sqlLimit, ...(scanToFill ? [offset] : [])];
-    for (const row of iterateDynamicSqlAcknowledged<StoredRecordRow>(sql, binds)) {
-      batchRows += 1;
-      scanned += 1;
-      const rawData = parseStoredRecordData(row.record_json);
-      if (compiledFilters.length && !passesRequestFilters(rawData, compiledFilters)) {
-        continue;
-      }
-      collected.push({
-        emitted_at: row.emitted_at,
-        rawData,
-        record_key: row.record_key,
-        sortPosition: buildRecordSortPosition(rawData, row.record_key, manifestStream),
-      });
-      if (collected.length > limit) {
-        break scan;
-      }
+  for (const row of iterateDynamicSqlAcknowledged<StoredRecordRow>(sql, [...whereBinds, ...seekBinds, sqlLimit])) {
+    scanned += 1;
+    const rawData = parseStoredRecordData(row.record_json);
+    if (compiledFilters.length && !passesRequestFilters(rawData, compiledFilters)) {
+      continue;
     }
-    if (!scanToFill || batchRows < sqlLimit) {
+    collected.push({
+      emitted_at: row.emitted_at,
+      rawData,
+      record_key: row.record_key,
+      sortPosition: buildRecordSortPosition(rawData, row.record_key, manifestStream),
+    });
+    if (collected.length > limit) {
       break;
     }
-    offset += sqlLimit;
   }
 
   const hasMore = collected.length > limit;
   const rows = hasMore ? collected.slice(0, limit) : collected;
 
-  // If we had request filters AND we exhausted the SQL batch without filling
-  // the page, we under-return (hasMore=false even though more rows may exist
-  // past our sqlLimit window). Acceptable for this tranche: the dashboard
-  // doesn't use request filters in its hot paths. A follow-up slice can
-  // loop the SQL offset forward in that case.
-  return {
-    hasMore,
-    rows,
-    scanned,
-    underread: !scanToFill && hasRequestFilters && !hasMore && scanned >= sqlLimit,
-  };
+  return { hasMore, rows, scanned };
 }
 
 function buildResponseRecord(
@@ -4322,6 +4339,10 @@ function decorateRecordWithConnectionIdentity(record: ResponseRecord, identity: 
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -4645,7 +4666,7 @@ function isVisibleSnapshot(snapshot: RecordSnapshot | null, effective: Effective
 
 function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (str === "beginning") {
-    return { bootstrap: true, version: 0 };
+    return { version: 0 };
   }
   const decoded = decodeCursor(str);
   if (!decoded) {
@@ -4659,11 +4680,12 @@ function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (decoded.kind !== "changes_since" || typeof decoded.version !== "number" || !Number.isInteger(decoded.version)) {
     return null;
   }
-  return {
-    kind: "changes_since",
-    version: decoded.version,
-    ...(typeof decoded.filters === "string" ? { filters: decoded.filters } : {}),
-  };
+  if (decoded.epoch === undefined) {
+    return { kind: "changes_since", version: decoded.version };
+  }
+  return typeof decoded.epoch === "string"
+    ? { epoch: decoded.epoch, kind: "changes_since", version: decoded.version }
+    : null;
 }
 
 // Self-teaching error message: when a caller passes something other than the
@@ -4685,14 +4707,9 @@ function parsePageCursor(str: string): PaginationCursor | null {
   return decoded;
 }
 
-function encodeRecordsPageCursor(
-  position: LogicalPosition | null | undefined,
-  order: PageOrder,
-  filterBinding?: string
-): string {
+function encodeRecordsPageCursor(position: LogicalPosition | null | undefined, order: PageOrder): string {
   return encodeCursor({
     cursor_value: position?.cursor_value ?? null,
-    ...(filterBinding ? { filters: filterBinding } : {}),
     kind: "page",
     order,
     primary_key: position?.primary_key || [],
@@ -4704,16 +4721,16 @@ function encodeChangesPageCursor({
   sinceVersion,
   afterVersion,
   sessionMaxVersion,
-  filterBinding,
+  epoch,
 }: {
   afterVersion: number;
-  filterBinding?: string | undefined;
+  epoch: string;
   sessionMaxVersion: number;
   sinceVersion: number;
 }): string {
   return encodeCursor({
     after_version: afterVersion,
-    ...(filterBinding ? { filters: filterBinding } : {}),
+    epoch,
     kind: "page",
     session: "changes",
     session_max_version: sessionMaxVersion,
@@ -4721,8 +4738,8 @@ function encodeChangesPageCursor({
   });
 }
 
-function encodeChangesSinceCursor(version: number, filterBinding?: string): string {
-  return encodeCursor({ ...(filterBinding ? { filters: filterBinding } : {}), kind: "changes_since", version });
+function encodeChangesSinceCursor(version: number, epoch: string): string {
+  return encodeCursor({ epoch, kind: "changes_since", version });
 }
 
 function getSnapshotAtVersion(
@@ -5112,8 +5129,17 @@ export async function recordCurrentGenerationUndeclaredWrite(
   });
 }
 
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+function readRecordResetGeneration(connectorInstanceId: string): string {
+  const row = getOne<{ reset_generation: string }>(referenceQueries.recordsDeleteGetRecordResetGeneration, [
+    connectorInstanceId,
+  ]);
+  return String(row?.reset_generation ?? "0");
+}
+
 interface ValidatedChangeVersions {
   effectiveSessionMaxVersion: number;
+  epoch: string;
   verifiedAfterVersion: number;
   verifiedSinceVersion: number;
 }
@@ -5138,6 +5164,22 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
+  // A bulk reset deletes the stream's records, history and version counter in
+  // one transaction and advances the connection's reset generation in that
+  // same transaction, so versions can be reissued afterwards. A token (or page
+  // cursor) minted under an earlier generation names versions from a space
+  // that no longer exists and must not be replayed against the new one.
+  // `beginning` and version-0 tokens hold no consumer state and stay valid.
+  const epoch = readRecordResetGeneration(connectorInstanceId);
+  const tokenEpoch = changesSince === null ? changesCursor?.epoch : changesSince.epoch;
+  if (tokenEpoch !== undefined && typeof tokenEpoch !== "string") {
+    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
+  }
+  const tokenHoldsNoState = changesSince !== null && changesSince.version === 0;
+  if (!tokenHoldsNoState && (tokenEpoch ?? "0") !== epoch) {
+    throw codedError("changes_since cursor predates a stream reset; full re-sync required", "cursor_expired");
+  }
+
   const vcRow = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [
     connectorInstanceId,
     stream,
@@ -5148,16 +5190,28 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
-  const minChangeRow = getOne<MinVersionRow>(referenceQueries.recordsSnapshotsGetMinRecordChangeVersion, [
-    connectorInstanceId,
-    stream,
-  ]);
-  const minVersion = minChangeRow?.min_version ?? null;
-  if (minVersion !== null && sinceVersion < minVersion - 1) {
-    throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
+  // `changes_floor` is the horizon below which history was pruned or compacted:
+  // a cursor at or above it can resolve every key's snapshot, one below it would
+  // get its deletions silently suppressed. (MIN(version) cannot say so: a cold
+  // key's anchor pins it near 1.) `beginning` needs no predecessor and stays
+  // valid as the recovery request. A continued page is read at
+  // `session_max_version`; once the horizon passes that snapshot the session
+  // expires rather than serve an incomplete page.
+  const changesFloor = vcRow?.changes_floor ?? 0;
+  const belowFloor = sinceVersion > 0 && sinceVersion < changesFloor;
+  const sessionSnapshotPruned = changesSince === null && effectiveSessionMaxVersion < changesFloor;
+  if (belowFloor || sessionSnapshotPruned) {
+    throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
+  }
+  // The counter only grows within a generation, so a token or page cursor past
+  // the head names versions this database never issued, as after restoring an
+  // older backup. Answering it would return an empty page and a token at the
+  // older head, which cannot tell the client to drop what it learned after it.
+  if (Math.max(sinceVersion, afterVersion, effectiveSessionMaxVersion) > currentMaxVersion) {
+    throw codedError("changes_since cursor is ahead of the stream's history; full re-sync required", "cursor_expired");
   }
 
-  return { effectiveSessionMaxVersion, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
+  return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
 
 function fetchChangeGroupBatch(
@@ -5241,26 +5295,6 @@ function collectVisibleChanges(
   return visibleChanges;
 }
 
-// A record that left a client filter range is not deleted, and a client
-// tombstone must not say when the change happened, so a range exit carries
-// neither `deleted_at` nor `emitted_at` (spec-core.md, client tombstones).
-function buildChangeTombstone(
-  group: ChangeGroupRow,
-  stream: string,
-  recordIdentity: RecordIdentity | null,
-  deletion?: { deletedAt: string | null; emittedAt: string }
-): ResponseRecord {
-  const tombstone = {
-    ...(deletion ? { deleted_at: deletion.deletedAt, emitted_at: deletion.emittedAt } : {}),
-    deleted: true,
-    id: group.record_key,
-    object: "record",
-    stream,
-  } as ResponseRecord;
-  decorateRecordWithConnectionIdentity(tombstone, recordIdentity);
-  return tombstone;
-}
-
 function resolveChangeGroupRecord(
   group: ChangeGroupRow,
   connectorInstanceId: string,
@@ -5275,36 +5309,47 @@ function resolveChangeGroupRecord(
 
   const previousVisible = isVisibleSnapshot(previous, effective);
   const currentVisible = isVisibleSnapshot(current, effective);
-  // Section 6.8: under client range filters, visibility at a horizon includes
-  // the filters, so a record that left the range is a tombstone and one that
-  // entered it is a change even when its projection did not differ.
-  const filterAwareHistory = compiledFilters.some((filter) => filter.kind === "client_range");
-  const previousInRange = previousVisible && !!previous?.data && passesRequestFilters(previous.data, compiledFilters);
 
   if (current?.deleted) {
-    if (!previousInRange) {
+    if (!(previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters))) {
       return null;
     }
-    // Under client range filters a deletion is indistinguishable from a range
-    // exit (spec-client-range-filters.md Section 6.8): neither says when it
-    // happened or whether the record was deleted.
-    return buildChangeTombstone(
-      group,
+    const deletedRecord: ResponseRecord = {
+      deleted: true,
+      deleted_at: current.deleted_at,
+      emitted_at: current.emitted_at,
+      id: group.record_key,
+      object: "record",
       stream,
-      recordIdentity,
-      filterAwareHistory ? undefined : { deletedAt: current.deleted_at, emittedAt: current.emitted_at }
-    );
+    };
+    decorateRecordWithConnectionIdentity(deletedRecord, recordIdentity);
+    return deletedRecord;
   }
 
   if (!(currentVisible && current?.data && passesRequestFilters(current.data, compiledFilters))) {
-    if (filterAwareHistory && previousInRange && current) {
-      return buildChangeTombstone(group, stream, recordIdentity);
+    if (
+      compiledFilters.some((filter) => filter.kind === "client") &&
+      previousVisible &&
+      previous?.data &&
+      passesRequestFilters(previous.data, compiledFilters) &&
+      current
+    ) {
+      const tombstone: ResponseRecord = {
+        object: "record",
+        stream,
+        id: group.record_key,
+        deleted: true,
+        deleted_at: current.emitted_at,
+        emitted_at: current.emitted_at,
+      };
+      decorateRecordWithConnectionIdentity(tombstone, recordIdentity);
+      return tombstone;
     }
     return null;
   }
 
   const previousProjection =
-    (filterAwareHistory ? previousInRange : previousVisible) && previous?.data
+    previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters)
       ? projectFields(previous.data, effective.fields ?? undefined)
       : null;
   const currentProjection = projectFields(current.data, effective.fields ?? undefined);
@@ -5326,7 +5371,6 @@ function resolveChangeGroupRecord(
 
 interface QueryRecordsChangesSinceArgs {
   changesSince: ChangesSinceCursor | null;
-  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorInstanceId: string;
   effective: EffectiveReadScope;
@@ -5337,9 +5381,13 @@ interface QueryRecordsChangesSinceArgs {
   stream: string;
 }
 
-function queryRecordsChangesSince({
+/** One deferred transaction pins one read snapshot for the epoch, floor, groups and snapshot lookups. */
+function queryRecordsChangesSince(args: QueryRecordsChangesSinceArgs): ListResponse {
+  return transaction(() => readChangesSinceSnapshot(args));
+}
+
+function readChangesSinceSnapshot({
   changesSince,
-  clientRangeBinding,
   compiledFilters,
   connectorInstanceId,
   effective,
@@ -5349,12 +5397,8 @@ function queryRecordsChangesSince({
   requestWarnings,
   stream,
 }: QueryRecordsChangesSinceArgs): ListResponse {
-  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion } = validateChangesSinceVersions(
-    changesSince,
-    paginationCursor,
-    connectorInstanceId,
-    stream
-  );
+  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion, epoch } =
+    validateChangesSinceVersions(changesSince, paginationCursor, connectorInstanceId, stream);
 
   const visibleChanges = collectVisibleChanges(
     connectorInstanceId,
@@ -5384,19 +5428,18 @@ function queryRecordsChangesSince({
     }
     response.next_cursor = encodeChangesPageCursor({
       afterVersion: lastGroup.latestVersion,
-      filterBinding: clientRangeBinding,
+      epoch,
       sessionMaxVersion: effectiveSessionMaxVersion,
       sinceVersion: verifiedSinceVersion,
     });
   }
 
-  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, clientRangeBinding);
+  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, epoch);
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }
 
 interface PagedRecordsArgs {
-  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorId: string;
   connectorInstanceId: string;
@@ -5415,7 +5458,6 @@ interface PagedRecordsArgs {
 }
 
 async function buildPagedRecordsResponse({
-  clientRangeBinding,
   compiledFilters,
   connectorId,
   connectorInstanceId,
@@ -5473,7 +5515,7 @@ async function buildPagedRecordsResponse({
     if (!lastRow) {
       throw new Error("[records] non-empty record page has no terminal row");
     }
-    response.next_cursor = encodeRecordsPageCursor(lastRow.sortPosition, order, clientRangeBinding);
+    response.next_cursor = encodeRecordsPageCursor(lastRow.sortPosition, order);
   }
 
   const countOutcome = computeGradedRecordCount({
@@ -5505,7 +5547,6 @@ async function buildPagedRecordsResponse({
 
 interface ValidatedQueryContext {
   changesSince: ChangesSinceCursor | null;
-  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorId: string;
   connectorInstanceId: string;
@@ -5519,30 +5560,10 @@ interface ValidatedQueryContext {
   requestWarnings: ReadWarning[];
 }
 
-// Section 6.7: a page cursor or sync token is bound to the set of client range
-// filters it was issued under. An unfiltered token and a filtered request (or
-// the reverse) are different sets. The `beginning` bootstrap names no set.
-function assertCursorFilterBinding(
-  changesSince: ChangesSinceCursor | null,
-  paginationCursor: PaginationCursor | null,
-  filterBinding: string | undefined
-): void {
-  const bound: Array<unknown> = [];
-  if (changesSince && !changesSince.bootstrap) {
-    bound.push(changesSince.filters);
-  }
-  if (paginationCursor) {
-    bound.push(paginationCursor.filters);
-  }
-  if (bound.some((issued) => (issued ?? undefined) !== filterBinding)) {
-    throw codedError("Cursor does not belong to this filter set", "invalid_cursor");
-  }
-}
-
 function validateQueryCursors(
   requestParams: RequestParams,
   expansions: ReturnType<typeof normalizeExpandRequest>,
-  filterBinding?: string
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5554,9 +5575,9 @@ function validateQueryCursors(
   if (requestParams.cursor && !paginationCursor) {
     throw codedError("Malformed cursor", "invalid_cursor");
   }
-  assertCursorFilterBinding(changesSince, paginationCursor, filterBinding);
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5591,15 +5612,14 @@ async function validateQueryRecordsRequest(
 
   const recordIdentity = await resolveRecordIdentityForBinding(connectorInstanceId, connectorId);
 
-  if (Array.isArray(requestParams.fields)) {
-    resolveRequestedFields(requestParams.fields, streamGrant.fields);
+  if (Array.isArray(requestParams.fields) && streamGrant.fields) {
+    const unauthorized = requestParams.fields.filter((field) => !streamGrant.fields?.includes(field));
+    if (unauthorized.length) {
+      throw codedError(`Fields not in grant: ${unauthorized.join(", ")}`, "field_not_granted");
+    }
   }
 
-  const clientRange = clientRangeReadOf(requestParams);
-  const compiledFilters: CompiledFilter[] = [
-    ...compileRequestFilters(requestParams.filter, streamGrant, mStream),
-    ...(clientRange ? [{ field: "", filters: clientRange.filters, kind: "client_range" } as const] : []),
-  ];
+  const compiledFilters = compileRequestFilters(requestParams.filter, streamGrant, mStream);
   const effective = buildEffectiveReadScope(streamGrant, requestParams, requiredFields);
   const expansions = normalizeExpandRequest(requestParams, stream, grant, mStream, order);
   const { limit, clamped: limitClamped, requested: requestedLimit } = clampRecordsPageLimit(requestParams.limit);
@@ -5607,11 +5627,10 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, clientRange?.binding);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,
-    clientRangeBinding: clientRange?.binding,
     compiledFilters,
     connectorId,
     connectorInstanceId,
@@ -5656,7 +5675,6 @@ export async function queryRecords(
   if (changesSince !== null || paginationCursor?.session === "changes") {
     return queryRecordsChangesSince({
       changesSince: ctx.changesSince,
-      clientRangeBinding: ctx.clientRangeBinding,
       compiledFilters: ctx.compiledFilters,
       connectorInstanceId: ctx.connectorInstanceId,
       effective: ctx.effective,
@@ -5669,7 +5687,6 @@ export async function queryRecords(
   }
 
   return buildPagedRecordsResponse({
-    clientRangeBinding: ctx.clientRangeBinding,
     compiledFilters: ctx.compiledFilters,
     connectorId: ctx.connectorId,
     connectorInstanceId: ctx.connectorInstanceId,
@@ -6516,6 +6533,10 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
       connectorId,
       connectorInstanceId,
       stream,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
     ]);
     const nextVersion = allocated.max_version;
 
@@ -6786,6 +6807,7 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
       if (!instanceStreams) {
         return;
       }
+      crashPoint("connector-teardown:before-durable-delete");
       writeTransaction(() => {
         advanceSqliteRecordResetGenerationForStreams(connectorInstanceId, instanceStreams);
         for (const stream of instanceStreams) {
@@ -6802,18 +6824,25 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           // `deleteConnectionRecordRowsSqlite`.
           exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
+        crashPoint("connector-teardown:before-commit");
       });
+      crashPoint("connector-teardown:after-durable-delete");
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         await markConnectorSummaryEvidenceDirty({
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
   if (deletedCount > 0) {
     markDatasetSummaryProjectionStale("bulk connector record delete bypassed exact dataset summary projection deltas");
     await markRetainedSizeConnectionDirty({ connectorInstanceId: null });
@@ -6902,6 +6931,7 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
+        crashPoint("connector-teardown:after-durable-delete");
         await withPostgresTransaction(
           async (client) => {
             const unbound = await client.query<{ blob_id: string }>(
@@ -6931,7 +6961,9 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           },
           { lockConnectorInstanceId: connectorInstanceId }
         );
+        crashPoint("connector-teardown:after-blob-delete");
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
         // connector-summary evidence row dirty too, not just retained-size.
@@ -6943,11 +6975,15 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
 
   if (deletedCount > 0) {
     // Postgres dashboard summary reads from the retained-size projection
@@ -8127,6 +8163,80 @@ function compareMergedBuckets(left: AggregateGroup, right: AggregateGroup, isSca
   return JSON.stringify(left.key).localeCompare(JSON.stringify(right.key));
 }
 
+function decorateStreamSummary(summary: StreamListEntry, binding: ReadBinding): StreamListEntry {
+  const decorated = { ...summary };
+  const wireBinding = projectReadBindingForWire(binding);
+  if (wireBinding?.connection_id) {
+    decorated.connection_id = wireBinding.connection_id;
+    decorated.connector_instance_id = wireBinding.connection_id;
+    const displayName = Reflect.get(wireBinding, "display_name");
+    if (typeof displayName === "string" && displayName) {
+      decorated.display_name = displayName;
+    }
+  }
+  return decorated;
+}
+
+/**
+ * Resolve authority per stream before reading storage, then enumerate each
+ * connection once. Keep grant entries (including resource/time constraints)
+ * intact and reconstruct stream-major, binding-major order after bounded I/O.
+ */
+export async function listStreamsByResolvedBindings(
+  grant: ReadGrant,
+  manifest: ReadManifest | null,
+  resolveBindingsForStream: NonNullable<FanInOptions["resolveBindingsForStream"]>,
+  opts: FanInOptions = {}
+): Promise<StreamListEntry[]> {
+  const namedGrants = grant.streams.filter((streamGrant) => streamGrant?.name);
+  const resolved = await mapWithConcurrency(
+    namedGrants,
+    fanInReadConcurrency(opts),
+    resolveBindingsForStream,
+    fanInMapOptions(opts)
+  );
+  const groups = new Map<
+    string,
+    { binding: ReadBinding; streams: ReadGrant["streams"]; indices: number[] }
+  >();
+  for (const [index, streamGrant] of namedGrants.entries()) {
+    for (const binding of resolved[index] ?? []) {
+      let group = groups.get(binding.connectorInstanceId);
+      if (!group) {
+        group = { binding, streams: [], indices: [] };
+        groups.set(binding.connectorInstanceId, group);
+      }
+      if (!group.indices.includes(index)) {
+        group.streams.push(streamGrant);
+        group.indices.push(index);
+      }
+    }
+  }
+  const perConnection = await mapWithConcurrency(
+    [...groups.values()],
+    fanInReadConcurrency(opts),
+    async ({ binding, streams, indices }) => {
+      const rows = await (opts.streamStore?.listStreams ?? listStreams)(
+        buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId),
+        { ...grant, streams },
+        manifest
+      );
+      return {
+        id: binding.connectorInstanceId,
+        rows: new Map(indices.map((index, position) => [index, rows[position]])),
+      };
+    },
+    fanInMapOptions(opts)
+  );
+  const byConnection = new Map(perConnection.map(({ id, rows }) => [id, rows]));
+  return resolved.flatMap((bindings, index) =>
+    (bindings ?? []).flatMap((binding) => {
+      const summary = byConnection.get(binding.connectorInstanceId)?.get(index);
+      return summary ? [decorateStreamSummary(summary, binding)] : [];
+    })
+  );
+}
+
 /**
  * Fan-in stream-list summaries across multiple bindings.
  *
@@ -8157,7 +8267,6 @@ export async function listStreamsAcrossBindings(
     typeof opts.resolveBindingsForStream === "function" ? opts.resolveBindingsForStream : null;
 
   const summaries: StreamListEntry[] = [];
-  const grantStreams = Array.isArray(grant.streams) ? grant.streams : [];
 
   // When no per-stream resolver is wired, fall back to the prior shape:
   // iterate every (binding, stream-in-grant) pair once.
@@ -8167,21 +8276,8 @@ export async function listStreamsAcrossBindings(
       fanInReadConcurrency(opts),
       async (binding) => {
         const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
-        const perBinding = await listStreams(target, grant, manifest);
-        const wireBinding = projectReadBindingForWire(binding);
-        return perBinding.map((summary) => {
-          const decorated: StreamListEntry = { ...summary };
-          if (wireBinding?.connection_id) {
-            decorated.connection_id = wireBinding.connection_id;
-            decorated.connector_instance_id = wireBinding.connection_id;
-            const wireDisplayName = Reflect.get(wireBinding, "display_name");
-            const displayName = typeof wireDisplayName === "string" ? wireDisplayName : null;
-            if (displayName) {
-              decorated.display_name = displayName;
-            }
-          }
-          return decorated;
-        });
+        const perBinding = await (opts.streamStore?.listStreams ?? listStreams)(target, grant, manifest);
+        return perBinding.map((summary) => decorateStreamSummary(summary, binding));
       },
       fanInMapOptions(opts)
     );
@@ -8191,50 +8287,7 @@ export async function listStreamsAcrossBindings(
     return summaries;
   }
 
-  // Per-stream resolver path: each stream's bindings honor its own
-  // grant-scope `connection_id` constraint. Streams whose grant entry
-  // pins different connections do not bleed each other's counts.
-  const namedGrants = grantStreams.filter((sg) => sg?.name);
-  const perStreamResults = await mapWithConcurrency(
-    namedGrants,
-    fanInReadConcurrency(opts),
-    async (streamGrant) => {
-      const bindingsForStream = await resolveBindingsForStream(streamGrant);
-      if (!bindingsForStream || bindingsForStream.length === 0) {
-        return [];
-      }
-      const singleStreamGrant = { ...grant, streams: [streamGrant] };
-      const perBindingResults = await mapWithConcurrency(
-        bindingsForStream,
-        fanInReadConcurrency(opts),
-        async (binding) => {
-          const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
-          const perBinding = await listStreams(target, singleStreamGrant, manifest);
-          const wireBinding = projectReadBindingForWire(binding);
-          return perBinding.map((summary) => {
-            const decorated: StreamListEntry = { ...summary };
-            if (wireBinding?.connection_id) {
-              decorated.connection_id = wireBinding.connection_id;
-              decorated.connector_instance_id = wireBinding.connection_id;
-              const wireDisplayName = Reflect.get(wireBinding, "display_name");
-              const displayName = typeof wireDisplayName === "string" ? wireDisplayName : null;
-              if (displayName) {
-                decorated.display_name = displayName;
-              }
-            }
-            return decorated;
-          });
-        },
-        fanInMapOptions(opts)
-      );
-      return perBindingResults.flat();
-    },
-    fanInMapOptions(opts)
-  );
-  for (const perStream of perStreamResults) {
-    summaries.push(...perStream);
-  }
-  return summaries;
+  return listStreamsByResolvedBindings(grant, manifest, resolveBindingsForStream, opts);
 }
 
 /**

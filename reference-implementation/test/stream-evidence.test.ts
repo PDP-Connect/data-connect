@@ -906,9 +906,12 @@ test("DETAIL_COVERAGE naming a state_stream-declared stream is still rejected af
   }
 });
 
-// ── No checkpoint-commit-eligibility interaction ──
+// ── Unaccounted outcomes withhold the parent checkpoint ──
 
-test("STREAM_EVIDENCE acceptance never gates the parent's (or any) checkpoint commit", async () => {
+// `outcomes.unaccounted` keys have no durable DETAIL_GAP, so nothing replays
+// them once the parent cursor moves past them. The parent checkpoint must stay
+// put so the next run re-collects them.
+test("STREAM_EVIDENCE with outcomes.unaccounted > 0 withholds the parent checkpoint", async () => {
   const { server, asUrl, rsUrl, ownerToken } = await setupServer();
   try {
     const manifest = twoStreamManifest("stream-evidence-no-commit-gating");
@@ -919,9 +922,8 @@ test("STREAM_EVIDENCE acceptance never gates the parent's (or any) checkpoint co
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  // Deliberately shortfall (partial coverage for the child) -- this MUST NOT
-  // withhold the messages checkpoint, which the manifest declares as
-  // message_bodies's parent.
+  // Two keys unaccounted: no DETAIL_GAP replays them, so the messages
+  // checkpoint (message_bodies's declared parent) must not commit.
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 3, outcomes: { emitted: 0, unchanged: 1, gapped: 0, unaccounted: 2 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
   rl.close();
@@ -947,9 +949,60 @@ test("STREAM_EVIDENCE acceptance never gates the parent's (or any) checkpoint co
         | undefined;
       assert.equal(
         checkpointSummary?.commit_status,
-        "committed",
-        "messages must commit regardless of message_bodies's STREAM_EVIDENCE shortfall"
+        "not_committed",
+        "messages must not commit while message_bodies reports unaccounted keys"
       );
+      assert.equal(checkpointSummary?.state_streams_committed, 0);
+      const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+      });
+      const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
+      assert.ok(!("messages" in (stateBody.state ?? {})), "the parent cursor must not move past unaccounted keys");
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("STREAM_EVIDENCE whose shortfall is fully gapped with durable DETAIL_GAPs still commits the parent checkpoint", async () => {
+  const { server, asUrl, rsUrl, ownerToken } = await setupServer();
+  try {
+    const manifest = twoStreamManifest("stream-evidence-gapped-commits");
+    await registerManifest(asUrl, manifest);
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-stream-evidence-gapped-commits-"));
+    const connectorPath = writeConnectorStub(
+      tmpDir,
+      `
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'message_bodies', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-2', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 2, outcomes: { emitted: 1, unchanged: 0, gapped: 1, unaccounted: 0 } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+    );
+    try {
+      const result = (await runConnector({
+        admitRunConnection: fakeAdmitRunConnection(),
+        collectionMode: "incremental",
+        connectorId: manifest.connector_id,
+        connectorPath,
+        manifest: manifest as unknown as RuntimeManifest,
+        onInteraction: async () => ({}),
+        ownerToken,
+        persistState: true,
+        rsUrl,
+        state: null,
+      })) as RuntimeRunConnectorResult;
+      assert.equal(result.status, "succeeded");
+      const checkpointSummary = result.checkpoint_summary as
+        | { commit_status?: string; state_streams_committed?: number }
+        | undefined;
+      assert.equal(checkpointSummary?.commit_status, "committed", "a durable DETAIL_GAP is a replayable work item");
       assert.equal(checkpointSummary?.state_streams_committed, 1);
     } finally {
       rmSync(tmpDir, { force: true, recursive: true });

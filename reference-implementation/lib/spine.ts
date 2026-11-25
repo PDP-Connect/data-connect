@@ -19,13 +19,17 @@ import {
   decodeCursor as wrapperDecodeCursor,
 } from "./db.ts";
 import {
+  deriveTokenAuditId,
+  normalizeDeviceAuditFields,
   postgresEmitSpineEvent,
+  postgresGetRunRecordOutcomes,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
   postgresListSpineCorrelations,
   postgresListSpineEventsPage,
   postgresSearchSpine,
+  type RunRecordOutcomesRow,
 } from "./postgres-spine.ts";
 
 /**
@@ -403,17 +407,20 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
   const actorType = asString(input.actor_type, "system");
   const actorId = asString(input.actor_id, "pdpp_reference");
   const source = deriveSourceFromEventInput(input, actorType, actorId);
+  const tokenId = asOptionalString(input.token_id);
+  const objectId = asString(input.object_id, generateSpineId("obj"));
+  const deviceAudit = normalizeDeviceAuditFields(input.object_type, objectId, input.data);
   return {
     actor_id: actorId,
     actor_type: actorType,
     client_id: asOptionalString(input.client_id),
     connector_instance_id: deriveConnectorInstanceIdFromEventInput(input),
-    data_json: serializeSpineEventData(input.data, source),
+    data_json: serializeSpineEventData(deviceAudit.data, source),
     event_id: asString(input.event_id, generateSpineId("evt")),
     event_type: asOptionalString(input.event_type),
     grant_id: asOptionalString(input.grant_id),
     interaction_id: asOptionalString(input.interaction_id),
-    object_id: asString(input.object_id, generateSpineId("obj")),
+    object_id: input.object_type === "token" ? deriveTokenAuditId(objectId) : deviceAudit.object_id,
     object_type: asString(input.object_type, "event"),
     occurred_at: occurredAt,
     recorded_at: nowIso(),
@@ -428,7 +435,7 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
     stream_id: asOptionalString(input.stream_id),
     subject_id: asOptionalString(input.subject_id),
     subject_type: asOptionalString(input.subject_type),
-    token_id: asOptionalString(input.token_id),
+    token_id: tokenId === null ? null : deriveTokenAuditId(tokenId),
     trace_id: asString(input.trace_id, generateSpineId("trc")),
     version: asString(input.version, SPINE_VERSION),
   };
@@ -902,6 +909,33 @@ export async function getRunStartedEvent(runId: string): Promise<RunLifecycleEve
     ? ((await postgresGetRunStartedEvent(runId)) as RunLifecycleEventRow | null | undefined)
     : getOne<RunLifecycleEventRow>(referenceQueries.spineGetRunStartedEvent, [runId]);
   return summarizeRunLifecycleRow(row);
+}
+
+/**
+ * Whole-run record outcomes the connector reported through spine events,
+ * summed over ALL of the run's events (never a timeline page).
+ *
+ * `rejected_in_batches` is the sum of `records_permanently_rejected` over the
+ * run's `run.batch_ingested` events, or `null` when some batch event carries
+ * no such count (events from before the field existed): that sum would be a
+ * guess, so it is absent rather than a smaller number. `unaccounted_by_stream`
+ * merges `run.stream_evidence_declared` `outcomes.unaccounted` per stream and
+ * lists only streams with a positive count.
+ */
+export interface RunRecordOutcomes {
+  readonly rejected_in_batches: number | null;
+  readonly unaccounted_by_stream: Readonly<Record<string, number>>;
+}
+
+export async function getRunRecordOutcomes(runId: string): Promise<RunRecordOutcomes> {
+  const row = isPostgresStorageBackend()
+    ? await postgresGetRunRecordOutcomes(runId)
+    : getOne<RunRecordOutcomesRow>(referenceQueries.spineGetRunRecordOutcomes, [runId, runId]);
+  const unaccounted = row?.unaccounted_json ? (JSON.parse(row.unaccounted_json) as Record<string, number>) : {};
+  return {
+    rejected_in_batches: Number(row?.unreported_batches ?? 0) > 0 ? null : Number(row?.rejected_in_batches ?? 0),
+    unaccounted_by_stream: unaccounted,
+  };
 }
 
 /**

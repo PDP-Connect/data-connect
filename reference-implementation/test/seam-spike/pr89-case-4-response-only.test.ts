@@ -72,21 +72,21 @@ test("captured introspection context enforces the response-only request matrix w
 
     const deniedRequests = [
       {
-        code: "context.stream_not_allowed",
+        code: "grant_stream_not_allowed",
         name: "stream",
-        status: 401,
+        status: 403,
         url: `${harness.rsUrl}/v1/streams/recently_played/records`,
       },
       {
-        code: "context.instance_mismatch",
+        code: "grant_instance_not_allowed",
         name: "instance",
-        status: 401,
+        status: 403,
         url: `${harness.rsUrl}/v1/streams/top_artists/records?connection_id=account-b`,
       },
       {
-        code: "field_not_granted",
+        code: "unknown_field",
         name: "field",
-        status: 403,
+        status: 400,
         url: `${harness.rsUrl}/v1/streams/top_artists/records?fields=private_note`,
       },
     ] as const;

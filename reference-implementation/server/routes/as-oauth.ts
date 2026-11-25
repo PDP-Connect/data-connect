@@ -262,7 +262,6 @@ export interface MountAsTokenContext {
   exchangeOAuthRefreshToken: (args: { baseUrl?: string; refreshToken: unknown; clientId: unknown }) => Promise<{
     access_token: string;
     access_token_expires_at?: string;
-    authorization_details?: unknown[];
     token_type: string;
     refresh_token: string;
     grant_id?: string | null;
@@ -349,7 +348,6 @@ async function handleRefreshTokenExchange(
     });
     return respondWithTokenJson(res, {
       access_token: token.access_token,
-      ...(token.authorization_details ? { authorization_details: token.authorization_details } : {}),
       ...accessTokenLifetimePayload(token.access_token_expires_at),
       refresh_token: token.refresh_token,
       token_type: token.token_type,

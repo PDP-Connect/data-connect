@@ -37,6 +37,7 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
+  getRunRecordOutcomes,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
@@ -52,8 +53,8 @@ import type {
 import { SourceWebhookError } from "../operations/ref-source-webhook-ingest/index.ts";
 import { deriveClientEventsFromRecordChange } from "../operations/rs-client-event-derive/index.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
+import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
-import { connectorRetainsSurfaceProcess } from "../runtime/browser-surface/retained-surface-connectors.ts";
 import {
   type BrowserSurfaceLeaseSweepCloseSource,
   type BrowserSurfaceLeaseSweepTimer,
@@ -88,6 +89,8 @@ import {
   reconcileConnectorUninstalls,
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
+import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
+import { validateConnectorManifest } from "./connector-manifest-validation.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -98,15 +101,7 @@ import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-pa
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
-import { CLIENT_RANGE_FILTERS_PROFILE_URI, clientRangeFiltersRsCapability } from "./client-range-filters.ts";
-import {
-  type ClientRangeFiltersOption,
-  clientFilterParameterOutsideList,
-  grantFrozenSetIsMalformed,
-  resolveClientRangeFiltersPolicy,
-} from "./client-range-read.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
-import { resolveRequestedFields } from "./requested-fields.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -127,9 +122,11 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  connectorDeclarationDigest,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
+  getAcceptedDeclarationDigest,
   getCimdDocument,
   getConfiguredNativeManifest,
   getConnectorManifest,
@@ -145,6 +142,7 @@ import {
   listGrantPackagesForOwner,
   listOwnerIssuedClients,
   listRegisteredConnectorIds,
+  normalizeConnectorManifestForStorage,
   registerConnector,
   registerDynamicClient,
   requireGrantContractAgainstManifest,
@@ -321,8 +319,8 @@ import {
   listDatasetSummaryStreamProjectionSeeds,
   listDatasetTopConnectorCandidates,
   listLocalCoverageDiagnostics,
-  listStreams,
   listStreamsAcrossBindings,
+  listStreamsByResolvedBindings,
   maintainRecordIndexes,
   prepareDeviceFinalRecords,
   putSyncState,
@@ -479,7 +477,12 @@ import {
   mountRefDeviceExporterSourceInstances,
   mountRefDeviceExportersList,
 } from "./routes/ref-device-exporters.ts";
-import { codeToStatus, recoveryAdmissionExtrasForWire, typeFor } from "./routes/ref-error-status.ts";
+import {
+  codeToStatus,
+  connectorNotInstalledExtrasForWire,
+  recoveryAdmissionExtrasForWire,
+  typeFor,
+} from "./routes/ref-error-status.ts";
 import {
   mountRefEventSubscriptionsDisable,
   mountRefEventSubscriptionsGet,
@@ -526,6 +529,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
+import { createRunBlobUploadCredentialRegistry } from "./run-blob-upload-credentials.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
@@ -735,6 +739,7 @@ interface PdppErrorBody {
   active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
+  connector_id?: string;
   message: unknown;
   next_eligible_at?: string;
   next_step?: string;
@@ -834,12 +839,6 @@ interface ServerOpts {
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
-  /**
-   * Opt in to the experimental client range filters profile
-   * (`spec-client-range-filters.md`). Off unless true or the
-   * `PDPP_EXPERIMENTAL_CLIENT_RANGE_FILTERS=1` environment switch is set.
-   */
-  clientRangeFilters?: ClientRangeFiltersOption;
   configuredProviderAuthConnectorKeys?: readonly string[];
   connectionScopedRunEnvResolver?: ReturnType<typeof buildConnectionScopedRunEnvResolver>;
   /** Operator-owned connector child environment policy; defaults to the JSON env contract. */
@@ -947,6 +946,12 @@ interface ServerOpts {
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
+  /**
+   * Run-scoped blob upload credentials shared with the controller. The blob
+   * upload route accepts these as an alternative to the owner bearer; no other
+   * route consults them. Standalone RS apps without it accept only owner tokens.
+   */
+  blobUploadCredentials?: import("./run-blob-upload-credentials.ts").RunBlobUploadCredentialRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
   semanticRetrievalCapability?: unknown;
@@ -1446,6 +1451,9 @@ function pdppError(
     if (typeof extras.pending_pressure_gap_count === "number") {
       body.error.pending_pressure_gap_count = extras.pending_pressure_gap_count;
     }
+    if (typeof extras.connector_id === "string") {
+      body.error.connector_id = extras.connector_id;
+    }
   }
   const resourceMetadataUrl = status === 401 ? getProtectedResourceMetadataUrl(typedRes) : null;
   if (resourceMetadataUrl) {
@@ -1506,12 +1514,20 @@ function getProtectedResourceMetadataUrl(res: ResLike) {
   return typeof metadataUrl === "string" && metadataUrl ? metadataUrl : null;
 }
 
-function setProtectedResourceMetadataChallenge(res: ResLike) {
+/**
+ * spec-core §8 "Protected resource metadata": every RS 401 carries a
+ * `WWW-Authenticate: Bearer` challenge (RFC 6750 §3). It names the metadata
+ * document in `resource_metadata` (RFC 9728 §5.1) when the RS has a trusted
+ * URL for it, and it adds `error="invalid_token"` when a token was presented
+ * and rejected. An untrusted, host-derived URL is never echoed.
+ */
+function setProtectedResourceMetadataChallenge(res: ResLike, { tokenRejected }: { tokenRejected: boolean }) {
   const metadataUrl = getProtectedResourceMetadataUrl(res);
-  if (!metadataUrl) {
-    return;
-  }
-  res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${httpQuotedString(metadataUrl)}"`);
+  const params = [
+    ...(metadataUrl ? [`resource_metadata="${httpQuotedString(metadataUrl)}"`] : []),
+    ...(tokenRejected ? ['error="invalid_token"'] : []),
+  ];
+  res.setHeader("WWW-Authenticate", params.length ? `Bearer ${params.join(", ")}` : "Bearer");
 }
 
 function sha256Hex(value: string) {
@@ -1571,6 +1587,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
     await registerConnector(localCollectorManifest, {
       backfillRetrievalIndexes: false,
+      // The server's own shipped manifest: a trusted publication, so it may
+      // supersede the accepted content recorded for its version.
+      replaceAcceptedDigest: true,
     });
     return;
   }
@@ -1619,7 +1638,7 @@ function handleError(res: ResLike, err: ApiError) {
   if (code === "connection_run_active" && typeof err.active_run_id === "string") {
     extras.active_run_id = err.active_run_id;
   }
-  Object.assign(extras, recoveryAdmissionExtrasForWire(err));
+  Object.assign(extras, recoveryAdmissionExtrasForWire(err), connectorNotInstalledExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
 }
 
@@ -1700,9 +1719,7 @@ function normalizeFieldListParam(value: unknown) {
 
 function validateRequestedQueryFieldParams(
   requestParams: Record<string, unknown>,
-  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined,
-  // Set for a client read: the stream grant's `fields`, or null when it lists none.
-  grantedFields?: readonly string[] | null
+  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined
 ) {
   if (requestParams.fields !== null && requestParams.fields !== undefined) {
     const normalizedFields = normalizeFieldListParam(requestParams.fields);
@@ -1712,11 +1729,6 @@ function validateRequestedQueryFieldParams(
       throw err;
     }
     requestParams.fields = normalizedFields;
-    // The grant is checked before the declaration, so a name that is invented
-    // and a name that exists but is outside the grant take the same path.
-    if (grantedFields !== undefined) {
-      requestParams.fields = resolveRequestedFields(normalizedFields, grantedFields);
-    }
   }
 
   const allowedFields = new Set(Object.keys(manifestStream?.schema?.properties || {}));
@@ -1804,13 +1816,13 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError, statusOverride?: number) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {
@@ -2095,7 +2107,7 @@ async function requireTokenWithIntrospection(
 ) {
   const auth = req.headers?.authorization;
   if (!auth || typeof auth !== "string" || !auth.startsWith("Bearer ")) {
-    setProtectedResourceMetadataChallenge(res);
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: false });
     return pdppError(res, 401, "authentication_error", "Missing Bearer token");
   }
   const token = auth.slice(7);
@@ -2108,79 +2120,136 @@ async function requireTokenWithIntrospection(
         stream: req.params.stream,
       });
     } catch (error: unknown) {
-      if (error instanceof SourceIntrospectionContextError) {
-        info.active = false;
-        info.inactive_reason = error.code;
-      } else {
+      if (!(error instanceof SourceIntrospectionContextError)) {
         throw error;
       }
+      // A valid token asking for a stream or connection outside its grant is
+      // an authorization denial, not a token failure: spec-core §8 Errors
+      // (403 grant_stream_not_allowed) and §9 RS item 2 (the RS enforces the
+      // explicit instance handles). The token stays valid, so no
+      // invalid_token challenge.
+      const denial = grantDenialForContextError(error.code, req.params.stream, requestedConnection);
+      if (denial) {
+        if (info.trace_id) {
+          setReferenceTraceId(res, info.trace_id);
+        }
+        await emitAuthGateQueryRejection(req, res, info, {
+          code: denial.code,
+          message: denial.message,
+          sourceDescriptor: buildClientSourceDescriptor(info),
+        });
+        return pdppError(res, 403, denial.code, denial.message, denial.param);
+      }
+      info.active = false;
+      info.inactive_reason = error.code;
     }
   }
   if (!info.active) {
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
-    const authGateQuery = inferAuthGateQueryContext(req, info);
-    if (authGateQuery && info.trace_id) {
-      const authGateContext: QueryContext = {
-        actorId: info.client_id ?? null,
-        actorType: "client",
-        queryData: {
-          auth_gate: true,
-          query_shape: authGateQuery.queryShape,
-          ...(authGateQuery.queryShape === "record_list"
-            ? {
-                // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-                has_changes_since: authGateQuery.hasChangesSince ?? false,
-                limit: authGateQuery.limit ?? null,
-              }
-            : {}),
-          ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
-        },
-        queryId: ensureRequestId(res),
-        scenarioId: info.scenario_id ?? null,
-        streamId: authGateQuery.streamId ?? null,
-        tokenInfo: info,
-        traceId: info.trace_id ?? null,
-      };
-      await emitQueryReceived(authGateContext, req);
-      const gateErrMsg =
-        info.inactive_reason === "grant_revoked"
-          ? "Grant has been revoked"
+    const gateErrMsg =
+      info.inactive_reason === "grant_revoked"
+        ? "Grant has been revoked"
+        : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
+          info.inactive_reason === "grant_expired"
+          ? "Grant has expired"
           : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-            info.inactive_reason === "grant_expired"
-            ? "Grant has expired"
-            : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-              info.inactive_reason === "grant_invalid"
-              ? "Grant is malformed or no longer valid"
-              : "Invalid or expired token";
-      const gateErr = Object.assign(new Error(gateErrMsg), {
-        code: info.inactive_reason || "authentication_error",
-      }) as ApiError;
-      await emitQueryRejected(authGateContext, req, gateErr);
-    }
+            info.inactive_reason === "grant_invalid"
+            ? "Grant is malformed or no longer valid"
+            : "Invalid or expired token";
+    await emitAuthGateQueryRejection(req, res, info, {
+      code: info.inactive_reason || "authentication_error",
+      message: gateErrMsg,
+      // The token is rejected, so the recorded status is the 401 sent below
+      // even where the internal code (grant_invalid) maps to 403.
+      status: 401,
+    });
     if (info.inactive_reason === "grant_revoked") {
-      return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
+      return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
     if (info.inactive_reason === "grant_expired") {
-      return pdppError(res, 403, "grant_expired", "Grant has expired");
+      return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "authentication_error", "Invalid or expired token");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res);
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res);
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res);
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;
   next();
+}
+
+/**
+ * Map a request-selector failure from the resolved grant to its 403 grant
+ * denial. Other context failures mean the token or its context is unusable
+ * and stay 401.
+ */
+function grantDenialForContextError(
+  code: string,
+  stream: string,
+  requestedConnection: string | null
+): { code: string; message: string; param: string | null } | null {
+  if (code === "context.stream_not_allowed") {
+    return { code: "grant_stream_not_allowed", message: `Stream '${stream}' not in grant`, param: null };
+  }
+  if (code === "context.instance_mismatch") {
+    return {
+      code: "grant_instance_not_allowed",
+      message: `connection_id '${requestedConnection ?? ""}' is not in the grant for stream '${stream}'`,
+      param: "connection_id",
+    };
+  }
+  return null;
+}
+
+/**
+ * Record an auth-gate rejection of a client stream read on the grant timeline
+ * as a correlated query.received / query.rejected pair. Reads that are not
+ * stream-scoped GETs, or that carry no trace id, are not recorded.
+ */
+async function emitAuthGateQueryRejection(
+  req: ReqLike,
+  res: ResLike,
+  info: TokenInfo,
+  rejection: { code: string; message: string; sourceDescriptor?: unknown; status?: number }
+) {
+  const authGateQuery = inferAuthGateQueryContext(req, info);
+  if (!(authGateQuery && info.trace_id)) {
+    return;
+  }
+  const authGateContext: QueryContext = {
+    actorId: info.client_id ?? null,
+    actorType: "client",
+    queryData: {
+      auth_gate: true,
+      query_shape: authGateQuery.queryShape,
+      ...(authGateQuery.queryShape === "record_list"
+        ? {
+            // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+            has_changes_since: authGateQuery.hasChangesSince ?? false,
+            limit: authGateQuery.limit ?? null,
+          }
+        : {}),
+      ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
+    },
+    queryId: ensureRequestId(res),
+    scenarioId: info.scenario_id ?? null,
+    ...(Object.hasOwn(rejection, "sourceDescriptor") ? { sourceDescriptor: rejection.sourceDescriptor } : {}),
+    streamId: authGateQuery.streamId ?? null,
+    tokenInfo: info,
+    traceId: info.trace_id ?? null,
+  };
+  await emitQueryReceived(authGateContext, req);
+  const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
+  await emitQueryRejected(authGateContext, req, gateErr, rejection.status);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -3866,6 +3935,7 @@ function buildFieldCapabilities(
       : null;
   const query = (manifestStream?.query || {}) as Record<string, unknown>;
   const rangeFilters = (query.range_filters || {}) as Record<string, unknown>;
+  const frozenFilters = streamGrant?.filter_fields as Record<string, { type: string; range: string[] }> | undefined;
   const search = (query.search || {}) as Record<string, unknown>;
   const lexicalFields = new Set(Array.isArray(search.lexical_fields) ? (search.lexical_fields as unknown[]) : []);
   const semanticFields = new Set(Array.isArray(search.semantic_fields) ? (search.semantic_fields as unknown[]) : []);
@@ -3890,6 +3960,27 @@ function buildFieldCapabilities(
         typeof schemaObj.x_pdpp_role === "string" && (schemaObj.x_pdpp_role as string).trim().length > 0
           ? (schemaObj.x_pdpp_role as string).trim()
           : null;
+      const filterCapabilities: Record<string, unknown> = {};
+      if (streamGrant === null) {
+        filterCapabilities.exact_filter = buildFieldCapabilityFlag({
+          declared: isExactFilterableSchema(schemaObj),
+          granted,
+        });
+        filterCapabilities.range_filter = buildFieldCapabilityFlag({
+          declared: Boolean(rangeOperators),
+          granted,
+          operators: rangeOperators || undefined,
+        });
+      } else if (frozenFilters) {
+        const capability = Object.hasOwn(frozenFilters, field) ? frozenFilters[field] : undefined;
+        filterCapabilities.filter_type = capability?.type;
+        filterCapabilities.exact_filter = buildFieldCapabilityFlag({ declared: Boolean(capability), granted });
+        filterCapabilities.range_filter = buildFieldCapabilityFlag({
+          declared: Boolean(capability?.range.length),
+          granted,
+          operators: capability?.range ?? [],
+        });
+      }
       return [
         field,
         {
@@ -3906,19 +3997,7 @@ function buildFieldCapabilities(
             declared: semanticFields.has(field),
             granted,
           }),
-          ...(streamGrant === null
-            ? {
-                exact_filter: buildFieldCapabilityFlag({
-                  declared: isExactFilterableSchema(schemaObj),
-                  granted,
-                }),
-                range_filter: buildFieldCapabilityFlag({
-                  declared: Boolean(rangeOperators),
-                  granted,
-                  operators: rangeOperators || undefined,
-                }),
-              }
-            : {}),
+          ...filterCapabilities,
         },
       ];
     })
@@ -3930,7 +4009,6 @@ function buildStreamMetadataEntry({
   streamGrant = null,
   grantStreams = [] as Record<string, unknown>[],
   freshness = null as ReturnType<typeof buildFreshness> | null,
-  frozenRangeFilters = null as Record<string, unknown> | null,
   grantedConnections = null as unknown[] | null,
   manifestStreamNames = null as Set<string> | null,
 }: {
@@ -3938,8 +4016,6 @@ function buildStreamMetadataEntry({
   streamGrant?: Record<string, unknown> | null;
   grantStreams?: Record<string, unknown>[];
   freshness?: ReturnType<typeof buildFreshness> | null;
-  /** Frozen client range filter facts of the grant (spec Section 7); client tokens only. */
-  frozenRangeFilters?: Record<string, unknown> | null;
   grantedConnections?: unknown[] | null;
   manifestStreamNames?: Set<string> | null;
 }) {
@@ -3954,9 +4030,7 @@ function buildStreamMetadataEntry({
     name: projectedManifestStream.name,
     object: "stream_metadata",
     primary_key: normalizePrimaryKey(projectedManifestStream.primary_key),
-    // A client projection never copies the current declaration's query
-    // capabilities; the frozen set of the grant is the only vocabulary shown.
-    query: frozenRangeFilters ?? projectedManifestStream.query ?? {},
+    query: projectedManifestStream.query || {},
     relationships: projectedManifestStream.relationships || [],
     schema: projectedManifestStream.schema,
     selection: projectedManifestStream.selection,
@@ -3964,6 +4038,9 @@ function buildStreamMetadataEntry({
     views: projectedManifestStream.views || [],
   };
   if (streamGrant) {
+    if (streamGrant.filter_fields) {
+      entry.filter_fields = structuredClone(streamGrant.filter_fields);
+    }
     entry.instance_ids = Array.isArray(streamGrant.instance_ids) ? [...streamGrant.instance_ids] : [];
     if (Array.isArray(streamGrant.resources)) {
       entry.resources = [...streamGrant.resources];
@@ -4165,52 +4242,38 @@ async function listSubjectVisibleStreamSummaries({
   const grantStreams = Array.isArray(effectiveGrant.streams)
     ? (effectiveGrant.streams as Record<string, unknown>[])
     : [];
-  const summaries = new Map<string, Record<string, unknown>>();
-  await Promise.all(
-    grantStreams.map(async (streamGrant) => {
-      const streamName = typeof streamGrant.name === "string" ? streamGrant.name : null;
-      if (!streamName) {
-        return;
-      }
-      let bindings: Array<{ connectorId: string; connectorInstanceId: string }>;
+  const typedGrant = {
+    ...effectiveGrant,
+    streams: grantStreams.filter((streamGrant) => typeof streamGrant.name === "string" && streamGrant.name),
+  } as unknown as Parameters<typeof listStreamsByResolvedBindings>[0];
+  const rows = await listStreamsByResolvedBindings(
+    typedGrant,
+    manifest as Parameters<typeof listStreamsByResolvedBindings>[1],
+    async (streamGrant) => {
       try {
         const resolved = await resolveReadRequestBindings({
-          grant: effectiveGrant as unknown as Parameters<typeof resolveReadRequestBindings>[0]["grant"],
+          grant: typedGrant,
           ownerRead: grant === null,
           ...(ownerSubjectId ? { ownerSubjectId } : {}),
           requestParams: {},
           storageBinding: storageBinding as unknown as NonNullable<
             Parameters<typeof resolveReadRequestBindings>[0]["storageBinding"]
           >,
-          streamName,
+          streamName: streamGrant.name,
         });
-        bindings = resolved.bindings as Array<{
-          connectorId: string;
-          connectorInstanceId: string;
-        }>;
+        return resolved.bindings;
       } catch (error) {
         if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
-          return;
+          return [];
         }
         throw error;
       }
-      const perBinding = await Promise.all(
-        bindings.map((binding) =>
-          listStreams(
-            {
-              connector_id: binding.connectorId,
-              connector_instance_id: binding.connectorInstanceId,
-            },
-            { streams: [streamGrant] } as unknown as Parameters<typeof listStreams>[1],
-            manifest as Parameters<typeof listStreams>[2]
-          )
-        )
-      );
-      for (const summary of perBinding.flat() as unknown as Record<string, unknown>[]) {
-        summaries.set(streamName, mergeStreamSummary(summaries.get(streamName), summary));
-      }
-    })
+    }
   );
+  const summaries = new Map<string, Record<string, unknown>>();
+  for (const summary of rows) {
+    summaries.set(summary.name, mergeStreamSummary(summaries.get(summary.name), { ...summary }));
+  }
   return [...summaries.values()];
 }
 
@@ -5012,9 +5075,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
       ? Object.freeze([...opts.acceptedCollectorProtocolVersions])
       : SUPPORTED_COLLECTOR_PROTOCOL_VERSIONS;
   const controller = opts.controller || null;
-  const consentStore = createConsentStore({
-    clientRangeFilters: resolveClientRangeFiltersPolicy(opts).enabled(),
-  });
+  const consentStore = createConsentStore();
   const ownerDeviceAuthStore = createOwnerDeviceAuthStore() as unknown as OwnerDeviceAuthStore;
   const deviceExporterStore = opts.deviceExporterStore || createDeviceExporterStore();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -5294,6 +5355,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
               purpose_description: "Delegate scoped personal data access to a local PDPP CLI client.",
               source: configuredSource,
               streams: [{ name: "*" }],
+              grant_version: "0.2.0",
               type: "https://pdpp.dev/data-access",
             },
           ],
@@ -5318,6 +5380,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
   });
 
+  // One resolver for the AS issuer: the metadata `issuer` and the RFC 9207
+  // `iss` on authorization responses both come from here, so they cannot drift.
+  const resolveExplicitAsIssuer = () =>
+    opts.asIssuer ||
+    opts.asPublicUrl ||
+    (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+    null;
+  const resolveAsIssuer = (req: unknown) =>
+    resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], resolveExplicitAsIssuer());
+
   // AS `/.well-known/oauth-authorization-server` is mounted via
   // `server/routes/root-and-discovery.ts` per OpenSpec change
   // `split-reference-server-by-route-family`. Behaviour-preserving
@@ -5327,8 +5399,6 @@ export function buildAsApp(opts: ServerOpts = {}) {
       typeof mountAsAuthorizationServerMetadata
     >[1]["buildAuthorizationServerMetadata"],
     cimdEnabled: opts.cimdEnabled !== false,
-    clientRangeFiltersProfiles: () =>
-      resolveClientRangeFiltersPolicy(opts).enabled() ? [CLIENT_RANGE_FILTERS_PROFILE_URI] : [],
     dynamicClientRegistrationEnabled,
     publicClientMetadataForAuthorizationServer: publicClientMetadataForAuthorizationServer as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5336,11 +5406,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     rejectUntrustedMetadataHost: rejectUntrustedMetadataHost as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["rejectUntrustedMetadataHost"],
-    resolveExplicitIssuer: () =>
-      opts.asIssuer ||
-      opts.asPublicUrl ||
-      (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
-      null,
+    resolveExplicitIssuer: resolveExplicitAsIssuer,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5483,6 +5549,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           >,
         }
       : {}),
+    resolveIssuer: resolveAsIssuer as unknown as Parameters<typeof mountAsAuthorize>[1]["resolveIssuer"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -5536,6 +5603,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         },
         {
           baseUrl: opts2.baseUrl,
+          deviceAuthorization: true,
           ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
           nativeManifest: resolveNativeManifest(opts),
           onCimdTransportFailure,
@@ -5909,6 +5977,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ? R
         : never;
     },
+    getRunRecordOutcomes: (runId: string) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
     handleError,
@@ -6828,7 +6897,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
 
   {
@@ -7180,11 +7249,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // GET /connectors/:id (manifest read) is unchanged — it exposes no user
     // data and is needed by the unauthenticated client-side connect flow.
     const asPolyfillConnectorsContext = {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
       getConnectorManifest,
       handleError,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
       pdppError,
       registerConnector,
       requireOwnerSessionForRegister: lockConnectorRegistry ? ownerAuth.requireOwnerSession : null,
+      validateManifest: (manifest: Record<string, unknown>) => validateConnectorManifest(manifest),
     };
     mountAsPolyfillConnectorRegister(
       app,
@@ -7246,6 +7319,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    resolveIssuer: resolveAsIssuer,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 
@@ -7467,27 +7541,40 @@ function buildRsApp(opts: ServerOpts = {}) {
     expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
     ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
   });
-  const clientRangeFiltersPolicy = resolveClientRangeFiltersPolicy(opts);
-  // Section 4.4: an RS that serves the profile refuses to serve data under a
-  // grant whose frozen set is malformed, and never repairs it. Reusing the
-  // inactive-token path gives every read route the same 403 grant_invalid.
-  const introspectGrantContext = async (token: string): Promise<TokenInfo> => {
-    const info = await introspectToken(token);
-    if (info.active && grantFrozenSetIsMalformed(clientRangeFiltersPolicy, info.pdpp_token_kind as string | undefined, info.grant)) {
-      return {
-        active: false,
-        client_id: info.client_id,
-        grant_id: info.grant_id,
-        inactive_reason: "grant_invalid",
-        scenario_id: info.scenario_id,
-        subject_id: info.subject_id,
-        trace_id: info.trace_id,
-      } as TokenInfo;
-    }
-    return info;
-  };
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
-    requireTokenWithIntrospection(req, res, next, introspectGrantContext);
+    requireTokenWithIntrospection(req, res, next, introspectToken);
+  // POST /v1/blobs auth: a live run-scoped upload credential, bound to one
+  // connector instance, or else the ordinary owner bearer. The credential is
+  // recognised only here; every other route authenticates through
+  // `requireToken`, where it is an unknown bearer and gets 401.
+  const requireBlobUploadAuth = (req: ReqLike, res: ResLike, next: () => void) => {
+    const auth = req.headers?.authorization;
+    const presented = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const binding = presented ? (opts.blobUploadCredentials?.verify(presented) ?? null) : null;
+    if (!binding) {
+      return requireToken(req, res, () => requireOwner(req, res, next));
+    }
+    const requestedConnectorId = resolveSingleConnectorIdQueryValue(req.query?.connector_id);
+    const requestedInstanceId = resolveSingleConnectorIdQueryValue(req.query?.connector_instance_id);
+    const connectorMatches =
+      requestedConnectorId !== null &&
+      (canonicalConnectorKey(requestedConnectorId) ?? requestedConnectorId) ===
+        (canonicalConnectorKey(binding.connectorId) ?? binding.connectorId);
+    if (!(connectorMatches && requestedInstanceId === binding.connectorInstanceId)) {
+      return pdppError(
+        res,
+        403,
+        "permission_error",
+        "Run upload credential is bound to a different connector instance"
+      );
+    }
+    req.tokenInfo = {
+      active: true,
+      pdpp_token_kind: "run_blob_upload",
+      subject_id: binding.ownerSubjectId,
+    };
+    next();
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7652,6 +7739,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectState,
     requireClient,
     requireCoreEndpointToken,
+    requireBlobUploadAuth,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -7734,8 +7822,6 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppProviderConnectVersion: PDPP_PROVIDER_CONNECT_VERSION,
     providerName,
     rejectUntrustedMetadataHost,
-    resolveClientRangeFiltersCapability: () =>
-      resolveClientRangeFiltersPolicy(opts).enabled() ? clientRangeFiltersRsCapability() : null,
     resolveClientEventSubscriptionsCapability: () => {
       if (opts.clientEventSubscriptionsCapability) {
         return opts.clientEventSubscriptionsCapability;
@@ -7845,27 +7931,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     projectBindingForWire,
     queryRecordsAcrossBindings,
     rejectQuery,
-    // Section 6.1 of the client range filters profile: where the RS serves it, a
-    // client `filter[...]` fails on every Core read endpoint except list-records,
-    // which compiles its own filters.
-    requireCoreEndpointToken: ((req: ReqLike, res: ResLike, next: () => void) =>
-      requireCoreEndpointToken(req, res, () => {
-        const rawQuery = String((req as { originalUrl?: string }).originalUrl ?? "").split("?")[1] ?? "";
-        const isRecordsList = /^\/v1\/streams\/[^/]+\/records\/?$/.test(String((req as { path?: string }).path ?? ""));
-        const rejected = isRecordsList
-          ? undefined
-          : clientFilterParameterOutsideList(clientRangeFiltersPolicy, req.tokenInfo?.pdpp_token_kind, rawQuery);
-        if (rejected !== undefined) {
-          return pdppError(
-            res,
-            400,
-            "invalid_request",
-            "Client range filters are accepted only when listing records",
-            rejected
-          );
-        }
-        next();
-      })) as typeof requireCoreEndpointToken,
+    requireCoreEndpointToken,
     requireToken,
     resolveGrantManifest: (tokenInfo: unknown, options: unknown) =>
       resolveGrantManifest(
@@ -8460,13 +8526,16 @@ function buildRsApp(opts: ServerOpts = {}) {
   // and registers only a verified installed manifest.
   mountOwnerConnectorInstall(app, {
     handleError,
+    // Installing or removing an implementation flips the summaries'
+    // `connector_implementation`; drop the cached list so the next read shows it.
+    onImplementationChanged: invalidateConnectorSummariesCache,
     pdppError,
     requireOwner,
     requireToken,
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) => registerConnector(manifest),
+        ...installedConnectorManifestRegistration,
         removeActivation: removeConnectorActivation,
         assertUninstallAllowed: async (connectorId) => {
           const activeRun = isPostgresStorageBackend()
@@ -8875,6 +8944,11 @@ export async function startServer(opts: ServerOpts = {}) {
   // can never leave the system silently inconsistent (P1).
   await checkOrphanedRecordsAtBoot(logger);
 
+  // Browser-image preflight: log, once, whether the Chromium the bundled
+  // Patchright expects exists. Non-fatal and skipped outside browser images; a
+  // missing browser fails browser connectors, not the server.
+  checkBrowserExecutableAtBoot(logger);
+
   // H5: manual-upload artifacts left stuck at uploaded/validating by a
   // process that died mid-upload/mid-validation (crash, OOM, kill -9, an
   // unclean deploy restart) sit non-terminal forever with nothing else to
@@ -9052,6 +9126,7 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  const blobUploadCredentials = opts.blobUploadCredentials ?? createRunBlobUploadCredentialRegistry();
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9129,6 +9204,7 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
     runtimeContext,
+    blobUploadCredentialHooks: blobUploadCredentials,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
       registerNonce: (args) => runTargetRegistry.registerNonce(args),
@@ -9379,7 +9455,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
@@ -9389,7 +9465,6 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl: configuredAsPublicUrl,
     clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
-    clientRangeFilters: opts.clientRangeFilters,
     connectorInstallService,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9499,12 +9574,12 @@ export async function startServer(opts: ServerOpts = {}) {
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    blobUploadCredentials,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
     ownerAuthPassword: opts.ownerAuthPassword,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
-    clientRangeFilters: opts.clientRangeFilters,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
     // the metadata route. Forwarded verbatim so test harnesses and operator
@@ -9903,33 +9978,6 @@ export async function startServer(opts: ServerOpts = {}) {
   };
 }
 
-// Deterministically re-derive credential-boundary retention on rehydrated
-// surfaces at boot, BEFORE the lease manager can run any idle-cleanup or
-// capacity-reclaim. `retained` is not a persisted column; it is a pure function
-// of the surface's connector via the RI retention registry. Fail-closed: a
-// surface whose connector is not registered stays non-retained.
-function rederiveRetainedSurfaces(surfaces: Record<string, unknown>[]) {
-  return surfaces.map((surface: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(surface.connector_id as string) ? { ...surface, retained: true } : surface
-  );
-}
-
-// Same re-derivation, for rehydrated NON-TERMINAL LEASES. A queued
-// (waiting_for_browser_surface) or starting_surface ChatGPT lease that has not
-// yet materialized a surface carries no surface row for
-// rederiveRetainedSurfaces to mark — without this, that lease rehydrates as an
-// ordinary (non-retained) lease, and once it does materialize a surface (via
-// #resolveNewLease / queue promotion) that surface would be created without
-// the retained flag, making it evictable by routine idle-TTL or
-// capacity-pressure reap. `retained` is not a persisted lease column either;
-// it is re-derived the same way, by connector_id, fail-closed for an
-// unregistered connector.
-function rederiveRetainedLeases(leases: Record<string, unknown>[]) {
-  return leases.map((lease: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(lease.connector_id as string) ? { ...lease, retained: true } : lease
-  );
-}
-
 // Independent periodic sweep for the managed browser-surface lease
 // lifecycle: expires past-TTL waiting leases, reconciles surfaces against the
 // Constructs (but never starts) the periodic browser-surface lease sweep
@@ -10038,21 +10086,8 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
   }
 
   await browserSurfaceLeaseStore.repairStaleSurfaceActiveLeases();
-  // The per-connection fair-slot invariant is enforced in the lease manager at
-  // retained-surface CREATION time (typed retained_capacity_reserved), NOT by
-  // counting these rehydrated surfaces — observed surfaces are not demand.
-  const rehydratedSurfaces = rederiveRetainedSurfaces(
-    (await browserSurfaceLeaseStore.listSurfaces()) as unknown as Record<string, unknown>[]
-  );
-  // Re-derive retention on rehydrated NON-TERMINAL LEASES too, not only
-  // surfaces: a queued/starting ChatGPT lease with no surface row yet would
-  // otherwise rehydrate non-retained and later materialize an evictable
-  // surface. Both re-derivations must run before the manager is constructed,
-  // so no idle-cleanup or capacity-reclaim can ever see a retaining
-  // lease/surface without the flag.
-  const rehydratedLeases = rederiveRetainedLeases(
-    (await browserSurfaceLeaseStore.listNonTerminalLeases()) as unknown as Record<string, unknown>[]
-  );
+  const rehydratedSurfaces = await browserSurfaceLeaseStore.listSurfaces();
+  const rehydratedLeases = await browserSurfaceLeaseStore.listNonTerminalLeases();
   // Optional: null when @opendatalabs/remote-surface is not installed, which
   // disables the browser-surface / streaming path rather than crashing boot.
   const browserSurfaceLeaseManager = await (
@@ -10444,6 +10479,9 @@ function createReferenceSchedulerManager({
             terminalData.connector_error_retryable !== undefined
           ) {
             connectorError = {};
+            if (typeof terminalData.connector_error_code === "string" && terminalData.connector_error_code.length > 0) {
+              connectorError.code = terminalData.connector_error_code;
+            }
             if (typeof terminalData.connector_error_message === "string") {
               connectorError.message = terminalData.connector_error_message;
             }
@@ -10451,7 +10489,14 @@ function createReferenceSchedulerManager({
               connectorError.retryable = terminalData.connector_error_retryable;
             }
           }
+          // The runtime reports the checkpoint outcome as the flat
+          // `checkpoint_commit_status`; scheduler records read `commit_status`.
+          const checkpointSummary =
+            typeof terminalData.checkpoint_commit_status === "string"
+              ? { commit_status: terminalData.checkpoint_commit_status }
+              : null;
           return {
+            checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
@@ -10470,6 +10515,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {

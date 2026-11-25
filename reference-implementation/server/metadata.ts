@@ -1291,7 +1291,6 @@ export interface AuthorizationServerMetadataInput {
   authorizationDetailsTypesSupported?: readonly string[] | null;
   authorizationEndpoint?: string | null;
   cimdEnabled?: boolean | null;
-  clientRangeFiltersProfiles?: readonly string[] | null;
   codeChallengeMethodsSupported?: readonly string[] | null;
   deviceAuthorizationEndpoint?: string | null;
   deviceAuthorizationProfilesSupported?: readonly Record<string, unknown>[] | null;
@@ -1318,6 +1317,7 @@ export interface AuthorizationServerPublicClient {
 export interface AuthorizationServerMetadata {
   agent_connect_endpoint?: string;
   authorization_endpoint?: string;
+  authorization_response_iss_parameter_supported?: true;
   client_id_metadata_document_supported?: true;
   code_challenge_methods_supported?: readonly string[];
   device_authorization_endpoint?: string;
@@ -1325,7 +1325,6 @@ export interface AuthorizationServerMetadata {
   introspection_endpoint: string;
   issuer: string;
   pdpp_authorization_details_types_supported?: readonly string[];
-  pdpp_client_range_filters_supported?: readonly string[];
   pdpp_device_authorization_profiles_supported?: readonly Record<string, unknown>[];
   pdpp_pre_registered_public_clients?: readonly AuthorizationServerPublicClient[];
   pdpp_provider_connect_capabilities: Record<string, unknown>;
@@ -1350,7 +1349,6 @@ export function buildAuthorizationServerMetadata({
   authorizationEndpoint,
   codeChallengeMethodsSupported,
   cimdEnabled,
-  clientRangeFiltersProfiles,
   tokenEndpoint,
   tokenEndpointAuthMethodsSupported,
   tokenEndpointAuthSigningAlgValuesSupported,
@@ -1389,12 +1387,12 @@ export function buildAuthorizationServerMetadata({
     metadata.pdpp_authorization_details_types_supported = authorizationDetailsTypesSupported;
   }
 
-  if (clientRangeFiltersProfiles?.length) {
-    metadata.pdpp_client_range_filters_supported = clientRangeFiltersProfiles;
-  }
-
   if (authorizationEndpoint) {
     metadata.authorization_endpoint = authorizationEndpoint;
+    // RFC 9207: every authorization response redirect carries `iss`
+    // (server/authorization-response.ts), so say so wherever the
+    // authorization endpoint is advertised.
+    metadata.authorization_response_iss_parameter_supported = true;
   }
   if (responseTypesSupported?.length) {
     metadata.response_types_supported = responseTypesSupported;

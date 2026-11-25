@@ -91,15 +91,14 @@ function isInitiateGrantResponse(
 /**
  * Construct the storage-backed `ConsentStore`.
  *
- * The only option is deployment policy for an experimental request member.
- * The underlying SQLite handle is owned by `server/db.js` and
+ * No arguments: the underlying SQLite handle is owned by `server/db.js` and
  * resolved per-call from inside the `auth.js` lifecycle helpers. The store
  * MUST NOT expose that handle, prepared statements, or table rows to its
  * callers.
  *
  * @returns {ConsentStore}
  */
-export function createConsentStore(options: { clientRangeFilters?: boolean } = {}): ConsentStore {
+export function createConsentStore(): ConsentStore {
   return {
     /**
      * Approve a pending consent and mint the corresponding grant + token.
@@ -184,12 +183,7 @@ export function createConsentStore(options: { clientRangeFilters?: boolean } = {
      * @returns {Promise<{ request_uri: string, authorization_url: string, expires_in: number, trace_context: object }>}
      */
     async initiateGrant(input: InitiateGrantInput, opts: InitiateGrantOptions = {}): Promise<InitiateGrantResponse> {
-      // The deployment decides whether the experimental range filter request
-      // member is accepted; callers cannot opt in for themselves.
-      const response = await initiateGrant(input, {
-        ...opts,
-        clientRangeFilters: options.clientRangeFilters === true,
-      });
+      const response = await initiateGrant(input, opts);
       if (!isInitiateGrantResponse(response)) {
         throw new Error("initiateGrant returned an invalid pending-consent response");
       }

@@ -417,7 +417,9 @@ where
             command.process_group(0);
         }
 
-        let mut child = command.spawn().map_err(|error| {
+        // `ensure_cloudflared_available` may have written the binary just now.
+        let spawned = crate::spawn_retry::spawn_retrying_while_busy(&mut command);
+        let mut child = spawned.map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "cloudflared ({}) could not be started. Install it yourself from \

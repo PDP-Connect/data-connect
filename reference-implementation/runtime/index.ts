@@ -15,8 +15,14 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  type ConnectorProtocolCapability,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
+  isConnectorProtocolCapabilityArray,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
+  STREAM_EVIDENCE_CAPABILITY,
+  unsupportedRequiredProtocolCapabilities,
   validateRuntimeContinuationFact,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { connectorChildArgs } from "../connector-dependency-loader.mjs";
@@ -27,6 +33,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { readStoredCollectionScope } from "../server/local-collection-scope.ts";
 import { encodeKey } from "../server/records.ts";
+import { getDefaultCheckpointWithholdStore } from "../server/stores/checkpoint-withhold-store.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import type { ConnectorInstanceConfigStore } from "../server/stores/connector-instance-config-store.ts";
@@ -46,6 +53,17 @@ import {
 } from "../server/stores/terminal-gap-classifier.ts";
 import type { AttentionWriterOptions } from "./attention-writer.ts";
 import { createAttentionWriter } from "./attention-writer.ts";
+import {
+  CHECKPOINT_STALL_RUNS,
+  type CheckpointCommitDecision,
+  type CoverageReport,
+  coveredRequiredKeys,
+  decideCheckpointCommits,
+  type ReportedOmission,
+  streamsCheckpointedBy,
+  type WithholdReason,
+  withholdReasonKey,
+} from "./checkpoint-commit-decision.ts";
 import { classifyRuntimeFailure } from "./classify-runtime-failure.ts";
 import {
   type ConnectorConnectionEnvironment,
@@ -62,6 +80,7 @@ import {
   buildCollectionFacts,
   buildKnownGap,
   buildRecoveryGapClosureFacts,
+  capCoveredCount,
   GAP_STRING_MAX,
   isValidRecoveryHintShape,
   normalizeGapScope,
@@ -343,6 +362,12 @@ interface RuntimeDetailGapStoreCapabilities {
     streams?: string[] | null;
   }) => Promise<DurableDetailGap[] | null>;
   markConnectorGapRecovered?: (gapId: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
+  markGapQuarantined?: (
+    gapId: string,
+    expectedStatus: string,
+    expectedAttemptCount: number,
+    options?: Record<string, unknown>
+  ) => Promise<DurableDetailGap | null>;
   markGapStatus?: (gapId: string, status: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markLeasedGapAttempt?: (lease: ServedGapLease) => Promise<DurableDetailGap | null>;
   reclaimStrandedInProgressGaps?: (options: {
@@ -359,6 +384,7 @@ interface RuntimeDetailGapStoreCapabilities {
 
 interface RuntimeDetailGapStore extends RuntimeDetailGapStoreCapabilities {
   markConnectorGapRecovered: NonNullable<RuntimeDetailGapStoreCapabilities["markConnectorGapRecovered"]>;
+  markGapQuarantined: NonNullable<RuntimeDetailGapStoreCapabilities["markGapQuarantined"]>;
   markGapStatus: NonNullable<RuntimeDetailGapStoreCapabilities["markGapStatus"]>;
   markLeasedGapAttempt: NonNullable<RuntimeDetailGapStoreCapabilities["markLeasedGapAttempt"]>;
   settleLeasedGapPending: NonNullable<RuntimeDetailGapStoreCapabilities["settleLeasedGapPending"]>;
@@ -372,10 +398,12 @@ function unsupportedDetailGapStoreCapability(capability: string): () => never {
   };
 }
 
-/** Per-parent-boundary DETAIL_COVERAGE accounting collected during a run. */
+/** Per-parent-boundary DETAIL_COVERAGE accounting collected during a run, as declared. */
 interface DetailCoverageEntry {
   considered: number | null;
   covered: number | null;
+  /** Keys the connector verified have no detail this run. */
+  emptyKeys: Set<string>;
   /**
    * Keys the connector declared it could not hydrate this run. Diagnostic
    * only: checkpoint authority still requires a matching durable DETAIL_GAP
@@ -387,17 +415,15 @@ interface DetailCoverageEntry {
   optionalSkipKeys: Set<string>;
   requiredKeys: string[];
   stream: string;
+  /** Keys the connector verified have no changed detail this run. */
+  unchangedKeys: Set<string>;
 }
 
-function durableGapMatchesCoverageParent(
-  gapParentStream: string | null | undefined,
-  stateStream: string,
-  hasMultipleParents: boolean
-): boolean {
-  if (gapParentStream) {
-    return gapParentStream === stateStream;
-  }
-  return !hasMultipleParents;
+/** A DETAIL_COVERAGE entry reconciled against the run's ingest evidence. */
+interface SettledDetailCoverage extends CoverageReport {
+  considered: number | null;
+  /** The declared count, capped at what the evidence accounts for. */
+  covered: number | null;
 }
 
 /**
@@ -572,6 +598,14 @@ export interface RuntimeRunConnectorOptions {
   onInteractionTerminal?: ((info: { interactionId: string; status: string }) => unknown) | null;
   onProgress?: (message: unknown) => void;
   onStarted?: ((info: { run_id: string; scenario_id?: string; trace_id: string }) => void) | null;
+  /**
+   * Run-scoped credential for `POST /v1/blobs`, minted by the controller.
+   * Forwarded to the child as `PDPP_BLOB_UPLOAD_TOKEN`, and as
+   * `PDPP_OWNER_TOKEN` for connectors built before that name. The owner bearer
+   * (`ownerToken`) stays in the runtime parent and is never put in the child
+   * environment.
+   */
+  blobUploadToken?: string | null;
   /** Authenticated owner for standalone default-account resolution. */
   ownerSubjectId?: string | null;
   ownerToken: string;
@@ -927,26 +961,59 @@ function readIngestResponse(resp: Response, stream: string, batchSize: number): 
 }
 
 /**
- * Lazily-created, disk-backed, per-run distinct-(stream,key) set of records
- * this run's own flush proved durably accepted. Never touches disk until
- * `record()` is first called with at least one survivor. `close()` is
- * idempotent and swallows its own errors — a failure to unlink a temp file
- * must never convert a succeeded run into a failed one.
+ * Lazily-created, disk-backed, per-run distinct-(stream,key) sets of records
+ * this run's own flush proved durably accepted, and of records the RS
+ * permanently rejected, with the coverage keys each record answers for. Never
+ * touches disk until `record()` is first called with a non-empty batch.
+ * `close()` is idempotent and swallows its own errors — a failure to unlink a
+ * temp file must never convert a succeeded run into a failed one.
  */
 interface AcceptedKeysStore {
   /** Remove the temp directory, if one was ever created. Never throws. */
   close: () => void;
   /** Exact distinct accepted-key count for `stream`. 0 if the store was never created. */
   distinctCount: (stream: string) => number;
-  /** Record survivors (batch entries NOT in `rejectedIndexes`) as accepted for `stream`. */
-  record: (stream: string, batch: readonly BufferedRecord[], rejectedIndexes: ReadonlySet<number>) => void;
+  /**
+   * Of `keys` for the (`stream`, `parentStream`) coverage boundary: the keys
+   * an accepted record answers for, and the keys a record the RS rejected and
+   * never accepted answers for.
+   */
+  boundaryEvidence: (
+    stream: string,
+    parentStream: string,
+    keys: Iterable<string>
+  ) => { evidenced: Set<string>; rejected: Set<string> };
+  /**
+   * Record survivors (batch entries NOT in `rejectedIndexes`) as accepted for
+   * `stream` and the rest as rejected. A record answers for its own primary
+   * key and for each `parentRefs` (parent stream, parent key) pair.
+   */
+  record: (
+    stream: string,
+    batch: readonly BufferedRecord[],
+    rejectedIndexes: ReadonlySet<number>,
+    parentRefs: (record: BufferedRecord) => readonly ParentRef[]
+  ) => void;
 }
+
+/** A record's foreign-key reference to a parent stream's key. */
+interface ParentRef {
+  key: string;
+  parentStream: string;
+}
+
+// `record_refs.parent` for a record's own primary key: it answers for that key
+// under every parent boundary.
+const OWN_KEY_PARENT = "";
 
 function createAcceptedKeysStore(): AcceptedKeysStore {
   let db: InstanceType<typeof DatabaseSync> | null = null;
   let dir: string | null = null;
   let insertStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let countStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
+  let insertRefStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
+  let evidencedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
+  let rejectedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
 
   function ensureOpen(): void {
     if (db) {
@@ -976,11 +1043,40 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("CREATE TABLE accepted_keys (stream TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (stream, key))");
+    db.exec(
+      "CREATE TABLE record_refs (stream TEXT NOT NULL, ref TEXT NOT NULL, parent TEXT NOT NULL, key TEXT NOT NULL, accepted INTEGER NOT NULL, " +
+        "PRIMARY KEY (stream, ref, parent, key))"
+    );
     insertStmt = db.prepare("INSERT OR IGNORE INTO accepted_keys (stream, key) VALUES (?, ?)");
     countStmt = db.prepare("SELECT COUNT(*) AS c FROM accepted_keys WHERE stream = ?");
+    // Acceptance belongs to this exact (record, parent boundary, FK) reference.
+    // A retry for the same primary key but a different FK cannot credit the old FK.
+    insertRefStmt = db.prepare(
+      "INSERT INTO record_refs (stream, ref, parent, key, accepted) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT (stream, ref, parent, key) DO UPDATE SET accepted = MAX(record_refs.accepted, excluded.accepted)"
+    );
+    const refsFor = "FROM record_refs r WHERE r.stream = ? AND r.ref = ? AND r.parent IN (?, ?)";
+    evidencedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 1 LIMIT 1`);
+    rejectedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 0 LIMIT 1`);
   }
 
   return {
+    boundaryEvidence(stream: string, parentStream: string, keys: Iterable<string>) {
+      const evidenced = new Set<string>();
+      const rejected = new Set<string>();
+      if (!(evidencedStmt && rejectedStmt)) {
+        return { evidenced, rejected };
+      }
+      for (const key of keys) {
+        if (evidencedStmt.get(stream, key, OWN_KEY_PARENT, parentStream)) {
+          evidenced.add(key);
+        }
+        if (rejectedStmt.get(stream, key, OWN_KEY_PARENT, parentStream)) {
+          rejected.add(key);
+        }
+      }
+      return { evidenced, rejected };
+    },
     close(): void {
       try {
         db?.close();
@@ -990,6 +1086,9 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       db = null;
       insertStmt = null;
       countStmt = null;
+      insertRefStmt = null;
+      evidencedStmt = null;
+      rejectedStmt = null;
       if (dir) {
         try {
           rmSync(dir, { force: true, recursive: true });
@@ -1006,9 +1105,13 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       const row = countStmt.get(stream) as { c: number } | undefined;
       return row?.c ?? 0;
     },
-    record(stream: string, batch: readonly BufferedRecord[], rejectedIndexes: ReadonlySet<number>): void {
-      const survivors = batch.filter((_, index) => !rejectedIndexes.has(index));
-      if (!survivors.length) {
+    record(
+      stream: string,
+      batch: readonly BufferedRecord[],
+      rejectedIndexes: ReadonlySet<number>,
+      parentRefs: (record: BufferedRecord) => readonly ParentRef[]
+    ): void {
+      if (!batch.length) {
         return;
       }
       ensureOpen();
@@ -1020,8 +1123,16 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       // above is the only path that can leave it null, and it always sets it.
       (db as InstanceType<typeof DatabaseSync>).exec("BEGIN IMMEDIATE");
       try {
-        for (const record of survivors) {
-          insertStmt?.run(stream, encodeKey(record.key));
+        for (const [index, record] of batch.entries()) {
+          const key = encodeKey(record.key);
+          const accepted = rejectedIndexes.has(index) ? 0 : 1;
+          if (accepted) {
+            insertStmt?.run(stream, key);
+          }
+          insertRefStmt?.run(stream, key, OWN_KEY_PARENT, key, accepted);
+          for (const ref of parentRefs(record)) {
+            insertRefStmt?.run(stream, ref.key, ref.parentStream, key, accepted);
+          }
         }
         (db as InstanceType<typeof DatabaseSync>).exec("COMMIT");
       } catch (err) {
@@ -1880,7 +1991,14 @@ function normalizeCoverageKey(key: string | number): string {
 }
 
 function validateCoverageKeySets(msg: ConnectorMessage): void {
-  const fields = ["required_keys", "hydrated_keys", "gap_keys", "optional_skip_keys"] as const;
+  const fields = [
+    "required_keys",
+    "hydrated_keys",
+    "empty_keys",
+    "unchanged_keys",
+    "gap_keys",
+    "optional_skip_keys",
+  ] as const;
   const keysByField = new Map<string, Set<string>>();
   for (const field of fields) {
     const values = (msg[field] as (string | number)[] | null | undefined) || [];
@@ -1893,7 +2011,7 @@ function validateCoverageKeySets(msg: ConnectorMessage): void {
   }
 
   const required = keysByField.get("required_keys") as Set<string>;
-  const outcomes = ["hydrated_keys", "gap_keys", "optional_skip_keys"] as const;
+  const outcomes = ["hydrated_keys", "empty_keys", "unchanged_keys", "gap_keys", "optional_skip_keys"] as const;
   const seenOutcomes = new Set<string>();
   for (const field of outcomes) {
     for (const key of keysByField.get(field) as Set<string>) {
@@ -1959,11 +2077,10 @@ function validateDetailCoverageMessage(
 
   assertCoverageKeyArray(msg.required_keys, "required_keys");
   assertCoverageKeyArray(msg.hydrated_keys, "hydrated_keys");
-  if (!isNullish(msg.gap_keys)) {
-    assertCoverageKeyArray(msg.gap_keys, "gap_keys");
-  }
-  if (!isNullish(msg.optional_skip_keys)) {
-    assertCoverageKeyArray(msg.optional_skip_keys, "optional_skip_keys");
+  for (const field of ["empty_keys", "unchanged_keys", "gap_keys", "optional_skip_keys"]) {
+    if (!isNullish(msg[field])) {
+      assertCoverageKeyArray(msg[field], field);
+    }
   }
   validateCoverageKeySets(msg);
   validateDetailCoverageAgainstManifest(msg, manifestStateStreamByStream, manifestDetailParentStreamsByStream);
@@ -2484,6 +2601,50 @@ export function buildBrowserSurfaceLaunchEnv({
   };
 }
 
+/**
+ * Protocol capabilities this runtime implements, listed in
+ * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
+ * unchanged_keys, and validates STREAM_EVIDENCE. It has no BLOB transport and
+ * no OBSERVATION handler, so it does not list them.
+ */
+const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  STREAM_EVIDENCE_CAPABILITY,
+];
+
+/**
+ * Declared capabilities this runtime starts a connector with although it does
+ * not implement them. BLOB is a runtime-specific extension (Collection Profile
+ * Section 7). chatgpt and anthropic declare it but emit BLOB only for an item
+ * over the inline cap, so most of their runs never send one. Such a run
+ * completes; a run that does send BLOB fails at that line as an unknown
+ * message type. BLOB stays out of START until this runtime implements it.
+ */
+const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [HOST_BLOB_CAPABILITY];
+
+/**
+ * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
+ * absent `protocol_capabilities` declares none. A malformed list or an unknown
+ * name fails closed, and so does a required capability this runtime does not
+ * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
+ * advisory capability never blocks the run.
+ */
+function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
+  const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
+  if (!isConnectorProtocolCapabilityArray(declared)) {
+    throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
+  }
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, [
+    ...RUNTIME_PROTOCOL_CAPABILITIES,
+    ...SPAWN_TOLERATED_PROTOCOL_CAPABILITIES,
+  ]);
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
+    );
+  }
+}
+
 function validateRequiredRuntimeBindings(
   requiredBindings: Record<string, { required?: boolean }>,
   availableBindings: AvailableBindings
@@ -2542,6 +2703,41 @@ function buildManifestDetailParentStreamsMap(manifest: ConnectorManifest): Map<s
     }
   }
   return parentsByStream;
+}
+
+/**
+ * Per stream, the (parent stream, foreign-key field) pairs its manifest
+ * `relationships` declare. A record whose foreign-key field holds a parent key
+ * answers for that key in the parent's DETAIL_COVERAGE boundary.
+ */
+function buildManifestParentForeignKeysMap(
+  manifest: ConnectorManifest
+): Map<string, { foreignKey: string; parentStream: string }[]> {
+  const foreignKeysByStream = new Map<string, { foreignKey: string; parentStream: string }[]>();
+  for (const stream of manifest.streams || []) {
+    const pairs = (Array.isArray(stream?.relationships) ? stream.relationships : []).flatMap((relationship) => {
+      const { foreign_key: foreignKey, stream: parentStream } = (relationship || {}) as Record<string, unknown>;
+      return typeof foreignKey === "string" && foreignKey && typeof parentStream === "string" && parentStream
+        ? [{ foreignKey, parentStream }]
+        : [];
+    });
+    if (pairs.length) {
+      foreignKeysByStream.set(stream.name, pairs);
+    }
+  }
+  return foreignKeysByStream;
+}
+
+/**
+ * Whether the connector's manifest declares DETAIL_COVERAGE_KEY_SETS in its
+ * `protocol_capabilities`. Only such a connector gets evidence-based crediting
+ * of `hydrated_keys` (see `CoverageReport.hydratedKeysNeedEvidence`). The
+ * capability is the connector's own declaration; the runtime never decides it
+ * per source. A missing or malformed declaration reads as not declared.
+ */
+function manifestDeclaresDetailCoverageKeySets(manifest: ConnectorManifest): boolean {
+  const capabilities = manifest.protocol_capabilities;
+  return Array.isArray(capabilities) && capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
 }
 
 function openRuntimeTraceFile(traceDir: string | undefined, connectorId: string, runId: string): string | null {
@@ -2798,6 +2994,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     connectorInstanceId = null,
     ownerSubjectId = null,
     ownerToken,
+    blobUploadToken = null,
     manifest,
     runSource: requestedRunSource,
     scope: providedScope = null,
@@ -2871,6 +3068,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const availableBindings = buildAvailableBindings(onInteraction);
 
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  validateRequiredProtocolCapabilities(manifest);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
@@ -2904,11 +3102,14 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // instead of a spurious `not_staged`.
   const manifestStateStreamByStream = buildManifestStateStreamMap(manifest);
   const manifestDetailParentStreamsByStream = buildManifestDetailParentStreamsMap(manifest);
+  const manifestParentForeignKeysByStream = buildManifestParentForeignKeysMap(manifest);
+  const hydratedKeysNeedEvidence = manifestDeclaresDetailCoverageKeySets(manifest);
   // `getDefaultConnectorDetailGapStore()` is declared `unknown` at its own
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
   const detailGapStore: RuntimeDetailGapStore = {
     markConnectorGapRecovered: unsupportedDetailGapStoreCapability("connector gap recovery"),
+    markGapQuarantined: unsupportedDetailGapStoreCapability("gap quarantine transitions"),
     markGapStatus: unsupportedDetailGapStoreCapability("gap status transitions"),
     markLeasedGapAttempt: unsupportedDetailGapStoreCapability("leased gap attempts"),
     settleLeasedGapPending: unsupportedDetailGapStoreCapability("pending lease settlement"),
@@ -2919,6 +3120,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const streamEvidenceRunRegistryStore: StreamEvidenceRunRegistryStore = resolveStreamEvidenceRunRegistryStore(
     opts.streamEvidenceRunRegistryStore
   );
+  const checkpointWithholdStore = getDefaultCheckpointWithholdStore();
 
   // Compute runId before spawn so it can be threaded into the child env
   // alongside the streaming registration token. The traceContext is
@@ -2983,7 +3185,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       explicitRunEnv: {
         PDPP_CONNECTOR_ID: connectorId,
         ...connectorInstanceEnv,
-        PDPP_OWNER_TOKEN: ownerToken,
+        // Connectors built before PDPP_BLOB_UPLOAD_TOKEN read the blob upload
+        // credential from PDPP_OWNER_TOKEN. They get the same run-scoped
+        // credential under that name, never the owner bearer.
+        ...(blobUploadToken ? { PDPP_BLOB_UPLOAD_TOKEN: blobUploadToken, PDPP_OWNER_TOKEN: blobUploadToken } : {}),
         PDPP_RS_URL: rsUrl,
         ...streamingRegistrationEnv,
         ...browserSurfaceLaunchEnv,
@@ -3258,6 +3463,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // we already terminated.
     terminateConnectorChildGroup("SIGTERM");
     unregisterOwnedConnectorChild(proc.pid);
+    // cleanupChildHandles does not exist yet, so release any leases a partial
+    // claim already registered. A release failure must not mask `err`.
+    if (allServedGapLeases.size > 0 && typeof detailGapStore.releaseLeasedGaps === "function") {
+      try {
+        await detailGapStore.releaseLeasedGaps([...allServedGapLeases.values()]);
+      } catch {
+        // The original start failure is the error to report; leases expire on their own.
+      }
+      allServedGapLeases.clear();
+    }
     throw err;
   }
 
@@ -3266,6 +3481,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     bindings: availableBindings,
     collection_mode: startCollectionMode,
     detail_gaps: startDetailGaps,
+    protocol_capabilities: RUNTIME_PROTOCOL_CAPABILITIES,
     run_id: runId,
     scope: startScope,
     state: startState,
@@ -3511,8 +3727,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // — an untargeted SKIP_RESULT never certifies any specific stream as
   // failed. Read by handleDoneClose: a failed DONE is trusted as a
   // stream-scoped (rather than whole-run) failure only when this set is
-  // non-empty, and only the streams named here are excluded from commit.
+  // non-empty, and the streams named here are withheld from commit.
   const streamCollectionFailedStreams = new Set<string>();
+  // SKIP_RESULTs that omitted rows with no durable work item of their own:
+  // stream_collection_failed, or any other retryable skip without a runtime
+  // continuation. The owning checkpoint must stay put for the next run to
+  // replay them. `stream: null` is a skip that named no stream.
+  const skipOmissions: ReportedOmission[] = [];
   const durableDetailGaps: DurableDetailGap[] = [];
   // First-sighting idempotency for run.detail_gap_recorded: gap_ids already
   // emitted as `recorded` THIS run. Closes the resumed-run-stdout-replay edge
@@ -3531,8 +3752,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // durable `StreamEvidenceRunRegistryStore` (see its doc comment,
   // server/stores/stream-evidence-run-registry-store.ts), claimed
   // atomically in `trackStreamEvidence`. Kept fully separate from
-  // `detailCoverageByStateStream`: STREAM_EVIDENCE is never consulted by
-  // `missingDetailCoverageReports`/`recordDetailCoverageShortfalls`.
+  // `detailCoverageByStateStream`: STREAM_EVIDENCE never reaches the coverage
+  // checks of `decideCheckpointCommits`; only its unaccounted count does.
   const streamEvidenceByStream = new Map<string, StreamEvidenceOutcomes & { considered: number }>();
   // Latest `collection_rate` progress payload seen this run. Updated on each
   // rate-change PROGRESS event so the terminal event can carry the final
@@ -3865,7 +4086,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // duplicating that module's private types.
     const collectionFacts = buildCollectionFacts({
       committedStateStreams,
-      detailCoverageByStateStream,
+      detailCoverageByStateStream: settledDetailCoverage(),
       durableDetailGaps,
       emittedByStream,
       knownGaps,
@@ -3939,16 +4160,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     };
   }
 
-  function trackDetailCoverage(msg: ConnectorMessage): void {
+  function trackDetailCoverage(msg: ConnectorMessage): DetailCoverageEntry {
     // `validateDetailCoverageMessage` ran first: state_stream/stream are
-    // non-empty strings and the three key arrays are string/number arrays.
+    // non-empty strings and the key arrays are string/number arrays.
     const stateStream = msg.state_stream as string;
     const stream = msg.stream as string;
     const entries = detailCoverageByStateStream.get(stateStream) || [];
     if (entries.some((entry) => entry.stream === stream)) {
       throw new Error(`Connector emitted duplicate DETAIL_COVERAGE for state_stream=${stateStream} stream=${stream}`);
     }
-    entries.push({
+    const keySet = (field: string) =>
+      new Set(((msg[field] as (string | number)[] | null | undefined) || []).map(normalizeCoverageKey));
+    const entry: DetailCoverageEntry = {
       // Optional connector-declared considered denominator (task 2.1). Retained
       // here — normalized to a trusted safe non-negative integer or null — so
       // the terminal collection-fact block can prefer it over the
@@ -3958,27 +4181,81 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // run accounted for (emitted + suppressed-unchanged). Same drop-don't-reject
       // normalization. null stays `unknown`; the projection compares `considered`
       // against `covered` when present so a steady-state full-sync run reads
-      // `complete`, never inferred from collected.
+      // `complete`, never inferred from collected. settleDetailCoverage caps it
+      // against this run's evidence.
       covered: boundConsideredCount(msg.covered),
+      emptyKeys: keySet("empty_keys"),
       // Connector-declared unhydrated keys. Retained for collection facts and
       // diagnostics, but never authoritative by themselves: the checkpoint
       // gate credits a gap only when the same key has a durable DETAIL_GAP.
-      gapKeys: new Set(((msg.gap_keys as (string | number)[] | null) || []).map(normalizeCoverageKey)),
-      hydratedKeys: new Set((msg.hydrated_keys as (string | number)[]).map(normalizeCoverageKey)),
-      optionalSkipKeys: new Set(
-        ((msg.optional_skip_keys as (string | number)[] | null) || []).map(normalizeCoverageKey)
-      ),
+      gapKeys: keySet("gap_keys"),
+      hydratedKeys: keySet("hydrated_keys"),
+      optionalSkipKeys: keySet("optional_skip_keys"),
       requiredKeys: (msg.required_keys as (string | number)[]).map(normalizeCoverageKey),
       stream,
-    });
+      unchangedKeys: keySet("unchanged_keys"),
+    };
+    entries.push(entry);
     detailCoverageByStateStream.set(stateStream, entries);
+    return entry;
+  }
+
+  // Every DETAIL_COVERAGE report reconciled against this run's final ingest
+  // evidence, never against the evidence when the report arrived: records may
+  // follow their report, and a late rejection or a late accepted retry must
+  // count. Settled once, in cleanupChildHandles, after DONE's final flush and
+  // before the evidence store closes; the commit decision and the terminal
+  // facts both read it.
+  let finalDetailCoverage: Map<string, SettledDetailCoverage[]> | null = null;
+
+  function settleFinalDetailCoverage(): void {
+    try {
+      finalDetailCoverage ??= settleDetailCoverage();
+    } catch (err) {
+      // Fail closed: unsettled coverage reads as no evidence, which withholds.
+      safeStderrWrite(`[runtime] detail coverage not settled: ${(err as Error).message}\n`);
+    }
+  }
+
+  function settledDetailCoverage(): Map<string, SettledDetailCoverage[]> {
+    return finalDetailCoverage ?? settleDetailCoverage();
+  }
+
+  function settleDetailCoverage(): Map<string, SettledDetailCoverage[]> {
+    const settled = new Map<string, SettledDetailCoverage[]>();
+    for (const [stateStream, entries] of detailCoverageByStateStream) {
+      settled.set(
+        stateStream,
+        entries.map((entry) => {
+          const { evidenced, rejected } = acceptedKeysDb.boundaryEvidence(
+            entry.stream,
+            stateStream,
+            entry.requiredKeys
+          );
+          const report: CoverageReport = {
+            ...entry,
+            evidencedKeys: evidenced,
+            hydratedKeysNeedEvidence,
+            rejectedKeys: rejected,
+          };
+          const uncoveredCount = entry.requiredKeys.length - coveredRequiredKeys(report).length;
+          return {
+            ...report,
+            considered: entry.considered,
+            covered: capCoveredCount(entry.covered, entry.considered ?? entry.requiredKeys.length, uncoveredCount),
+          };
+        })
+      );
+    }
+    return settled;
   }
 
   // Parallel to, but independent from, trackDetailCoverage: STREAM_EVIDENCE
   // is folded into RuntimeCollectionFact.considered/covered at terminal
   // collection-fact assembly (buildCollectionFacts) and never into
   // detailCoverageByStateStream, so it can never reach
-  // missingDetailCoverageReports/recordDetailCoverageShortfalls.
+  // the coverage checks of decideCheckpointCommits. Its `unaccounted` count
+  // reaches that decision separately, as a reported omission.
   //
   // This is the single acceptance point for the cross-invocation half of
   // rule 5 ("at most one accepted STREAM_EVIDENCE per stream per run_id"):
@@ -4037,22 +4314,17 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     return claimResult.claim;
   }
 
-  // Resolve every STATE_STREAM checkpoint key owned by a data stream, for
-  // excluding a failed stream's checkpoint parent(s) from commit. Manifest
-  // declaration is authoritative and takes precedence: a `parent_streams`
-  // stream's every declared parent is a candidate to withhold, whether or
-  // not that parent got a live DETAIL_COVERAGE report this run (a failed
-  // stream's live evidence is inherently incomplete, so under-excluding by
-  // trusting only what happened to arrive live would be unsafe). The static
-  // `state_stream` mapping is the fallback for a stream with no
-  // `parent_streams` declaration, and the data stream's own name is the
-  // final fallback for a self-mapped stream.
-  function resolveStateStreamsForDataStream(dataStream: string): ReadonlySet<string> {
-    const declaredParents = manifestDetailParentStreamsByStream.get(dataStream);
-    if (declaredParents?.size) {
-      return declaredParents;
-    }
-    return new Set([manifestStateStreamByStream.get(dataStream) || dataStream]);
+  // Omissions this run reported without a durable work item, in the shape
+  // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
+  // DETAIL_GAPs, which START serves independently of cursors, so only
+  // unaccounted keys count.
+  function collectReportedOmissions(): ReportedOmission[] {
+    return [
+      ...skipOmissions,
+      ...[...streamEvidenceByStream]
+        .filter(([, evidence]) => evidence.unaccounted > 0)
+        .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),
+    ];
   }
 
   // A DETAIL_COVERAGE shortfall is a coverage GAP, not a protocol violation.
@@ -4060,65 +4332,82 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // could not hydrate this run; the honest response is to report the shortfall
   // and withhold the affected `state_stream`'s cursor so the next run
   // re-collects it — never to fail a run whose records are already ingested and
-  // durable. (A claim of completeness must carry proof, so an unproven key
-  // still blocks the cursor advance; incomplete coverage is reported, not
-  // fatal.) Mirrors the transient-manifest-drift posture in
+  // durable. Mirrors the transient-manifest-drift posture in
   // `recordManifestDriftStreamSkip`: per-stream gap + no cursor advance.
-  //
-  // Returns the `state_stream`s whose coverage is unproven; the caller skips
-  // exactly those commits and commits the rest.
-  function missingDetailCoverageReports(
-    stateStream: string,
-    coverageEntries: readonly DetailCoverageEntry[]
-  ): string[] {
-    const missing: string[] = [];
-    for (const [detailStream, parents] of manifestDetailParentStreamsByStream) {
-      if (
-        scopeByStream.has(detailStream) &&
-        parents.has(stateStream) &&
-        !coverageEntries.some((coverage) => coverage.stream === detailStream)
-      ) {
-        missing.push(detailStream);
-      }
+  // Tell the owner why each withheld cursor stayed put, and whether it has
+  // stayed put for the same reason long enough to be a stall rather than a
+  // transient shortfall. A streak-store failure only loses the stall count.
+  async function reportWithheldCheckpoints(decision: CheckpointCommitDecision): Promise<void> {
+    const reasonsByStateStream = new Map<string, WithholdReason[]>();
+    for (const reason of decision.withheld) {
+      reasonsByStateStream.set(reason.stateStream, [...(reasonsByStateStream.get(reason.stateStream) || []), reason]);
     }
-    return missing;
-  }
-
-  async function recordDetailCoverageShortfalls(): Promise<Set<string>> {
-    const shortfallStateStreams = new Set<string>();
-    for (const stateStream of Object.keys(newState)) {
-      const coverageEntries = detailCoverageByStateStream.get(stateStream) || [];
-      for (const detailStream of missingDetailCoverageReports(stateStream, coverageEntries)) {
-        shortfallStateStreams.add(stateStream);
-        // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per missing parent report; sequential ordering keeps the timeline honest.
-        await recordMissingDetailCoverageReport(stateStream, detailStream);
-      }
-      for (const coverage of coverageEntries) {
-        const coverageParents = manifestDetailParentStreamsByStream.get(coverage.stream);
-        const hasMultipleParents = (coverageParents?.size || 0) > 1;
-        const accountedGapKeys = new Set(
-          durableDetailGaps
-            .filter(
-              (gap) =>
-                gap.stream === coverage.stream &&
-                (gap.status === "pending" || gap.status === "recovered") &&
-                durableGapMatchesCoverageParent(gap.parent_stream, stateStream, hasMultipleParents) &&
-                !isNullish(gap.record_key)
-            )
-            .map((gap) => normalizeCoverageKey(gap.record_key as string | number))
-        );
-        const missingKeys = coverage.requiredKeys.filter(
-          (key) => !(coverage.hydratedKeys.has(key) || coverage.optionalSkipKeys.has(key) || accountedGapKeys.has(key))
-        );
-        if (!missingKeys.length) {
-          continue;
-        }
-        shortfallStateStreams.add(stateStream);
-        // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per shortfalling coverage entry; sequential ordering keeps the timeline honest.
-        await recordDetailCoverageShortfall(stateStream, coverage, missingKeys.length);
-      }
+    let streaks = new Map<string, number>();
+    try {
+      streaks = await checkpointWithholdStore.recordCheckpointOutcomes({
+        committed: [],
+        nowIso: new Date().toISOString(),
+        runId,
+        scope: {
+          connectorId,
+          connectorInstanceId: connectorInstanceEnv.PDPP_CONNECTOR_INSTANCE_ID || null,
+          grantId: grantId || null,
+        },
+        withheld: new Map(
+          [...reasonsByStateStream].map(([stateStream, reasons]) => [stateStream, withholdReasonKey(reasons)])
+        ),
+      });
+    } catch (err) {
+      safeStderrWrite(`[runtime] checkpoint withhold streak not recorded: ${(err as Error).message}\n`);
     }
-    return shortfallStateStreams;
+    for (const [stateStream, reasons] of reasonsByStateStream) {
+      const consecutiveRuns = streaks.get(stateStream) ?? null;
+      const stalled = consecutiveRuns !== null && consecutiveRuns >= CHECKPOINT_STALL_RUNS;
+      const why = withholdReasonKey(reasons);
+      const message = stalled
+        ? `Checkpoint for ${stateStream} withheld for ${consecutiveRuns} consecutive runs, each time because ${why}; collection is not advancing`
+        : `Checkpoint for ${stateStream} withheld: ${why}`;
+      const gap = buildKnownGap({
+        diagnostics: {
+          ...(consecutiveRuns === null ? {} : { consecutive_runs: consecutiveRuns }),
+          state_stream: stateStream,
+        },
+        kind: "checkpoint_withheld",
+        message,
+        reason: stalled ? "checkpoint_stalled" : "checkpoint_withheld",
+        recoveryHint: "retry_by_runtime",
+        severity: stalled ? "actionable" : "transient",
+        stream: stateStream,
+      });
+      appendKnownGap(gap);
+      // biome-ignore lint/performance/noAwaitInLoops: one event per withheld state stream; sequential ordering keeps the timeline honest.
+      await emitSpineEventTracked({
+        actor_id: connectorId,
+        actor_type: "runtime",
+        data: {
+          consecutive_runs: consecutiveRuns,
+          known_gap: gap,
+          reasons: reasons.map(({ stateStream: _stateStream, ...reason }) => reason),
+          source: runSource,
+          stalled,
+          state_stream: stateStream,
+        },
+        event_type: "run.checkpoint_withheld",
+        object_id: runId,
+        object_type: "run",
+        run_id: runId,
+        scenario_id: traceContext.scenario_id,
+        status: "skipped",
+        stream_id: stateStream,
+        trace_id: traceContext.trace_id,
+      });
+      onProgress({
+        consecutive_runs: consecutiveRuns,
+        stalled,
+        state_stream: stateStream,
+        type: "checkpoint_withheld",
+      });
+    }
   }
 
   async function recordMissingDetailCoverageReport(stateStream: string, stream: string): Promise<void> {
@@ -4158,23 +4447,24 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Per-shortfall known gap + timeline event. `detail_coverage_incomplete` is a
   // transient reason: the next run retries the same keys, so the owner sees a
   // reported gap with a real explanation rather than a bare failure.
-  async function recordDetailCoverageShortfall(
-    stateStream: string,
-    coverage: DetailCoverageEntry,
-    missingKeyCount: number
-  ): Promise<void> {
-    const message = detailCoverageShortfallMessage(stateStream, coverage.stream, missingKeyCount);
+  async function recordDetailCoverageShortfall({
+    missingKeyCount,
+    requiredKeyCount,
+    stateStream,
+    stream,
+  }: Extract<WithholdReason, { kind: "coverage_shortfall" }>): Promise<void> {
+    const message = detailCoverageShortfallMessage(stateStream, stream, missingKeyCount);
     const gap = buildKnownGap({
       diagnostics: {
         missing_required_keys: missingKeyCount,
-        required_keys: coverage.requiredKeys.length,
+        required_keys: requiredKeyCount,
         state_stream: stateStream,
       },
       kind: "detail_coverage",
       message,
       reason: "detail_coverage_incomplete",
       recoveryHint: "retry_by_runtime",
-      stream: coverage.stream,
+      stream,
     });
     appendKnownGap(gap);
     await emitSpineEventTracked({
@@ -4186,7 +4476,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         reason: "detail_coverage_incomplete",
         source: runSource,
         state_stream: stateStream,
-        stream: coverage.stream,
+        stream,
       },
       event_type: "run.stream_skipped",
       object_id: runId,
@@ -4194,10 +4484,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       run_id: runId,
       scenario_id: traceContext.scenario_id,
       status: "skipped",
-      stream_id: coverage.stream,
+      stream_id: stream,
       trace_id: traceContext.trace_id,
     });
-    onProgress({ reason: "detail_coverage_incomplete", stream: coverage.stream, type: "stream_skipped" });
+    onProgress({ reason: "detail_coverage_incomplete", stream, type: "stream_skipped" });
   }
 
   // Record a transient per-stream gap for a stream whose ingest was rejected as
@@ -4359,6 +4649,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     throw exhausted;
   }
 
+  function parentRefsOf(stream: string, record: BufferedRecord): ParentRef[] {
+    const data = (record.data || {}) as Record<string, unknown>;
+    return (manifestParentForeignKeysByStream.get(stream) || []).flatMap(({ foreignKey, parentStream }) => {
+      const value = data[foreignKey];
+      return (typeof value === "string" && value) || typeof value === "number"
+        ? [{ key: normalizeCoverageKey(value), parentStream }]
+        : [];
+    });
+  }
+
   async function flushBatch(stream: string): Promise<void> {
     // Cancellation owns the terminal outcome. Do not start another ingest for
     // a RECORD that was already buffered in the parent after the child was
@@ -4467,7 +4767,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // strictly after the envelope contract check above and read `result` as
     // it stands post-response: inserting before the response is proven would
     // record keys the RS never accepted.
-    acceptedKeysDb.record(stream, batch, new Set(result.rejections.map((rejection) => rejection.input_index)));
+    acceptedKeysDb.record(
+      stream,
+      batch,
+      new Set(result.rejections.map((rejection) => rejection.input_index)),
+      (record) => parentRefsOf(stream, record)
+    );
     await emitSpineEventTracked({
       actor_id: connectorId,
       actor_type: "runtime",
@@ -4601,6 +4906,23 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // already durable server-side at this point.
       await resp.text().catch(() => "");
       committedStateStreams.add(stream);
+      // Reset this cursor immediately: a later cursor PUT may fail.
+      // Scheduling metadata must never turn a durable commit into a failure.
+      try {
+        await checkpointWithholdStore.recordCheckpointOutcomes({
+          committed: [stream],
+          nowIso: new Date().toISOString(),
+          runId,
+          scope: {
+            connectorId,
+            connectorInstanceId: connectorInstanceEnv.PDPP_CONNECTOR_INSTANCE_ID || null,
+            grantId: grantId || null,
+          },
+          withheld: new Map(),
+        });
+      } catch (err) {
+        safeStderrWrite(`[runtime] checkpoint withhold streak not reset: ${(err as Error).message}\n`);
+      }
 
       // Cursor-band contiguity: the cursor that was just durably committed is
       // the exact artifact that decides what future runs will fetch, so this
@@ -4835,6 +5157,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // path (success, failure, cancellation, protocol violation) because this
       // function itself is the run's one cleanup chokepoint (`cleanedUp` guard
       // makes it idempotent across the multiple call sites).
+      settleFinalDetailCoverage();
       acceptedKeysDb.close();
       if (cancelSignal) {
         cancelSignal.removeEventListener("abort", handleCancellation);
@@ -5057,30 +5380,29 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // in-scope names and the key arrays are string/number arrays.
       const coverageStateStream = msg.state_stream as string;
       const coverageStream = msg.stream as string;
-      const coverageRequiredKeys = msg.required_keys as (string | number)[];
-      const coverageHydratedKeys = msg.hydrated_keys as (string | number)[];
-      const coverageGapKeys = msg.gap_keys as (string | number)[] | null | undefined;
-      const coverageOptionalSkipKeys = msg.optional_skip_keys as (string | number)[] | null | undefined;
-      trackDetailCoverage(msg);
-      const coverageConsidered = boundConsideredCount(msg.considered);
-      const coverageCovered = boundConsideredCount(msg.covered);
+      const coverageEntry = trackDetailCoverage(msg);
+      const coverageConsidered = coverageEntry.considered;
+      const coverageCovered = coverageEntry.covered;
       await emitSpineEventTracked({
         actor_id: connectorId,
         actor_type: "runtime",
         data: {
-          gap_keys: coverageGapKeys?.length || 0,
+          empty_keys: coverageEntry.emptyKeys.size,
+          gap_keys: coverageEntry.gapKeys.size,
           grant_id: grantId,
-          hydrated_keys: coverageHydratedKeys.length,
-          optional_skip_keys: coverageOptionalSkipKeys?.length || 0,
+          hydrated_keys: coverageEntry.hydratedKeys.size,
+          optional_skip_keys: coverageEntry.optionalSkipKeys.size,
           reference_only: true,
-          required_keys: coverageRequiredKeys.length,
+          required_keys: coverageEntry.requiredKeys.length,
           source: runSource,
+          unchanged_keys: coverageEntry.unchangedKeys.size,
           state_stream: coverageStateStream,
           stream: coverageStream,
           // Optional connector-declared denominator; omitted (= `unknown`)
           // unless it is a trusted safe non-negative integer.
           ...(isNullish(coverageConsidered) ? {} : { considered: coverageConsidered }),
-          // Optional covered count (task 4.4); same omit-unless-trusted posture.
+          // Optional covered count (task 4.4) as declared; same
+          // omit-unless-trusted posture. The terminal fact carries it capped.
           ...(isNullish(coverageCovered) ? {} : { covered: coverageCovered }),
         },
         event_type: "run.detail_coverage_declared",
@@ -5247,14 +5569,25 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // Proven a non-empty, in-scope stream name by the validator above.
       const stateStream = msg.stream as string;
 
-      // Flush records for this stream before persisting state
-      await flushBatch(stateStream);
-      // Transient manifest drift: this stream's batch was rejected as
-      // not_found for a manifest-declared stream and recorded as a per-stream
-      // gap. Do NOT stage its cursor — leaving it uncommitted makes the next
-      // run re-collect the stream once the RS manifest row re-heals. Skipping
-      // the `run.state_staged` event keeps the timeline honest (no advance).
-      if (driftSkippedStreams.has(stateStream)) {
+      // The staged cursor vouches for every record already buffered on this
+      // stream and on the streams it owns (co-emitted `state_stream` children
+      // and detail lanes), so all of them must be durable before staging.
+      const vouchedStreams = streamsCheckpointedBy(stateStream, manifestByStream.keys(), {
+        detailParentsByStream: manifestDetailParentStreamsByStream,
+        stateStreamByStream: manifestStateStreamByStream,
+      });
+      for (const stream of vouchedStreams) {
+        // biome-ignore lint/performance/noAwaitInLoops: flushes are sequential so a failure stops before staging.
+        await flushBatch(stream);
+      }
+      // Transient manifest drift: a batch of this stream, or of a stream its
+      // cursor vouches for, was rejected as not_found for a manifest-declared
+      // stream and dropped as a per-stream gap. A flush that drops a batch
+      // returns normally, so the flush alone does not prove durability. Do NOT
+      // stage the cursor: leaving it uncommitted makes the next run re-collect
+      // those records once the RS manifest row re-heals. Skipping the
+      // `run.state_staged` event keeps the timeline honest (no advance).
+      if (vouchedStreams.some((stream) => driftSkippedStreams.has(stream))) {
         return;
       }
       newState[stateStream] = msg.cursor;
@@ -5281,6 +5614,44 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       });
     }
 
+    // A flush failure on a failed DONE must not replace the connector's error:
+    // the run still terminates failed with the connector's own error, and the
+    // flush failure is recorded as its own event ahead of the terminal event.
+    // `buffered_records_dropped` on the terminal event counts what did not land.
+    async function flushBeforeFailedTerminal(): Promise<void> {
+      try {
+        await flushAll();
+      } catch (caught) {
+        if (terminalStopRequested()) {
+          return;
+        }
+        const err = caught as RuntimeRunError;
+        const ingestFailure = toPublicIngestFailure(err.ingest_failure);
+        try {
+          await emitSpineEventTracked({
+            actor_id: connectorId,
+            actor_type: "runtime",
+            data: {
+              buffered_records: countBufferedRecords(),
+              grant_id: grantId,
+              ...(ingestFailure ? { ingest_failure: ingestFailure } : {}),
+              message: boundedRuntimeFailureMessage(err.message || String(caught)),
+              source: runSource,
+            },
+            event_type: "run.terminal_flush_failed",
+            object_id: runId,
+            object_type: "run",
+            run_id: runId,
+            scenario_id: traceContext.scenario_id,
+            status: "failed",
+            trace_id: traceContext.trace_id,
+          });
+        } catch (emitErr) {
+          onProgress({ error: (emitErr as Error).message, type: "spine_error" });
+        }
+      }
+    }
+
     async function handleDoneMessage(msg: ConnectorMessage): Promise<void> {
       const invalidDoneStatus = validateDoneStatus(msg.status);
       if (invalidDoneStatus) {
@@ -5298,12 +5669,23 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         status: doneStatus,
       };
 
-      if (msg.status === "succeeded") {
-        // Flush any remaining records
+      // Records the connector emitted and the runtime validated are durable on
+      // succeeded and failed DONE, as mid-run batches already are: ingest upserts
+      // (connector_instance_id, stream, record_key), so a later run re-emitting them
+      // cannot duplicate. STATE is committed only by handleDoneClose: never for an
+      // ordinary failed run, and for a certified stream-scoped failure only for the
+      // staged sibling checkpoints it allows. Those are safe whether or not this flush
+      // succeeds, because handleStateMessage flushed each stream before staging its
+      // cursor. Connector-reported cancelled and owner cancel/timeout drop buffers.
+      // The flush completes here, before the terminal event is emitted.
+      if (doneStatus === "succeeded") {
         await flushAll();
+      } else if (doneStatus === "failed") {
+        await flushBeforeFailedTerminal();
       }
       // Close child stdin to signal that the runtime has finished
-      // consuming DONE (and flushed all records for succeeded runs).
+      // consuming DONE (and attempted the terminal flush for succeeded and
+      // failed runs).
       // The connector's flushAndExit waits for this EOF before calling
       // process.exit(), closing the race where the connector exits while
       // buffered stdout bytes are still in transit through the kernel pipe.
@@ -5796,6 +6178,15 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         stream: skipStream,
         unsupportedInDefaultScope: streamUnsupportedInDefaultScope(skippedManifestStream),
       });
+      // A continuation is replayed by the committed cursor itself (the next
+      // slice starts at slice_end), so only a continuation-free omission
+      // withholds the checkpoint. A skip without a stream still omitted rows
+      // that some cursor owns; decideCheckpointCommits withholds them all.
+      if (msg.reason === "stream_collection_failed") {
+        skipOmissions.push({ source: "stream_collection_failed", stream: skipStream });
+      } else if (continuation === null && (gap.recovery_hint as { retryable: boolean }).retryable) {
+        skipOmissions.push({ source: "retryable_skip", stream: skipStream });
+      }
       appendKnownGap(gap);
       await emitSpineEventTracked({
         actor_id: connectorId,
@@ -6387,65 +6778,43 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         streamCollectionFailedStreams.size > 0;
 
       if (persistState && (terminalStatus === "succeeded" || isCertifiedStreamCollectionFailure)) {
-        // Unproven coverage withholds only its own state_stream's cursor; every
-        // other stream still commits, and the run stays successful with the
-        // shortfall reported as a known gap.
-        const coverageShortfallStateStreams = await recordDetailCoverageShortfalls();
-        if (done.status === "succeeded") {
-          // Unproven coverage withholds only its own state_stream's cursor; every
-          // other stream still commits, and the run stays successful with the
-          // shortfall reported as a known gap.
-          await Object.entries(newState)
-            .filter(([stream]) => !coverageShortfallStateStreams.has(stream))
-            .reduce(
-              (previous, [stream, cursor]) => previous.then(() => commitState(stream, cursor)),
-              Promise.resolve()
-            );
-        } else {
-          // A failed DONE is normally a global failure: the run's state map is
-          // unproven and nothing commits (the else-branch this replaces for
-          // every other failed/cancelled/crashed/protocol-mismatched close).
-          // The one exception the runtime can verify structurally: the
-          // connector certified the failure as stream-scoped by (a) declaring
-          // DONE.error.code === "stream_collection_failed" AND (b) emitting at
-          // least one in-scope SKIP_RESULT{reason:"stream_collection_failed"}
-          // naming the specific stream(s) that failed. Only those named
-          // streams' cursors are withheld; every other staged stream reached
-          // its own terminal STATE with no reported failure and is provably
-          // safe to commit. A DONE claiming this code with zero matching
-          // SKIP_RESULT (streamCollectionFailedStreams.size === 0) is not
-          // structurally certified and falls through to the fail-closed
-          // default — never trust the code string alone.
-          //
-          // SKIP_RESULT.stream names a DATA stream, but `newState`/`commitState`
-          // are keyed by STATE_STREAM (the checkpoint's own key), which a
-          // manifest may declare as a distinct parent key shared by several
-          // data streams (`stream.state_stream`, see buildManifestStateStreamMap).
-          // Mapping the failed DATA stream straight through as if it were the
-          // STATE_STREAM key would filter nothing (no match in newState) and
-          // falsely commit the parent checkpoint a failed CHILD stream shares
-          // with untouched siblings. `resolveStateStreamsForDataStream` resolves
-          // from the manifest's static declaration ONLY (`state_stream`, or the
-          // full declared `parent_streams` set) — never from live DETAIL_COVERAGE,
-          // which can only select/report within the declared set and must never
-          // widen or override it (see "Precedence between manifest and run-time
-          // evidence"). Using the full declared set here, not just the parents
-          // that happened to report live this run, is deliberately conservative:
-          // a failed stream's live evidence is inherently incomplete, so every
-          // declared parent is a candidate to withhold.
-          const failedStateStreams = new Set(
-            Array.from(streamCollectionFailedStreams).flatMap((stream) => [...resolveStateStreamsForDataStream(stream)])
-          );
-          await Object.entries(newState)
-            .filter(
-              ([stateStream]) =>
-                !(failedStateStreams.has(stateStream) || coverageShortfallStateStreams.has(stateStream))
-            )
-            .reduce(
-              (previous, [stateStream, cursor]) => previous.then(() => commitState(stateStream, cursor)),
-              Promise.resolve()
-            );
+        // A failed DONE is normally a global failure: the run's state map is
+        // unproven and nothing commits (the outer condition excludes every
+        // other failed/cancelled/crashed/protocol-mismatched close). The one
+        // exception the runtime can verify structurally: the connector
+        // certified the failure as stream-scoped by (a) declaring
+        // DONE.error.code === "stream_collection_failed" AND (b) emitting at
+        // least one in-scope SKIP_RESULT{reason:"stream_collection_failed"}
+        // naming the failed stream(s). A DONE claiming this code with zero
+        // matching SKIP_RESULT is not certified and falls through to the
+        // fail-closed default — never trust the code string alone.
+        //
+        // Either way, decideCheckpointCommits says which staged cursors may
+        // move; this block only applies that decision. Coverage reasons become
+        // known gaps (a shortfall is reported, not fatal); omission reasons
+        // already have their SKIP_RESULT gap or STREAM_EVIDENCE fact.
+        const decision = decideCheckpointCommits({
+          coverageByStateStream: settledDetailCoverage(),
+          detailParentsByStream: manifestDetailParentStreamsByStream,
+          durableGaps: durableDetailGaps,
+          inScopeStreams: new Set(scopeByStream.keys()),
+          omissions: collectReportedOmissions(),
+          stagedStateStreams: Object.keys(newState),
+          stateStreamByStream: manifestStateStreamByStream,
+        });
+        for (const reason of decision.withheld) {
+          if (reason.kind === "coverage_report_missing") {
+            // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per reason; sequential ordering keeps the timeline honest.
+            await recordMissingDetailCoverageReport(reason.stateStream, reason.stream);
+          } else if (reason.kind === "coverage_shortfall") {
+            await recordDetailCoverageShortfall(reason);
+          }
         }
+        for (const stateStream of decision.commit) {
+          // biome-ignore lint/performance/noAwaitInLoops: commits are sequential, as before.
+          await commitState(stateStream, newState[stateStream]);
+        }
+        await reportWithheldCheckpoints(decision);
       }
       const assistanceStatus = terminalStatus === "succeeded" ? "resolved" : "cancelled";
       const assistanceReason =
@@ -6616,7 +6985,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...buildIngestAccountingFields(),
         records_emitted: totalEmitted,
         run_id: runId,
-        state: newState,
+        // Committed cursors only. The scheduler persists this map after a
+        // succeeded run, and a run can succeed with staged cursors withheld.
+        state: Object.fromEntries(Object.entries(newState).filter(([stream]) => committedStateStreams.has(stream))),
         status: finalStatus,
         terminal_reason: resolution.reason,
         trace_id: traceContext.trace_id,
@@ -6738,12 +7109,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // deployed head, with a real owner credential. See stderr-redact.ts.
       //
       // The set is every live secret THIS run handed the child, not just the
-      // connection's own credential: `ownerToken` and the streaming
-      // registration token are bearer credentials in the same environment, so
-      // a child that echoes one into stderr leaks it the same way. Scoping to
+      // connection's own credential: the blob upload and streaming
+      // registration tokens are bearer credentials in the same environment, so
+      // a child that echoes one into stderr leaks it the same way. The owner
+      // token is not in the child environment; it stays listed as a backstop. Scoping to
       // what was actually injected keeps this a fact about the run rather than
       // a guess about the connector.
-      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
+      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, blobUploadToken, streamingRegistrationToken].filter(
         (value): value is string => typeof value === "string" && value.length > 0
       );
       if (stderrTailRaw.text) {

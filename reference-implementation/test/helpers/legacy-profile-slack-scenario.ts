@@ -643,14 +643,12 @@ export async function assertCompiledSlackUpgrade(
 					for (const label of [mw, ww]) {
 						assert.equal(
 							reads[label]?.[EXPLICIT]?.status,
-							403,
+							isRegistered ? 400 : 403,
 							`${stage} ${label}: explicit fetched_at`,
 						);
-						// The grant is checked before the declaration, so a grant without
-						// fetched_at gets the same answer whether or not 0.7.1 declares it.
 						assert.equal(
 							(reads[label]?.[EXPLICIT]?.body as Row | undefined)?.code,
-							"field_not_granted",
+							isRegistered ? "unknown_field" : "field_not_granted",
 						);
 					}
 				}

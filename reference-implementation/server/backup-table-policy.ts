@@ -74,6 +74,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Subscriptions are durable client delivery configuration.",
   },
+  connector_accepted_declarations: {
+    classification: "backup_required",
+    reason:
+      "First accepted content digest per connector version. A restore that drops it lets a registration replace content the server had accepted (Core section 5 equivocation guard).",
+  },
   connector_attention_records: {
     classification: "backup_required",
     reason: "Owner-visible connector attention state must survive restore.",
@@ -81,6 +86,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connector_activations: {
     classification: "backup_required",
     reason: "Installed connector activation state is durable runtime authority for which verified manifest revision may run.",
+  },
+  connector_checkpoint_withholds: {
+    classification: "backup_required",
+    reason:
+      "Consecutive-run withhold counts behind the checkpoint-stall report. A lost row only restarts a count, so a stall is reported a few runs late.",
   },
   connector_coverage_horizons: {
     classification: "backup_required",
@@ -321,6 +331,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   record_changes: {
     classification: "backup_required",
     reason: "Record history is durable owner data.",
+  },
+  record_derived_repair_pending: {
+    classification: "backup_required",
+    reason:
+      "Queued re-derivation of manifest-derived record columns after a manifest publication. Loss leaves those columns derived from the previous manifest until the connector is installed again.",
   },
   record_rejection_quota: {
     classification: "backup_required",

@@ -790,6 +790,49 @@ test("ordinary connector completion keeps a managed lease unavailable until the 
   );
 });
 
+test("drain waits for persisted managed lease release after connector completion", async (t) => {
+  let releasePresentation: () => void = () => undefined;
+  let enterTerminalizer: () => void = () => undefined;
+  const presentationBarrier = new Promise<void>((resolve) => {
+    releasePresentation = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    enterTerminalizer = resolve;
+  });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, {
+    beforeBrowserSurfaceLeaseRelease: async () => {
+      enterTerminalizer();
+      await presentationBarrier;
+    },
+    browserSurfaceAllocator: createReadyAllocator(),
+    browserSurfaceLeaseStore,
+    manager: createDynamicManager(),
+  });
+
+  try {
+    await controller.runNow("managed", {
+      manifest: MANIFEST,
+      ownerToken: "owner-token",
+      runId: "run_drain_persisted_release",
+    });
+    await entered;
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "leased");
+
+    const heldDrain = await controller.drainActiveRuns(200);
+    assert.equal(heldDrain.timedOut, 1);
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "leased");
+
+    releasePresentation();
+    const releasedDrain = await controller.drainActiveRuns(5000);
+    assert.equal(releasedDrain.timedOut, 0);
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "released");
+  } finally {
+    releasePresentation();
+    await controller.drainActiveRuns(5000);
+  }
+});
+
 test("ordinary connector failure keeps a managed lease unavailable until the presentation terminalizer settles", async (t) => {
   let releasePresentation: () => void = () => undefined;
   let terminalizerStarted = false;
@@ -2849,4 +2892,560 @@ test("overlapping sweep calls: the second is a no-op while the first is in fligh
 
   unblockAllocator();
   await firstSweep;
+});
+
+// ─── Periodic sweep runs idle cleanup (idle surfaces stop past TTL) ─
+
+test("sweep stops a ready idle surface past the idle TTL and persists the stop", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 1 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_idle_first",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  // Inside the TTL (600_000 ms from last use): the sweep leaves it running.
+  now = new Date("2026-05-12T12:09:59.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+  // `length` rather than deepEqual(..., []): node's deepEqual assertion
+  // narrows the array to never[] and breaks the reason/surfaceId reads below.
+  assert.equal(allocator.stopRequests.length, 0);
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: "surface_1" }]
+  );
+  assert.equal(manager.getSurface("surface_1"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "stopping");
+});
+
+test("sweep leaves a surface with an active lease running past the idle TTL", async (t) => {
+  let releaseFirst: () => void = () => undefined;
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 1 });
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_sweep_active_first") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseFirst = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, manager, runConnectorImpl });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_active_first",
+  });
+  assert.equal(manager.getLease("lease_1")?.status, "leased");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // `length` rather than deepEqual(..., []): node's deepEqual assertion
+  // narrows the array to never[] and breaks the reason/surfaceId reads below.
+  assert.equal(allocator.stopRequests.length, 0);
+  assert.equal(manager.getLease("lease_1")?.status, "leased");
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  releaseFirst();
+  await controller.drainActiveRuns(1000);
+});
+
+test("sweep idle cleanup frees capacity so a queued lease is promoted before capacity reclaim", async (t) => {
+  let releaseFirst: () => void = () => undefined;
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ leaseWaitTimeoutMs: 1_800_000, now: () => now, surfaceCap: 1 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_sweep_queued_first") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseFirst = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const { calls, controller } = setup(t, {
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseStore,
+    manager,
+    runConnectorImpl,
+  });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_queued_first",
+  });
+  const queued = await controller.runNow("other-managed", {
+    manifest: DISTINCT_PROFILE_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_queued_second",
+  });
+  assert.equal(queued.status, "waiting_for_browser_surface");
+
+  releaseFirst();
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getLease("lease_2")?.status, "waiting_for_browser_surface");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // The idle surface is stopped by the idle TTL path, not by capacity reclaim,
+  // and the queued lease starts on the freed capacity.
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: "surface_1" }]
+  );
+  await waitFor(
+    () => allocator.ensureRequests.length === 2,
+    "queued run should allocate after sweep idle cleanup frees capacity"
+  );
+  await waitFor(() => calls.runConnector === 2, "queued run should spawn after allocator readiness");
+  await controller.drainActiveRuns(1000);
+  assert.equal(calls.runConnector, 2);
+  assert.ok(listRunEventTypes("run_sweep_queued_second").includes("run.browser_surface_leased"));
+  assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
+});
+
+test("sweep persists the idle stops that succeeded when another idle stop fails", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const readyAllocator = createReadyAllocator();
+  const allocator: typeof readyAllocator = {
+    ...readyAllocator,
+    stopSurface: (request) =>
+      request.surfaceId === "surface_1"
+        ? Promise.reject(new Error("allocator stop failed"))
+        : readyAllocator.stopSurface(request),
+  };
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 2 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_partial_first",
+  });
+  await controller.runNow("other-managed", {
+    manifest: DISTINCT_PROFILE_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_partial_second",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+  assert.equal(manager.getSurface("surface_2")?.health, "ready");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // surface_1's stop fails first; surface_2 is still stopped and persisted.
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "ready");
+  assert.equal(manager.getSurface("surface_2"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_2"))?.health, "stopping");
+});
+
+// Covers the race where a run acquires while idle cleanup has claimed a surface
+// for stopping: the claimed surface must not be leased until its stop settles.
+test("a run acquiring during a pending idle stop does not lease the stopping surface", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const readyAllocator = createReadyAllocator();
+  let releaseStop: () => void = () => undefined;
+  const stopGate = new Promise<void>((resolve) => {
+    releaseStop = resolve;
+  });
+  let signalStopStarted: () => void = () => undefined;
+  const stopStarted = new Promise<void>((resolve) => {
+    signalStopStarted = resolve;
+  });
+  const allocator: typeof readyAllocator = {
+    ...readyAllocator,
+    stopSurface: async (request) => {
+      signalStopStarted();
+      await stopGate;
+      return readyAllocator.stopSurface(request);
+    },
+  };
+  let releaseSecond: () => void = () => undefined;
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_inflight_second") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseSecond = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 2 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { calls, controller } = setup(t, {
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseStore,
+    manager,
+    runConnectorImpl,
+  });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_inflight_first",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  const sweep = controller.sweepBrowserSurfaceLeases();
+  await stopStarted;
+
+  // Same profile key, so surface_1 is the only surface the new run could reuse.
+  // It is claimed for stopping, so the new run must get surface_2 instead.
+  const second = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_inflight_second",
+  });
+  assert.equal(second.status, "started");
+  await waitFor(() => calls.runConnector === 2, "second run should spawn while the stop is pending");
+  assert.equal(manager.getLease("lease_2")?.surface_id, "surface_2");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, "lease_2");
+  assert.equal(manager.getSurface("surface_1")?.active_lease_id, undefined);
+
+  releaseStop();
+  await sweep;
+  assert.equal(manager.getSurface("surface_1"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "stopping");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, "lease_2");
+
+  releaseSecond();
+  await controller.drainActiveRuns(1000);
+  assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, undefined);
+});
+
+test("boot and periodic ready refresh survive durable reload before dispatch", async () => {
+  for (const health of ["ready", "unhealthy"] as const) {
+    for (const phase of ["boot", "periodic"] as const) {
+      const initial: BrowserSurfaceWithPersistenceMetadata = {
+        surface_id: "refresh-surface",
+        backend: "neko",
+        connector_id: "managed",
+        profile_key: "managed-profile",
+        health,
+        container_id: "prior-container",
+        cdp_url: "http://prior:9223/",
+        stream_base_url: "http://prior:8080/neko",
+        window_settle_endpoint: "http://prior:8080/window-settle",
+        allocator_metadata: { container_name: "prior", host_port: "31001" },
+        created_at: "2026-05-12T12:00:00.000Z",
+        last_used_at: "2026-05-12T12:00:00.000Z",
+      };
+      const replacement: BrowserSurfaceWithPersistenceMetadata = {
+        ...initial,
+        health: "ready",
+        container_id: "replacement-container",
+        cdp_url: "http://replacement:9223/",
+        stream_base_url: "http://replacement:8080/neko",
+        window_settle_endpoint: "http://replacement:8080/window-settle",
+        allocator_metadata: { container_name: "replacement", host_port: "31002" },
+      };
+      const store = createMemoryBrowserSurfaceLeaseStore({ surfaces: [initial] });
+      const manager = createManager({ initialSurfaces: [initial], staticProfileKey: undefined });
+      let statusCalls = 0;
+      const create = (leaseManager: BrowserSurfaceLeaseManager) =>
+        createBrowserSurfaceManager({
+          activeRunInteractions: new Map(),
+          browserSurfaceAllocator: {
+            ensureSurface: async () => {
+              throw new Error("unexpected allocation");
+            },
+            getSurfaceStatus: async () => {
+              statusCalls += 1;
+              return replacement;
+            },
+            listSurfaces: async () => [replacement],
+            stopSurface: async () => null,
+          },
+          browserSurfaceLeaseManager: leaseManager,
+          browserSurfaceLeaseStore: store,
+          browserSurfaceMidWaitPollIntervalMs: 0,
+          browserSurfaceReadinessProbe: null,
+          browserSurfaceReadinessTimeoutMs: undefined,
+          browserSurfaceReplacementReceiptStore: null,
+          listPersistedActiveRuns: async () => [],
+          log: { warn: () => undefined },
+          pendingBrowserSurfaceLaunches: new Map(),
+          scheduleRun: () => undefined,
+          startupControllerRunReconciliation: Promise.resolve(),
+        });
+      const controller = create(manager);
+      if (phase === "boot") {
+        await controller.reconcileBrowserSurfaceLeasesAfterBoot();
+      } else {
+        await controller.sweepBrowserSurfaceLeases();
+      }
+      const rows = await store.listSurfaces();
+      assert.equal(rows[0]?.container_id, replacement.container_id);
+      assert.deepEqual(rows[0]?.allocator_metadata, replacement.allocator_metadata);
+      const reloaded = createManager({ initialSurfaces: rows, staticProfileKey: undefined });
+      const refreshed = create(reloaded);
+      const observedCalls = statusCalls;
+      const acquired = await refreshed.acquireManagedBrowserSurfaceForRun({
+        automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+        connectorId: "managed",
+        connectorInstanceId: "managed",
+        manifest: MANIFEST,
+        options: {},
+        runId: "refresh-run",
+        traceContext: createTraceContext(),
+      });
+      assert.equal(acquired.kind, "ready");
+      if (acquired.kind !== "ready" || !acquired.lease) {
+        throw new Error("missing ready lease");
+      }
+      assert.equal(acquired.lease.surface_id, initial.surface_id);
+      assert.ok(acquired.lease.surface_id);
+      const bound = reloaded.getSurface(acquired.lease.surface_id);
+      assert.equal(bound?.container_id, replacement.container_id);
+      assert.equal(
+        (bound as BrowserSurfaceWithPersistenceMetadata | undefined)?.window_settle_endpoint,
+        replacement.window_settle_endpoint
+      );
+      assert.equal(bound?.created_at, initial.created_at);
+      assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, replacement.cdp_url);
+      assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_STREAM_BASE_URL, replacement.stream_base_url);
+      assert.equal(store.surfaces.get(acquired.lease.surface_id)?.active_lease_id, acquired.lease.lease_id);
+      assert.equal(statusCalls, observedCalls);
+    }
+  }
+});
+
+test("a surface persisted as retained reloads without the flag and idle cleanup stops it", async (t) => {
+  // Builds that loaded the old ChatGPT retention rule wrote retained = 1.
+  // Restoring that flag would keep the surface running past the idle TTL forever.
+  closeDb();
+  const path = tempDbPath();
+  initDb(path);
+  t.after(() => closeDb());
+  const surface: BrowserSurfaceWithPersistenceMetadata = {
+    surface_id: "persisted-refresh",
+    backend: "neko",
+    connector_id: "managed",
+    profile_key: "managed-profile",
+    health: "ready",
+    cdp_url: "http://replacement:9223/",
+    stream_base_url: "http://replacement:8080/neko",
+    window_settle_endpoint: "http://replacement:8080/window-settle",
+    allocator_metadata: { container_name: "replacement", host_port: "31002" },
+    retained: true,
+    created_at: "2026-05-12T12:00:00.000Z",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+  };
+  await createSqliteBrowserSurfaceLeaseStore().upsertSurface(surface);
+  getDb().prepare("UPDATE browser_surfaces SET retained = 1 WHERE surface_id = ?").run(surface.surface_id);
+  closeDb();
+  initDb(path);
+  const reloaded = await createSqliteBrowserSurfaceLeaseStore().getSurface(surface.surface_id);
+  const { retained: _retained, ...unretained } = surface;
+  assert.deepEqual(reloaded, { ...unretained, container_name: "replacement" });
+  assert.ok(reloaded);
+  const manager = createDynamicManager({ initialSurfaces: [reloaded], now: () => new Date("2026-05-13T12:00:00Z") });
+  const allocator = createReadyAllocator();
+  await manager.cleanupIdleSurfaces(allocator);
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: surface.surface_id }]
+  );
+});
+
+function createReadyRefreshFixture() {
+  const initial: BrowserSurfaceWithPersistenceMetadata = {
+    surface_id: "refresh-race-surface",
+    backend: "neko",
+    connector_id: "managed",
+    profile_key: "managed-profile",
+    health: "ready",
+    container_id: "old-container",
+    cdp_url: "http://old:9223/",
+    stream_base_url: "http://old:8080/neko",
+    created_at: "2026-05-12T12:00:00.000Z",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+  };
+  const replacement: BrowserSurfaceWithPersistenceMetadata = {
+    ...initial,
+    container_id: "new-container",
+    cdp_url: "http://new:9223/",
+    stream_base_url: "http://new:8080/neko",
+  };
+  const store = createMemoryBrowserSurfaceLeaseStore({ surfaces: [initial] });
+  const leaseManager = createDynamicManager({ initialSurfaces: [initial] });
+  const activeRunIds = new Set<string>();
+  const allocator: BrowserSurfaceAllocator = {
+    ensureSurface: async () => { throw new Error("unexpected allocation"); },
+    getSurfaceStatus: async () => replacement,
+    listSurfaces: async () => [replacement],
+    stopSurface: async () => null,
+  };
+  const manager = createBrowserSurfaceManager({
+    activeRunInteractions: new Map(),
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseManager: leaseManager,
+    browserSurfaceLeaseStore: store,
+    browserSurfaceMidWaitPollIntervalMs: 0,
+    browserSurfaceReadinessProbe: null,
+    browserSurfaceReadinessTimeoutMs: undefined,
+    browserSurfaceReplacementReceiptStore: null,
+    listPersistedActiveRuns: async () => [...activeRunIds].map((run_id) => ({ run_id })),
+    log: { warn: () => undefined },
+    pendingBrowserSurfaceLaunches: new Map(),
+    scheduleRun: () => undefined,
+    startupControllerRunReconciliation: Promise.resolve(),
+  });
+  const acquire = (runId: string) => manager.acquireManagedBrowserSurfaceForRun({
+    automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+    connectorId: "managed",
+    connectorInstanceId: "managed",
+    manifest: MANIFEST,
+    options: {},
+    runId,
+    traceContext: createTraceContext(),
+  });
+  return { acquire, activeRunIds, allocator, initial, leaseManager, manager, replacement, store };
+}
+
+test("boot refreshes a surface after releasing its dead-run lease before the first acquire", async () => {
+  const f = createReadyRefreshFixture();
+  const prior = await f.acquire("dead-run");
+  assert.equal(prior.kind, "ready");
+  if (prior.kind !== "ready" || !prior.lease) throw new Error("expected prior lease");
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.active_lease_id, prior.lease.lease_id);
+  await f.manager.reconcileBrowserSurfaceLeasesAfterBoot();
+  assert.equal(f.store.leases.get(prior.lease.lease_id)?.status, "released");
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.replacement.container_id);
+  const acquired = await f.acquire("after-boot");
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  assert.equal(acquired.lease.surface_id, f.initial.surface_id);
+  assert.ok(acquired.lease.fencing_token > prior.lease.fencing_token);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+  assert.equal(f.store.surfaces.get(acquired.lease.surface_id)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("boot does not retarget a retained active run or change its lease fencing", async () => {
+  const f = createReadyRefreshFixture();
+  const acquired = await f.acquire("live-run");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  f.activeRunIds.add("live-run");
+  const prior = structuredClone(f.leaseManager.getLease(acquired.lease.lease_id));
+  await f.manager.reconcileBrowserSurfaceLeasesAfterBoot();
+  assert.deepEqual(f.leaseManager.getLease(acquired.lease.lease_id), prior);
+  assert.equal(f.leaseManager.getSurface(f.initial.surface_id)?.container_id, f.initial.container_id);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.initial.container_id);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("acquire joins a pending allocator observation before selecting its runtime", async () => {
+  const f = createReadyRefreshFixture();
+  let enter: () => void = () => undefined;
+  let resume: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  f.allocator.getSurfaceStatus = async () => { enter(); await gate; return f.replacement; };
+  const sweep = f.manager.sweepBrowserSurfaceLeases();
+  await entered;
+  const acquire = f.acquire("joined-run");
+  resume();
+  await sweep;
+  const acquired = await acquire;
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
+  assert.equal(f.leaseManager.getSurface(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+});
+
+test("a transient refresh-only write failure recovers through acquisition's own durable write", async () => {
+  const f = createReadyRefreshFixture();
+  const upsert = f.store.upsertSurface.bind(f.store);
+  let failed = false;
+  f.store.upsertSurface = (surface) => {
+    if (!failed) { failed = true; return Promise.reject(new Error("transient refresh write failure")); }
+    return upsert(surface);
+  };
+  await f.manager.sweepBrowserSurfaceLeases();
+  assert.equal(failed, true);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.initial.container_id);
+  const acquired = await f.acquire("store-recovered");
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("refresh queued behind a release persists current authority with asynchronous transactions", async () => {
+  const f = createReadyRefreshFixture();
+  const first = await f.acquire("first-run");
+  if (first.kind !== "ready" || !first.lease) throw new Error("expected ready lease");
+  let enter: () => void = () => undefined;
+  let resume: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  const upsert = f.store.upsertSurface.bind(f.store);
+  let once = true;
+  f.store.upsertSurface = async (surface) => {
+    if (once && !surface.active_lease_id) { once = false; enter(); await gate; }
+    return upsert(surface);
+  };
+  // The fake store deliberately does not serialize transactions itself.
+  const release = f.manager.releaseLease(first.lease, "managed", "first-run", createTraceContext());
+  await entered;
+  const sweep = f.manager.sweepBrowserSurfaceLeases();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(f.leaseManager.getSurface(f.initial.surface_id)?.container_id, f.replacement.container_id);
+  const newer = f.leaseManager.acquire({
+    connectorId: "managed", profileKey: f.initial.profile_key, runId: "concurrent-lease",
+  });
+  assert.equal(newer.lease.status, "leased");
+  resume();
+  await Promise.all([release, sweep]);
+  const row = f.store.surfaces.get(f.initial.surface_id);
+  assert.equal(row?.container_id, f.replacement.container_id);
+  assert.equal(row?.active_lease_id, newer.lease.lease_id);
+  assert.ok(newer.lease.fencing_token > first.lease.fencing_token);
+  assert.equal(f.store.leases.get(first.lease.lease_id)?.status, "released");
 });

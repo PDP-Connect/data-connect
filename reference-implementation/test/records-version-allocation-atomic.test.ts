@@ -114,6 +114,10 @@ test("atomic allocator returns 1 on first call and bumps counter in one statemen
       CONNECTOR_ID,
       CONNECTOR_INSTANCE_ID,
       STREAM,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
     ]);
     assert.equal(first.max_version, 1, "first allocation returns 1");
     assert.equal(
@@ -126,12 +130,20 @@ test("atomic allocator returns 1 on first call and bumps counter in one statemen
       CONNECTOR_ID,
       CONNECTOR_INSTANCE_ID,
       STREAM,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
     ]);
     assert.equal(second.max_version, 2, "second allocation returns counter + 1");
     assert.equal(readVersionCounter(CONNECTOR_INSTANCE_ID), 2);
 
     const third = execReturningOne<{ max_version: number }>(referenceQueries.recordsIngestAllocateNextVersion, [
       CONNECTOR_ID,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
+      CONNECTOR_INSTANCE_ID,
+      STREAM,
       CONNECTOR_INSTANCE_ID,
       STREAM,
     ]);
@@ -141,6 +153,50 @@ test("atomic allocator returns 1 on first call and bumps counter in one statemen
     teardown();
   }
 });
+
+for (const counterState of ["lagging", "missing"] as const) {
+  test(`changed ingest heals a ${counterState} counter above history/current`, async () => {
+    setup();
+    try {
+      await ingestRecord(CONNECTOR_ID, makeUpsert("a", { v: 1 }));
+      await ingestRecord(CONNECTOR_ID, makeUpsert("a", { v: 2 }));
+      const newest = readVersionCounter();
+      assert.equal(newest, 2);
+      assert.deepEqual(readChangeVersions(), [1, 2]);
+
+      if (counterState === "lagging") {
+        getDb().prepare(
+          "UPDATE version_counter SET max_version = 1 WHERE connector_instance_id = ? AND stream = ?"
+        ).run(DEFAULT_ACCOUNT_CONNECTOR_INSTANCE_ID, STREAM);
+        assert.equal(readVersionCounter(), 1);
+      } else {
+        getDb().prepare(
+          "DELETE FROM version_counter WHERE connector_instance_id = ? AND stream = ?"
+        ).run(DEFAULT_ACCOUNT_CONNECTOR_INSTANCE_ID, STREAM);
+        assert.equal(readVersionCounter(), null);
+      }
+
+      const changed = await ingestRecord(CONNECTOR_ID, makeUpsert("a", { v: 3 }));
+      assert.equal(changed.accepted, true);
+      assert.equal(changed.changed, true);
+      const expectedVersion = newest + 1;
+      assert.equal(readVersionCounter(), expectedVersion);
+      assert.deepEqual(readChangeVersions(), [1, 2, expectedVersion]);
+
+      const current = getDb().prepare(
+        "SELECT version, record_json FROM records WHERE connector_instance_id = ? AND stream = ?"
+      ).get(DEFAULT_ACCOUNT_CONNECTOR_INSTANCE_ID, STREAM) as { version: number; record_json: string };
+      const latestChange = getDb().prepare(
+        "SELECT version, record_json FROM record_changes WHERE connector_instance_id = ? AND stream = ? ORDER BY version DESC LIMIT 1"
+      ).get(DEFAULT_ACCOUNT_CONNECTOR_INSTANCE_ID, STREAM) as { version: number; record_json: string };
+      assert.equal(current.version, expectedVersion);
+      assert.deepEqual(current, latestChange, "current and latest history must converge");
+      assert.deepEqual(JSON.parse(current.record_json), { id: "a", v: 3 });
+    } finally {
+      teardown();
+    }
+  });
+}
 
 test("changed writes for the same (connector_id, stream) allocate distinct increasing versions", async () => {
   setup();

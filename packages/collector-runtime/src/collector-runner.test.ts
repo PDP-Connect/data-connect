@@ -17,7 +17,6 @@ import {
   CollectorStateReadError,
   DEFAULT_COLLECTOR_OUTBOX_POLICY,
   drainCollectorOutbox,
-  drainCollectorQueue,
   recoverAndSummarizeOutbox,
   runCollectorConnector,
   transformRecordsToCollectorEnvelopes,
@@ -34,7 +33,6 @@ import {
 } from "./local-device-client.ts";
 import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "./local-device-envelope.ts";
 import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "./local-device-outbox.ts";
-import { LocalDeviceQueue } from "./local-device-queue.ts";
 import {
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
   RuntimeCapabilityMismatchError,
@@ -826,58 +824,6 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
   } finally {
     await harness.close();
   }
-});
-
-test("drainCollectorQueue marks sent and preserves retryable failures", async () => {
-  const queue = new LocalDeviceQueue({
-    path: await tempQueuePath(),
-    retryBackoffMs: () => 60_000,
-  });
-  const records = transformRecordsToCollectorEnvelopes({
-    batchId: "batch-1",
-    batchSeq: 1,
-    connectorId: "codex",
-    deviceId: "device-1",
-    messages: [
-      {
-        data: { id: "m-1" },
-        emitted_at: "2026-04-30T12:00:00.000Z",
-        key: "m-1",
-        stream: "messages",
-        type: "RECORD",
-      },
-    ],
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-1",
-    batchSeq: 1,
-    records,
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-2",
-    batchSeq: 2,
-    records,
-    sourceInstanceId: "src-1",
-  });
-
-  const sent: IngestBatchRequest[] = [];
-  const client = {
-    async ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
-      await Promise.resolve();
-      sent.push(request);
-      if (request.batch_id === "batch-2") {
-        throw new Error("temporary 503");
-      }
-      return { ok: true };
-    },
-  };
-
-  assert.equal(await drainCollectorQueue({ client, queue }), 1);
-  const items = await queue.list();
-  assert.equal(items.find((i) => i.batch_id === "batch-1")?.status, "sent");
-  assert.equal(items.find((i) => i.batch_id === "batch-2")?.status, "pending");
 });
 
 test("runCollectorConnector refuses a connector requiring a binding the collector lacks", async () => {
@@ -1900,75 +1846,73 @@ test("runCollectorConnector drains durable checkpoint work before reading prior 
   }
 });
 
-test(
-  "runCollectorConnector: restored server cursor is not advanced by an older pending checkpoint",
-  async (t) => {
-    const harness = await startCollectorHarness({ priorState: { messages: { cursor: "cursor-S" } } });
+test("runCollectorConnector: restored server cursor is not advanced by an older pending checkpoint", async (t) => {
+  const harness = await startCollectorHarness({ priorState: { messages: { cursor: "cursor-S" } } });
+  try {
+    const queuePath = await tempQueuePath();
+    const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
-      const queuePath = await tempQueuePath();
-      const outbox = new LocalDeviceOutbox({ path: queuePath });
-      try {
-        const lostRecords = transformRecordsToCollectorEnvelopes({
+      const lostRecords = transformRecordsToCollectorEnvelopes({
+        batchId: "accepted-before-restore",
+        batchSeq: 1,
+        connectorId: "fixture-restore-gap",
+        deviceId: "device-1",
+        messages: [
+          {
+            data: { id: "record-after-S" },
+            emitted_at: "2026-10-15T12:00:00.000Z",
+            key: "record-after-S",
+            stream: "messages",
+            type: "RECORD",
+          },
+        ],
+        sourceInstanceId: "src-1",
+      });
+      const acceptedBatchId = buildLocalDeviceOutboxId({
+        kind: "record_batch",
+        parts: ["accepted-before-restore"],
+        sourceInstanceId: "src-1",
+      });
+      outbox.enqueue({
+        id: acceptedBatchId,
+        kind: "record_batch",
+        payload: {
           batchId: "accepted-before-restore",
           batchSeq: 1,
           connectorId: "fixture-restore-gap",
           deviceId: "device-1",
-          messages: [
-            {
-              data: { id: "record-after-S" },
-              emitted_at: "2026-10-15T12:00:00.000Z",
-              key: "record-after-S",
-              stream: "messages",
-              type: "RECORD",
-            },
-          ],
+          records: lostRecords,
           sourceInstanceId: "src-1",
-        });
-        const acceptedBatchId = buildLocalDeviceOutboxId({
-          kind: "record_batch",
-          parts: ["accepted-before-restore"],
-          sourceInstanceId: "src-1",
-        });
-        outbox.enqueue({
-          id: acceptedBatchId,
-          kind: "record_batch",
-          payload: {
-            batchId: "accepted-before-restore",
-            batchSeq: 1,
-            connectorId: "fixture-restore-gap",
-            deviceId: "device-1",
-            records: lostRecords,
-            sourceInstanceId: "src-1",
-          },
-          sourceInstanceId: "src-1",
-        });
-        const acceptedLease = outbox.claimReady({ holder: "pre-restore", leaseMs: 10_000, sourceInstanceId: "src-1" })[0];
-        assert.ok(acceptedLease);
-        outbox.acknowledge({
-          holder: "pre-restore",
-          id: acceptedLease.id,
-          leaseEpoch: acceptedLease.lease_epoch,
-        });
-        outbox.enqueue({
-          id: buildLocalDeviceOutboxId({
-            kind: "checkpoint",
-            parts: ["fixture-restore-gap", { messages: { cursor: "cursor-T" } }],
-            sourceInstanceId: "src-1",
-          }),
+        },
+        sourceInstanceId: "src-1",
+      });
+      const [acceptedLease] = outbox.claimReady({ holder: "pre-restore", leaseMs: 10_000, sourceInstanceId: "src-1" });
+      assert.ok(acceptedLease);
+      outbox.acknowledge({
+        holder: "pre-restore",
+        id: acceptedLease.id,
+        leaseEpoch: acceptedLease.lease_epoch,
+      });
+      outbox.enqueue({
+        id: buildLocalDeviceOutboxId({
           kind: "checkpoint",
-          payload: {
-            connectorId: "fixture-restore-gap",
-            sourceInstanceId: "src-1",
-            state: { messages: { cursor: "cursor-T" } },
-          },
+          parts: ["fixture-restore-gap", { messages: { cursor: "cursor-T" } }],
           sourceInstanceId: "src-1",
-        });
-      } finally {
-        outbox.close();
-      }
+        }),
+        kind: "checkpoint",
+        payload: {
+          connectorId: "fixture-restore-gap",
+          sourceInstanceId: "src-1",
+          state: { messages: { cursor: "cursor-T" } },
+        },
+        sourceInstanceId: "src-1",
+      });
+    } finally {
+      outbox.close();
+    }
 
-      const fixture = await writeFixtureConnector({
-        script: `
+    const fixture = await writeFixtureConnector({
+      script: `
           let buf = "";
           await new Promise((r) => process.stdin.on("data", (c) => {
             buf += c;
@@ -1985,42 +1929,46 @@ test(
           }
           process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: records }) + "\\n");
         `,
-      });
+    });
 
-      const result = await runCollectorConnector({
-        baseUrl: harness.url,
-        connector: {
-          args: [fixture],
-          command: "node",
-          connector_id: "fixture-restore-gap",
-          protocol_capabilities: [],
-          runtime_requirements: { bindings: {} },
-          streams: ["messages"],
-        },
-        deviceId: "device-1",
-        deviceToken: "device-token",
-        executionRoot: TEST_EXECUTION_ROOT,
-        queuePath,
-        sourceInstanceId: "src-1",
-      });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-restore-gap",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      sourceInstanceId: "src-1",
+    });
 
-      assert.equal(result.done?.status, "succeeded");
-      await t.test("pending checkpoint must preserve recovery from S", {
+    assert.equal(result.done?.status, "succeeded");
+    await t.test(
+      "pending checkpoint must preserve recovery from S",
+      {
         todo: "known gap: after restoring server DB to S, a pending local checkpoint advances the cursor to T before GET and skips records lost by restore",
-      }, () => assert.deepEqual(
-        {
-          cursorUsedForRecovery: (result.priorState?.messages as { cursor?: string } | undefined)?.cursor,
-          recoveredRecordIds: harness.ingestedBatches.flatMap((batch) =>
-            (batch.records ?? []).flatMap((record) => (typeof record.data?.id === "string" ? [record.data.id] : []))
-          ),
-        },
-        { cursorUsedForRecovery: "cursor-S", recoveredRecordIds: ["record-after-S"] }
-      ));
-    } finally {
-      await harness.close();
-    }
+      },
+      () =>
+        assert.deepEqual(
+          {
+            cursorUsedForRecovery: (result.priorState?.messages as { cursor?: string } | undefined)?.cursor,
+            recoveredRecordIds: harness.ingestedBatches.flatMap((batch) =>
+              (batch.records ?? []).flatMap((record) => (typeof record.data?.id === "string" ? [record.data.id] : []))
+            ),
+          },
+          { cursorUsedForRecovery: "cursor-S", recoveredRecordIds: ["record-after-S"] }
+        )
+    );
+  } finally {
+    await harness.close();
   }
-);
+});
 
 test("runCollectorConnector validates the reference route before mutating durable outbox work", async () => {
   const harness = await startCollectorHarness({
