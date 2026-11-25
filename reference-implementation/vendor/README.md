@@ -62,9 +62,9 @@ install`. No other code changes are needed — the package's public surface (all
 `exports` subpaths) is unchanged from the source it was packed from, only compiled.
 
 **Update (2026-11-24): client request filters.** Rebuilt the compiled snapshot from
-`PDP-Connect/pdpp` commit `e1e53961af` (`spec/client-query-filters`). The build ran
-in a scratch directory under `~/.tmp/`, with source copied from the read-only
-checkout. The exports point to compiled JS and declarations; source is retained.
+`PDP-Connect/pdpp` commit `e1e53961af` (`spec/client-query-filters`), built in a
+scratch directory from a copy of that source. The exports point to compiled JS and
+declarations; source is retained.
 This adds grant schema 0.2.0 and selection-request `grant_version`.
 The repacked package's `files` allowlist includes `dist`, `src`, `test`, and
 `README.md`, so npm retains compiled output even when `.gitignore` excludes it.
