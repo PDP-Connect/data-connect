@@ -43,6 +43,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import styles from "./consent-screen.module.css";
 import type {
+  ConsentActionResult,
   ConsentDecision,
   ConsentScreenModel,
   ConsentSourceModel,
@@ -217,6 +218,8 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
               {client.domain && <span>{client.domain} · </span>}
               <span className={styles.verified}>Verified</span>
             </>
+          ) : client.trust === "domain" ? (
+            <span>{client.domain ?? "Website verified"}</span>
           ) : (
             <span>{client.domain ? `${client.domain} (not verified)` : "Website not verified"}</span>
           )}
@@ -488,8 +491,8 @@ export function ConsentUnavailable({
     <main className={styles.unavailable} data-state={kind}>
       <h1 className="pdpp-display">
         {kind === "expired"
-          ? "This request is no longer available. Go back to ChatGPT and try again."
-          : "This request could not be loaded. Go back to ChatGPT and try again."}
+          ? "This request is no longer available. Go back to the app and try again."
+          : "This request could not be loaded. Go back to the app and try again."}
       </h1>
       {kind === "error" && (
         <IcButton onClick={retry} type="button" variant="ghost">
@@ -512,10 +515,10 @@ export function ConsentScreen({
    * Server Actions — Next.js enforces the suffix on a "use client" component's
    * non-serializable props.
    */
-  acceptAction: (decision: ConsentDecision) => Promise<string>;
+  acceptAction: (decision: ConsentDecision) => Promise<ConsentActionResult>;
   demoOnly?: boolean;
   model: ConsentScreenModel;
-  rejectAction: () => Promise<string>;
+  rejectAction: () => Promise<ConsentActionResult>;
 }) {
   const [selection, setSelection] = useState<SelectionState>(() => initialSelection(model.sources));
   const [fieldSelection, setFieldSelection] = useState<FieldSelectionState>(() => initialFieldSelection(model.sources));
@@ -701,12 +704,17 @@ export function ConsentScreen({
     setSubmitState("submitting");
     setSubmitError(null);
     try {
-      const redirectUrl = action === "accept" ? await acceptAction(buildDecision()) : await rejectAction();
+      const result = action === "accept" ? await acceptAction(buildDecision()) : await rejectAction();
+      if (!result.ok) {
+        setSubmitState("failed");
+        setSubmitError(result.message);
+        return;
+      }
       // The OAuth flow ends at the CLIENT's origin, so this is a full document
       // navigation off the console, not a router push. `replace` keeps the
       // consumed challenge out of history — going Back must not re-present a
       // decision the owner has already made.
-      window.location.replace(redirectUrl);
+      window.location.replace(result.redirectUrl);
     } catch {
       setSubmitState("failed");
       setSubmitError(`This request could not be completed. Go back to ${model.client.name} and try again.`);

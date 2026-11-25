@@ -111,6 +111,10 @@ export interface ConsentScreenModel {
   readonly sources: readonly ConsentSourceModel[];
 }
 
+export type ConsentActionResult =
+  | { readonly ok: true; readonly redirectUrl: string }
+  | { readonly ok: false; readonly message: string };
+
 /** One source's decision: the source, and which of its streams the owner chose. */
 export interface ConsentSelectedSource {
   readonly sourceId: string;

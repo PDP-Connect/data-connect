@@ -222,10 +222,10 @@ test("client trust explanations stay reachable from a plain link", () => {
 });
 
 test("only verified apps receive the tone-colored trust word", () => {
-  // Consent brief: verified is the only colored trust state; other states name the website as not verified.
+  // Consent repair 1: the server's domain tier proves control; only unverified may say not verified.
   assert.match(CLIENT_SOURCE, /client\.trust === "verified"/);
   assert.match(CLIENT_SOURCE, /<span className=\{styles\.verified\}>Verified<\/span>/);
-  assert.match(CLIENT_SOURCE, /\$\{client\.domain\} \(not verified\)/);
+  assert.match(CLIENT_SOURCE, /client\.trust === "unverified"/);
   assert.match(CLIENT_SOURCE, /The app proved it controls this website/);
 });
 
@@ -345,7 +345,7 @@ test("the owner's refusal is a first-class action beside Allow", () => {
 test("a completed decision navigates to the client and leaves no back-button replay", () => {
   assert.match(
     CLIENT_SOURCE,
-    /window\.location\.replace\(redirectUrl\)/,
+    /window\.location\.replace\(result\.redirectUrl\)/,
     "must replace, so Back cannot re-present a consumed challenge"
   );
 });
@@ -354,6 +354,10 @@ test("a failed submission tells the owner nothing was shared", () => {
   assert.match(CLIENT_SOURCE, /setSubmitError/, "failures must surface to the owner");
   assert.match(CLIENT_SOURCE, /role="alert"/, "the failure must be announced, not just drawn");
   assert.match(ACTIONS_SOURCE, /Nothing was shared/, "the fallback message must state the outcome");
+  assert.match(ACTIONS_SOURCE, /error_description/);
+  assert.match(ACTIONS_SOURCE, /detail\?\.error/);
+  assert.match(ACTIONS_SOURCE, /ok: false/);
+  assert.doesNotMatch(ACTIONS_SOURCE, /throw new Error\(\s*detail\?\.error_description/);
 });
 
 // ─── The retired preview is gone ───────────────────────────────────────────

@@ -23,7 +23,11 @@ import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/ow
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
 import { ConsentScreen, ConsentUnavailable } from "@/components/consent-screen/consent-screen-client.tsx";
 import { resolveConsentDemoState } from "@/components/consent-screen/consent-screen-demo.ts";
-import type { ConsentDecision, ConsentScreenModel } from "@/components/consent-screen/consent-screen-model.ts";
+import type {
+  ConsentActionResult,
+  ConsentDecision,
+  ConsentScreenModel,
+} from "@/components/consent-screen/consent-screen-model.ts";
 import { acceptConsentChallenge, rejectConsentChallenge } from "./actions.ts";
 
 // A consent decision is per-request and carries the requesting client's
@@ -71,13 +75,13 @@ export default async function ConsentPage({
   if (demo) {
     const { buildConsentDemoModel } = await import("@/components/consent-screen/consent-screen-demo.ts");
     const demoModel = buildConsentDemoModel(demo);
-    async function acceptDemoAction(_decision: ConsentDecision): Promise<string> {
+    async function acceptDemoAction(_decision: ConsentDecision): Promise<ConsentActionResult> {
       "use server";
-      return "";
+      return { ok: true, redirectUrl: "" };
     }
-    async function rejectDemoAction(): Promise<string> {
+    async function rejectDemoAction(): Promise<ConsentActionResult> {
       "use server";
-      return "";
+      return { ok: true, redirectUrl: "" };
     }
     return (
       <ConsentScreen
@@ -105,11 +109,11 @@ export default async function ConsentPage({
   // Bound here so the challenge id and client identity travel with the action
   // itself and are never re-read from a form field the browser could alter.
   const clientId = model.client.id;
-  async function acceptAction(decision: ConsentDecision): Promise<string> {
+  async function acceptAction(decision: ConsentDecision): Promise<ConsentActionResult> {
     "use server";
     return acceptConsentChallenge(challenge, clientId, decision);
   }
-  async function rejectAction(): Promise<string> {
+  async function rejectAction(): Promise<ConsentActionResult> {
     "use server";
     return rejectConsentChallenge(challenge);
   }
