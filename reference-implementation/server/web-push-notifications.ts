@@ -1190,7 +1190,7 @@ export function classifyPushFanoutOutcome(result: unknown): PushFanoutOutcome {
 export type RecordPushOutcome = (outcome: PushFanoutOutcome) => Promise<void>;
 
 export interface FanoutPendingInteractionWebPushArgs {
-  config?: WebPushConfig;
+  config?: WebPushConfig | undefined;
   connectorDisplayName: string;
   interaction: PendingInteractionInput | null | undefined;
   log?: WebPushLog;
@@ -1247,7 +1247,7 @@ async function fanoutPendingInteractionWebPushImpl({
   routeTo,
   runId,
   log,
-}: Required<Pick<FanoutPendingInteractionWebPushArgs, "config" | "store" | "sender" | "routeTo" | "log">> &
+}: { config: WebPushConfig } & Required<Pick<FanoutPendingInteractionWebPushArgs, "store" | "sender" | "routeTo" | "log">> &
   Pick<
     FanoutPendingInteractionWebPushArgs,
     "interaction" | "connectorDisplayName" | "ownerSubjectId" | "runId"
@@ -1282,7 +1282,7 @@ async function fanoutPendingInteractionWebPushImpl({
 
 export interface FanoutAssistanceWebPushArgs {
   assistance: AssistancePushInput | null | undefined;
-  config?: WebPushConfig;
+  config?: WebPushConfig | undefined;
   connectorDisplayName: string;
   log?: WebPushLog;
   ownerSubjectId: unknown;
@@ -1334,7 +1334,7 @@ async function fanoutAssistanceWebPushImpl({
   ownerSubjectId,
   runId,
   log,
-}: Required<Pick<FanoutAssistanceWebPushArgs, "config" | "store" | "sender" | "log">> &
+}: { config: WebPushConfig } & Required<Pick<FanoutAssistanceWebPushArgs, "store" | "sender" | "log">> &
   Pick<
     FanoutAssistanceWebPushArgs,
     "assistance" | "connectorDisplayName" | "ownerSubjectId" | "runId"
@@ -1361,7 +1361,7 @@ async function fanoutAssistanceWebPushImpl({
 }
 
 export interface FanoutTestWebPushArgs {
-  config?: WebPushConfig;
+  config?: WebPushConfig | undefined;
   log?: WebPushLog;
   ownerSubjectId: unknown;
   sender?: WebPushSender;
@@ -1446,7 +1446,7 @@ export type EscalationRenderedVerdict = {
 } | null;
 
 export interface FanoutEscalationWebPushArgs {
-  config?: WebPushConfig;
+  config?: WebPushConfig | undefined;
   connectionUrl?: string;
   connectorDisplayName: string;
   log?: WebPushLog;

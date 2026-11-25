@@ -5,7 +5,7 @@
 // a send signed with a different key than the one a subscription was created
 // under, so an existing subscription made under another key is replaced.
 
-function urlBase64ToUint8Array(base64String: string): Uint8Array {
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
   const rawData = atob(base64);
@@ -22,7 +22,7 @@ function sameBytes(buffer: ArrayBuffer | null, expected: Uint8Array): boolean {
 
 interface PushManagerLike {
   getSubscription: () => Promise<PushSubscription | null>;
-  subscribe: (options: { applicationServerKey: Uint8Array; userVisibleOnly: boolean }) => Promise<PushSubscription>;
+  subscribe: (options: { applicationServerKey: Uint8Array<ArrayBuffer>; userVisibleOnly: boolean }) => Promise<PushSubscription>;
 }
 
 /** Whether `subscription` was created under `serverPublicKey`, so a send signed with it can reach the browser. */

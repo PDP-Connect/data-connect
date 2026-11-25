@@ -1969,7 +1969,7 @@ async function buildAttentionOutcomeRecorder(args: { runId: string; requestId: s
 }
 
 async function fireWebPush(args: {
-  webPushConfig?: WebPushConfig;
+  webPushConfig?: WebPushConfig | undefined;
   interaction: RuntimeInteraction;
   connectorDisplayName: string;
   ownerSubjectId: string;
@@ -1996,7 +1996,7 @@ async function fireWebPush(args: {
 }
 
 async function fireAssistanceWebPush(args: {
-  webPushConfig?: WebPushConfig;
+  webPushConfig?: WebPushConfig | undefined;
   assistance: Record<string, unknown>;
   connectorDisplayName: string;
   ownerSubjectId: string;
@@ -2060,7 +2060,7 @@ function brokerInteraction(
     connectorDisplayName: string;
     log: ControllerLogger;
     ownerSubjectId: string;
-    webPushConfig?: WebPushConfig;
+    webPushConfig?: WebPushConfig | undefined;
   }
 ): Promise<InteractionResponse> {
   return new Promise((resolve) => {
