@@ -1121,12 +1121,13 @@ function deletedResponseRecord({
   row: PgRow;
   identity?: RecordIdentity | null;
 }): ResponseRecord {
-  const record = {
+  const record: ResponseRecord = {
     deleted: true,
     deleted_at: row.deleted_at || row.emitted_at,
     emitted_at: row.emitted_at,
     id: row.record_key,
     object: "record",
+    removal: "deleted",
     stream,
   };
   decorateRecordWithConnectionIdentity(record, identity);
