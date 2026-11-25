@@ -510,3 +510,29 @@ test("runtime config routes USAA to a managed n.eko surface from the committed c
   assert.equal(options.browserSurfaceLeaseManager.isManagedConnector(USAA_CONNECTOR_ID), true);
   assert.equal(options.browserSurfaceLeaseManager.isManagedConnector("usaa"), true);
 });
+
+async function nekoLauncherArgs(env: NodeJS.ProcessEnv): Promise<string[]> {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  assert.ok(source.includes("exec /usr/bin/neko serve"));
+  const fixture = source.replace("exec /usr/bin/neko serve", 'set -- serve');
+  const result = spawnSync("/bin/sh", ["-eu", "-c", fixture + '\nfor arg do printf "%s\\n" "$arg"; done\n'], {
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trimEnd().split("\n");
+}
+
+test("n.eko launch retains the configured path prefix and proxy flag", async () => {
+  const args = await nekoLauncherArgs({ NEKO_SERVER_PATH_PREFIX: "/fixture/", NEKO_SERVER_PROXY: "true" });
+  assert.equal(args[args.indexOf("--server.path_prefix") + 1], "/fixture/");
+  assert.ok(args.includes("--server.proxy=true"));
+});
+
+test("n.eko launch passes each ICE settings array as a single argument", async () => {
+  const front = '[{ "urls": ["stun:front.invalid"] }]';
+  const back = '[{ "urls": ["stun:back.invalid"] }]';
+  const args = await nekoLauncherArgs({ NEKO_WEBRTC_ICESERVERS: front, NEKO_WEBRTC_ICESERVERS_BACKEND: back });
+  assert.equal(args[args.indexOf("--webrtc.iceservers.frontend") + 1], front);
+  assert.equal(args[args.indexOf("--webrtc.iceservers.backend") + 1], back);
+});
