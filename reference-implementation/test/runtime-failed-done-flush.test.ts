@@ -18,6 +18,8 @@
 //   DONE failed                     | flushed         | NO           | run.failed (after the flush)
 //   DONE failed, flush itself fails | dropped, counted| NO           | run.failed, connector error stays primary,
 //                                   |                 |              | flush failure recorded as run.terminal_flush_failed
+//   certified stream-scoped failure,| dropped, counted| staged       | run.failed, as above
+//   flush itself fails              |                 | siblings only|
 //   DONE succeeded, flush fails     | dropped, counted| NO           | run.failed (unchanged: run fails, no success claim)
 //   DONE cancelled (connector)      | dropped         | NO           | run.failed
 //   owner cancel / run timeout      | dropped         | NO           | run.cancelled / run.failed
@@ -25,8 +27,12 @@
 //
 // Ingest is an upsert on (connector_instance_id, stream, record_key)
 // (runtime/ingest-retry.ts), so the next run re-emitting the same records is
-// idempotent. STATE is never committed on a failed run, so the next run still
-// re-walks from the last good checkpoint.
+// idempotent. An ordinary failed run commits no STATE, so the next run still
+// re-walks from the last good checkpoint. A certified stream-scoped failure
+// (DONE.error.code "stream_collection_failed" plus a matching SKIP_RESULT)
+// commits the staged checkpoints of its other streams; a failed terminal flush
+// does not change that, because STATE flushes its stream before the cursor is
+// staged, so a committed cursor never covers a dropped record.
 
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -63,7 +69,10 @@ interface RsRequest {
   pathname: string;
 }
 
-function startMockRs({ failIngest }: { failIngest: boolean }) {
+// `failIngestAfter` lets that many ingest POSTs succeed before every later
+// one fails; `failIngest` is the same with zero.
+function startMockRs({ failIngestAfter }: { failIngestAfter: number | null }) {
+  let ingestPosts = 0;
   const requests: RsRequest[] = [];
   const server = createServer((req, res) => {
     let body = "";
@@ -74,7 +83,8 @@ function startMockRs({ failIngest }: { failIngest: boolean }) {
       const { pathname } = new URL(req.url ?? "/", "http://localhost");
       requests.push({ body, method: req.method, pathname });
       if (req.method === "POST" && pathname.startsWith("/v1/ingest/")) {
-        if (failIngest) {
+        ingestPosts += 1;
+        if (failIngestAfter !== null && ingestPosts > failIngestAfter) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: { message: "Invalid or expired token" } }));
           return;
@@ -162,13 +172,15 @@ interface Scenario {
   cancelAfterReady?: boolean;
   exitCode: number;
   failIngest?: boolean;
+  failIngestAfter?: number;
   messages: readonly StubMessage[];
   runId: string;
 }
 
 async function runScenario(t: TestContext, scenario: Scenario) {
   freshDb(t);
-  const { server, requests } = startMockRs({ failIngest: scenario.failIngest === true });
+  const failIngestAfter = scenario.failIngest === true ? 0 : (scenario.failIngestAfter ?? null);
+  const { server, requests } = startMockRs({ failIngestAfter });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object", "ephemeral port");
@@ -326,6 +338,66 @@ test("DONE failed: a flush failure never replaces the connector's error", async 
   assert.ok(JSON.parse((flushFailed[0] as SpineRow).data_json).ingest_failure, "with the ingest failure detail");
   assert.equal(data.buffered_records_dropped, 3, "the records that did not land are counted as dropped");
   assert.equal(outcome?.connector_error?.code, "upstream_boom");
+});
+
+test("certified stream-scoped failure with a failing terminal flush: the staged sibling checkpoint still commits", async (t) => {
+  // items: 2 records, then STATE (flushes both and stages the cursor), then 1
+  // tail record. orders: 3 records, then the connector certifies orders as the
+  // failed stream. The first ingest POST (the STATE flush) succeeds; the
+  // terminal flush fails, so the items tail and all orders are dropped. The
+  // items cursor covers only the 2 records that landed, so it commits.
+  const { events, outcome, outcomeError, requests, stateCommits } = await runScenario(t, {
+    exitCode: 1,
+    failIngestAfter: 1,
+    messages: [
+      ...records(ITEMS, 2),
+      { cursor: { offset: 2 }, stream: ITEMS, type: "STATE" },
+      record(ITEMS, "items_tail"),
+      ...records(ORDERS, 3),
+      { message: "upstream 500", reason: "stream_collection_failed", stream: ORDERS, type: "SKIP_RESULT" },
+      {
+        error: {
+          code: "stream_collection_failed",
+          message: "stream collection failed: orders: upstream 500",
+          retryable: true,
+        },
+        records_emitted: 6,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    runId: "run_failed_done_flush_certified_partial",
+  });
+
+  assert.equal(outcomeError, null);
+  assert.equal(outcome?.status, "failed");
+  assert.equal(outcome?.connector_error?.code, "stream_collection_failed", "the connector's error stays primary");
+  assert.deepEqual(
+    stateCommits.map((r) => decodeURIComponent(r.pathname)),
+    [`/v1/state/${MANIFEST.connector_id}`],
+    "exactly one STATE commit"
+  );
+  assert.deepEqual(
+    Object.keys((JSON.parse((stateCommits[0] as RsRequest).body) as { state: Record<string, unknown> }).state),
+    [ITEMS],
+    "only the sibling's checkpoint commits"
+  );
+  const acceptedPost = requests.find((r) => r.method === "POST" && r.pathname.startsWith("/v1/ingest/"));
+  assert.equal(acceptedPost?.pathname, `/v1/ingest/${ITEMS}`);
+  assert.deepEqual(
+    acceptedPost?.body
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { key: string }).key),
+    ["items_0", "items_1"],
+    "the one accepted ingest, at STATE, holds exactly the records the committed cursor covers"
+  );
+
+  assertNoIngestAfterTerminal(events);
+  assert.equal(events.filter((e) => e.event_type === "run.terminal_flush_failed").length, 1);
+  const data = terminalData(events, "run.failed");
+  assert.equal(data.connector_error_code, "stream_collection_failed");
+  assert.equal(data.buffered_records_dropped, 4, "the items tail and the orders did not land");
 });
 
 test("DONE succeeded: the tail is flushed and STATE is committed (control)", async (t) => {

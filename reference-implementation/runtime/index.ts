@@ -5660,8 +5660,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // Records the connector emitted and the runtime validated are durable on
       // succeeded and failed DONE, as mid-run batches already are: ingest upserts
       // (connector_instance_id, stream, record_key), so a later run re-emitting them
-      // cannot duplicate. STATE is committed only by handleDoneClose, never for a
-      // failed run. Connector-reported cancelled and owner cancel/timeout drop buffers.
+      // cannot duplicate. STATE is committed only by handleDoneClose: never for an
+      // ordinary failed run, and for a certified stream-scoped failure only for the
+      // staged sibling checkpoints it allows. Those are safe whether or not this flush
+      // succeeds, because handleStateMessage flushed each stream before staging its
+      // cursor. Connector-reported cancelled and owner cancel/timeout drop buffers.
       // The flush completes here, before the terminal event is emitted.
       if (doneStatus === "succeeded") {
         await flushAll();
