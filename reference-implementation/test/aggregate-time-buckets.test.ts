@@ -656,3 +656,25 @@ test("group_by_time other_count covers buckets truncated by limit", async () => 
     assert.equal(res.other_count, 2);
   });
 });
+
+test("optional aggregate dimensions must be nonblank strings, not coerced values", async () => {
+  await withSeeded([], async () => {
+    const aggregate = (requestParams: Record<string, unknown>) =>
+      aggregateRecords(target(), STREAM, grant, requestParams, manifestWith(FULL_AGGREGATIONS));
+    await assert.rejects(
+      aggregate({ group_by_time: "occurred_at", granularity: ["day"], metric: "count" }),
+      /granularity must be a nonblank string/
+    );
+    await assert.rejects(
+      aggregate({ field: " ", metric: "count" }),
+      /field must be a nonblank string/
+    );
+    await assert.rejects(
+      aggregate({ group_by: 7, metric: "count" }),
+      /group_by must be a nonblank string/
+    );
+    const absent = await aggregate({ granularity: undefined, metric: "count", time_zone: null });
+    assert.equal(absent.granularity, null);
+    assert.equal(absent.time_zone, null);
+  });
+});

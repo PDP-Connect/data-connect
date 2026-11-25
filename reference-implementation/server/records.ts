@@ -3809,6 +3809,19 @@ function resolveAggregateTimeGrouping(
   return { granularity: granularityRaw, timeZone: resolveAggregateTimeZone(timeZoneRaw) };
 }
 
+// Optional aggregate dimensions are absent (null/undefined) or a nonblank
+// string. Anything else (arrays, numbers, blank text) is rejected instead of
+// being coerced with String(), which would turn `["day"]` into "day".
+function toOptionalAggregateString(value: unknown, name: string): string | null {
+  if (isNullish(value)) {
+    return null;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidQueryError(`${name} must be a nonblank string`);
+  }
+  return value.trim();
+}
+
 function normalizeAggregateRequest(
   requestParams: RequestParams,
   streamGrant: StreamGrant,
@@ -3822,22 +3835,11 @@ function normalizeAggregateRequest(
   }
 
   const metric = normalizeAggregateMetric(requestParams.metric);
-  const field =
-    isNullish(requestParams.field) || requestParams.field === "" ? null : String(requestParams.field).trim();
-  const groupBy =
-    isNullish(requestParams.group_by) || requestParams.group_by === "" ? null : String(requestParams.group_by).trim();
-  const groupByTime =
-    isNullish(requestParams.group_by_time) || requestParams.group_by_time === ""
-      ? null
-      : String(requestParams.group_by_time).trim();
-  const granularityRaw =
-    isNullish(requestParams.granularity) || requestParams.granularity === ""
-      ? null
-      : String(requestParams.granularity).trim();
-  const timeZoneRaw =
-    isNullish(requestParams.time_zone) || requestParams.time_zone === ""
-      ? null
-      : String(requestParams.time_zone).trim();
+  const field = toOptionalAggregateString(requestParams.field, "field");
+  const groupBy = toOptionalAggregateString(requestParams.group_by, "group_by");
+  const groupByTime = toOptionalAggregateString(requestParams.group_by_time, "group_by_time");
+  const granularityRaw = toOptionalAggregateString(requestParams.granularity, "granularity");
+  const timeZoneRaw = toOptionalAggregateString(requestParams.time_zone, "time_zone");
 
   // Exactly one grouping dimension in v1: group_by XOR group_by_time.
   if (groupBy && groupByTime) {
