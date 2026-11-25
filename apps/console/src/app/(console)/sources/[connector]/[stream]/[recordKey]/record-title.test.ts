@@ -53,7 +53,7 @@ test("record page uses the same human title as the kind row", () => {
 
 test("a payment with no text is titled by its amount, not the kind name", () => {
   // The header shows one line, so the amount would otherwise be missing from it.
-  const preview = recordTitlePreview({ amount: "$12.50", kind: "transaction" } as never, "transaction", "transactions");
+  const preview = recordTitlePreview({ amount: "$12.50", kind: "money" }, "money", "transactions");
   assert.equal(rowPrimary(preview), "$12.50");
   assert.equal(recordCrumbLabel(preview, "transactions"), "$12.50");
 });
