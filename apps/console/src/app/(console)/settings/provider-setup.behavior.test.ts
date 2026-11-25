@@ -226,7 +226,7 @@ for (const viaPoll of [false, true]) {
             {
               providerId: reservation.providerId,
               label: reservation.providerLabel,
-              reach: "public",
+              reach: "internet",
               transport: "https",
               availability: { attached: { state: "available", reason: "" } },
               configuration: { revision: "config", actions: [], inputRequirements: [], values: {}, credentials: {} },

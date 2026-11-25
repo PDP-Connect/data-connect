@@ -338,7 +338,7 @@ export function RuntimeRouteConsentCard({
         }
         type="button"
       >
-        Turn on again
+        Use the new details
       </Button>
     </section>
   );

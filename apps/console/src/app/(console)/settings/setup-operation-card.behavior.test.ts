@@ -392,9 +392,10 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
         ],
         // The cost summary is a leftover sentence: it lives in Details, one click away.
         cardWords: [/There is no charge/] },
+      // RAISE rule 4: the warning is plain; the raw transport fact remains in Details.
       { name: "unencrypted transport", disclosures: { ...typedRouteDisclosures, transport: "http" }, open: false,
-        words: [/Workshop can see what passes through\./],
-        detailsWords: [/unencrypted HTTP/], cardWords: [] as RegExp[] },
+        words: [/This connection is not encrypted\. Others may be able to read what passes through\./],
+        detailsWords: [/Transport\s*http/i], cardWords: [] as RegExp[] },
       { name: "unrecognized reach", disclosures: { ...readableRoute, reach: "regional" }, open: true,
         words: [] as RegExp[], detailsWords: [] as RegExp[], cardWords: [/regional/] },
     ]

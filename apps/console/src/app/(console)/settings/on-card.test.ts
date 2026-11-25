@@ -15,7 +15,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -84,7 +84,7 @@ const offState = ok({ routes: [], reasons: {}, starting: false, services: [] });
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -141,6 +141,8 @@ async function withScreen<T>(
     tick: (ms: number) => Promise<void>;
     text: () => string;
     allText: () => string;
+    /** Labels of the confirmation buttons the helper pressed, in order. */
+    confirmed: string[];
   }) => Promise<T>,
   t?: TestContext
 ): Promise<T> {
@@ -161,15 +163,30 @@ async function withScreen<T>(
     return handler(call);
   }) as typeof requestReachability;
   const settle = () => act(async () => {});
+  const confirmed: string[] = [];
+  const confirmDialogs = async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await settle();
+      const dialog = container.querySelector('[role="alertdialog"]');
+      const confirm = [...(dialog?.querySelectorAll("button") ?? [])].find((node) =>
+        /^(?:Continue turning on|Turn off|Turn off and on)$/.test(node.textContent ?? "")
+      );
+      if (!confirm) return;
+      confirmed.push(confirm.textContent ?? "");
+      await act(async () => confirm.click());
+    }
+  };
   try {
     await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
     await settle();
     return await run({
       container,
       calls,
+      confirmed,
       tick: async (ms) => {
         await act(async () => t?.mock.timers.tick(ms));
         await settle();
+        await confirmDialogs();
       },
       text: () => {
         const clone = container.cloneNode(true) as Element;
@@ -182,6 +199,7 @@ async function withScreen<T>(
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
         await settle();
+        await confirmDialogs();
       },
     });
   } finally {
@@ -213,6 +231,13 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     const visible = text();
     assert.ok(container.querySelector('section[aria-label="Remote access"]'), "the card is the page's Remote access section");
     assert.match(visible, /On/);
+    // Remote-access brief, decision 2: show separate status and guidance for both outcomes.
+    assert.match(visible, /Available · ChatGPT/);
+    assert.match(visible, /This address works from the internet; connect ChatGPT below\./);
+    assert.match(visible, /Available · Your phone/);
+    assert.match(visible, /Open this address on your phone\./);
+    const accessRows = [...container.querySelectorAll('[aria-label="Who can open this address"] > div')];
+    assert.equal(accessRows[0]?.querySelector("span")?.className, "text-primary");
     // The address sits in a copyable field with its own label.
     assert.match(visible, /Your address/);
     assert.ok(visible.includes("https://one.example.invalid"), visible);
@@ -244,6 +269,45 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
+  }, t);
+});
+
+test("private and same-Wi-Fi routes state which outcome can use the address", async (t) => {
+  for (const [reach, phoneStatus, phoneSentence] of [
+    ["tailnet", "Needs Tailscale · Your phone", "Use Tailscale on your phone with the same account."],
+    ["lan", "Same Wi-Fi · Your phone", "Your phone and this computer need the same Wi-Fi."],
+  ] as const) {
+    const privateCatalog = ok({ ...catalog, providers: [{ ...provider, reach }] });
+    const route = routeAt({ providerId: "p-tunnel" });
+    await withScreen(host({ "/catalog": privateCatalog, "/state": onState(route) }), async ({ text }) => {
+      const visible = text();
+      assert.match(visible, /Not available · ChatGPT/);
+      assert.match(visible, /ChatGPT needs an address that works from the internet\./);
+      assert.ok(visible.includes(phoneStatus), visible);
+      assert.ok(visible.includes(phoneSentence), visible);
+    }, t);
+  }
+});
+
+test("an unlisted route does not claim that the phone or ChatGPT can open it", async (t) => {
+  const route = routeAt({ providerId: "unknown-way" });
+  await withScreen(host({ "/state": onState(route) }), async ({ text }) => {
+    const visible = text();
+    assert.match(visible, /Unknown · ChatGPT/);
+    assert.match(visible, /We don't know whether ChatGPT can open this address\./);
+    assert.match(visible, /Unknown · Your phone/);
+    assert.match(visible, /We don't know whether your phone can open this address\./);
+  }, t);
+});
+
+test("a public address without a public check stays unconfirmed", async (t) => {
+  const route = routeAt({ providerId: "p-tunnel" });
+  route.verification.vantage = "this-device";
+  await withScreen(host({ "/state": onState(route) }), async ({ text }) => {
+    const visible = text();
+    assert.match(visible, /Not confirmed · ChatGPT/);
+    assert.match(visible, /Not confirmed · Your phone/);
+    assert.doesNotMatch(visible, /Available · ChatGPT|Available · Your phone/);
   }, t);
 });
 
@@ -683,7 +747,7 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     },
     "/operations/op-2": ok({ operationId: "op-2", stage: "settled", kind: "stop", failureCode: null, recovery: null }),
   });
-  await withScreen(handler, async ({ calls, press, tick, text }) => {
+  await withScreen(handler, async ({ calls, confirmed, press, tick, text }) => {
     await press(/^Turn on remote access$/);
     await tick(3_000);
     assert.ok(text().includes("https://one.example.invalid"));
@@ -691,8 +755,11 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     stage = "lost";
     await tick(3_000);
     assert.match(text(), /Needs your action/);
+    const before = confirmed.length;
     await press(/^Turn on again$/);
     await tick(3_000);
+    // Remote-access brief, decision 2: the stop asks once; the turn-on on approved facts asks nothing more.
+    assert.deepEqual(confirmed.slice(before), ["Turn off and on"]);
     const approvals = calls.filter((call) => call.url === "/operations");
     assert.equal(approvals.length, 2, "Turn on again approves once, with no second click");
     assert.equal(approvals[1]!.body?.consentFactsDigest, "digest-1", "on the facts the owner already approved");

@@ -44,7 +44,8 @@ test('a known error code returns its plain message and keeps the server sentence
       result: {
         ok: false,
         code: 'host_path_too_long',
-        message: "DataConnect's data folder path is too long for remote access.",
+        // RAISE rule 4: mapped failure copy ends with the next step.
+        message: "DataConnect's data folder path is too long for remote access. Choose a shorter folder path and try again.",
         serverMessage: 'The reachability operation could not complete.',
       },
     });

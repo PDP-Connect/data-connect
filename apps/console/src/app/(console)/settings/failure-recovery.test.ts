@@ -9,7 +9,8 @@ import { ERROR_MESSAGES, GENERIC_ERROR } from "./reachability-errors.ts";
 type Row = { code: string; status: "off" | "needs-action"; message: RegExp; buttons: string[] };
 const rows: Row[] = [
   { code: "owner_password_required", status: "off", message: /Set a password first/, buttons: [] },
-  { code: "provider_unavailable", status: "off", message: /Remote access did not turn on\./, buttons: ["Try again", "Try another way"] },
+  // RAISE rule 4: failed-state copy uses plain words and ends with a next step.
+  { code: "provider_unavailable", status: "off", message: /Couldn't reach the service\. It may be busy or down\. Try again\./, buttons: ["Try again", "Try another way"] },
   { code: "verification_failed", status: "needs-action", message: /address isn't working from the internet yet/, buttons: ["Try again"] },
   { code: "proof_refresh_unsupported", status: "needs-action", message: /Turn it off and on to get a fresh one/, buttons: ["Turn off and on"] },
   { code: "consent_changed", status: "needs-action", message: /Details of this connection changed/, buttons: ["Review"] },
@@ -21,7 +22,8 @@ const rows: Row[] = [
   { code: "host_supervisor_unavailable", status: "needs-action", message: /background service isn't running\. Quit and reopen DataConnect\./, buttons: ["Copy diagnostics"] },
   { code: "host_runtime_unavailable", status: "needs-action", message: /background service isn't running\. Quit and reopen DataConnect\./, buttons: ["Copy diagnostics"] },
   { code: "route_reconciliation_required", status: "needs-action", message: /We lost track of the address\. It may still be on\./, buttons: ["Turn off"] },
-  { code: "cleanup_unconfirmed", status: "needs-action", message: /Couldn't confirm .* closed your address\./, buttons: ["Try again"] },
+  // RAISE rule 4: the warning names the address plainly and ends with an action.
+  { code: "cleanup_unconfirmed", status: "needs-action", message: /couldn't confirm that your address closed\. Turn it off again to check\./i, buttons: ["Try again"] },
   { code: "reachability_unavailable", status: "off", message: /couldn't turn on\. Try again, or copy the details for support\./, buttons: ["Try again"] },
   { code: "internal_error", status: "off", message: /couldn't turn on\. Try again, or copy the details for support\./, buttons: ["Try again"] },
 ];

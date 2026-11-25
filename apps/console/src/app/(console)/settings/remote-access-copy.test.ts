@@ -26,7 +26,7 @@ import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 import { TurnOnCard } from "./turn-on.tsx";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -296,7 +296,19 @@ test("every error message is plain, and an unknown code gets the generic message
   assert.equal(publicError("some_future_code", "server sentence").serverMessage, "server sentence");
   assert.equal(publicError(undefined).message, GENERIC_ERROR);
   assert.equal(publicError("toString").message, GENERIC_ERROR);
-  assert.equal(publicError("host_path_too_long").message, "DataConnect's data folder path is too long for remote access.");
+  // RAISE rule 4: the failure sentence now ends with a plain next step.
+  assert.equal(publicError("host_path_too_long").message, "DataConnect's data folder path is too long for remote access. Choose a shorter folder path and try again.");
+});
+
+test("error sentences stay plain and end with a next step", () => {
+  const forbidden = /\b(?:grant|client|bearer|scope|token|run|stream|connector|manifest|projection|cursor|trace|verdict|coverage|fleet|subscription|exporter|provider\s+app|oauth|pkce|dcr|jwks)\b/i;
+  const nextStep = /^(?:try|copy|set|enter|turn|fix|ask|reload|wait|unlock|choose|quit|check|open|finish|change|save|restart|review)\b/i;
+  // RAISE rule 4: error copy appears outside Details, so keep every mapped sentence in the plain vocabulary and end with an action.
+  for (const [code, message] of Object.entries(ERROR_MESSAGES)) {
+    assert.doesNotMatch(message, forbidden, `${code}: ${message}`);
+    const lastSentence = message.match(/[^.!?]+[.!?]$/)?.[0].trim() ?? message;
+    assert.match(lastSentence, nextStep, `${code} does not end with a next step: ${message}`);
+  }
 });
 
 // ---------- 3. rendered states ----------
@@ -375,7 +387,7 @@ function world(overrides: Partial<Record<string, Result>> = {}): Handler {
       observedAt: isoA,
       schemaVersion: 1,
       providers: [
-        provider("p-tunnel", "Tunnel for reachability", "public"),
+        provider("p-tunnel", "Tunnel for reachability", "internet"),
         provider("p-lan", "Local network", "lan"),
       ],
     }),
@@ -493,8 +505,9 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     await settle();
     const text = visibleText(container);
     assertClean("ready to turn on", text);
-    assert.match(text, /Step 2 of 2/);
-    assert.match(text, /Turn on/);
+    // RAISE rule 2: the first choice names the person's outcome instead of a setup step.
+    assert.match(text, /Use DataConnect from my phone/);
+    assert.match(text, /Let ChatGPT reach it/);
     // One line per kind under the caption naming the selected way.
     assert.match(text, /For Tunnel for remote access:/);
     assert.match(text, /People who open the address must sign in with your password\. Apps also need your permission\./);
@@ -505,6 +518,47 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     assert.doesNotMatch(text, /Continue setup|Staged configuration|Reload|Start setup|Save and review|Discard|Review reachability|Apply reachability/);
     assert.doesNotMatch(text, /\b(draft|route|attached|session|durable)\b/i);
     assert.equal(container.querySelector('input[type="checkbox"]'), null, "there is no approval checkbox");
+  });
+});
+
+test("clearing a port asks before it acknowledges that remote access may stop", async () => {
+  const calls: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  const handler: Handler = (url, body) => {
+    calls.push({ url, ...(body ? { body } : {}) });
+    return url === "/state"
+      ? ok({ routes: [], reasons: {}, starting: false })
+      : url === "/host-settings"
+        ? body
+          ? ok({ ...host.value, port: { known: true, value: 4567 } })
+          : ok({ ...host, value: { ...host.value, port: { known: true, value: 4567 } } })
+        : world()(url, body);
+  };
+  await withScreen(handler, async ({ container, act, settle }) => {
+    await settle();
+    const hostDetails = [...container.querySelectorAll("details")].find((item) => item.querySelector("summary")?.textContent === "This computer") as HTMLDetailsElement;
+    hostDetails.open = true;
+    const save = [...container.querySelectorAll("button")].find((item) => item.textContent === "Save port")!;
+    await act(async () => save.click());
+    await settle();
+    assert.match(container.textContent ?? "", /Saving this port will stop existing remote access addresses/);
+    assert.equal(calls.filter((call) => call.url === "/host-settings" && call.body).length, 0);
+    // RAISE rule 5: Cancel leaves the host settings unchanged until the owner confirms the warning.
+    const cancel = [...container.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find((item) => item.textContent === "Cancel")!;
+    await act(async () => cancel.click());
+    await settle();
+    assert.equal(calls.filter((call) => call.url === "/host-settings" && call.body).length, 0);
+    const saveAgain = [...container.querySelectorAll("button")].find((item) => item.textContent === "Save port")!;
+    await act(async () => saveAgain.click());
+    await settle();
+    const confirm = [...container.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find((item) => item.textContent === "Save port")!;
+    await act(async () => confirm.click());
+    await settle();
+    assert.deepEqual(calls.find((call) => call.url === "/host-settings" && call.body)?.body, {
+      expectedRevision: "h1",
+      mode: "off",
+      port: null,
+      acknowledgeDisconnect: true,
+    });
   });
 });
 
@@ -668,6 +722,9 @@ test("setup, approval and consent cards show no codes, flags or ISO times", () =
       })
     ),
   ];
+  // RAISE rule 1: changed route details use a separate approval action label.
+  assert.match(html[1] ?? "", /Use the new details/);
+  assert.doesNotMatch(html[1] ?? "", /Turn on again/);
   for (const markup of html) {
     const dom = new JSDOM(`<div id="r">${markup}</div>`);
     assertClean("consent card", visibleText(dom.window.document.querySelector("#r")!));
@@ -728,6 +785,9 @@ async function failFirstAction(container: Element, run: typeof act, settle: () =
   await settle();
   const turnOn = [...container.querySelectorAll("button")].find((node) => node.textContent === "Turn on remote access")!;
   await run(async () => turnOn.click());
+  await settle();
+  const confirm = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue turning on")!;
+  await run(async () => confirm.click());
   await settle();
 }
 const alertText = (container: Element) => container.querySelector("[role=alert]")?.textContent ?? "";
@@ -801,10 +861,10 @@ test("polls that finish out of order apply the newest answer only", async (t) =>
     await run(async () => t.mock.timers.tick(3000)); // poll 2 starts and waits
     await run(async () => t.mock.timers.tick(3000)); // poll 3 finishes first
     await settle();
-    assert.match(visibleText(container), /couldn.t confirm the service closed your address/i);
+    assert.match(visibleText(container), /couldn.t confirm that your address closed/i);
     await run(async () => releases[0]!(ok({ routes: [], reasons: {}, starting: false }))); // the older answer lands last
     await settle();
-    assert.match(visibleText(container), /couldn.t confirm the service closed your address/i, "an older poll overwrote a newer one");
+    assert.match(visibleText(container), /couldn.t confirm that your address closed/i, "an older poll overwrote a newer one");
   });
 });
 
@@ -824,10 +884,13 @@ test("the fallback error names the action that failed", async () => {
 test("a failed turn off says so on screen", async () => {
   const stop = fail("brand_new_server_code");
   const handler: Handler = (url, body) =>
-    url.endsWith("/stop") ? stop : world()(url, body);
+    url.includes("/stop") ? stop : world()(url, body);
   await withScreen(handler, async ({ container, act: run, settle }) => {
     const press = async (label: RegExp) => {
-      const button = [...container.querySelectorAll("button")].findLast((node) => label.test(node.textContent ?? ""));
+      const dialog = container.querySelector('[role="alertdialog"]');
+      const buttons = [...(dialog?.querySelectorAll("button") ?? container.querySelectorAll("button"))];
+      const button = (dialog ? buttons.find((node) => label.test(node.textContent ?? "")) : buttons.findLast((node) => label.test(node.textContent ?? "")))
+        ?? [...container.querySelectorAll("button")].findLast((node) => label.test(node.textContent ?? ""));
       assert.ok(button, `no button matching ${label}`);
       await run(async () => button.click());
       await settle();
@@ -835,6 +898,7 @@ test("a failed turn off says so on screen", async () => {
     const ack = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
     if (ack) await run(async () => ack.click());
     // The last Turn off is the route's; the first belongs to the address that may still be on.
+    await press(/^Turn off$/);
     await press(/^Turn off$/);
     assert.match(alertText(container), /couldn.t turn off\. It may still be on/);
   });

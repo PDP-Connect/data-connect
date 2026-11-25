@@ -20,7 +20,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -49,7 +49,7 @@ const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt
 const way = (providerId: string, over: Record<string, unknown> = {}) => ({
   providerId,
   label: `Label ${providerId}`,
-  reach: providerId === "lan" ? "lan" : "public",
+  reach: providerId === "lan" ? "lan" : "internet",
   transport: "https",
   availability: { session: available, durable: available },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -159,6 +159,12 @@ async function withScreen<T>(
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
         await settle();
+        if (label.source === "^Turn on remote access$") {
+          const confirm = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue turning on");
+          assert.ok(confirm, "turn on waits for its disconnect confirmation");
+          await act(async () => confirm.click());
+          await settle();
+        }
       },
       pickRadio: async (label) => {
         const radio = [...container.querySelectorAll("label, section[aria-label='Recommended way']")]
@@ -317,10 +323,12 @@ test("a Funnel setup blocked on the administrator step demotes Funnel and recomm
   await withScreen(funnelHost(blockedView("tailscale-funnel-policy")), async ({ calls, container, press, text }) => {
     assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
     assert.ok(draftsFor(calls).includes("localhost-run"), "the temporary address is prepared");
-    assert.match(text(), /Tailscale · public address can't be used now: Funnel isn't allowed on this Tailscale device yet\. Ask an administrator to allow it\. Using Temporary address instead\./);
+    // RAISE rule 4: the step explains what to do without naming its protocol feature.
+    assert.match(text(), /Tailscale · public address can't be used now: An administrator needs to allow this address on the computer\. Using Temporary address instead\./);
     await press(/^Other ways$/);
     const row = [...container.querySelectorAll("label")].find((node) => /Tailscale · public address/.test(node.textContent ?? ""))!;
-    assert.match(row.textContent!, /Ask an administrator to allow it/);
+    // RAISE rule 4: the missing step names the action in plain words.
+    assert.match(row.textContent!, /An administrator needs to allow this address on the computer/);
     assert.equal(row.querySelector("input")!.disabled, true);
     const link = row.querySelector("a")!;
     assert.equal(link.getAttribute("href"), "https://login.tailscale.com/admin/acls");
@@ -400,7 +408,8 @@ for (const alternative of [true, false]) {
         await settle();
       }
       assert.deepEqual(draftsFor(calls), alternative ? ["localhost-run", "cloudflare-named"] : ["localhost-run"]);
-      assert.match(text(), /Needs SSH permission \(denied\)/);
+      // RAISE rule 4: a machine-specific prerequisite is explained in plain words.
+      assert.match(text(), /This way needs another step before it can work/);
       if (alternative) assert.match(text(), /Using Cloudflare instead/);
       else assert.doesNotMatch(text(), /Turn on remote access/);
     });

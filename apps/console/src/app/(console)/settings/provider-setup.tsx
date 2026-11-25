@@ -109,13 +109,21 @@ function SetupOperationAction({
     (action.kind === "open-url" && !action.step?.browser)
   ) {
     const url = action.href ? URL.parse(action.href) : null
+    const isAccountPolicyStep = action.id === "tailscale-funnel-policy"
+    const instructions = action.instructions ?? action.help ?? action.disclosure.text
     return (
       <div className="grid gap-2">
-        <h4 className="pdpp-label">{plain(action.label)}</h4>
-        <p>{action.instructions ?? action.help ?? action.disclosure.text}</p>
+        <h4 className="pdpp-label">{isAccountPolicyStep ? "Tailscale account settings" : plain(action.label)}</h4>
+        <p>{isAccountPolicyStep ? "Ask an administrator to allow this address, then check again." : instructions}</p>
+        {isAccountPolicyStep ? (
+          <details>
+            <summary>Details</summary>
+            <p>{plain(action.label)}. {plain(instructions)}</p>
+          </details>
+        ) : null}
         {url?.protocol === "https:" && !url.username && !url.password ? (
           <a href={url.href} rel="noreferrer" target="_blank">
-            {plain(action.label)}
+            {isAccountPolicyStep ? "Open account settings" : plain(action.label)}
           </a>
         ) : null}
         {consent ? <ApprovalDisclosure actionDisclosure={action.disclosure} consent={consent} shown={[action.label, action.instructions ?? action.help ?? action.disclosure.text]} /> : null}
@@ -593,7 +601,7 @@ export function ProviderSetup({
         if (next.id === "tailscale-account" || next.id === "tailscale-tailnet") {
           const typed = (next.id === "tailscale-account" ? account : tailnet).trim()
           if (typed === "") {
-            setNotice(next.id === "tailscale-account" ? "Enter your Tailscale email." : "Enter your tailnet name.")
+            setNotice(next.id === "tailscale-account" ? "Enter your email address." : "Enter your Tailscale address.")
             break
           }
           input = { value: typed }
@@ -668,17 +676,17 @@ export function ProviderSetup({
         {chainAsksFields(action) ? (
           <>
             <label className="grid gap-2">
-              Tailscale email
+              Email address
               <Input autoComplete="off" disabled={busy} onChange={event => setAccount(event.target.value)} placeholder="name@example.com" type="email" value={account} />
             </label>
             <label className="grid gap-2">
-              Your tailnet name (ends in .ts.net)
-              <Input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} placeholder="example.ts.net" type="text" value={tailnet} />
+              Your Tailscale address
+              <Input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} placeholder="Name shown in Tailscale" type="text" value={tailnet} />
             </label>
             <p>
-              Tailscale shows it under DNS in its admin console.{" "}
+              Find this address on the DNS page of your Tailscale admin console.{" "}
               <a href={dnsUrl ?? TAILNET_NAME_HELP_URL} rel="noreferrer" target="_blank">
-                Find it in Tailscale
+                Find your address
               </a>
             </p>
           </>
@@ -700,7 +708,11 @@ export function ProviderSetup({
     return (
       <section aria-label={`Finish setting up ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
-        <p role="status">{adminCopy.line}</p>
+        <p role="status">Finish one step in your account, then check again.</p>
+        <details>
+          <summary>Details</summary>
+          <p>{adminCopy.line}</p>
+        </details>
         {notice ? <p role="status">{notice}</p> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}

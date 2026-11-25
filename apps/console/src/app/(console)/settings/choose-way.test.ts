@@ -13,7 +13,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -38,7 +38,7 @@ const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt
 const way = (providerId: string, over: Record<string, unknown> = {}) => ({
   providerId,
   label: `Label ${providerId}`,
-  reach: providerId === "lan" ? "lan" : "public",
+  reach: providerId === "lan" ? "lan" : "internet",
   transport: "https",
   availability: { session: available, durable: available },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -111,7 +111,9 @@ test("Tailscale with Funnel blocked is not recommended and its row shows the mis
   const lasting = otherWays(inv(funnelBlocked), caps, "localhost-run").find((group) => group.id === "lasting")!;
   const row = lasting.rows.find((item) => item.providerId === "tailscale-funnel")!;
   assert.equal(row.usable, false);
-  assert.match(row.missing!.text, /Funnel isn't allowed/);
+  // RAISE rule 4: the account-specific step is described without the protocol name.
+  assert.match(row.missing!.text, /Your account needs another step/);
+  assert.doesNotMatch(row.missing!.text, /Funnel/);
   assert.equal(lasting.rows.at(-1)!.providerId, "tailscale-funnel", "a way that cannot run comes last");
 });
 
@@ -125,7 +127,8 @@ test("a missing Tailscale app shows Get Tailscale", () => {
 
 test("Other ways has three groups, no development row, and no code in any text", () => {
   const groups = otherWays(inv(tailscaleReady), caps, "tailscale-funnel");
-  assert.deepEqual(groups.map((group) => group.title), ["Lasting address for AI apps", "Only my own devices", "Advanced"]);
+  // RAISE rule 2: alternative ways are grouped by what the person wants to do.
+  assert.deepEqual(groups.map((group) => group.title), ["Addresses ChatGPT can open", "Your phone and computers", "Details"]);
   const rows = groups.flatMap((group) => group.rows);
   assert.ok(!rows.some((row) => row.providerId === "ngrok-tcp-passthrough"), "detect-only row hidden");
   assert.ok(!rows.some((row) => row.providerId === "tailscale-funnel"), "the recommended way is not repeated");
@@ -260,20 +263,23 @@ const changesHostFor = (calls: Call[], providerId: string) =>
       (call.body?.providerId === providerId || call.url.includes(`d-${providerId}/`))
   );
 
-test("the card recommends the temporary address and Other ways opens in three groups", async () => {
+test("the phone and ChatGPT outcomes lead; Other ways still opens the full list", async () => {
   await withScreen(noTailscale, async ({ container, press, text }) => {
     const card = container.querySelector("[aria-label='Recommended way']")!;
     assert.match(card.textContent!, /Temporary address/);
-    assert.match(card.textContent!, /Recommended/);
-    assert.match(card.textContent!, /Free, no account, ready in seconds\. Good for a quick test\./);
+    // RAISE rule 3: the suggested option uses plain words without a recommendation badge.
+    assert.doesNotMatch(card.textContent!, /Recommended/);
+    assert.match(text(), /Use DataConnect from my phone/);
+    assert.match(text(), /Let ChatGPT reach it/);
+    assert.match(card.textContent!, /Free\. Needs no account\./);
     assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
     await press(/^Other ways$/);
     const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
-    assert.deepEqual(headings.slice(0, 2), ["Lasting address for AI apps", "Only my own devices"]);
-    // The advanced row lists its ways inline, next to the group title.
-    assert.match(headings[2] ?? "", /^Advanced · Your own address, ngrok \(advanced, TLS\), tunnl\.gg›$/, headings[2] ?? "no advanced row");
+    // RAISE rule 4: the alternative groups use the same plain outcome language.
+    assert.deepEqual(headings.slice(0, 2), ["Addresses ChatGPT can open", "Your phone and computers"]);
+    assert.match(headings[2] ?? "", /^Details · /, headings[2] ?? "no Details row");
     assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
-    assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Advanced starts closed");
+    assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Details starts closed");
     const shown = container.querySelector("fieldset")!.textContent!;
     assert.doesNotMatch(shown, /Label |ngrok-tcp|detect-only|deferred|admitted/);
     assert.deepEqual(bannedIn(shown), []);

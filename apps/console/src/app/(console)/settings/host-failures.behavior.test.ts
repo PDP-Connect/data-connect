@@ -49,7 +49,7 @@ const review = { id: "rev-1", kind: "route", candidate };
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -122,6 +122,14 @@ async function withScreen<T>(
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
         await settle();
+        // Decision 3: acknowledge the possible disconnect before the start request is sent.
+        const confirm = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Turn on remote access"] button')].find(
+          (node) => node.textContent === "Continue turning on"
+        );
+        if (confirm) {
+          await act(async () => confirm.click());
+          await settle();
+        }
       },
     });
   } finally {

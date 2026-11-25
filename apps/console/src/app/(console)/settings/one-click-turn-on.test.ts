@@ -14,7 +14,7 @@ import { publicError } from "./reachability-errors.ts";
 import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -59,7 +59,7 @@ const review = (id: string, digest: string, facts?: ReturnType<typeof fact>[], e
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -388,6 +388,7 @@ async function withScreen<T>(
   run: (screen: {
     container: Element;
     calls: Call[];
+    click: (label: RegExp) => Promise<void>;
     press: (label: RegExp) => Promise<void>;
     settle: () => Promise<void>;
     text: () => string;
@@ -424,17 +425,22 @@ async function withScreen<T>(
   try {
     await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
     await settle();
+    const click = async (label: RegExp) => {
+      const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
+      assert.ok(button, `no button matching ${label}`);
+      await act(async () => button.click());
+      await settle();
+    };
     return await run({
       container,
       calls,
       settle,
       unmount,
       text: () => container.textContent ?? "",
+      click,
       press: async (label) => {
-        const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
-        assert.ok(button, `no button matching ${label}`);
-        await act(async () => button.click());
-        await settle();
+        await click(label);
+        if (label.source === "^Turn on remote access$") await click(/^Continue turning on$/);
       },
     });
   } finally {
@@ -468,6 +474,16 @@ test("opening step 2 prepares a review without applying anything", async () => {
     assert.match(text(), /Turn on remote access/);
     assert.deepEqual(approvals(calls), []);
     assert.ok(!calls.some((call) => call.url.includes("/approve") || call.url.includes("/stop")));
+  });
+});
+
+test("Turn on remote access asks before sending the disconnect acknowledgement", async () => {
+  await withScreen(host({ "/operations": ok({ operationId: "op-1" }) }), async ({ calls, click, text }) => {
+    await click(/^Turn on remote access$/);
+    assert.match(text(), /Turning on remote access may interrupt this page/);
+    assert.deepEqual(approvals(calls), []);
+    await click(/^Cancel$/);
+    assert.deepEqual(approvals(calls), []);
   });
 });
 

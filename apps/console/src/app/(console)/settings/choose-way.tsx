@@ -1,7 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Badge } from "@/components/ui/badge.tsx";
+import { Button } from "@/components/ui/button.tsx";
 import { type Blocks, type WayRow, otherWays } from "./choose-way.ts";
 import type { Inventory } from "./prepare-remote-access.ts";
 
@@ -10,7 +10,7 @@ type Capabilities = Parameters<typeof otherWays>[1];
 function MissingStep({ row }: { row: WayRow }) {
   if (!row.missing) return null;
   return (
-    <span className="text-[13px] text-amber-600 dark:text-amber-400">
+    <span className="text-[13px] text-attention">
       {row.missing.text}
       {row.missing.link ? (
         <>
@@ -28,9 +28,7 @@ function MissingStep({ row }: { row: WayRow }) {
 function WayChoice({ row, checked, onPick }: { row: WayRow; checked: boolean; onPick: (providerId: string) => void }) {
   return (
     <label
-      className={`grid cursor-pointer gap-1 rounded-xl border p-3.5 transition-colors has-[input:focus-visible]:border-ring ${
-        checked ? "border-primary bg-primary/5" : row.usable ? "hover:border-ring" : "opacity-60"
-      }`}
+      className={`grid cursor-pointer gap-1 border-b border-border/70 py-3 transition-colors has-[input:focus-visible]:bg-muted ${checked ? "text-foreground" : "text-muted-foreground"} ${row.usable ? "" : "opacity-60"}`}
     >
       <span className="flex items-start gap-3">
         <input
@@ -52,6 +50,73 @@ function WayChoice({ row, checked, onPick }: { row: WayRow; checked: boolean; on
   );
 }
 
+function OutcomeChoice({
+  title,
+  line,
+  row,
+  checked,
+  disabled,
+  onPick,
+}: {
+  title: string;
+  line: string;
+  row: WayRow;
+  checked: boolean;
+  disabled: boolean;
+  onPick: (providerId: string) => void;
+}) {
+  return (
+    <Button
+      aria-pressed={checked}
+      className="h-auto min-h-11 w-full justify-start rounded-none border-b border-border/70 px-0 py-3 text-left"
+      disabled={disabled || !row.usable}
+      onClick={() => onPick(row.providerId)}
+      type="button"
+      variant="ghost"
+    >
+      <span className="grid gap-1 whitespace-normal">
+        <span className="text-[15px] font-medium text-foreground">{title}</span>
+        <span className="text-[13px] font-normal text-muted-foreground">{line}</span>
+      </span>
+    </Button>
+  );
+}
+
+export function OutcomeWays({
+  phone,
+  chatgpt,
+  pickedId,
+  disabled,
+  onPick,
+}: {
+  phone: WayRow;
+  chatgpt: WayRow;
+  pickedId: string | null;
+  disabled: boolean;
+  onPick: (providerId: string) => void;
+}) {
+  return (
+    <section aria-label="Choose how to use remote access" className="grid gap-1">
+      <OutcomeChoice
+        checked={pickedId === phone.providerId}
+        disabled={disabled}
+        line={phone.line || "Free. Needs a Tailscale account."}
+        onPick={onPick}
+        row={phone}
+        title="Use DataConnect from my phone"
+      />
+      <OutcomeChoice
+        checked={pickedId === chatgpt.providerId}
+        disabled={disabled}
+        line={chatgpt.line || "Needs a web address that ChatGPT can open."}
+        onPick={onPick}
+        row={chatgpt}
+        title="Let ChatGPT reach it"
+      />
+    </section>
+  );
+}
+
 /** The recommended way, above Turn on. It stays here when the owner picks another way below. */
 export function RecommendedWay({
   row,
@@ -66,11 +131,7 @@ export function RecommendedWay({
 }) {
   return (
     <section aria-label="Recommended way" className="grid gap-1">
-      <label
-        className={`grid cursor-pointer gap-1 rounded-xl border p-3.5 transition-colors has-[input:focus-visible]:border-ring ${
-          checked ? "border-primary bg-primary/5" : "hover:border-ring"
-        }`}
-      >
+      <label className="grid cursor-pointer gap-1 border-b border-border/70 py-3 has-[input:focus-visible]:bg-muted">
         <span className="flex items-start gap-3">
           <input
             aria-label={row.title}
@@ -83,10 +144,7 @@ export function RecommendedWay({
             value={row.providerId}
           />
           <span className="grid gap-1.5">
-            <span className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold">{row.title}</span>
-              <Badge variant="secondary">Recommended</Badge>
-            </span>
+            <span className="text-[15px] font-medium">{row.title}</span>
             {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
           </span>
         </span>
@@ -136,7 +194,7 @@ export function OtherWays({
         ) : (
           <section aria-label={group.title} className="grid gap-2" key={group.id}>
             <div className="grid gap-0.5">
-              <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{group.title}</h4>
+              <h4 className="text-[13px] font-medium text-muted-foreground">{group.title}</h4>
               {group.note ? <p className="text-[13px] text-muted-foreground">{group.note}</p> : null}
             </div>
             <div className="grid gap-2.5">{rows}</div>

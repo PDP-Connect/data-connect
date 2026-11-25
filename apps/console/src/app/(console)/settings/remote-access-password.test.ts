@@ -9,11 +9,13 @@ import { createRoot } from "react-dom/client"
 import type { requestReachability } from "./reachability-client.ts"
 
 const windowCalls: string[] = []
+let passwordWindowAvailable = true
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: { requestReachability: async () => { throw new Error("Use the test transport") } },
 })
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: {
+    canOpenOwnerPasswordWindowAction: async () => passwordWindowAvailable,
     requestOwnerPasswordWindowAction: async () => {
       windowCalls.push(dom?.window.location.hash ?? "")
       return { ok: true }
@@ -29,7 +31,21 @@ async function mount(passwordSet: boolean | undefined, hash = "") {
   const request = (async (url: string) => ({
     ok: true,
     data:
-      url.startsWith("/catalog") ? { providers: [] }
+      url.startsWith("/catalog") ? {
+        catalogRevision: "c1",
+        observedAt: "2026-11-18T13:00:00.000Z",
+        schemaVersion: 1,
+        providers: [{
+          providerId: "localhost-run",
+          label: "Temporary address",
+          reach: "internet",
+          transport: "https_tunnel",
+          availability: { session: { reason: "admitted", state: "available" } },
+          configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
+          facts: [],
+          prerequisites: [],
+        }],
+      }
       : url === "/state" ? { routes: [], reasons: {}, starting: false, ...(passwordSet === undefined ? {} : { passwordSet }) }
       : url === "/host-settings" ? { known: false, reason: "unavailable" }
       : {},
@@ -37,7 +53,7 @@ async function mount(passwordSet: boolean | undefined, hash = "") {
   const root = createRoot(dom.window.document.querySelector("#root")!)
   const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
   await act(async () => root.render(createElement(RemoteAccessSetting, { request })))
-  await act(async () => {})
+  await act(async () => { await Promise.resolve(); await Promise.resolve() })
   return {
     window: dom.window,
     container: dom.window.document.querySelector("#root")!,
@@ -48,14 +64,27 @@ async function mount(passwordSet: boolean | undefined, hash = "") {
   }
 }
 
-test("step 1 shows only while no password is set, and nothing can be turned on", async () => {
+test("the desktop app can set the missing password before remote access is available", async () => {
+  passwordWindowAvailable = true
   const screen = await mount(false)
   try {
     const text = screen.container.textContent ?? ""
     assert.match(text, /Step 1: Set a password/)
     assert.match(text, /only\s+thing stopping them/)
-    assert.doesNotMatch(text, /Step 2 of 2|Turn on remote access/)
+    assert.doesNotMatch(text, /Turn on remote access/)
     assert.doesNotMatch(text, /Password saved/)
+  } finally {
+    await screen.stop()
+  }
+})
+
+test("a browser gets directions to the desktop app instead of a dead-end password button", async () => {
+  passwordWindowAvailable = false
+  const screen = await mount(false)
+  try {
+    assert.match(screen.container.textContent ?? "", /Set a password from the DataConnect app on the computer that runs it\./)
+    assert.equal([...screen.container.querySelectorAll("button")].some((item) => item.textContent === "Set password"), false)
+    assert.doesNotMatch(screen.container.textContent ?? "", /Step 1: Set a password/)
   } finally {
     await screen.stop()
   }
@@ -66,8 +95,8 @@ test("with a password set there is no step 1 and step 2 is open", async () => {
     const screen = await mount(passwordSet)
     try {
       assert.doesNotMatch(screen.container.textContent ?? "", /Set a password|Password saved/)
-      assert.match(screen.container.textContent ?? "", /Step 2 of 2/)
-      assert.match(screen.container.textContent ?? "", /Turn on/)
+      assert.match(screen.container.textContent ?? "", /Use DataConnect from my phone/)
+      assert.match(screen.container.textContent ?? "", /Let ChatGPT reach it/)
     } finally {
       await screen.stop()
     }
@@ -86,6 +115,7 @@ test("coming back from the password restart shows the saved note once and clears
 })
 
 test("Set password records the return fragment before the native window opens", async () => {
+  passwordWindowAvailable = true
   windowCalls.length = 0
   const screen = await mount(false)
   try {
