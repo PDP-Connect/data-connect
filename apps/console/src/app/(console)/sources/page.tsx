@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Sources — the Ink Carbon "loading dock" view.
+ * Sources — the paged data sources list.
  *
- * Reskinned per docs/design-system/ink-carbon/project/recordroom/rr-sources.jsx: a
- * master-detail over the owner's configured source instances. The left list is
- * health-flagged; the right "passport" (a Sheet) carries identity + a KV block
- * + foot actions; below it a stream manifest Table links every stream into
- * Explore. Records are never rendered here — Explore is the one reader.
+ * The page reads one bounded page of summaries and projects each data source
+ * into a row. Row actions and folded groups keep the other list controls close
+ * to the data source they affect. Records are never rendered here — Explore is
+ * the one reader.
  *
  * Data path is REAL: the page fetches exactly ONE bounded page of connector
  * summaries (`listConnectorSummaries({ cursor, limit: 100 })` — never the
  * exhaustive fold) through the existing owner-token `liveDashboardDataSource`,
- * and projects it with the pure `toSourcesView` mapping. A fleet larger than
+ * and projects it with the pure `toSourcesView` mapping. A list larger than
  * one page is reachable via the shared `ConnectorSummaryPager` (a bounded
  * `page_cursor` Next link + explicit Restart; Previous is the browser's own
  * back button, never URL-side history), not by prefetching every page
@@ -51,6 +50,7 @@ import {
   revokeConnectionAction,
 } from "./[connector]/actions.ts";
 import { runConnectorNowAction } from "./actions.ts";
+import { readConnectorUpdates } from "./connector-updates-read.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
 import { SourcesView } from "./sources-view.tsx";
 import {
@@ -59,6 +59,7 @@ import {
   type SourcesRuntimeAdvisory,
   toSourcesView,
 } from "./sources-view-model.ts";
+import { buildUpdatesReadyDemo, isUpdatesReadyDemoScenario, readUpdatesReadySafely } from "./updates-ready-model.ts";
 
 const SOURCES_PATH = "/sources";
 const REFERENCE_REVISION = process.env.PDPP_REFERENCE_REVISION?.trim() || undefined;
@@ -112,6 +113,7 @@ export default async function RecordsIndexPage({
     );
     const scenario = isSourcesDemoScenario(demoParam) ? demoParam : "mixed";
     const instances = toSourcesView(buildSourcesDemoSummaries(scenario));
+    const updatesReadyDemo = isUpdatesReadyDemoScenario(demoParam) ? buildUpdatesReadyDemo(demoParam) : undefined;
     // Seed a churn advisory for the demo so the protocol-toned notice is
     // screenshot-able without a live version-stats route.
     const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
@@ -130,6 +132,7 @@ export default async function RecordsIndexPage({
           resumeSetupAction={resumeSetupConnectionAction}
           revokeAction={revokeConnectionAction}
           runNowAction={runConnectorNowAction}
+          updatesReadyDemo={updatesReadyDemo}
         />
       </RecordroomShellWithPalette>
     );
@@ -170,6 +173,7 @@ export default async function RecordsIndexPage({
   const summaries = [...page.items];
   const runtimeAdvisory: SourcesRuntimeAdvisory | null = buildSourcesRuntimeAdvisory(page.runtime);
   const instances = toSourcesView(summaries, { connectorIcons, manifests });
+  const updatesReady = readUpdatesReadySafely(readConnectorUpdates);
   // The poller is mounted unconditionally; `running` (derived from any active
   // run) only selects the fast vs. idle cadence. Named `runningCount` to match
   // the records-poller mount invariant.
@@ -191,6 +195,7 @@ export default async function RecordsIndexPage({
         revokeAction={revokeConnectionAction}
         runNowAction={runConnectorNowAction}
         runtimeAdvisory={runtimeAdvisory}
+        updatesReady={updatesReady}
       />
       <ConnectorSummaryPager
         basePath={SOURCES_PATH}

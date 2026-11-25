@@ -5,15 +5,16 @@
 
 import { Menu } from "@base-ui/react/menu";
 import { buttonVariants, IcButton, Text } from "@pdpp/brand-react";
-import { formatRelative } from "@pdpp/display";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useState, useTransition } from "react";
+import { Suspense, useCallback, useState, useTransition } from "react";
 import { ConnectorMark } from "../components/connector-mark.tsx";
 import type { RunNowResult } from "./actions.ts";
 import { SourceRowStatus } from "./source-row-status.tsx";
 import type { DuplicateSourceReview, SourceInstanceView, SourcesChurnAdvisory, SourcesRuntimeAdvisory } from "./sources-view-model.ts";
-import { buildDuplicateSourceReview, filterSourcesForList, orderSourcesForList, reactivateRecordCopy } from "./sources-view-model.ts";
+import { buildDuplicateSourceReview, collapseSetupFailedSources, filterSourcesForList, orderSourcesForList, reactivateRecordCopy, sourceRowMenuItems } from "./sources-view-model.ts";
+import { UpdatesReadySlot } from "./updates-ready.tsx";
+import type { UpdatesReadyModel } from "./updates-ready-model.ts";
 import "./sources-view.css";
 
 interface SourcesViewProps {
@@ -28,6 +29,8 @@ interface SourcesViewProps {
   revokeAction: FormAction;
   runNowAction: RunNowAction;
   runtimeAdvisory?: SourcesRuntimeAdvisory | null;
+  updatesReady?: Promise<UpdatesReadyModel | null>;
+  updatesReadyDemo?: { initialResult: string | null; model: UpdatesReadyModel };
 }
 
 type ToastState =
@@ -50,11 +53,13 @@ export function SourcesView({
   revokeAction,
   runNowAction,
   runtimeAdvisory,
+  updatesReady,
+  updatesReadyDemo,
 }: SourcesViewProps) {
   const [query, setQuery] = useState("");
   const archived = instances.filter((instance) => instance.archived);
   const disconnected = instances.filter((instance) => instance.revoked && !instance.archived && !instance.setupFailed);
-  const setupNotCompleted = instances.filter((instance) => instance.setupFailed);
+  const setupNotCompleted = collapseSetupFailedSources(instances).setupFailedGroups.map((group) => group.representative);
   const listRows = orderSourcesForList(instances.filter((instance) =>
     !instance.archived && !instance.revoked && !instance.setupFailed
   ));
@@ -71,7 +76,16 @@ export function SourcesView({
 
   return (
     <>
-      <UpdatesReadySlot />
+      {updatesReady || updatesReadyDemo ? (
+        <Suspense fallback={null}>
+          <UpdatesReadySlot
+            demoModel={updatesReadyDemo?.model}
+            initialResult={updatesReadyDemo?.initialResult}
+            interactive={interactive}
+            updates={updatesReady}
+          />
+        </Suspense>
+      ) : null}
       {runtimeAdvisory ? <RuntimeNotice advisory={runtimeAdvisory} /> : null}
       {churnAdvisory ? <ChurnNotice advisory={churnAdvisory} /> : null}
       {buildDuplicateNotice(buildDuplicateSourceReview(instances.filter((instance) => !(instance.archived || instance.setupFailed))))}
@@ -127,10 +141,6 @@ export function SourcesView({
       </section>
     </>
   );
-}
-
-function UpdatesReadySlot() {
-  return null;
 }
 
 function SourceRow({
@@ -303,13 +313,7 @@ function SourceRowMenu({ instance, interactive, pending, onSync, onReprocess, re
 }) {
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
   const [confirmingReactivate, setConfirmingReactivate] = useState(false);
-  const action = instance.statusWords.action;
-  const canSyncFromServer = instance.sourceKind !== "manual" && instance.sourceKind !== "local_device" &&
-    !instance.connectorNotInstalled && !instance.revoked && !instance.archived && !instance.setupFailed &&
-    instance.sourceScope !== "paused" && instance.sourceScope !== "draft" && !instance.isRunning;
-  const rowStartsSync = action?.kind === "sync_now" || action?.kind === "retry_first_sync" ||
-    (action?.kind === "server_cta" && instance.primaryVerdictAction?.ownerRunnable &&
-      (instance.primaryVerdictAction.kind === "refresh_now" || instance.primaryVerdictAction.kind === "retry_gap"));
+  const menuItems = sourceRowMenuItems(instance, interactive);
 
   return (
     <>
@@ -318,33 +322,23 @@ function SourceRowMenu({ instance, interactive, pending, onSync, onReprocess, re
         <Menu.Portal>
           <Menu.Positioner className="rr-s-menu-positioner" sideOffset={6}>
             <Menu.Popup className="rr-s-menu">
-              {canSyncFromServer && !rowStartsSync ? (
-                <Menu.Item className="rr-s-menu__item" disabled={!interactive || pending} onClick={onSync}>Sync now</Menu.Item>
-              ) : null}
-              {instance.manualUploadHref ? (
-                <>
-                  <Menu.LinkItem className="rr-s-menu__item" closeOnClick href={instance.manualUploadHref}>Add another export</Menu.LinkItem>
-                  <Menu.Item className="rr-s-menu__item" disabled={!interactive || pending || instance.isRunning || instance.revoked} onClick={onReprocess}>Reprocess all exports</Menu.Item>
-                </>
-              ) : null}
-              {interactive && instance.connectionId && !instance.revoked && !instance.setupFailed ? (
-                <Menu.Item className="rr-s-menu__item" onClick={() => setConfirmingRevoke(true)}>Revoke</Menu.Item>
-              ) : null}
-              {interactive && instance.connectionId && instance.revoked && !instance.setupFailed ? (
-                <Menu.Item className="rr-s-menu__item" onClick={() => setConfirmingReactivate(true)}>Reactivate</Menu.Item>
-              ) : null}
-              <Menu.Separator className="rr-s-menu__separator" />
-              <Menu.LinkItem className="rr-s-menu__item" closeOnClick href={instance.detailHref}>Open this data source</Menu.LinkItem>
-              {instance.nextAction ? (
-                <Menu.LinkItem className="rr-s-menu__item" closeOnClick href={instance.detailHref}>
-                  {instance.nextAction.label}
-                  {instance.nextAction.caveat ? ` · ${instance.nextAction.caveat}` : ""}
-                  {instance.nextAction.notificationHint ? ` · ${instance.nextAction.notificationHint}` : ""}
-                </Menu.LinkItem>
-              ) : null}
-              <Menu.Item className="rr-s-menu__fact" disabled>Type · {instance.kind}</Menu.Item>
-              <Menu.Item className="rr-s-menu__fact" disabled>Access · {passportValue(instance, "auth") ?? "—"}</Menu.Item>
-              {addedLabel(instance) ? <Menu.Item className="rr-s-menu__fact" disabled>{addedLabel(instance)}</Menu.Item> : null}
+              {menuItems.slice(0, -1).map((item) => {
+                if (item.kind === "sync") {
+                  return <Menu.Item className="rr-s-menu__item" disabled={!interactive || pending} key={item.kind} onClick={onSync}>{item.label}</Menu.Item>;
+                }
+                if (item.kind === "add_export") {
+                  return <Menu.LinkItem className="rr-s-menu__item" closeOnClick href={item.href} key={item.kind}>{item.label}</Menu.LinkItem>;
+                }
+                if (item.kind === "reprocess") {
+                  return <Menu.Item className="rr-s-menu__item" disabled={!interactive || pending || instance.isRunning || instance.revoked} key={item.kind} onClick={onReprocess}>{item.label}</Menu.Item>;
+                }
+                if (item.kind === "revoke") {
+                  return <Menu.Item className="rr-s-menu__item" key={item.kind} onClick={() => setConfirmingRevoke(true)}>{item.label}</Menu.Item>;
+                }
+                return <Menu.Item className="rr-s-menu__item" key={item.kind} onClick={() => setConfirmingReactivate(true)}>{item.label}</Menu.Item>;
+              })}
+              {menuItems.length > 1 ? <Menu.Separator className="rr-s-menu__separator" /> : null}
+              <Menu.LinkItem className="rr-s-menu__item" closeOnClick href={instance.detailHref}>{menuItems.at(-1)?.label}</Menu.LinkItem>
             </Menu.Popup>
           </Menu.Positioner>
         </Menu.Portal>
@@ -357,18 +351,6 @@ function SourceRowMenu({ instance, interactive, pending, onSync, onReprocess, re
       ) : null}
     </>
   );
-}
-
-function passportValue(instance: SourceInstanceView, key: string): string | null {
-  return instance.passportFields.find((field) => field.k === key)?.value ?? null;
-}
-
-function addedLabel(instance: SourceInstanceView): string | null {
-  const value = passportValue(instance, "added");
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return `Added ${formatRelative(date, Date.now())}`;
 }
 
 function RevokeCeremony({ action, connectionId, onCancel }: { action: FormAction; connectionId: string; onCancel: () => void }) {

@@ -60,15 +60,16 @@ test("Sources header and empty state use the specified copy and route", async ()
   // DIRECTION.md, “Data sources /sources”: only a truly empty first page uses the all-data-sources empty state.
   assert.match(view, /instances\.length === 0 && !pagingInPlay/);
   assert.match(view, /No data sources on this page\./);
-  assert.match(view, /function UpdatesReadySlot\(\)/);
-  assert.match(view, /<UpdatesReadySlot\s*\/>/);
+  // DIRECTION.md, “Data sources /sources”: the separate update line uses an empty Suspense fallback.
+  assert.match(view, /<Suspense fallback=\{null\}>[\s\S]*<UpdatesReadySlot/);
 });
 
 // DIRECTION.md, “Data sources /sources”: controls L1–L21 stay on the list, menu, pager, or source page.
 test("each existing list control L1–L21 still has a visible destination", async () => {
-  const [view, page, sourcePage] = await Promise.all([
+  const [view, page, model, sourcePage] = await Promise.all([
     sourceFile("sources-view.tsx"),
     sourceFile("page.tsx"),
+    sourceFile("sources-view-model.ts"),
     readFile(`${SOURCES}[connector]/page.tsx`, "utf8"),
   ]);
   const evidence: Array<[string, RegExp]> = [
@@ -80,8 +81,9 @@ test("each existing list control L1–L21 still has a visible destination", asyn
     ["L7 setup group", /label="Setup never completed"/],
     ["L8 row navigation", /href=\{instance\.detailHref\}/],
     ["L9 copyable id", /ariaLabel="Copy connection ID"/],
-    ["L10 source page link", /Open this data source/],
-    ["L11 next step", /instance\.nextAction\.label/],
+    ["L10 source page link", /label: "Open this data source"/],
+    // DIRECTION.md, “Data sources /sources”: menu copy does not expose server next-action wording.
+    ["L11 next step", /statusWords\.action/],
     ["L12 sync/reprocess", /runConnectorNowAction[\s\S]*Reprocess all exports/],
     ["L13 add export", /Add another export/],
     ["L14 details", /Open this data source/],
@@ -93,7 +95,7 @@ test("each existing list control L1–L21 still has a visible destination", asyn
     ["L19/L20 paging", /<ConnectorSummaryPager/],
     ["L21 saved-session retry", /Remove saved browser session/],
   ];
-  const corpus = `${view}\n${page}\n${sourcePage}`;
+  const corpus = `${view}\n${page}\n${model}\n${sourcePage}`;
   for (const [control, pattern] of evidence) assert.match(corpus, pattern, `${control} is missing`);
   assert.match(page, /purgeRetryId/);
   assert.match(page, /SourcesHeader error=\{params\.error\} message=\{params\.message\} purgeRetryId=\{params\.purge_retry\}/);
@@ -101,7 +103,7 @@ test("each existing list control L1–L21 still has a visible destination", asyn
 
 // DIRECTION.md, “Data sources /sources”: the row action follows the shared table and the menu contains only remaining actions.
 test("status actions use their existing handlers and the remaining actions use a real menu", async () => {
-  const [view, page] = await Promise.all([sourceFile("sources-view.tsx"), sourceFile("page.tsx")]);
+  const [view, page, model] = await Promise.all([sourceFile("sources-view.tsx"), sourceFile("page.tsx"), sourceFile("sources-view-model.ts")]);
   assert.match(view, /const action = instance\.statusWords\.action/);
   assert.match(view, /action\.filled \? "default" : "ghost"/);
   assert.match(view, /action\.kind === "resume" && instance\.connectionId[\s\S]*action=\{resumeAction\}/);
@@ -114,8 +116,10 @@ test("status actions use their existing handlers and the remaining actions use a
   // DIRECTION.md, status row 3: “Set up again” keeps the detail page's existing Add address.
   assert.match(view, /action\.kind === "set_up_again"[\s\S]*source_q=\$\{encodeURIComponent\(instance\.connectorId\)\}/);
   assert.match(view, /Menu\.Trigger[\s\S]*Menu\.Popup/);
-  assert.match(view, /canSyncFromServer && !rowStartsSync/);
-  assert.match(view, /instance\.manualUploadHref[\s\S]*Add another export[\s\S]*Reprocess all exports/);
+  // DIRECTION.md, “Data sources /sources”: Sync now is omitted for server actions owned by another surface.
+  assert.match(model, /serverActionBelongsElsewhere[\s\S]*primaryVerdictAction !== null \|\| instance\.nextAction !== null/);
+  assert.match(model, /kind: "add_export"[\s\S]*Add another export/);
+  assert.match(model, /kind: "reprocess"[\s\S]*Reprocess all exports/);
   assert.match(view, /setConfirmingRevoke\(true\)/);
   assert.match(view, /setConfirmingReactivate\(true\)/);
   assert.match(view, /data-testid="sources-revoke-ceremony"/);
@@ -194,11 +198,14 @@ test("manual upload rows keep their import actions and existing-source route", a
     sourceFile("sources-view.tsx"),
     sourceFile("sources-view-model.ts"),
   ]);
-  assert.match(view, /Add another export/);
-  assert.match(view, /Reprocess all exports/);
-  assert.match(view, /instance\.manualUploadHref/);
+  // DIRECTION.md, “Data sources /sources”: the pure menu model supplies the existing import actions.
+  assert.match(model, /label: "Add another export"/);
+  assert.match(model, /label: "Reprocess all exports"/);
+  assert.match(model, /instance\.manualUploadHref/);
   assert.match(model, /connection_id/);
-  assert.match(view, /instance\.sourceKind !== "manual"/);
+  // DIRECTION.md, “Data sources /sources”: the menu renders the model's remaining controls.
+  assert.match(view, /sourceRowMenuItems\(instance, interactive\)/);
+  assert.match(model, /instance\.sourceKind !== "manual"/);
 });
 
 test("Sources keeps the summary projection separate from the Add catalog", async () => {

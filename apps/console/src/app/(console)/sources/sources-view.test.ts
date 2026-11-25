@@ -20,8 +20,8 @@ import {
 
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 const BANNED_WORDS_RE = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
-const noopFormAction = async (_formData: FormData) => {};
-const noopRunNowAction = async (_connectorId: string, _connectionId?: string | null) => ({
+const noopFormAction = async () => {};
+const noopRunNowAction = async () => ({
   ok: true as const,
   run_id: "test-run",
   trace_id: "test-run",
@@ -94,12 +94,34 @@ test("source filters match the current page by name or account without changing 
 
 // DIRECTION.md, “Data sources /sources”: the new row actions use real links/buttons and a Base UI menu.
 test("sources rows link to their own page and use the shared keyboard menu", async () => {
-  const src = await readFile(new URL("./sources-view.tsx", import.meta.url), "utf8");
+  const [src, model] = await Promise.all([
+    readFile(new URL("./sources-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./sources-view-model.ts", import.meta.url), "utf8"),
+  ]);
   assert.match(src, /<Link aria-label=\{`Open \$\{instance\.displayName\}`\} className="rr-s-row__link" href=\{instance\.detailHref\}>/);
   assert.match(src, /import \{ Menu \} from "@base-ui\/react\/menu"/);
   assert.match(src, /<Menu\.Trigger aria-label=\{`More actions for \$\{instance\.displayName\}`\}/);
-  assert.match(src, /Open this data source/);
+  // DIRECTION.md, “Data sources /sources”: the menu model supplies its visible destination label.
+  assert.match(model, /label: "Open this data source"/);
   assert.match(src, /UpdatesReadySlot/);
+});
+
+// DIRECTION.md, “Data sources /sources”: without a device id in the list read, the device action keeps the detail route.
+test("View this device links to the data source page when the list has no device id", () => {
+  const base = seededViews("mixed").instances[0];
+  assert.ok(base);
+  const local = {
+    ...base,
+    isLocalDevicePush: true,
+    sourceKind: "local_device" as const,
+    statusWords: {
+      ...base.statusWords,
+      action: { kind: "view_device" as const, label: "View this device", filled: false },
+    },
+  };
+  const html = renderSourcesView([local]);
+  assert.ok(html.includes(`href="${local.detailHref}"`));
+  assert.match(renderedCopy(html), /View this device/);
 });
 
 // DIRECTION.md, “Data sources /sources”: a successful row action links to the returned sync detail.

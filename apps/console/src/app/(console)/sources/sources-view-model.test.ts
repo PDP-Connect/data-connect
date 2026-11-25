@@ -33,6 +33,7 @@ import {
   manualUploadHrefForSource,
   orderSourcesForList,
   sourceDetailHrefFor,
+  sourceRowMenuItems,
   toSourceInstanceView,
   toSourcesView,
 } from "./sources-view-model.ts";
@@ -55,6 +56,7 @@ const RECORDS_UNAVAILABLE_RE = /records unavailable/;
 const NUMERIC_RECORDS_RE = /\d records/;
 const PASSPORT_42_UNVERIFIED_RE = /42.*unverified/;
 const PASSPORT_0_UNVERIFIED_RE = /0.*unverified/;
+const BANNED_WORDS_RE = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
 
 const EMPTY_AXES = {
   attention: {} as RefConnectionHealthSnapshot["axes"]["attention"],
@@ -231,6 +233,17 @@ test("toSourceInstanceView derives local-device modality from persisted source_k
   );
   assert.equal(localWithoutHeartbeat.isLocalDevicePush, true);
   assert.equal(remoteWithHeartbeatShapedProgress.isLocalDevicePush, false);
+});
+
+// DIRECTION.md, “Data sources /sources”: without a device id in the list read, View this device keeps the safe data source link.
+test("local-device View this device action keeps the data source route when the summary has no device id", () => {
+  const local = toSourceInstanceView(summary({
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "owner", posture: "observed", resolver: "owner_paused" },
+    source_kind: "local_device",
+  }));
+  assert.equal(local.statusWords.action?.kind, "view_device");
+  assert.equal(local.statusWords.action?.label, "View this device");
+  assert.equal(local.detailHref, "/sources/conn_1");
 });
 
 test("toSourceInstanceView treats pending last_run as running and keeps terminal or unknown statuses out", () => {
@@ -1355,6 +1368,19 @@ test("collapseSetupFailedSources coalesces every setup-failed attempt for a conn
   );
 });
 
+// DIRECTION.md, “Data sources /sources”: the folded heading counts one representative row per kind.
+test("setup-failed groups keep one row per data source kind", () => {
+  const views = toSourcesView([
+    summary({ connection_id: "cin_mail_1", connector_id: "mail", revoked_at: "2026-11-20T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+    summary({ connection_id: "cin_mail_2", connector_id: "mail", revoked_at: "2026-11-21T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+    summary({ connection_id: "cin_calendar_1", connector_id: "calendar", revoked_at: "2026-11-20T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+  ]);
+  const groups = collapseSetupFailedSources(views).setupFailedGroups;
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.connectorId), ["calendar", "mail"]);
+  assert.deepEqual(groups.map((group) => group.attemptCount), [1, 2]);
+});
+
 test("collapseSetupFailedSources keeps a single attempt as its own one-item group — coalescing does not require a minimum count", () => {
   const views = toSourcesView([
     summary({
@@ -1799,13 +1825,67 @@ test("toSourceInstanceView: accountLine preserves owned name (no fallback)", () 
 
 // DIRECTION.md, “Data sources /sources”: schedule words, local filtering, and row order follow the shared status result.
 test("list schedule words use the schedule mode and interval as plain language", () => {
+  // DIRECTION.md, “Data sources /sources”: unknown schedules are a dash.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ enabled: undefined as never })), "—");
   assert.equal(formatSourceRowSchedule(null), "Manual");
   assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 3600 })), "Every hour");
   assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 21_600 })), "Every 6 hours");
   assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 172_800 })), "Every 2 days");
-  assert.equal(formatSourceRowSchedule(scheduleFixture({ effective_mode: "paused" })), "Paused");
-  assert.equal(formatSourceRowSchedule(scheduleFixture({ ineligibility_reason: "policy" })), "Paused");
+  // DIRECTION.md, “Data sources /sources”: an enabled schedule keeps its cadence even if it cannot run now.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ ineligibility_reason: "policy" })), "Every day");
+  // DIRECTION.md, “Data sources /sources”: a disabled automatic schedule reads Manual; never Paused.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ enabled: false })), "Manual");
+  // DIRECTION.md, “Data sources /sources”: a known paused schedule reads its cadence.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ effective_mode: "paused" })), "Every day");
   assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 0 })), "—");
+});
+
+// DIRECTION.md, “Data sources /sources”: Sync now is absent when the server action belongs elsewhere or is not owner-runnable.
+test("row menu sync follows server action ownership and page routing", () => {
+  const base = toSourceInstanceView(summary());
+  const menu = (instance: typeof base) => sourceRowMenuItems(instance, false).map((item) => item.label);
+  assert.ok(menu(base).includes("Sync now"));
+
+  const maintainerAction = {
+    ...base,
+    primaryVerdictAction: {
+      audience: "maintainer" as const,
+      channel: "advisory" as const,
+      cta: "Wait for repair",
+      kind: "wait" as const,
+      ownerRunnable: false,
+      satisfiedWhenKind: "none" as const,
+      terminal: false,
+    },
+  };
+  assert.ok(!menu(maintainerAction).includes("Sync now"));
+
+  const signInAction = {
+    ...base,
+    primaryVerdictAction: {
+      audience: "owner" as const,
+      channel: "attention" as const,
+      cta: "Sign in again",
+      kind: "reauth" as const,
+      ownerRunnable: true,
+      satisfiedWhenKind: "credential_present_and_unrejected" as const,
+      terminal: false,
+    },
+  };
+  assert.ok(!menu(signInAction).includes("Sync now"));
+
+  assert.ok(!menu({ ...base, nextAction: { label: "Wait", actionTarget: null, variant: "fallback" } as never }).includes("Sync now"));
+});
+
+// DIRECTION.md, “Data sources /sources”: the menu has no system facts or raw server action wording.
+test("row menu text excludes raw action and access facts", () => {
+  const instance = toSourceInstanceView(summary({
+    next_action: { kind: "reauth", label: "Access · session / stored credential" } as never,
+    source_kind: "manual",
+  }));
+  const menuText = sourceRowMenuItems(instance).map((item) => item.label).join(" ");
+  assert.doesNotMatch(menuText, /\b(?:access|session|stored credential|owner file import|reauth)\b/i);
+  assert.doesNotMatch(menuText, BANNED_WORDS_RE);
 });
 
 // DIRECTION.md, “Data sources /sources”: needs-you rows come first, then syncing rows, then names; filter matches name/account.

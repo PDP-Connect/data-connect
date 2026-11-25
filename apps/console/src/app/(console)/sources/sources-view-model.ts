@@ -27,8 +27,8 @@
  * a false zero or green.
  */
 
-import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
+import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
 import {
   deriveSourceDisplayNameFallback,
   formatConnectorNameForDisplay,
@@ -41,8 +41,8 @@ import {
   manualUploadSetupFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { formatStreamCollectionFacts, indexCollectionReportByStream } from "../lib/collection-report.ts";
-import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import { isConnectorNotInstalled } from "../lib/connector-implementation.ts";
+import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import type { FormattedNextAction } from "../lib/next-action.ts";
 import type {
   RefConnectorRunSummary,
@@ -363,12 +363,12 @@ export function formatSourceRowRecords(totalRecords: number, state?: RefCountSta
 
 export function formatSourceRowSchedule(schedule: RefSchedule | null): string {
   if (!schedule) return "Manual";
-  if (schedule.effective_mode === "paused" || !schedule.enabled) return "Paused";
-  if (schedule.ineligibility_reason) return "Paused";
-  if (schedule.effective_mode === "manual") return "Manual";
+  const enabled = scheduleEnabled(schedule.enabled);
+  if (schedule.effective_mode === "manual" || enabled === false) return "Manual";
+  if (enabled !== true) return "—";
 
-  const seconds = schedule.interval_seconds;
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const seconds = scheduleIntervalSeconds(schedule.interval_seconds);
+  if (seconds === null) return "—";
   const units = [
     { label: "day", seconds: SECONDS_PER_DAY },
     { label: "hour", seconds: SECONDS_PER_HOUR },
@@ -378,6 +378,43 @@ export function formatSourceRowSchedule(schedule: RefSchedule | null): string {
   if (!unit) return "—";
   const count = seconds / unit.seconds;
   return `Every${count === 1 ? "" : ` ${count}`} ${unit.label}${count === 1 ? "" : "s"}`;
+}
+
+export type SourceRowMenuItem =
+  | { kind: "sync"; label: "Sync now" }
+  | { kind: "add_export"; href: string; label: "Add another export" }
+  | { kind: "reprocess"; label: "Reprocess all exports" }
+  | { kind: "revoke"; label: "Revoke" }
+  | { kind: "reactivate"; label: "Reactivate" }
+  | { kind: "open"; href: string; label: "Open this data source" };
+
+/** Only actions and destinations belong in the row menu; status words stay on the row. */
+export function sourceRowMenuItems(instance: SourceInstanceView, interactive = true): SourceRowMenuItem[] {
+  const action = instance.statusWords.action;
+  const rowStartsSync = action?.kind === "sync_now" || action?.kind === "retry_first_sync" ||
+    (action?.kind === "server_cta" && instance.primaryVerdictAction?.ownerRunnable &&
+      (instance.primaryVerdictAction.kind === "refresh_now" || instance.primaryVerdictAction.kind === "retry_gap"));
+  const serverActionBelongsElsewhere = instance.primaryVerdictAction !== null || instance.nextAction !== null;
+  const canSyncFromServer = instance.sourceKind !== "manual" && instance.sourceKind !== "local_device" &&
+    !instance.connectorNotInstalled && !instance.revoked && !instance.archived && !instance.setupFailed &&
+    instance.sourceScope !== "paused" && instance.sourceScope !== "draft" && !instance.isRunning;
+  const items: SourceRowMenuItem[] = [];
+
+  if (canSyncFromServer && !rowStartsSync && !serverActionBelongsElsewhere) {
+    items.push({ kind: "sync", label: "Sync now" });
+  }
+  if (instance.manualUploadHref) {
+    items.push({ kind: "add_export", href: instance.manualUploadHref, label: "Add another export" });
+    items.push({ kind: "reprocess", label: "Reprocess all exports" });
+  }
+  if (interactive && instance.connectionId && !instance.revoked && !instance.setupFailed) {
+    items.push({ kind: "revoke", label: "Revoke" });
+  }
+  if (interactive && instance.connectionId && instance.revoked && !instance.setupFailed) {
+    items.push({ kind: "reactivate", label: "Reactivate" });
+  }
+  items.push({ kind: "open", href: instance.detailHref, label: "Open this data source" });
+  return items;
 }
 
 /**

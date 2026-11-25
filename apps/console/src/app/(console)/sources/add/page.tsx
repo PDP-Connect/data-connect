@@ -2,22 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import type { ConnectorIconLike } from "@pdpp/brand-react";
-import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
 import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
-import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
-import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
+import { existingSourcesByConnectorCatalog, getConnectorInstallSnapshot } from "../connector-updates-read.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
 import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
 
@@ -44,8 +43,8 @@ function AddSourceHeader() {
 
 export default async function AddSourcePage({ searchParams }: { searchParams: Promise<PageParams> }) {
   const params = await searchParams;
-  let catalog: ConnectorCatalogEntry[] = [];
-  let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
+  let catalog: ConnectorCatalogEntry[];
+  let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]>;
   let existingSourcesTruncated = false;
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
   let installCatalogBusySnapshotId: string | null = null;

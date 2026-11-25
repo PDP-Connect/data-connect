@@ -1,0 +1,169 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import type { ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
+import type { ConnectorInstallSnapshot } from "../lib/connector-install-contract.ts";
+import {
+  buildConnectorInstallLifecycleByConnector,
+  connectorInstallRowModel,
+  connectorLookupKey,
+} from "../lib/connector-install-presentation.ts";
+
+export interface UpdatesReadyKind {
+  connectorId: string;
+  sourceNames: string[];
+}
+
+export interface UpdatesReadyModel {
+  buttonLabel: "Update" | "Update both" | "Update all";
+  kinds: UpdatesReadyKind[];
+  namesText: string;
+  seeChangesHref: string;
+}
+
+export interface UpdateResult {
+  ok: boolean;
+  sourceNames: readonly string[];
+}
+
+export type UpdatesReadyDemoScenario = "update-one" | "update-two" | "update-four" | "update-finished-one-failure";
+
+function listNames(names: readonly string[]): string {
+  if (names.length < 2) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
+}
+
+function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
+  if (kinds.length === 0) return null;
+  const names = [...new Set(kinds.flatMap((kind) => kind.sourceNames))].sort((a, b) => a.localeCompare(b));
+  if (names.length === 0) return null;
+  return {
+    buttonLabel: kinds.length === 1 ? "Update" : kinds.length === 2 ? "Update both" : "Update all",
+    kinds,
+    namesText: listNames(names),
+    seeChangesHref: kinds.length === 1
+      ? `/sources/add?source_q=${encodeURIComponent(kinds[0]?.connectorId ?? "")}`
+      : "/sources/add",
+  };
+}
+
+/** Build ready updates using the same install lifecycle rules as the Add page. */
+export function buildUpdatesReadyModel(
+  snapshot: ConnectorInstallSnapshot | null,
+  sourcesByConnector: Readonly<Record<string, readonly { displayName: string }[]>>
+): UpdatesReadyModel | null {
+  if (!snapshot) return null;
+
+  const lifecycles = Object.values(buildConnectorInstallLifecycleByConnector(snapshot.catalog, snapshot.status));
+  const kindsByLifecycle = new Map<string, UpdatesReadyKind>();
+
+  for (const [sourceConnectorId, sources] of Object.entries(sourcesByConnector)) {
+    const identity = connectorLookupKey(sourceConnectorId);
+    const match = lifecycles.find((lifecycle) => {
+      const candidates = [
+        lifecycle.catalog?.connector_id,
+        lifecycle.catalog?.connector_key,
+        lifecycle.catalog?.catalog_connector_id,
+        lifecycle.installed?.connector_id,
+      ];
+      return candidates.some((candidate) => candidate && connectorLookupKey(candidate) === identity);
+    });
+    if (!match) continue;
+    const catalog = match.catalog;
+    const installed = match.installed;
+    if (!catalog || !installed || !catalog.latest || catalog.digest === installed.digest) continue;
+
+    const row = connectorInstallRowModel(
+      {
+        connectorKey: catalog.connector_key,
+        publicTier: catalog.tier ?? installed.tier ?? "supported",
+        registrationStatus: "registered",
+      } as ConnectorCatalogEntry,
+      match
+    );
+    if (row.action?.kind !== "update") continue;
+
+    const sourceNames = sources.map((source) => source.displayName).filter(Boolean);
+    if (sourceNames.length === 0) continue;
+    const lifecycleKey = catalog.connector_key;
+    const existing = kindsByLifecycle.get(lifecycleKey);
+    if (existing) existing.sourceNames.push(...sourceNames);
+    else kindsByLifecycle.set(lifecycleKey, { connectorId: row.connectorId, sourceNames });
+  }
+
+  const kinds = [...kindsByLifecycle.values()].map((kind) => ({
+    ...kind,
+    sourceNames: [...new Set(kind.sourceNames)].sort((a, b) => a.localeCompare(b)),
+  }));
+  return modelFromKinds(kinds.sort((a, b) => {
+    const firstA = a.sourceNames[0] ?? "";
+    const firstB = b.sourceNames[0] ?? "";
+    return firstA.localeCompare(firstB);
+  }));
+}
+
+export interface ConnectorUpdatesRead {
+  existingSources: {
+    byConnector: Readonly<Record<string, readonly { displayName: string }[]>>;
+    truncated: boolean;
+  };
+  snapshot: ConnectorInstallSnapshot | null;
+}
+
+/**
+ * The list never waits on, or fails with, the update read: a rejected read, a
+ * thrown read or a partial kind map all become "no update line".
+ */
+export function readUpdatesReadySafely(read: () => Promise<ConnectorUpdatesRead>): Promise<UpdatesReadyModel | null> {
+  try {
+    return read()
+      .then(({ existingSources, snapshot }) =>
+        existingSources.truncated ? null : buildUpdatesReadyModel(snapshot, existingSources.byConnector)
+      )
+      .catch(() => null);
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+export function formatUpdateResult(results: readonly UpdateResult[]): string {
+  const successes = results.filter((result) => result.ok).flatMap((result) => result.sourceNames);
+  const failures = results.filter((result) => !result.ok).flatMap((result) => result.sourceNames);
+  const parts: string[] = [];
+  if (successes.length > 0) {
+    parts.push(`Updated ${successes.length === 1 ? "data source" : "data sources"} ${listNames(successes)}.`);
+  }
+  if (failures.length > 0) {
+    parts.push(`Could not update ${failures.length === 1 ? "data source" : "data sources"} ${listNames(failures)}.`);
+  }
+  return parts.join(" ");
+}
+
+export function isUpdatesReadyDemoScenario(value: string): value is UpdatesReadyDemoScenario {
+  return value === "update-one" || value === "update-two" || value === "update-four" || value === "update-finished-one-failure";
+}
+
+export function buildUpdatesReadyDemo(scenario: UpdatesReadyDemoScenario): {
+  initialResult: string | null;
+  model: UpdatesReadyModel;
+} {
+  const demoKinds: UpdatesReadyKind[] = [
+    { connectorId: "calendar", sourceNames: ["Calendar"] },
+    { connectorId: "email", sourceNames: ["Email"] },
+    { connectorId: "photos", sourceNames: ["Photos"] },
+    { connectorId: "notes", sourceNames: ["Notes"] },
+  ];
+  const count = scenario === "update-one" ? 1 : scenario === "update-two" || scenario === "update-finished-one-failure" ? 2 : 4;
+  const model = modelFromKinds(demoKinds.slice(0, count));
+  if (!model) throw new Error("An updates demo needs at least one kind.");
+  return {
+    initialResult: scenario === "update-finished-one-failure"
+      ? formatUpdateResult([
+          { ok: true, sourceNames: ["Calendar"] },
+          { ok: false, sourceNames: ["Email"] },
+        ])
+      : null,
+    model,
+  };
+}
