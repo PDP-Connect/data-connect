@@ -112,7 +112,7 @@ export async function fetchAndCacheClientLogo(
   }: FetchClientLogoOptions = {}
 ): Promise<CachedClientLogo | null> {
   const cached = readCachedClientLogo(cacheKey, nowMs);
-  if (cached) {
+  if (cached?.sourceUri === logoUri) {
     return cached;
   }
 
