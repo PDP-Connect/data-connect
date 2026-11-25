@@ -343,3 +343,37 @@ test("a newer package leaves the installed version visible and explicitly names 
   });
   assert.deepEqual([noTarget.activationState, noTarget.installedVersion, noTarget.action], ["active", "1.0.0", null]);
 });
+
+test("a required binding declaration alone does not block Install", () => {
+  assert.ok(browserPackage.catalog);
+  const model = connectorInstallRowModel(setupCapable, {
+    catalog: { ...browserPackage.catalog, bindings: { browser_session: { required: true } } },
+    installed: null,
+  });
+  assert.equal(model.hostBlockReason, null);
+  assert.deepEqual(model.action, {
+    digest: browserPackage.catalog.digest,
+    kind: "install",
+    version: browserPackage.catalog.version,
+  });
+});
+
+test("an unreadable availability claim blocks Update but still shows what is installed", () => {
+  assert.ok(browserPackage.catalog);
+  const [saved] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(saved);
+  const installed = { ...saved, digest: "sha256:" + "a".repeat(64), version: "1.0.0" };
+  const model = connectorInstallRowModel(setupCapable, {
+    catalog: {
+      ...browserPackage.catalog,
+      digest: "sha256:" + "b".repeat(64),
+      version: "2.0.0",
+      bindings: { browser_session: { available: "unknown" } },
+    },
+    installed,
+  });
+  assert.equal(model.activationState, "update_available");
+  assert.equal(model.installedVersion, "1.0.0");
+  assert.equal(model.hostBlockReason, "browser session availability could not be read.");
+  assert.equal(model.action, null);
+});
