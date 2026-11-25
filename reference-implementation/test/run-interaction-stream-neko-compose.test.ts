@@ -352,6 +352,29 @@ test("n.eko startup uses DISPLAY only when the dedicated desktop display is abse
   assert.equal(await startupDisplay({ DISPLAY: ":7", NEKO_DESKTOP_DISPLAY: ":12" }), ":12");
 });
 
+async function startupNekoDefaultArg(flag: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const source = await readFile(REPO_ROOT + "docker/neko/start-neko.sh", "utf8");
+  const line = source.split("\n").map((value) => value.trim())
+    .find((value) => value.startsWith(flag + " "));
+  assert.ok(line, "n.eko defines " + flag + " on the serve command");
+  const args = line.slice(0, -1).trimEnd();
+  const result = spawnSync("/bin/sh", ["-eu", "-c", "set -- " + args + '\nprintf "%s" "$2"'], {
+    env, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
+test("standalone n.eko remains loopback-bound unless the bind address is configured", async () => {
+  assert.equal(await startupNekoDefaultArg("--server.bind", {}), "127.0.0.1:8080");
+  assert.equal(await startupNekoDefaultArg("--server.bind", { NEKO_SERVER_BIND: "127.0.0.1:9090" }), "127.0.0.1:9090");
+});
+
+test("n.eko preserves the configured screen mode or supplies its default for an empty setting", async () => {
+  assert.equal(await startupNekoDefaultArg("--desktop.screen", { NEKO_DESKTOP_SCREEN: "" }), "1280x720@30");
+  assert.equal(await startupNekoDefaultArg("--desktop.screen", { NEKO_DESKTOP_SCREEN: "800x600@24" }), "800x600@24");
+});
+
 test("ChatGPT large-history guardrails are wired into Docker runtime config", async () => {
   const [compose, envExample] = await Promise.all([readFile(COMPOSE_FILE, "utf8"), readFile(ENV_EXAMPLE_FILE, "utf8")]);
 
