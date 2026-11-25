@@ -5354,7 +5354,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
               source: configuredSource,
               streams: [{ name: "*" }],
               grant_version: "0.2.0",
-        type: "https://pdpp.dev/data-access",
+              type: "https://pdpp.dev/data-access",
             },
           ],
           client_display: { name: clientName },

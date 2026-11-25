@@ -4075,7 +4075,7 @@ function fetchVisibleRecordRowsInMemory({
   cursorPosition,
   limit,
   order,
-}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number; underread: false } {
+}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number } {
   // Access-control pushdown: keep the same WHERE shape the SQL path uses, just
   // without ORDER BY / LIMIT / cursor-seek.
   const whereParts = ["connector_instance_id = ?", "stream = ?", "deleted = 0"];
@@ -4118,7 +4118,7 @@ function fetchVisibleRecordRowsInMemory({
 
   const hasMore = afterCursor.length > limit;
   const rows = hasMore ? afterCursor.slice(0, limit) : afterCursor;
-  return { hasMore, rows, scanned: visible.length, underread: false };
+  return { hasMore, rows, scanned: visible.length };
 }
 
 interface PaginatedSqlParts {
@@ -4197,7 +4197,7 @@ function fetchVisibleRecordRowsPaginated({
   cursorPosition,
   limit,
   order,
-}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number; underread: boolean } {
+}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number } {
   // Graceful per-stream fallback for manifests whose cursor_field is not
   // compatible with the SQL sort path. Registration-time validation catches
   // this for freshly-registered connectors (see auth.js), but stale DB rows
@@ -4232,16 +4232,12 @@ function fetchVisibleRecordRowsPaginated({
   const orderBySql = `ORDER BY ${orderByParts.join(", ")}`;
 
   // --- SQL LIMIT strategy ---
-  // Post-SQL we run request-side filters in JS. When request-filters reject
-  // rows, we need to keep reading from the driver until we've collected
-  // `limit + 1` post-filter rows. Use iterate() with a generous batch bound —
-  // if the driver's LIMIT cuts us off before filling the page, we re-issue
-  // with the offset advanced. For the no-request-filter case (the overwhelming
-  // majority of traffic) one batch of `limit + 1` is enough.
+  // Request filters run in JS after SQL, so a fixed SQL window could end
+  // before the page fills and report has_more=false while matches remain.
+  // With request filters, read without a limit: iterate() streams rows and
+  // the loop stops after `limit + 1` matches. SQLite treats LIMIT -1 as none.
   const hasRequestFilters = compiledFilters && compiledFilters.length > 0;
-  const sqlLimit = hasRequestFilters
-    ? Math.max(limit * 4, 100) // headroom for rejections
-    : limit + 1;
+  const sqlLimit = hasRequestFilters ? -1 : limit + 1;
 
   const sql = `
     SELECT ${selectParts.join(", ")}
@@ -4276,12 +4272,7 @@ function fetchVisibleRecordRowsPaginated({
   const hasMore = collected.length > limit;
   const rows = hasMore ? collected.slice(0, limit) : collected;
 
-  // If we had request filters AND we exhausted the SQL batch without filling
-  // the page, we under-return (hasMore=false even though more rows may exist
-  // past our sqlLimit window). Acceptable for this tranche: the dashboard
-  // doesn't use request filters in its hot paths. A follow-up slice can
-  // loop the SQL offset forward in that case.
-  return { hasMore, rows, scanned, underread: hasRequestFilters && !hasMore && scanned >= sqlLimit };
+  return { hasMore, rows, scanned };
 }
 
 function buildResponseRecord(

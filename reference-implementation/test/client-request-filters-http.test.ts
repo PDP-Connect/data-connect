@@ -319,6 +319,19 @@ for (const backend of ["sqlite", "postgres"] as const) {
       );
       assert.equal(preciseAggregate.status, 200, JSON.stringify(preciseAggregate.body));
       assert.equal(preciseAggregate.body.value, 1);
+      // A selective filter must find a match that sorts past any internal read batch.
+      for (let index = 0; index < 300; index += 1) {
+        const id = `m${String(index).padStart(3, "0")}`;
+        // biome-ignore lint/performance/noAwaitInLoops: Fixture writes are sequential.
+        await write(id, index === 150 ? "rare" : "bulk");
+      }
+      const selective = await request(`${base}/records?fields=id&limit=1&filter[status]=rare`, modern.token);
+      assert.equal(selective.status, 200, JSON.stringify(selective.body));
+      assert.deepEqual(
+        selective.body.data.map((record) => record.id),
+        ["m150"]
+      );
+      assert.equal(selective.body.has_more, false);
     } finally {
       await closeTestServer(server);
       closeDb();

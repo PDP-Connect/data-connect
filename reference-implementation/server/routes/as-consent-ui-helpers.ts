@@ -424,7 +424,7 @@ export function buildHostedMcpAuthorizationDetailsForConnector(
       source,
       streams: [{ name: "*" }],
       grant_version: "0.2.0",
-        type: "https://pdpp.dev/data-access",
+      type: "https://pdpp.dev/data-access",
     },
   ];
 }

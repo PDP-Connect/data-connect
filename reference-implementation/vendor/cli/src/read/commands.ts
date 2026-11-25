@@ -14,7 +14,7 @@ const SEARCH_MODE_PATHS: Record<string, string> = {
 };
 
 export function readHelp(binName = "pdpp"): string {
-  return `Grant-scoped reads (uses pdpp connect/token cache, never owner credentials). Filters require the grants frozen filter_fields; pass precise numeric operands as JSON strings:
+  return `Grant-scoped reads (uses pdpp connect/token cache, never owner credentials). Client filters require the grant's frozen filter_fields; pass precise numeric operands as JSON strings:
   ${binName} read schema <provider-url> [--view compact] [--stream <name>] [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read streams <provider-url> [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read query-records <provider-url> <stream> [--connection-id <cin>] [--limit <n>] [--cursor <cursor>] [--fields a,b] [--sort <spec>] [--count none|estimated|exact] [--filter-json <json>] [--format json|jsonl|table]
