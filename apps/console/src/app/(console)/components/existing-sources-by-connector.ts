@@ -8,7 +8,7 @@ import {
   type RefConnectorRetainedCountSummary,
 } from "../lib/ref-client.ts";
 import { connectionDisplayName } from "../lib/connection-display-name.ts";
-import type { ExistingSourceSetupLink, UncataloguedSourceSetupLink } from "./source-setup-catalog.tsx";
+import type { ExistingSourceSetupLink, UncataloguedSourceSetupLink } from "./existing-source-links.ts";
 
 function latestImportFacts(coverage: RefConnectorRetainedCountSummary["acquisition_coverage"]): {
   file: string | null;

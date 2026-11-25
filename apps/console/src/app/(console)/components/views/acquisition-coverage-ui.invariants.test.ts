@@ -29,36 +29,17 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const CATALOG_FILE = `${HERE}../source-setup-catalog.tsx`;
 const MANUAL_UPLOAD_FILE = `${HERE}../../connect/manual-upload/[connectorId]/page.tsx`;
 const MANUAL_UPLOAD_FORM_FILE = `${HERE}../../connect/manual-upload/[connectorId]/manual-upload-form.tsx`;
 const STATUS_FILE = `${HERE}../../connect/status/[connectionId]/page.tsx`;
 const STATUS_LINKS_FILE = `${HERE}../../connect/status/[connectionId]/connect-status-links.ts`;
 
-const ONE_STATUS_AND_ACTION_COPY = /one status and one next action/;
-const COMPACT_METHOD_LINE = /function sourceMethodLine/;
-const SUPPORT_FACT_TEST_ID = /data-testid="source-support-fact"/;
-const PUBLIC_TIER_COPY = /Supported|Preview/;
-const LEGACY_TIER_COPY = />Experimental\s*\(|Continue anyway|Not available from this page|No setup path available here/;
-const UNAVAILABLE_PROP = /unavailable\?: boolean/;
-const UNAVAILABLE_TEST_ID = /source-unavailable-fact/;
-const REDUNDANT_NEXT_COPY = /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/;
-const GENERIC_SUPPORT_DETAIL_COPY = /Why this, and what to expect/;
-const IMPORT_DETAILS_IN_SOURCE_ROW = /function SourceSetupDetails[\s\S]*<SourceAcquisitionPaths paths=\{entry\.acquisitionPaths\} \/>/;
-const EXISTING_SOURCE_REUSE = /data-testid="existing-source-reuse"/;
-const EXISTING_SOURCE_LINKS = /data-testid="existing-source-links"/;
-const SOURCE_RECORDS_HELPER = /function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
-const SOURCE_DETAIL_HELPER = /function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
 // The status page's own sourceRecordsHref/sourceDetailHref now live in
 // connect-status-links.ts (extracted so setupHref's connection-id regression
 // — the draft-deadlock fix — is directly unit-testable). Same contract, same
 // helper names, different file.
 const STATUS_SOURCE_RECORDS_HELPER = /export function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
 const STATUS_SOURCE_DETAIL_HELPER = /export function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
-const CATALOG_EXPLORE_LINK = /href=\{sourceRecordsHref\(source\.connectionId\)\}[\s\S]*Open in Explore/;
-// Add-page repair decision 2: the account name remains visible; its link has a clear Source details name.
-const CATALOG_SOURCE_DETAILS_LINK =
-  /function ExistingSourceIdentity[\s\S]*aria-label=\{`Source details for \$\{source\.displayName\}`\}[\s\S]*href=\{sourceDetailHref\(connectorKey, source\.connectionId\)\}/;
 // RAISE-RULES.md 2 / setup-pages brief 4: the filled action after success is "Open <Source>".
 const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open \{displayName\}/;
 // RAISE-RULES.md 4: "source" alone becomes "data source".
@@ -100,51 +81,6 @@ const IMPORT_PHASES = [/Received/, /Parsed/, /Deduplicated/, /Committed/, /Index
 const NO_PARALLEL_PROGRESS_ENUM = /type ImportPhaseState = "current" \| "done" \| "failed" \| "waiting"/;
 const SETUP_STATE_REFERENCE = /status\.setup_state/;
 const IMPORT_RECEIPT_STATE_REFERENCE = /status\.import_receipt/;
-
-// ── 1. Source catalog presents a source journey ─────────────────────────────
-
-test("source catalog no longer frames itself as one status and one next action", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.doesNotMatch(src, ONE_STATUS_AND_ACTION_COPY);
-  // The default picker is a compact decision surface: method line first,
-  // detailed acquisition paths only after import intent.
-  assert.match(src, COMPACT_METHOD_LINE);
-});
-
-test("source card keeps the support fact distinct from the recommended next action", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  // Current support/blocked fact is its own labelled element…
-  assert.match(src, SUPPORT_FACT_TEST_ID);
-  // …and the action is compact and placed after the card's content, without
-  // an extra label that repeats what the button already says.
-  assert.match(src, /sourceSetupAction/);
-  assert.doesNotMatch(src, REDUNDANT_NEXT_COPY);
-  // The old generic disclosure repeated on every row and made the picker noisy.
-  assert.doesNotMatch(src, GENERIC_SUPPORT_DETAIL_COPY);
-  // Add-page repair decision 2: import guidance lives inside the row's one Details disclosure.
-  assert.match(src, IMPORT_DETAILS_IN_SOURCE_ROW);
-  assert.doesNotMatch(src, /Show import options/);
-  // The existing-vs-new source choice belongs on the import page, not in the picker.
-  assert.doesNotMatch(src, EXISTING_SOURCE_REUSE);
-});
-
-test("source catalog exposes only public Supported/Preview tiers and no latent unavailable card", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.match(src, PUBLIC_TIER_COPY);
-  assert.doesNotMatch(src, LEGACY_TIER_COPY);
-  assert.doesNotMatch(src, UNAVAILABLE_PROP);
-  assert.doesNotMatch(src, UNAVAILABLE_TEST_ID);
-});
-
-test("source catalog exposes exact existing-account links without turning the picker into a reuse flow", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.match(src, EXISTING_SOURCE_LINKS);
-  assert.match(src, SOURCE_RECORDS_HELPER);
-  assert.match(src, SOURCE_DETAIL_HELPER);
-  assert.match(src, CATALOG_EXPLORE_LINK);
-  assert.match(src, CATALOG_SOURCE_DETAILS_LINK);
-  assert.doesNotMatch(src, EXISTING_SOURCE_REUSE);
-});
 
 // ── 2. Manual/upload page is a coverage-assistant start ─────────────────────
 
