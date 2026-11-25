@@ -8,8 +8,8 @@ import { GRANT_LIFECYCLE_VOCABULARY } from "@pdpp/operator-ui/components/status-
 import { type ListWithPeekParams, ListWithPeekView } from "@pdpp/operator-ui/components/views/list-with-peek";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
-import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/shell.tsx";
 import { getOwnerLoginPath, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import {
@@ -158,9 +158,18 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
       },
     },
     headerActions: (
-      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/grants/request">
-        Grant request workspace
-      </Link>
+      <>
+        {/* The packages list is reachable only from here (it left Home). */}
+        <Link
+          className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          href="/grants/packages"
+        >
+          Packages
+        </Link>
+        <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/grants/request">
+          Grant request workspace
+        </Link>
+      </>
     ),
     peekCliCommand: (id) => `pdpp ref grant timeline ${id}`,
     peekEnvelope,

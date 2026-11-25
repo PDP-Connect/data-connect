@@ -36,7 +36,6 @@ const HREFS: HomeHrefs = {
   deploymentTokens: "/deployment/tokens",
   grant: (id) => `/grants/${id}`,
   grants: "/grants",
-  packages: "/grants/packages",
   source: (id) => `/sources/${id}`,
   sources: "/sources",
 };
@@ -422,7 +421,7 @@ test("the title answers first run, one or many needs, sync, current data, and a 
   );
   assert.equal(multipleNeeds.title, "2 things need you");
 
-  // DIRECTION.md, Home § Title: one active sync names its data source.
+  // DIRECTION.md, Home: one active sync names its data source.
   assert.equal(
     buildHomeViewModel(
       base({
@@ -435,7 +434,7 @@ test("the title answers first run, one or many needs, sync, current data, and a 
     ).title,
     "Syncing Amazon",
   );
-  // DIRECTION.md, Home § Title: multiple active syncs show their count.
+  // DIRECTION.md, Home: multiple active syncs show their count.
   assert.equal(
     buildHomeViewModel(
       base({
@@ -449,13 +448,13 @@ test("the title answers first run, one or many needs, sync, current data, and a 
     "Syncing 2 data sources",
   );
 
-  // DIRECTION.md, Home § Title: rows 18 and 19 are the only all-current evidence.
+  // DIRECTION.md, Home: rows 18 and 19 are the only all-current evidence.
   const current = [statusSource(18, "Pocket"), statusSource(19, "Spotify")];
   assert.equal(
     buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: current } })).title,
     "Everything is up to date",
   );
-  // DIRECTION.md, Home § Title: other non-action states do not claim all data is current.
+  // DIRECTION.md, Home: other non-action states do not claim all data is current.
   assert.equal(
     buildHomeViewModel(
       base({
@@ -472,9 +471,9 @@ test("the title answers first run, one or many needs, sync, current data, and a 
 
 test("the row-22 never-synced state does not create an alarm on Home", () => {
   const neverSynced = statusSource(22, "Fitbit");
-  // DIRECTION.md, Home § Title: an ordinary never-synced source does not claim an owner action.
+  // DIRECTION.md, Home: an ordinary never-synced source does not claim an owner action.
   assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, false);
-  // DIRECTION.md, Home § Title: use the source status, not the server-wide alarm, for the heading.
+  // DIRECTION.md, Home: use the source status, not the server-wide alarm, for the heading.
   assert.equal(
     buildHomeViewModel(
       base({
@@ -490,17 +489,17 @@ test("the prior fleet alarm maps never-synced rows into an audit failure, while 
     new URL("../../../../../../../reference-implementation/server/fleet-health.ts", import.meta.url),
     "utf8",
   );
-  // DIRECTION.md, Home § Server warning: active source summaries enter the server answer's assessed scope.
+  // DIRECTION.md, Home: active source summaries enter the server answer's assessed scope.
   assert.match(fleetHealth, /assessed\.push\(ref\)/);
-  // DIRECTION.md, Home § Server warning: the server answer preserves the stream audit result in coverage_audit.
+  // DIRECTION.md, Home: the server answer preserves the stream audit result in coverage_audit.
   assert.match(fleetHealth, /coverage_audit: input\.streamHealth\.status/);
-  // DIRECTION.md, Home § Server warning: unobserved can produce a failing stream audit and is not owner-caused.
+  // DIRECTION.md, Home: unobserved can produce a failing stream audit and is not owner-caused.
   assert.match(fleetHealth, /const FAIL_PRODUCING_STREAM_HEALTH_CLASSES = \[[\s\S]*?"unobserved"/);
   const ownerClasses =
     fleetHealth.match(/const OWNER_CAUSED_STREAM_HEALTH_CLASSES = \[([\s\S]*?)\] as const/)?.[1] ?? "";
-  // DIRECTION.md, Home § Server warning: unobserved is excluded from the owner-caused class set.
+  // DIRECTION.md, Home: unobserved is excluded from the owner-caused class set.
   assert.doesNotMatch(ownerClasses, /"unobserved"/);
-  // DIRECTION.md, Home § Server warning: that system-caused fail reaches the global banner.
+  // DIRECTION.md, Home: that system-caused fail reaches the global banner.
   assert.match(fleetHealth, /streamHealthFailIsSystemCaused\(input\.streamHealth\)/);
 
   const ids = ["never-synced-a", "never-synced-b"];
@@ -513,7 +512,7 @@ test("the prior fleet alarm maps never-synced rows into an audit failure, while 
       },
     }),
   );
-  // DIRECTION.md, Home § Title: source rows provide the title and never-synced rows are not an alarm.
+  // DIRECTION.md, Home: source rows provide the title and never-synced rows are not an alarm.
   assert.equal(home.title, "Nothing needs you");
 });
 
@@ -632,7 +631,7 @@ test("bounded or failed source and approval reads cannot prove an all-clear", ()
       sourcePage: { hasMore: true, kind: "ok", sources: currentSources },
     }),
   );
-  // DIRECTION.md, Home § Title: a continuation makes the title neutral.
+  // DIRECTION.md, Home: a continuation makes the title neutral.
   assert.equal(paged.title, "Data sources");
   // DIRECTION.md, Home § Data sources: the continuation is discoverable.
   assert.equal(paged.showMoreSources, true);
@@ -647,9 +646,9 @@ test("bounded or failed source and approval reads cannot prove an all-clear", ()
       },
     }),
   );
-  // DIRECTION.md, Home § Read failures: a failed source read cannot claim what it might have shown.
+  // DIRECTION.md, Home: a failed source read cannot claim what it might have shown.
   assert.equal(sourceFailed.title, "Data sources");
-  // DIRECTION.md, Home § Read failures: source failure gets a section-local error state.
+  // DIRECTION.md, Home: source failure gets a section-local error state.
   assert.equal(sourceFailed.dataSourceError, true);
   // DIRECTION.md, Home § First run: failed reads do not turn into the first-run page.
   assert.equal(sourceFailed.firstRun, false);
@@ -660,23 +659,23 @@ test("bounded or failed source and approval reads cannot prove an all-clear", ()
       sourcePage: { hasMore: false, kind: "ok", sources: currentSources },
     }),
   );
-  // DIRECTION.md, Home § Read failures: a failed approval read makes the title neutral.
+  // DIRECTION.md, Home: a failed approval read makes the title neutral.
   assert.equal(approvalFailed.title, "Data sources");
-  // DIRECTION.md, Home § Read failures: the needs-you section reports the failed read.
+  // DIRECTION.md, Home: the needs-you section reports the failed read.
   assert.equal(approvalFailed.needsError, true);
 });
 
 test("summary totals stay honest when the summary is stale, unknown, or failed", () => {
   const stale = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale" } } }));
-  // DIRECTION.md, Home § Summary: stale record totals are omitted.
+  // DIRECTION.md, Home: stale record totals are omitted.
   assert.equal(stale.recordCount, null);
-  // DIRECTION.md, Home § Server warning: stale totals show the plain status link.
+  // DIRECTION.md, Home: stale totals show the plain status link.
   assert.equal(stale.warning, true);
-  // DIRECTION.md, Home § Summary: the source count remains a direct summary field.
+  // DIRECTION.md, Home: the source count remains a direct summary field.
   assert.equal(stale.dataSourceCount, String(SUMMARY.connector_count));
 
   const unknown = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: undefined } }));
-  // DIRECTION.md, Home § Summary: unknown summary state does not prove a current record total.
+  // DIRECTION.md, Home: unknown summary state does not prove a current record total.
   assert.equal(unknown.recordCount, null);
 
   // DIRECTION.md, Home: "N data sources · N records" under the title, counted words in the singular for one.
@@ -690,7 +689,7 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   assert.equal(unknown.subtitle, "4 data sources");
 
   const failed = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
-  // DIRECTION.md, Home § Read failures: a failed summary has a local retry state.
+  // DIRECTION.md, Home: a failed summary has a local retry state.
   assert.equal(failed.summaryError, true);
 });
 
@@ -722,21 +721,21 @@ test("apps group active grants, say what can be read, and include only matching 
     }),
   );
 
-  // DIRECTION.md, Home § Apps: a client with multiple active permissions gets one row.
+  // DIRECTION.md, Home § Apps that can read your data: a client with multiple active permissions gets one row.
   assert.equal(data.apps.length, 1);
-  // DIRECTION.md, Home § Apps: app access reuses the permission-to-words mapping.
+  // DIRECTION.md, Home § Apps that can read your data: app access reuses the permission-to-words mapping.
   assert.equal(data.apps[0]?.reads, "your pay and your spending");
-  // DIRECTION.md, Home § Apps: grouped grants use the full access list address.
+  // DIRECTION.md, Home § Apps that can read your data: grouped grants use the full access list address.
   assert.equal(data.apps[0]?.href, HREFS.grants);
-  // DIRECTION.md, Home § Apps: only a successful read by the same app supplies last-read text.
+  // DIRECTION.md, Home § Apps that can read your data: only a successful read by the same app supplies last-read text.
   assert.match(data.apps[0]?.lastRead ?? "", /ago|today|yesterday/);
-  // DIRECTION.md, Home § Apps: token rows count active owner-made tokens directly.
+  // DIRECTION.md, Home § Apps that can read your data: token rows count active owner-made tokens directly.
   assert.equal(data.activeTokenCount, 1);
 });
 
 test("single app links, token links, and empty-state conditions are exact", () => {
   const singleGrant = buildHomeViewModel(base({ grants: [grant("g1", "Atlas")] }));
-  // DIRECTION.md, Home § Apps: one permission uses the matching access page.
+  // DIRECTION.md, Home § Apps that can read your data: one permission uses the matching access page.
   assert.equal(singleGrant.apps[0]?.href, HREFS.grant("g1"));
 
   const withTokens = buildHomeViewModel(
@@ -751,38 +750,36 @@ test("single app links, token links, and empty-state conditions are exact", () =
       ],
     }),
   );
-  // DIRECTION.md, Home § Apps: access tokens have their own management address.
+  // DIRECTION.md, Home § Apps that can read your data: access tokens have their own management address.
   assert.equal(withTokens.tokensHref, HREFS.deploymentTokens);
-  // DIRECTION.md, Home § Apps: an active owner token prevents the no-app empty state.
+  // DIRECTION.md, Home § Apps that can read your data: an active owner token prevents the no-app empty state.
   assert.equal(withTokens.appsEmpty, false);
 
   const empty = buildHomeViewModel(base());
-  // DIRECTION.md, Home § Apps: the no-app message appears only when both access reads are complete.
+  // DIRECTION.md, Home § Apps that can read your data: the no-app message appears only when both access reads are complete.
   assert.equal(empty.appsEmpty, true);
-  // DIRECTION.md, Home § Apps: keep app-access destinations in the Apps section.
-  assert.equal(empty.packagesHref, HREFS.packages);
   const grantsIncomplete = buildHomeViewModel(base({ grantsHaveMore: true }));
-  // DIRECTION.md, Home § Apps: incomplete permission data cannot claim no app has access.
+  // DIRECTION.md, Home § Apps that can read your data: incomplete permission data cannot claim no app has access.
   assert.equal(grantsIncomplete.appsEmpty, false);
   const ownerClientsFailed = buildHomeViewModel(base({ ownerClientsFailed: true }));
-  // DIRECTION.md, Home § Apps: a failed token read cannot claim no app has access.
+  // DIRECTION.md, Home § Apps that can read your data: a failed token read cannot claim no app has access.
   assert.equal(ownerClientsFailed.appsEmpty, false);
-  // DIRECTION.md, Home § Read failures: affected app data carries a retry state.
+  // DIRECTION.md, Home: affected app data carries a retry state.
   assert.equal(ownerClientsFailed.appError, true);
 });
 
 test("the apps section links to all apps at twelve permissions and suppresses false empty states", () => {
   const twelveGrants = Array.from({ length: 12 }, (_, index) => grant(`grant-${index}`, `App ${index}`));
   const exactLimit = buildHomeViewModel(base({ grants: twelveGrants }));
-  // DIRECTION.md, Home § Apps: reaching the permissions limit adds the all-apps link.
+  // DIRECTION.md, Home § Apps that can read your data: reaching the permissions limit adds the all-apps link.
   assert.equal(exactLimit.allAppsLink, true);
-  // DIRECTION.md, Home § Apps: the all-apps link points to the full permissions page.
+  // DIRECTION.md, Home § Apps that can read your data: the all-apps link points to the full permissions page.
   assert.equal(exactLimit.allAppsHref, HREFS.grants);
 
   const tracesFailed = buildHomeViewModel(base({ tracesFailed: true }));
-  // DIRECTION.md, Home § Apps: incomplete reads suppress the no-app message.
+  // DIRECTION.md, Home § Apps that can read your data: incomplete reads suppress the no-app message.
   assert.equal(tracesFailed.appsEmpty, false);
-  // DIRECTION.md, Home § Read failures: failed reads remain visible as a soft error.
+  // DIRECTION.md, Home: failed reads remain visible as a soft error.
   assert.equal(tracesFailed.appError, true);
 });
 
@@ -791,9 +788,96 @@ test("the seeded demos exercise every active status row through the shared statu
   const rows = scenarios.flatMap((scenario) =>
     buildDemoInputs(scenario, HREFS).sourcePage.sources.map((source) => sourceStatusWords(source, { now: NOW }).row),
   );
-  // DIRECTION.md, Home § Demo: every visible status row appears in at least one seeded scenario.
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): every visible status row appears in at least one seeded scenario.
   assert.deepEqual(
     Array.from(new Set(rows)).sort((left, right) => left - right),
     Array.from({ length: 21 }, (_, index) => index + 4),
+  );
+});
+
+test("every status fixture named after a row lands on that row", () => {
+  // DIRECTION.md, "One status, from one place": each fixture is named by the row it must reach.
+  for (const row of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23, 24]) {
+    assert.equal(sourceStatusWords(statusSource(row, `Row ${row}`), { now: NOW }).row, row, `fixture for row ${row}`);
+  }
+});
+
+test("a read with more than it returned is not a failure: show what was read and link to the full list", () => {
+  const moreApprovals = buildHomeViewModel(
+    base({
+      approvals: [approval("a1", "Atlas Mortgage", SUCCESS)],
+      approvalsHaveMore: true,
+      sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(19, "Spotify")] },
+    }),
+  );
+  // Lead decision (deputy-fixes-1 E4): `has_more` on app requests shows the rows read, no failure line.
+  assert.equal(moreApprovals.needs.length, 1);
+  assert.equal(moreApprovals.needsError, false);
+  assert.equal(moreApprovals.needsMore, true);
+  assert.equal(moreApprovals.warning, false);
+  // DIRECTION.md, Home: "When there is more than it read, it never says 'everything' or 'no'".
+  assert.equal(moreApprovals.title, "Data sources");
+
+  const moreClients = buildHomeViewModel(
+    base({
+      grants: [grant("g1", "Atlas")],
+      ownerClients: [{ active_token_count: 2, client_id: "owner", client_name: "Owner tool", created_at: SUCCESS }],
+      ownerClientsHaveMore: true,
+    }),
+  );
+  // Lead decision (deputy-fixes-1 E4): `has_more` on owner-made clients is not "This could not be loaded."
+  assert.equal(moreClients.appError, false);
+  assert.equal(moreClients.warning, false);
+  // DIRECTION.md, Home: "No count is ever made by subtraction"; a short page gives a link, not a count.
+  assert.equal(moreClients.activeTokenCount, 0);
+  assert.equal(moreClients.allTokensLink, true);
+  assert.equal(moreClients.appsEmpty, false);
+  assert.equal(moreClients.apps.length, 1);
+
+  const failedClients = buildHomeViewModel(base({ ownerClientsFailed: true }));
+  // A real failure still reports itself and gives no full-list link.
+  assert.equal(failedClients.appError, true);
+  assert.equal(failedClients.allTokensLink, false);
+});
+
+test("no data sources but an app: the top says so with the one filled button", () => {
+  const data = buildHomeViewModel(base({ grants: [grant("g1", "Atlas")] }));
+  // Lead decision (deputy-fixes-1 E5): not first run, and not "Nothing needs you".
+  assert.equal(data.firstRun, false);
+  assert.equal(data.noSources, true);
+  assert.equal(data.title, "No data sources yet.");
+
+  const withRequest = buildHomeViewModel(
+    base({ approvals: [approval("a1", "Atlas Mortgage", SUCCESS)], grants: [grant("g1", "Atlas")] }),
+  );
+  // DIRECTION.md, Home: a thing that needs the person keeps the title and its own filled button.
+  assert.equal(withRequest.title, "1 thing needs you");
+  assert.equal(withRequest.noSources, false);
+});
+
+test("more than twelve data sources: a complete read names the total, a paged read keeps the paged wording", () => {
+  const sources = Array.from({ length: 14 }, (_, index) =>
+    statusSource(20, `Source ${String(index + 1).padStart(2, "0")}`),
+  );
+  const complete = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
+  // DIRECTION.md, Home § Data sources: "More than twelve: show twelve and 'All N data sources'."
+  assert.equal(complete.sourceTotalLink, "All 14 data sources");
+
+  const paged = buildHomeViewModel(base({ sourcePage: { hasMore: true, kind: "ok", sources } }));
+  // DIRECTION.md, Home: a read with more than it read names no total.
+  assert.equal(paged.sourceTotalLink, null);
+  assert.equal(paged.showMoreSources, true);
+});
+
+test("the record total shows while the summary is refreshing, not while rebuilding", () => {
+  // Lead decision (deputy-fixes-1 E7): refreshing still carries the last known total.
+  assert.equal(
+    buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "refreshing" } } })).subtitle,
+    "4 data sources · 48,120 records",
+  );
+  // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
+  assert.equal(
+    buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "rebuilding" } } })).subtitle,
+    "4 data sources",
   );
 });

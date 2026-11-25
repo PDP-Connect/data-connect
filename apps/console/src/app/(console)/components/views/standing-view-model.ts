@@ -61,7 +61,6 @@ export interface HomeHrefs {
   deploymentTokens: string;
   grant: (id: string) => string;
   grants: string;
-  packages: string;
   source: (id: string) => string;
   sources: string;
 }
@@ -123,6 +122,7 @@ export interface HomeData {
   activeTokenCount: number;
   allAppsHref: string;
   allAppsLink: boolean;
+  allTokensLink: boolean;
   appError: boolean;
   apps: HomeAppRow[];
   appsEmpty: boolean;
@@ -134,14 +134,17 @@ export interface HomeData {
   firstRun: boolean;
   needs: HomeNeedRow[];
   needsError: boolean;
+  needsMore: boolean;
   needsVisible: boolean;
-  packagesHref: string;
+  noSources: boolean;
   recordCount: string | null;
   summaryError: boolean;
   reloadHref: string;
   sourcesHref: string;
   showMoreSources: boolean;
   shownSourceCount: number;
+  /** "All N data sources" when a complete read has more rows than Home shows; null on a paged read. */
+  sourceTotalLink: string | null;
   subtitle: string | null;
   title: string;
   tokensHref: string;
@@ -419,8 +422,10 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     lastRead: input.tracesFailed ? null : latestSuccessfulRead(input.traces, app.clientId, input.now),
   }));
   const activeTokenCount = input.ownerClients.reduce((sum, client) => sum + Math.max(0, client.active_token_count), 0);
+  // More owner-made clients than one page is not a failure: show what was read
+  // and link to the full list instead of a count that may be short.
   const tokenReadIncomplete = input.ownerClientsFailed || input.ownerClientsHaveMore;
-  const appError = input.grantsFailed || input.tracesFailed || tokenReadIncomplete;
+  const appError = input.grantsFailed || input.tracesFailed || input.ownerClientsFailed;
   const appsEmpty =
     apps.length === 0 &&
     activeTokenCount === 0 &&
@@ -430,20 +435,25 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     !input.tracesHaveMore &&
     !tokenReadIncomplete;
   const sourceReadComplete = !sourceReadFailed && !input.sourcePage.hasMore;
-  const needsReadFailed = input.approvalsFailed || input.approvalsHaveMore;
+  const needsReadFailed = input.approvalsFailed;
+  const needsReadIncomplete = needsReadFailed || input.approvalsHaveMore;
   const firstRun =
     sourceReadComplete &&
     preparedSources.length === 0 &&
     needs.length === 0 &&
-    !needsReadFailed &&
+    !needsReadIncomplete &&
     apps.length === 0 &&
     activeTokenCount === 0 &&
     !appError &&
     !input.grantsHaveMore &&
     !input.tracesHaveMore;
+  // No data sources, but something else exists (an app, a token): the title
+  // says so and carries the one filled button, unless something needs the person.
+  const noSources =
+    !firstRun && sourceReadComplete && preparedSources.length === 0 && needs.length === 0 && !needsReadIncomplete;
   const title = firstRun
     ? "Start with one data source"
-    : !sourceReadComplete || needsReadFailed
+    : !sourceReadComplete || needsReadIncomplete
       ? "Data sources"
       : needs.length === 1
         ? "1 thing needs you"
@@ -453,9 +463,11 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
             ? `Syncing ${syncingSources[0]?.name ?? "a data source"}`
             : syncingSources.length > 1
               ? `Syncing ${syncingSources.length} data sources`
-              : activeSources.length > 0 && activeSources.every((source) => isUpToDateRow(source.status.row))
-                ? "Everything is up to date"
-                : "Nothing needs you";
+              : noSources
+                ? "No data sources yet."
+                : activeSources.length > 0 && activeSources.every((source) => isUpToDateRow(source.status.row))
+                  ? "Everything is up to date"
+                  : "Nothing needs you";
 
   const dataSourceTotal = input.summaryFailed
     ? sourceReadComplete
@@ -467,8 +479,13 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
         ? preparedSources.length
         : null;
   const dataSourceCount = dataSourceTotal === null ? null : number(dataSourceTotal);
+  // A refreshing summary still carries the last known total; rebuilding,
+  // stale, failed or unknown states do not.
+  const recordState = input.summary?.projection?.state;
   const recordTotal =
-    !input.summaryFailed && input.summary?.projection?.state === "fresh" ? input.summary.record_count : null;
+    !input.summaryFailed && (recordState === "fresh" || recordState === "refreshing")
+      ? (input.summary?.record_count ?? null)
+      : null;
   const subtitle =
     [
       dataSourceTotal === null ? null : counted(dataSourceTotal, "data source", "data sources"),
@@ -484,13 +501,18 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     needsReadFailed ||
     input.grantsFailed ||
     input.tracesFailed ||
-    tokenReadIncomplete;
+    input.ownerClientsFailed;
 
   const showMoreSources = !sourceReadFailed && (input.sourcePage.hasMore || sortedDataSources.length > 12);
+  const sourceTotalLink =
+    sourceReadComplete && sortedDataSources.length > 12
+      ? `All ${counted(preparedSources.length, "data source", "data sources")}`
+      : null;
   return {
     activeTokenCount: tokenReadIncomplete ? 0 : activeTokenCount,
     allAppsHref: input.hrefs.grants,
     allAppsLink: !input.grantsFailed && input.grants.length >= HOME_GRANT_LIMIT,
+    allTokensLink: !input.ownerClientsFailed && input.ownerClientsHaveMore,
     appError,
     apps,
     appsEmpty,
@@ -502,14 +524,16 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     firstRun,
     needs,
     needsError: needsReadFailed,
-    needsVisible: needs.length > 0 || needsReadFailed,
-    packagesHref: input.hrefs.packages,
+    needsMore: !needsReadFailed && input.approvalsHaveMore,
+    needsVisible: needs.length > 0 || needsReadIncomplete,
+    noSources,
     recordCount: recordTotal === null ? null : number(recordTotal),
     reloadHref: input.reloadHref,
     addSourceHref: input.hrefs.addSource,
     sourcesHref: input.hrefs.sources,
     showMoreSources,
     shownSourceCount: dataSources.length + needs.filter((need) => need.source).length,
+    sourceTotalLink,
     subtitle,
     summaryError: input.summaryFailed,
     title,

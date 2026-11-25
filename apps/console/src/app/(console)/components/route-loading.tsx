@@ -77,6 +77,36 @@ export function ListLoadingSkeleton({
 }
 
 /**
+ * A neutral page skeleton for routes without a loading file of their own: a
+ * heading bar and `rows` plain rows divided by hairlines. It carries no page's
+ * layout (no box, no action buttons), so it fits any page it stands in for.
+ */
+export function PageLoadingSkeleton({
+  label,
+  rows = 4,
+}: {
+  /** What is loading, e.g. "this page" — announced to assistive tech. */
+  label: string;
+  rows?: number;
+}) {
+  return (
+    <div aria-busy="true" className="min-w-0">
+      <span className="sr-only" role="status">
+        Loading {label}…
+      </span>
+      <HeaderSkeleton withSubtitle={false} />
+      <div className="divide-y divide-border/70">
+        {skeletonRowKeys(rows).map((key) => (
+          <div className="py-3" key={key}>
+            <Bar className="h-4 w-2/3 max-w-md" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
  * A skeleton for a dense record-table surface (a stream's records list). The
  * resolved page renders a header plus a desktop table / mobile list of records;
  * a generic `DetailLoadingSkeleton` (two prose blocks) is the wrong shape and

@@ -5,7 +5,6 @@ import { Text } from "@pdpp/brand-react";
 import "@pdpp/brand-react/components.css";
 import { buttonVariants } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
-import { SyncNowButton } from "../../sources/[connector]/sync-now-button.tsx";
 import { ConnectorMark } from "../connector-mark.tsx";
 import { SourceStatusText } from "../source-status-text.tsx";
 import type { HomeData, HomeNeedRow, HomeSourceRow } from "./standing-view-model.ts";
@@ -79,6 +78,11 @@ function PageHeading({
           {data.subtitle}
         </Text>
       ) : null}
+      {data.noSources ? (
+        <Link className={`${FILLED_BUTTON} mt-4`} href={data.addSourceHref}>
+          Add a data source
+        </Link>
+      ) : null}
       {data.summaryError ? <ReadFailure href={data.reloadHref} /> : null}
     </header>
   );
@@ -120,8 +124,6 @@ function NeedSentence({ need }: { need: HomeNeedRow }) {
 }
 
 function NeedRow({ need }: { need: HomeNeedRow }) {
-  const retryFirstSyncSource = need.status?.action?.kind === "retry_first_sync" ? need.source : undefined;
-
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-3">
       <div className="flex min-w-0 items-center gap-3">
@@ -135,16 +137,7 @@ function NeedRow({ need }: { need: HomeNeedRow }) {
           ) : null}
         </div>
       </div>
-      {retryFirstSyncSource && need.actionLabel ? (
-        <SyncNowButton
-          connectionId={retryFirstSyncSource.connection_id}
-          connectorId={retryFirstSyncSource.connector_id}
-          displayName={retryFirstSyncSource.display_name}
-          idleLabel={need.actionLabel}
-          initialRunning={retryFirstSyncSource.last_run?.status === "started"}
-          variant="default"
-        />
-      ) : need.actionLabel ? (
+      {need.actionLabel ? (
         <Link className={FILLED_BUTTON} href={need.actionHref}>
           {need.actionLabel}
         </Link>
@@ -161,7 +154,7 @@ function NeedsBlock({ data }: { data: HomeData }) {
       <Text as="h2" className={`${SECTION_LABEL} mb-2`} id="home-needs-heading">
         Needs you
       </Text>
-      <div className="overflow-hidden rounded-md border border-border">
+      <div className="overflow-hidden rounded-md border border-border-strong">
         {data.needs.length > 0 ? (
           <div className="divide-y divide-border/70">
             {data.needs.map((need) => (
@@ -172,6 +165,16 @@ function NeedsBlock({ data }: { data: HomeData }) {
         {data.needsError ? (
           <div className={data.needs.length > 0 ? "border-t border-border/70 px-3 py-3" : "px-3 py-3"}>
             <ReadFailure href={data.reloadHref} />
+          </div>
+        ) : null}
+        {data.needsMore ? (
+          <div className={data.needs.length > 0 ? "border-t border-border/70 px-3 py-3" : "px-3 py-3"}>
+            <Link
+              className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={data.allAppsHref}
+            >
+              All apps
+            </Link>
           </div>
         ) : null}
       </div>
@@ -221,12 +224,21 @@ function DataSourcesBlock({ data }: { data: HomeData }) {
           ))}
         </div>
       ) : null}
-      {!data.dataSourceError && data.dataSources.length === 0 && !data.firstRun ? (
+      {!data.dataSourceError && data.dataSources.length === 0 && !data.firstRun && !data.noSources ? (
         <Text as="p" className={SECOND_LINE}>
           No active data sources.
         </Text>
       ) : null}
-      {data.showMoreSources ? (
+      {data.sourceTotalLink ? (
+        <div className="border-t border-border/70 py-3">
+          <Link
+            className="text-[13px] tabular-nums text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            href={data.sourcesHref}
+          >
+            {data.sourceTotalLink}
+          </Link>
+        </div>
+      ) : data.showMoreSources ? (
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 py-3">
           <Text as="p" className={`${SECOND_LINE} tabular-nums`}>
             Showing {data.shownSourceCount.toLocaleString("en-US")} of your data sources.
@@ -272,18 +284,20 @@ function AppsBlock({ data }: { data: HomeData }) {
           Apps that can read your data
         </Text>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <Link
-            className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            href={data.packagesHref}
-          >
-            Packages
-          </Link>
           {data.allAppsLink ? (
             <Link
               className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               href={data.allAppsHref}
             >
               All apps
+            </Link>
+          ) : null}
+          {data.allTokensLink ? (
+            <Link
+              className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={data.tokensHref}
+            >
+              All access tokens
             </Link>
           ) : null}
           <Link

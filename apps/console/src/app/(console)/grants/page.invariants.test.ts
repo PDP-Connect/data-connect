@@ -55,3 +55,9 @@ test("grants page collapses the Pending approvals section when there are zero pe
   // ...and the empty-state placeholder is no longer used (nothing renders at zero).
   assert.doesNotMatch(src, PENDING_EMPTY_STATE_IMPORT_RE);
 });
+
+test("the packages list stays reachable from the page heading", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // Lead decision (deputy-fixes-1 E2): Home no longer links to packages, so /grants does, beside its heading.
+  assert.match(src, /headerActions: \([\s\S]*href="\/grants\/packages"\s*>\s*Packages/);
+});

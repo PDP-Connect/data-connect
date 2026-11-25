@@ -29,20 +29,22 @@ const FIRST_RUN_COPY = new RegExp(
     .replaceAll(" ", "\\s+"),
 );
 const FIRST_RUN_LOGOS = /\["amazon", "facebook", "gmail", "notion", "spotify"\]/;
-const FIRST_SYNC_ACTION = /need\.status\?\.action\?\.kind === "retry_first_sync"[\s\S]*<SyncNowButton/;
+const SYNC_CONTROL = /SyncNowButton|runConnectorNowAction/;
+const NEED_ACTION_LINK = /<Link className=\{FILLED_BUTTON\} href=\{need\.actionHref\}>\s*\{need\.actionLabel\}/;
+const NEEDS_BOX_STRONG_LINE = /home-needs-heading[\s\S]*rounded-md border border-border-strong/;
 
 test("Home uses the existing reads, limits, and soft-failure boundary", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
 
-  // DIRECTION.md, Home § Reads: the requested route still composes the new pure view model.
+  // DIRECTION.md, Home: the requested route still composes the new pure view model.
   assert.match(page, STANDING_OVERVIEW_RENDER);
-  // DIRECTION.md, Home § Reads: permissions and recent reads keep their existing bounds.
+  // DIRECTION.md, Home: permissions and recent reads keep their existing bounds.
   assert.match(page, HOME_READS);
-  // DIRECTION.md, Home § Reads: source summaries remain one bounded page and do not fetch an aggregate verdict.
+  // DIRECTION.md, Home: source summaries remain one bounded page and do not fetch an aggregate verdict.
   assert.match(page, BOUNDED_SOURCE_READ);
-  // DIRECTION.md, Home § Read failures: reads retain a soft fallback and rethrow control flow.
+  // DIRECTION.md, Home: reads retain a soft fallback and rethrow control flow.
   assert.match(page, SOFT_READS);
-  // DIRECTION.md, Home § Server warning: the Home title no longer depends on fleet or deployment summary reads.
+  // DIRECTION.md, Home: the Home title no longer depends on fleet or deployment summary reads.
   assert.doesNotMatch(page, NO_RETIRED_READS);
 });
 
@@ -52,20 +54,23 @@ test("Home renders Needs you, Data sources, then Apps that can read your data", 
   const sources = overview.indexOf("Data sources");
   const apps = overview.indexOf("Apps that can read your data");
 
-  // DIRECTION.md, Home § Page order: the page leads with the items that need the person.
+  // DIRECTION.md, Home: the page leads with the items that need the person.
   assert.ok(needs >= 0 && needs < sources);
-  // DIRECTION.md, Home § Page order: data sources follow Needs you.
+  // DIRECTION.md, Home: data sources follow Needs you.
   assert.ok(sources < apps);
   // DIRECTION.md, Home § Data sources: status words use the shared component and carry row/source attributes.
   assert.match(overview, SOURCE_STATUS_PRIMITIVE);
   // DIRECTION.md, Home § Data sources: every rendered status can be compared to the server row.
   assert.match(overview, STATUS_ATTRS);
-  // DIRECTION.md, Home § Read failures: the affected section offers the exact retry copy.
+  // DIRECTION.md, Home: the affected section offers the exact retry copy.
   assert.match(overview, ERROR_WORDS);
-  // DIRECTION.md, Home § Needs you: retry-first-sync uses the existing sync action.
-  assert.match(overview, FIRST_SYNC_ACTION);
-  // DIRECTION.md, Home § Apps: retain the access package destination in the Apps section.
-  assert.match(overview, /href=\{data\.packagesHref\}\s*>\s*Packages/);
+  // Lead decision (deputy-fixes-1 E3): no sync starts from Home; every row action opens the data source's page.
+  assert.doesNotMatch(overview, SYNC_CONTROL);
+  assert.match(overview, NEED_ACTION_LINK);
+  // Lead decision (deputy-fixes-1 E2): the packages list is linked from /grants, not Home.
+  assert.doesNotMatch(overview, /Packages/);
+  // DIRECTION.md, Values: the needs-you box uses the "Stronger line (buttons, the needs-you box)".
+  assert.match(overview, NEEDS_BOX_STRONG_LINE);
 });
 
 test("first run uses bundled marks and copy that does not guess the installation host", async () => {
@@ -84,10 +89,12 @@ test("the page keeps the seeded demos and route-level loading skeleton", async (
   const model = await readFile(MODEL_FILE, "utf8");
   const loading = await readFile(LOADING_FILE, "utf8");
 
-  // DIRECTION.md, Home § Demo: demos remain gated to non-production requests.
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): demos remain gated to non-production requests.
   assert.match(page, /process\.env\.NODE_ENV !== "production"/);
-  // DIRECTION.md, Home § Demo: calm, alarm and decide fixtures share the live Home input shape.
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): calm, alarm and decide fixtures share the live Home input shape.
   assert.match(model, /export interface HomeInputs/);
-  // DIRECTION.md, Home § Loading: Home uses the shared shell and route skeleton.
-  assert.match(loading, /RecordroomShellWithPalette[\s\S]*ListLoadingSkeleton/);
+  // DIRECTION.md, Home: Home uses the shared shell and route skeleton.
+  // Lead decision (deputy-fixes-1 E1): the shared loading state is a neutral heading and plain rows, not Home's layout.
+  assert.match(loading, /RecordroomShellWithPalette[\s\S]*<PageLoadingSkeleton label="this page" rows=\{4\} \/>/);
+  assert.doesNotMatch(loading, /ListLoadingSkeleton/);
 });

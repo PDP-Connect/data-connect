@@ -36,7 +36,6 @@ const HREFS: HomeHrefs = {
   deploymentTokens: dashboardRoutes.section.deploymentTokens,
   grant: (id) => dashboardRoutes.grant(id),
   grants: dashboardRoutes.section.grants,
-  packages: `${dashboardRoutes.section.grants}/packages`,
   source: (id) => dashboardRoutes.connector(id),
   sources: dashboardRoutes.section.records,
 };

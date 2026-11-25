@@ -4,7 +4,7 @@
 /**
  * Accessibility + structure contract for the shared route-loading skeletons.
  *
- * Every records (and runs) `loading.tsx` renders one of the three skeletons in
+ * Every records (and runs) `loading.tsx` renders one of the four skeletons in
  * this module inside the stable `RecordroomShellWithPalette`. The skeletons are the only
  * thing the owner sees while a `force-dynamic` page resolves, so their
  * loading-state contract is load-bearing UX:
@@ -32,7 +32,7 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 // The module is `route-loading.tsx`; the `.ts` URL resolves to the same dir.
 const SOURCE_FILE = `${HERE}route-loading.tsx`;
 
-const SKELETONS = ["ListLoadingSkeleton", "TableLoadingSkeleton", "DetailLoadingSkeleton"] as const;
+const SKELETONS = ["ListLoadingSkeleton", "TableLoadingSkeleton", "DetailLoadingSkeleton", "PageLoadingSkeleton"] as const;
 
 const STATUS_ROLE_RE = /role="status"/g;
 const ARIA_BUSY_RE = /aria-busy="true"/g;
