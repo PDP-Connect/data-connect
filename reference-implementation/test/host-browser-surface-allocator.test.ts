@@ -362,6 +362,66 @@ test("an unanswered lease POST leaves the surface starting, and asking again ado
 	assert.deepEqual(postedRunIds, ["run-slow", "run-slow", "run-slow"]);
 });
 
+const CHASE_SURFACE_REQUEST: EnsureBrowserSurfaceRequest = {
+	connectorId: "chase",
+	profileKey: "chase:cin_chase",
+	surfaceSubjectId: "cin_chase",
+	surfaceId: "surface_1",
+};
+
+test("a lease answer whose body stalls after its headers counts as an unanswered start", async () => {
+	const mock = createMockHostEndpoint({
+		json: () => new Promise<unknown>(() => undefined),
+		ok: true,
+		status: 200,
+	});
+	const allocator = slowStartAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-stalled", surfaceId: "surface_1" });
+
+	const surface = await allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+
+	assert.equal(surface.health, "starting");
+	assert.equal(
+		allocator.lastStartFailure("run-stalled")?.code,
+		"host_browser_surface_timeout",
+	);
+});
+
+test("overlapping ensures of one surface share one host request, so a ready lease is never downgraded", async () => {
+	let answer: () => void = () => undefined;
+	const answered = new Promise<void>((resolve) => {
+		answer = resolve;
+	});
+	const calls: string[] = [];
+	const fetchImpl = (async (input: string | URL | Request) => {
+		calls.push(String(input));
+		await answered;
+		return {
+			json: async () => ({
+				cdp_url: "http://127.0.0.1:9222/host-cdp",
+				surface_id: "host-surface-shared",
+			}),
+			ok: true,
+			status: 200,
+		} as Response;
+	}) as typeof fetch;
+	const allocator = hostAllocator(fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-shared", surfaceId: "surface_1" });
+
+	const first = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	const second = allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	answer();
+	const [a, b] = await Promise.all([first, second]);
+
+	assert.equal(calls.length, 1);
+	assert.equal(a.health, "ready");
+	assert.deepEqual(b, a);
+	// The binding is consumed once; a later ensure reuses the ready lease.
+	assert.deepEqual(await allocator.ensureSurface(CHASE_SURFACE_REQUEST), a);
+	assert.equal(calls.length, 1);
+	assert.equal((await allocator.getSurfaceStatus("surface_1"))?.health, "ready");
+});
+
 test("stopping an unanswered start releases its run, so the host drops the browser when the start completes", async () => {
 	const host = createSlowStartHost();
 	const allocator = slowStartAllocator(host.fetchImpl);

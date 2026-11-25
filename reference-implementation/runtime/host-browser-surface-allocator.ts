@@ -103,6 +103,21 @@ type FetchImpl = (
 	init: RequestInit,
 ) => Promise<FetchResponseLike>;
 
+/** Settle with `work`, or reject as soon as `signal` aborts. */
+function beforeAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) {
+		work.catch(() => undefined);
+		return Promise.reject(signal.reason);
+	}
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		work.then(resolve, reject).finally(() =>
+			signal.removeEventListener("abort", onAbort),
+		);
+	});
+}
+
 export function createHostBrowserSurfaceAllocator(
 	options: HostBrowserSurfaceAllocatorOptions,
 ): HostBrowserSurfaceAllocator {
@@ -120,6 +135,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #pendingRunIdsBySurfaceId = new Map<string, string>();
 	readonly #migrateProfileBySurfaceId = new Map<string, boolean>();
 	readonly #surfaceIdsByRunId = new Map<string, string>();
+	readonly #ensuresInFlightBySurfaceId = new Map<
+		string,
+		Promise<BrowserSurface>
+	>();
 	readonly #lastStartFailureByRunId = new Map<
 		string,
 		HostBrowserSurfaceStartFailure
@@ -153,7 +172,25 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		return this.#lastStartFailureByRunId.get(runId);
 	}
 
-	async ensureSurface(
+	/**
+	 * One host request per surface at a time. A second caller joins the first
+	 * one's request: two requests for the same run could finish in either
+	 * order, and a timed-out one finishing last would record the surface as
+	 * starting over the ready lease the other one got.
+	 */
+	ensureSurface(request: EnsureBrowserSurfaceRequest): Promise<BrowserSurface> {
+		const inFlight = this.#ensuresInFlightBySurfaceId.get(request.surfaceId);
+		if (inFlight) {
+			return inFlight;
+		}
+		const ensure = this.#ensureSurfaceOnce(request).finally(() => {
+			this.#ensuresInFlightBySurfaceId.delete(request.surfaceId);
+		});
+		this.#ensuresInFlightBySurfaceId.set(request.surfaceId, ensure);
+		return ensure;
+	}
+
+	async #ensureSurfaceOnce(
 		request: EnsureBrowserSurfaceRequest,
 	): Promise<BrowserSurface> {
 		const existing = this.#leasesBySurfaceId.get(request.surfaceId);
@@ -311,36 +348,45 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		return `${this.#endpoint}/browser-surface/leases`;
 	}
 
-	async #requestJson(
+	#requestJson(
 		method: "POST",
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body));
-		try {
-			return await response.json();
-		} catch (error) {
-			throw new HostBrowserSurfaceAllocatorError(
-				"host_browser_surface_malformed_response",
-				`host browser surface ${method} ${url} returned invalid JSON`,
-				{ cause: error },
-			);
-		}
+		return this.#request(method, url, JSON.stringify(body), async (response) => {
+			try {
+				return await response.json();
+			} catch (error) {
+				throw new HostBrowserSurfaceAllocatorError(
+					"host_browser_surface_malformed_response",
+					`host browser surface ${method} ${url} returned invalid JSON`,
+					{ cause: error },
+				);
+			}
+		});
 	}
 
 	async #requestNoContent(method: "DELETE", url: string): Promise<void> {
 		// A 404 means the host no longer holds the lease (for example after a
 		// host restart), so the release already happened. Treating it as an
 		// error would leave the surface ready here and retry the DELETE forever.
-		await this.#request(method, url, undefined, { notFoundIsSuccess: true });
+		await this.#request(method, url, undefined, async () => undefined, {
+			notFoundIsSuccess: true,
+		});
 	}
 
-	async #request(
+	/**
+	 * Send one request and read its body within one deadline. Headers alone do
+	 * not finish a request: a host that sends them and then stalls the body
+	 * times out the same way as one that never answers.
+	 */
+	async #request<T>(
 		method: "DELETE" | "POST",
 		url: string,
-		body?: string,
+		body: string | undefined,
+		read: (response: FetchResponseLike) => Promise<T>,
 		{ notFoundIsSuccess = false }: { notFoundIsSuccess?: boolean } = {},
-	): Promise<FetchResponseLike> {
+	): Promise<T> {
 		const controller = new AbortController();
 		const timeout = setTimeout(
 			() => controller.abort(),
@@ -357,9 +403,12 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				signal: controller.signal,
 			});
 			if (!response.ok && !(notFoundIsSuccess && response.status === 404)) {
-				throw await this.#buildHttpError(method, url, response);
+				throw await beforeAbort(
+					this.#buildHttpError(method, url, response),
+					controller.signal,
+				);
 			}
-			return response;
+			return await beforeAbort(read(response), controller.signal);
 		} catch (error) {
 			if (error instanceof HostBrowserSurfaceAllocatorError) {
 				throw error;
