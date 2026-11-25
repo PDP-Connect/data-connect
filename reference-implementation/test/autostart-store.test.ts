@@ -88,14 +88,40 @@ test("failed native result is rejected for that command", async () => {
     // timeout is only a backstop against a hang. A tight one fails on a starved
     // runner before the test gets to write the result.
     const store = createAutostartStore(dir, published, { pollIntervalMs: 5, timeoutMs: 60_000 });
+    await writeFile(join(dir, "autostart-state.json"), JSON.stringify({
+      enabled: false, error: null, observedAt: new Date().toISOString(), revision: "one",
+    }));
     const request = store.requestChange(true);
     // If publishing fails, onWrite never fires; the request's own rejection then
     // fails the test here instead of leaving it hanging.
     await Promise.race([wasPublished, request]);
     const files = (await readdir(join(dir, "autostart-commands"))).filter(isCommandFileName);
     assert.equal(files.length, 1);
+    assert.equal((await store.load()).pending, true);
     await answer(dir, files[0]!.replace(".json", ""), true, false, "permission denied");
     await assert.rejects(request, /permission denied/);
+    assert.equal((await store.load()).pending, false);
+  });
+});
+
+test("pending clears only for a valid matching desktop result", async () => {
+  await withTempDir(async dir => {
+    const store = createAutostartStore(dir);
+    const commandId = "ast_AAAAAAAAAAAAAAAAAAAAAA";
+    const now = new Date().toISOString();
+    await writeFile(join(dir, "autostart-state.json"), JSON.stringify({
+      enabled: false, error: null, observedAt: now, revision: "fixture",
+    }));
+    const commandDir = join(dir, "autostart-commands");
+    await mkdir(commandDir, { recursive: true });
+    await writeFile(join(commandDir, `${commandId}.json`), JSON.stringify({
+      commandId, kind: "set_autostart_enabled", desiredEnabled: true,
+      createdAt: now, status: "accepted",
+    }));
+    await answer(dir, commandId, false);
+    assert.equal((await store.load()).pending, true);
+    await answer(dir, commandId, true, false, "synthetic failure");
+    assert.equal((await store.load()).pending, false);
   });
 });
 
