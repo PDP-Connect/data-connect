@@ -198,3 +198,65 @@ export async function seedConnector(
   )
   console.log(`[capture] ${stdout.trim()}`)
 }
+
+/** Replace the baseline route placeholders with identifiers from the seeded Spotify source. */
+export async function resolveBaselineRoutes<T extends { path: string }>(
+  page: Page,
+  routes: T[]
+): Promise<T[]> {
+  await page.goto(`${BASE_URL}/sources`, { waitUntil: "domcontentloaded" })
+  const sourceHref = await page
+    .locator('a[href^="/sources/cin_"]')
+    .filter({ hasText: /spotify/i })
+    .first()
+    .getAttribute("href")
+  const connectionId = sourceHref?.match(/^\/sources\/([^/]+)/)?.[1]
+  let recordHref: string | undefined
+  let runHref: string | undefined
+  if (sourceHref) {
+    await page.goto(`${BASE_URL}${sourceHref}/top_artists`, {
+      waitUntil: "domcontentloaded",
+    })
+    const recordLinks = await page
+      .locator(`a[href^="${sourceHref}/top_artists/"]`)
+      .evaluateAll(elements =>
+        elements.map(element => element.getAttribute("href"))
+      )
+    recordHref =
+      recordLinks.find(href => href && !href.endsWith("/health")) ?? undefined
+    runHref =
+      (await page
+        .locator('a[href^="/syncs/run_"]')
+        .first()
+        .getAttribute("href")) ?? undefined
+  }
+  await page.goto(`${BASE_URL}/audit`, { waitUntil: "domcontentloaded" })
+  const traceLinks = page.locator('a[href^="/audit/"]')
+  const traceHref =
+    (await traceLinks.count()) > 0
+      ? ((await traceLinks.first().getAttribute("href")) ?? undefined)
+      : undefined
+  return routes.map(route => {
+    let path = route.path
+    if (connectionId) {
+      path = path.replaceAll("/sources/spotify", `/sources/${connectionId}`)
+      path = path.replaceAll("baseline-missing-connection", connectionId)
+    }
+    if (recordHref)
+      path = path.replace(
+        "/baseline-missing-record",
+        recordHref.slice(recordHref.lastIndexOf("/"))
+      )
+    if (runHref)
+      path = path.replaceAll(
+        "baseline-missing-run",
+        runHref.slice("/syncs/".length).split("/")[0]
+      )
+    if (traceHref)
+      path = path.replace(
+        "baseline-missing-trace",
+        traceHref.slice("/audit/".length)
+      )
+    return { ...route, path }
+  })
+}

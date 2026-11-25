@@ -265,6 +265,10 @@ const reachabilityModes = new Map([
 async function startStack({ root, launch, signal }, args) {
   const reachabilityMode = reachabilityModes.get(args.find(arg => reachabilityModes.has(arg)))
   args = args.filter(arg => !reachabilityModes.has(arg))
+  // `--console-dev` serves `next dev` so the dev-only `?demo=` routes render;
+  // only look.spec.ts uses it, and only to photograph those routes.
+  const consoleDev = args.includes("--console-dev")
+  args = args.filter(arg => arg !== "--console-dev")
   const data = join(root, "data")
   await mkdir(data, { mode: 0o700 })
   const nonce = randomBytes(24).toString("hex")
@@ -312,19 +316,21 @@ async function startStack({ root, launch, signal }, args) {
   if (reachabilityMode) {
     await requireDiskFloor(process.env, repo, 110_000_000_000)
   }
-  const buildStarted = performance.now()
-  const build = launch([next, "build", "--webpack"], consoleOptions)
-  if ((await build.completion) !== 0)
-    throw new Error(`Console build failed\n${build.diagnostic()}`)
-  console.log(
-    `Console build: ${((performance.now() - buildStarted) / 1000).toFixed(2)}s`
-  )
+  if (!consoleDev) {
+    const buildStarted = performance.now()
+    const build = launch([next, "build", "--webpack"], consoleOptions)
+    if ((await build.completion) !== 0)
+      throw new Error(`Console build failed\n${build.diagnostic()}`)
+    console.log(
+      `Console build: ${((performance.now() - buildStarted) / 1000).toFixed(2)}s`
+    )
+  }
   const web = launch(
-    [next, "start", "--hostname", "127.0.0.1", "--port", String(consolePort)],
+    [next, consoleDev ? "dev" : "start", ...(consoleDev ? ["--webpack"] : []), "--hostname", "127.0.0.1", "--port", String(consolePort)],
     consoleOptions
   )
   console.log(
-    `Console startup (next start): ${await waitReady(`${origin}/owner/login`, web, signal)}s`
+    `Console startup (next ${consoleDev ? "dev" : "start"}): ${await waitReady(`${origin}/owner/login`, web, signal)}s`
   )
   const browser = launch(
     [require.resolve("@playwright/test/cli"), "test", ...args],
@@ -337,6 +343,7 @@ async function startStack({ root, launch, signal }, args) {
         E2E_OWNER_PASSWORD: password,
         E2E_HARNESS_ROOT: root,
         E2E_HARNESS_NONCE: nonce,
+        E2E_CONSOLE_MODE: consoleDev ? "dev" : "production",
       },
     }
   )
@@ -447,7 +454,10 @@ export async function main({
     assertLoopbackOnly(interfaces)
     const stopReceiving = reexeced ? receiveSignals() : () => {}
     try {
-      return await runOwnedHarness(state => startStack(state, args))
+      // `--harness-minutes=N` lifts the 10-minute ceiling for long photo runs.
+      const minutes = Number(args.find(arg => arg.startsWith("--harness-minutes="))?.split("=")[1])
+      args = args.filter(arg => !arg.startsWith("--harness-minutes="))
+      return await runOwnedHarness(state => startStack(state, args), Number.isFinite(minutes) && minutes > 0 ? { timeoutMs: minutes * 60_000 } : {})
     } finally {
       stopReceiving()
     }

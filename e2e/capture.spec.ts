@@ -5,7 +5,12 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { randomBytes } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import { doctor, seedConnector, BASE_URL } from "./capture-support.ts"
+import {
+  doctor,
+  seedConnector,
+  resolveBaselineRoutes,
+  BASE_URL,
+} from "./capture-support.ts"
 
 interface Action {
   type: "click"
@@ -285,61 +290,7 @@ async function captureBaseline(page: Page): Promise<void> {
   for (const connector of ["spotify", "github", "reddit"])
     await seedConnector(page, connector)
 
-  await page.goto(`${BASE_URL}/sources`, { waitUntil: "domcontentloaded" })
-  const sourceHref = await page
-    .locator('a[href^="/sources/cin_"]')
-    .filter({ hasText: /spotify/i })
-    .first()
-    .getAttribute("href")
-  const connectionId = sourceHref?.match(/^\/sources\/([^/]+)/)?.[1]
-  let recordHref: string | undefined
-  let runHref: string | undefined
-  if (sourceHref) {
-    await page.goto(`${BASE_URL}${sourceHref}/top_artists`, {
-      waitUntil: "domcontentloaded",
-    })
-    const recordLinks = await page
-      .locator(`a[href^="${sourceHref}/top_artists/"]`)
-      .evaluateAll(elements =>
-        elements.map(element => element.getAttribute("href"))
-      )
-    recordHref =
-      recordLinks.find(href => href && !href.endsWith("/health")) ?? undefined
-    runHref =
-      (await page
-        .locator('a[href^="/syncs/run_"]')
-        .first()
-        .getAttribute("href")) ?? undefined
-  }
-  await page.goto(`${BASE_URL}/audit`, { waitUntil: "domcontentloaded" })
-  const traceLinks = page.locator('a[href^="/audit/"]')
-  const traceHref =
-    (await traceLinks.count()) > 0
-      ? ((await traceLinks.first().getAttribute("href")) ?? undefined)
-      : undefined
-  const resolvedRoutes = routes.map(route => {
-    let path = route.path
-    if (connectionId) {
-      path = path.replaceAll("/sources/spotify", `/sources/${connectionId}`)
-      path = path.replaceAll("baseline-missing-connection", connectionId)
-    }
-    if (recordHref)
-      path = path.replace(
-        "/baseline-missing-record",
-        recordHref.slice(recordHref.lastIndexOf("/"))
-      )
-    if (runHref)
-      path = path.replaceAll(
-        "baseline-missing-run",
-        runHref.slice("/syncs/".length).split("/")[0]
-      )
-    if (traceHref)
-      path = path.replace(
-        "baseline-missing-trace",
-        traceHref.slice("/audit/".length)
-      )
-    return { ...route, path }
-  })
+  const resolvedRoutes = await resolveBaselineRoutes(page, routes)
 
   for (const route of resolvedRoutes) {
     if (route.path === "/owner/login") continue
