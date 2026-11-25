@@ -136,7 +136,11 @@ if (POSTGRES_URL) {
 
       const client = await pool.connect();
       try {
-        assert.equal(await migrateRenamedConnectorIdsPostgres(client), 0, "the function itself is a no-op on a migrated store");
+        assert.equal(
+          (await migrateRenamedConnectorIdsPostgres(client)).changedRows,
+          0,
+          "the function itself is a no-op on a migrated store"
+        );
       } finally {
         client.release();
       }

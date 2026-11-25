@@ -26,6 +26,31 @@ export const CONNECTOR_ID_RENAME_MIGRATION_ID = "renamed_connector_ids_v1";
 
 const ID_COLUMN_NAMES = ["connector_id", "connector_key"] as const;
 
+/**
+ * What a rename run did. `supersededRows` counts, per table, the rows under an
+ * old id that were deleted because a row under the current id has the same
+ * remaining primary key (see {@link dropSupersededRowsSql}).
+ */
+export interface ConnectorIdRenameResult {
+  changedRows: number;
+  supersededRows: Readonly<Record<string, number>>;
+}
+
+const NO_RENAME: ConnectorIdRenameResult = Object.freeze({ changedRows: 0, supersededRows: Object.freeze({}) });
+
+/** One log line for a run that changed rows; null when it changed nothing. */
+export function describeConnectorIdRename(result: ConnectorIdRenameResult): string | null {
+  if (result.changedRows === 0) {
+    return null;
+  }
+  const superseded = Object.entries(result.supersededRows)
+    .map(([table, rows]) => `${table}: ${rows}`)
+    .join(", ");
+  return superseded
+    ? `Renamed connector ids: ${result.changedRows} rows changed; old-id rows replaced by current-id rows with the same key were deleted (${superseded})`
+    : `Renamed connector ids: ${result.changedRows} rows changed`;
+}
+
 interface IdColumn {
   column: string;
   /** Primary-key columns of the table other than this one; null when this column is not part of the primary key. */
@@ -35,7 +60,16 @@ interface IdColumn {
 
 const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
 
-/** SQL that, for one id column, deletes rows under `old` that a row under `new` already covers. */
+/**
+ * SQL that, for one id column, deletes rows under `old` that a row under `new`
+ * already covers: same values in every other primary-key column.
+ *
+ * Precedence is the same for every table and does not compare the rest of
+ * the row: the current-id row wins. Releases wrote the old ids before they
+ * wrote the current ids, never after, so when both rows exist the current-id
+ * row is the later write and the old-id row is stale. Each deletion is
+ * counted in {@link ConnectorIdRenameResult.supersededRows} and logged.
+ */
 function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: string }): string | null {
   if (c.otherKeyColumns === null) {
     return null;
@@ -126,16 +160,16 @@ function sqliteIdColumns(raw: SqliteLike): IdColumn[] {
 
 /**
  * Rename stored old connector ids to their current keys in one transaction.
- * Returns the number of rows changed; 0 (and no write) when no old id is stored.
+ * Changes nothing, and writes nothing, when no old id is stored.
  *
  * Order respects the foreign keys to `connectors(connector_id)`: the current
  * key's `connectors` row is created first, every referencing row is moved,
  * and the old row is deleted last. A row keyed by the old id that a
- * row keyed by the current id already covers is dropped (the current row
- * wins); any other unique-key collision aborts the migration with the
- * database's error rather than merging data.
+ * row keyed by the current id already covers is deleted (the current row
+ * wins; see {@link dropSupersededRowsSql}); any other unique-key collision
+ * aborts the migration with the database's error rather than merging data.
  */
-export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): number {
+export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRenameResult {
   const columns = sqliteIdColumns(raw);
   const olds = renameEntries().map(([oldId]) => oldId);
   const marks = renamedInList(() => "?");
@@ -145,11 +179,12 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): number {
       undefined
   );
   if (!anyStored) {
-    return 0;
+    return NO_RENAME;
   }
   const changes = (result: unknown): number => Number((result as { changes?: number }).changes ?? 0);
-  const run = raw.transaction(() => {
+  const run = raw.transaction((): ConnectorIdRenameResult => {
     let changed = 0;
+    const superseded: Record<string, number> = {};
     for (const [oldId, newId] of renameEntries()) {
       const parent = raw.prepare("SELECT * FROM connectors WHERE connector_id = ?").get(oldId);
       if (parent && raw.prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get(newId) === undefined) {
@@ -162,7 +197,7 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): number {
       for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
         if (drop) {
-          raw.prepare(drop).run(oldId, newId);
+          countSuperseded(superseded, c.table, changes(raw.prepare(drop).run(oldId, newId)));
         }
       }
     }
@@ -176,16 +211,29 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): number {
     }
     changed += changes(raw.prepare(`DELETE FROM connectors WHERE connector_id IN (${marks})`).run(...olds));
     // A connection created without a name is labelled with its connector id.
-    // Keep that placeholder in step with the id it names.
+    // Keep that placeholder in step with the id it names; a connection of
+    // another connector that happens to carry the same text keeps it.
     for (const [oldId, newId] of renameEntries()) {
-      changed += changes(
-        raw.prepare("UPDATE connector_instances SET display_name = ? WHERE display_name = ?").run(newId, oldId)
-      );
+      changed += changes(raw.prepare(renamePlaceholderLabelSql(() => "?")).run(newId, oldId, newId));
     }
-    return changed;
+    return { changedRows: changed + sumSuperseded(superseded), supersededRows: superseded };
   });
   return run.immediate();
 }
+
+/** Parameters: the current id, the old id, the current id. */
+const renamePlaceholderLabelSql = (placeholder: (n: number) => string): string =>
+  `UPDATE connector_instances SET display_name = ${placeholder(1)}
+    WHERE display_name = ${placeholder(2)} AND connector_id = ${placeholder(3)}`;
+
+function countSuperseded(into: Record<string, number>, table: string, rows: number): void {
+  if (rows > 0) {
+    into[table] = (into[table] ?? 0) + rows;
+  }
+}
+
+const sumSuperseded = (superseded: Readonly<Record<string, number>>): number =>
+  Object.values(superseded).reduce((sum, rows) => sum + rows, 0);
 
 // ---------------------------------------------------------------- Postgres
 
@@ -221,10 +269,9 @@ async function postgresIdColumns(client: PoolClient): Promise<IdColumn[]> {
 /**
  * Postgres counterpart of {@link migrateRenamedConnectorIdsSqlite}. The caller
  * owns the migration receipt; this function runs the rename in one transaction
- * and returns the number of rows changed (0, with no write, when no old
- * id is stored).
+ * (no write when no old id is stored).
  */
-export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Promise<number> {
+export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Promise<ConnectorIdRenameResult> {
   const columns = await postgresIdColumns(client);
   const olds = renameEntries().map(([oldId]) => oldId);
   const marks = renamedInList((n) => `$${n}`);
@@ -237,11 +284,12 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     }
   }
   if (!anyStored) {
-    return 0;
+    return NO_RENAME;
   }
   await client.query("BEGIN");
   try {
     let changed = 0;
+    const superseded: Record<string, number> = {};
     for (const [oldId, newId] of renameEntries()) {
       const parent = await client.query("SELECT * FROM connectors WHERE connector_id = $1", [oldId]);
       const current = await client.query("SELECT 1 FROM connectors WHERE connector_id = $1", [newId]);
@@ -257,7 +305,7 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
       for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
         if (drop) {
-          await client.query(drop, [oldId, newId]);
+          countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);
         }
       }
     }
@@ -273,16 +321,14 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     const removed = await client.query(`DELETE FROM connectors WHERE connector_id IN (${marks})`, olds);
     changed += removed.rowCount ?? 0;
     // A connection created without a name is labelled with its connector id.
-    // Keep that placeholder in step with the id it names.
+    // Keep that placeholder in step with the id it names; a connection of
+    // another connector that happens to carry the same text keeps it.
     for (const [oldId, newId] of renameEntries()) {
-      const labels = await client.query("UPDATE connector_instances SET display_name = $1 WHERE display_name = $2", [
-        newId,
-        oldId,
-      ]);
+      const labels = await client.query(renamePlaceholderLabelSql((n) => `$${n}`), [newId, oldId, newId]);
       changed += labels.rowCount ?? 0;
     }
     await client.query("COMMIT");
-    return changed;
+    return { changedRows: changed + sumSuperseded(superseded), supersededRows: superseded };
   } catch (err) {
     try {
       await client.query("ROLLBACK");

@@ -25,7 +25,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
+import { describeConnectorIdRename, migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
 import {
   makeConnectorInstanceId as canonicalConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
@@ -6623,7 +6623,11 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
   // Rename ids that older collectors spelled with underscores before any
   // migration below derives identity from a connector id.
-  runWithSqliteBusyRetrySync(() => migrateRenamedConnectorIdsSqlite(raw));
+  const connectorIdRename = runWithSqliteBusyRetrySync(() => migrateRenamedConnectorIdsSqlite(raw));
+  const connectorIdRenameSummary = describeConnectorIdRename(connectorIdRename);
+  if (connectorIdRenameSummary) {
+    console.warn(`[db] ${connectorIdRenameSummary}`);
+  }
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
   raw.exec(`

@@ -17,6 +17,8 @@ import { writeFileSync } from "node:fs";
 import { type Pool as PgPool, Pool, type PoolClient, type QueryResultRow } from "pg";
 import {
   CONNECTOR_ID_RENAME_MIGRATION_ID,
+  type ConnectorIdRenameResult,
+  describeConnectorIdRename,
   migrateRenamedConnectorIdsPostgres,
 } from "./connector-id-rename-migration.ts";
 import {
@@ -7226,9 +7228,9 @@ async function migratePostgresRenamedConnectorIds(
   if (!claim) {
     return;
   }
-  let changedRows: number;
+  let result: ConnectorIdRenameResult;
   try {
-    changedRows = await migrateRenamedConnectorIdsPostgres(client);
+    result = await migrateRenamedConnectorIdsPostgres(client);
   } catch (err) {
     try {
       await blockPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
@@ -7241,8 +7243,9 @@ async function migratePostgresRenamedConnectorIds(
     throw err;
   }
   await completePostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, { nowIso: new Date().toISOString() });
-  if (changedRows > 0) {
-    log(`[PDPP] Renamed connector ids: ${changedRows} rows changed`);
+  const summary = describeConnectorIdRename(result);
+  if (summary) {
+    log(`[PDPP] ${summary}`);
   }
 }
 
