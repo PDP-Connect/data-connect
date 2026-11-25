@@ -17,9 +17,10 @@ on:
     # request builds it only when it changes an input of the packaging itself.
     # Every merge to main still builds all four installers through the
     # automatic desktop release, and workflow_dispatch builds any branch.
-    # All of scripts/ counts, except its tests: build steps reach helpers
+    # All of scripts/ counts, tests included: build steps reach helpers
     # through npm scripts and child processes as well as direct imports, and
-    # a per-file list cannot be checked against those edges.
+    # neither a per-file list nor a test-file exclusion can be checked
+    # against those edges.
     # scripts/release-workflow.test.ts checks that every file the build job
     # runs, with its local imports, falls under these paths.
     paths:
@@ -36,7 +37,6 @@ on:
       - personal-server/**
       - pdpp-runtime/**
       - scripts/**
-      - "!scripts/**/*.test.*"
   release:
     types: [created]
   workflow_dispatch:

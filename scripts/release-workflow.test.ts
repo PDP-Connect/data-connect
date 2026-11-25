@@ -342,11 +342,13 @@ describe("release workflow", () => {
       "personal-server/scripts/verify-artifact-relocatable.js"
     )
     expect(files.filter(file => !includedByPaths(file, paths))).toEqual([])
-    // The negation drops test files only, never a helper the build runs.
-    expect(includedByPaths("scripts/release-workflow.test.ts", paths)).toBe(
-      false
-    )
+    // Build steps also reach scripts through npm scripts and child
+    // processes, which the scan above cannot follow, so every file under
+    // scripts/ counts, whatever its name.
     expect(includedByPaths("scripts/lib/helper.mjs", paths)).toBe(true)
+    expect(includedByPaths("scripts/lib/package-input.test.mjs", paths)).toBe(
+      true
+    )
   })
 
   it("builds manual-install artifacts on demand without an updater", () => {
