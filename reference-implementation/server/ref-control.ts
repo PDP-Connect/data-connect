@@ -1639,12 +1639,6 @@ export function canUseConnectorWideRunSummaryFallback(input: {
   if (input.summary.browser_surface_profile_key) {
     return false;
   }
-  // A summary bound to a connection that is not this row is that other
-  // connection's run, even when this row is the only visible one.
-  const binding = input.summary as SpineSummary & { connector_instance_id?: unknown; connection_id?: unknown };
-  if (binding.connector_instance_id != null || binding.connection_id != null) {
-    return false;
-  }
   // Legacy API/static/manual connectors often emitted connector-wide run events
   // before connection_id existed on the spine. When there is exactly one active
   // visible connection for that connector type, the connector-wide run is the
@@ -1687,7 +1681,7 @@ function retainedBytesFromConnectionRow(
   };
 }
 
-export function buildRecordProjectionFromRetainedRows(input: {
+function buildRecordProjectionFromRetainedRows(input: {
   readonly retainedBytes: RetainedBytesBreakdown | null;
   readonly retainedSizeReliable: boolean;
   readonly rows: readonly RecordProjectionRow[];
@@ -1695,13 +1689,8 @@ export function buildRecordProjectionFromRetainedRows(input: {
   const byStream = new Map<string, StreamProjection>();
   let latest: string | null = null;
   for (const row of input.rows) {
-    // A connector-wide read has one row per stream per connection, so a stream
-    // can appear more than once: sum its counts and keep its newest update.
-    const previous = byStream.get(row.stream);
-    const recordCount = (previous?.record_count ?? 0) + Number(row.record_count || 0);
-    const rowUpdated = row.last_updated || null;
-    const previousUpdated = previous?.last_updated ?? null;
-    const lastUpdated = rowUpdated && (!previousUpdated || rowUpdated > previousUpdated) ? rowUpdated : previousUpdated;
+    const recordCount = Number(row.record_count || 0);
+    const lastUpdated = row.last_updated || null;
     byStream.set(row.stream, {
       freshness: buildFreshness(lastUpdated),
       last_updated: lastUpdated,

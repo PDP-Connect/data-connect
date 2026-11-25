@@ -161,18 +161,3 @@ test("the singleton gate precedes any binding match (a perfect match with count 
     "more than one active visible connection short-circuits before the match check"
   );
 });
-
-test("a summary bound to another connection is never borrowed by the singleton fallback", () => {
-  for (const binding of [{ connector_instance_id: "cin_other" }, { connection_id: "cin_other" }]) {
-    assert.equal(
-      canUseConnectorWideRunSummaryFallback({
-        ...SINGLETON,
-        browserSurfaceProfileKey: null,
-        connectorInstanceId: "cin_target",
-        summary: baseSummary({ ...binding, id: "run_other", run_id: "run_other" }),
-      }),
-      false,
-      `bound by ${Object.keys(binding)[0]}`
-    );
-  }
-});
