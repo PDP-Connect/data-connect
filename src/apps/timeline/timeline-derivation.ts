@@ -65,7 +65,7 @@ const knownTimestampFields = new Set([
 
 const dateOnlyPattern = /^(\d{4})-(\d{2})-(\d{2})$/
 const dateTimePattern =
-  /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/
+  /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/
 
 export function deriveTimeline(
   read: TimelineRead,
@@ -268,7 +268,8 @@ function parseTimestamp(
   if (!isValidCalendarDay(year, month, day)) {
     return null
   }
-  const milliseconds = Date.parse(value)
+  const atMillisecondPrecision = value.replace(/(\.\d{3})\d+(?=Z|[+-])/, "$1")
+  const milliseconds = Date.parse(atMillisecondPrecision)
   return isValidTimestamp(milliseconds) ? milliseconds : null
 }
 
