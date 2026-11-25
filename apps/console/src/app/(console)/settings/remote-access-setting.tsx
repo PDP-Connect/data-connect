@@ -570,6 +570,7 @@ export function RemoteAccessSetting({
 
   // Preparation for a way pins it. If that replaces a way the owner was on,
   // the old way could no longer be used: say why.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
   useEffect(() => {
     if (!wayId && pinnedWay && wayUnusable(pinnedWay, capabilities, blocks)) {
       selection.current += 1;
@@ -588,9 +589,10 @@ export function RemoteAccessSetting({
       );
     }
     setPinned(wayId);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
   }, [readyToPrepare, wayId, pinned]);
 
+  // `send` only wraps `request`; `prepRun` re-runs preparation when a review expires.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way, its use or the review changes
   useEffect(() => {
     if (!readyToPrepare || !wayId || !wayUsage) {
       refreshing.current = null;
@@ -646,8 +648,6 @@ export function RemoteAccessSetting({
     return () => {
       active = false;
     };
-    // `send` only wraps `request`.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
   }, [readyToPrepare, wayId, wayUsage, prepRun, request]);
 
   // An expired review is replaced without a click.
@@ -666,6 +666,7 @@ export function RemoteAccessSetting({
 
   // After Turn on again: turn on once the review is ready, only when it shows the facts
   // the host recorded as approved for the route. Different facts, or no record, wait for a click.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
   useEffect(() => {
     if (!readyReview || !againPending.current || busy) return;
     const { approvedDigest } = againPending.current;
@@ -676,7 +677,6 @@ export function RemoteAccessSetting({
     } else {
       setChanged([]);
     }
-    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
   }, [readyReview, busy]);
 
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
