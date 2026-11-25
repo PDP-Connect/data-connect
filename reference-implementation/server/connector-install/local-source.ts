@@ -11,10 +11,13 @@
  */
 import { createHash } from "node:crypto"
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   writeFileSync,
@@ -143,13 +146,22 @@ function readManifest(root: string): {
     MANIFEST_PATH,
     "Collection Profile manifest"
   )
-  // Parse and hash one read, so the recorded digest is of the parsed bytes.
-  // The size is checked before the read and again on the bytes read, in case
-  // the file grew in between.
-  if (lstatSync(manifestPath).size > MAX_PROFILE_BYTES) {
-    throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
+  // Parse and hash one bounded read from one descriptor, so the recorded
+  // digest is of the parsed bytes and a file that grows mid-read cannot
+  // allocate past the limit.
+  const buffer = Buffer.alloc(MAX_PROFILE_BYTES + 1)
+  const fd = openSync(manifestPath, "r")
+  let length = 0
+  try {
+    while (length < buffer.length) {
+      const n = readSync(fd, buffer, length, buffer.length - length, null)
+      if (n === 0) break
+      length += n
+    }
+  } finally {
+    closeSync(fd)
   }
-  const bytes = readFileSync(manifestPath)
+  const bytes = buffer.subarray(0, length)
   if (bytes.byteLength > MAX_PROFILE_BYTES) {
     throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
   }
