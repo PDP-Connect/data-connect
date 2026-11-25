@@ -280,6 +280,42 @@ test("a queue file named with the legacy underscore connector id is renamed once
   });
 });
 
+test("an underscore-named queue beside the hyphen-named queue is left in place, with a warning while it holds pending rows", () => {
+  withTempRoot("pdpp-durable-state-underscore-both-", (root) => {
+    const stateRoot = join(root, "state");
+    const resolve = () =>
+      captureStderr(() => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }));
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A, "canonical-row");
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+
+    const first = resolve();
+    assert.equal(first.result, hyphenPath);
+    assert.match(first.stderr, /holds 1 pending row\(s\) for this source/);
+    assert.ok(first.stderr.includes(`--queue ${underscorePath}`));
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 1, "the legacy rows are neither moved nor deleted");
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1, "the canonical queue is not merged into");
+
+    // It warns on every run until the operator delivers the legacy rows.
+    assert.match(resolve().stderr, /holds 1 pending row/);
+
+    const drained = new DatabaseSync(underscorePath);
+    try {
+      drained.prepare("UPDATE local_device_outbox SET status = 'succeeded'").run();
+    } finally {
+      drained.close();
+    }
+    const quiet = resolve();
+    assert.equal(quiet.result, hyphenPath);
+    assert.equal(quiet.stderr, "");
+  });
+});
+
 function enqueueRow(outbox: LocalDeviceOutbox, id: string): void {
   outbox.enqueue({ id, kind: "record_batch", payload: { id }, sourceInstanceId: SOURCE_A });
 }

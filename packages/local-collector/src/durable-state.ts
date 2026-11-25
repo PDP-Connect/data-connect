@@ -151,8 +151,10 @@ function foldQueueIntoMainFile(path: string): boolean {
  * behind are removed. If the fold cannot be proven (the file is held by a
  * running collector, or unreadable), nothing is renamed and no row is lost.
  * When the hyphen-named file exists it is authoritative and the
- * underscore-named file is left untouched. A second run finds nothing to do,
- * and nothing reads the old spelling anywhere else.
+ * underscore-named file is left untouched; if that file still holds pending
+ * rows for the source, every run warns with the path to deliver them from.
+ * A second run finds nothing to do, and nothing reads the old spelling
+ * anywhere else.
  */
 function migrateUnderscoreSpelledQueue(
   canonicalPath: string,
@@ -169,7 +171,16 @@ function migrateUnderscoreSpelledQueue(
     sourceInstanceId,
     stateRoot,
   });
-  if (legacyPath === canonicalPath || existsSync(canonicalPath) || !existsSync(legacyPath)) {
+  if (legacyPath === canonicalPath || !existsSync(legacyPath)) {
+    return;
+  }
+  if (existsSync(canonicalPath)) {
+    warnLegacyQueuePending({
+      canonicalPath,
+      legacyPath,
+      situation: `the legacy queue ${legacyPath} exists beside the canonical local collector queue ${canonicalPath}`,
+      sourceInstanceId,
+    });
     return;
   }
   if (!foldQueueIntoMainFile(legacyPath)) {
@@ -494,13 +505,35 @@ function abandonMigrationForExistingCanonical(
   temporaryPath: string,
   lockPath: string
 ): string {
-  const pending = countPendingSourceRows(legacyPath, sourceInstanceId);
   rmSync(temporaryPath, { force: true });
   releaseMigrationLock(lockPath);
-  process.stderr.write(
-    `warning: a canonical local collector queue appeared at ${canonicalPath} while migrating the legacy queue ${legacyPath} for source '${sourceInstanceId}'. The legacy queue was left writable and was not merged or deleted. It holds ${pending} pending row(s) for this source; run with --queue ${legacyPath} to deliver them.\n`
-  );
+  warnLegacyQueuePending({
+    canonicalPath,
+    legacyPath,
+    situation: `a canonical local collector queue appeared at ${canonicalPath} while migrating the legacy queue ${legacyPath}`,
+    sourceInstanceId,
+  });
   return canonicalPath;
+}
+
+/**
+ * The canonical queue is authoritative, so a legacy queue beside it is never
+ * drained by the resolver. Its pending rows are not lost, but only the
+ * operator can deliver them; say where they are.
+ */
+function warnLegacyQueuePending(input: {
+  canonicalPath: string;
+  legacyPath: string;
+  situation: string;
+  sourceInstanceId: string;
+}): void {
+  const pending = countPendingSourceRows(input.legacyPath, input.sourceInstanceId);
+  if (pending === 0) {
+    return;
+  }
+  process.stderr.write(
+    `warning: ${input.situation} for source '${input.sourceInstanceId}'. The legacy queue was left writable and was not merged or deleted. It holds ${pending} pending row(s) for this source; run with --queue ${input.legacyPath} to deliver them.\n`
+  );
 }
 
 function countPendingSourceRows(path: string, sourceInstanceId: string): number {
@@ -508,6 +541,12 @@ function countPendingSourceRows(path: string, sourceInstanceId: string): number 
   try {
     db = new DatabaseSync(path, { readOnly: true });
     db.exec("PRAGMA busy_timeout = 5000");
+    const table = db
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'local_device_outbox'")
+      .get();
+    if (!table) {
+      return 0;
+    }
     const row = db
       .prepare(
         "SELECT COUNT(*) AS pending FROM local_device_outbox WHERE source_instance_id = ? AND status IN ('ready', 'leased')"
