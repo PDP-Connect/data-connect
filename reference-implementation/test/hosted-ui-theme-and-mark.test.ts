@@ -126,6 +126,11 @@ test("renderHostedDocument applies the shared DataConnect style only when asked"
   assert.doesNotMatch(page, /hosted-ui-footer-attribution/);
   assert.match(HOSTED_UI_CSS, /--background: oklch\(0\.995 0\.001 90\)/);
   assert.match(HOSTED_UI_CSS, /html\[data-theme="dark"\]\[data-console-style="true"\]/);
+  // server-consent.md #4: shared buttons and fields meet the 44px hosted-page target.
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-console-page \.hosted-ui-button \{[^}]*min-height: 44px/s);
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-console-page \.hosted-ui-field input \{[^}]*width: 100%/s);
+  assert.match(HOSTED_UI_CSS, /\.hosted-ui-console-page \.hosted-ui-actions > \.hosted-ui-button \{[^}]*width: 100%/s);
+  assert.match(HOSTED_UI_CSS, /@media \(max-width: 480px\)[\s\S]*\.hosted-ui-consent-pair/);
 
   const consentPage = renderHostedDocument({ body: "Consent", providerName: "DataConnect", title: "Consent" });
   assert.doesNotMatch(consentPage, /data-console-style="true"/);

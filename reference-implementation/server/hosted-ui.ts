@@ -745,6 +745,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   line-height: 1.2;
   font-family: inherit;
   cursor: pointer;
+  min-height: 44px;
   border: 1px solid var(--border);
   background: var(--card);
   color: var(--foreground);
@@ -1117,13 +1118,15 @@ html[data-theme="dark"][data-console-style="true"] {
   background: var(--card);
 }
 .hosted-ui-console-page .hosted-ui-button {
-  height: 30px;
-  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   padding: 0 0.875rem;
   border-radius: var(--radius-control);
   font-size: 0.8125rem;
   font-weight: 500;
-  line-height: 28px;
+  line-height: 1.2;
 }
 .hosted-ui-console-page .hosted-ui-button[data-variant="primary"] {
   background: var(--foreground);
@@ -1137,6 +1140,21 @@ html[data-theme="dark"][data-console-style="true"] {
 }
 .hosted-ui-console-page .hosted-ui-actions {
   margin-top: 1.25rem;
+  width: 100%;
+}
+.hosted-ui-console-page .hosted-ui-actions > .hosted-ui-button {
+  width: 100%;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair .hosted-ui-actions {
+  margin-top: 0;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair .hosted-ui-button {
+  width: 100%;
 }
 .hosted-ui-console-page .hosted-ui-error {
   padding: 0;
@@ -1169,6 +1187,67 @@ html[data-theme="dark"][data-console-style="true"] {
 .hosted-ui-console-page .hosted-ui-details dd {
   overflow-wrap: anywhere;
 }
+.hosted-ui-console-page .hosted-ui-consent-summary {
+  display: grid;
+  gap: 0.5rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-summary > p {
+  margin: 0.5rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.hosted-ui-console-page .hosted-ui-client-trust {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+.hosted-ui-console-page .hosted-ui-trust-verified {
+  color: var(--success);
+  font-weight: 500;
+}
+.hosted-ui-console-page .hosted-ui-consent-source {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9375rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-source input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--foreground);
+}
+.hosted-ui-console-page .hosted-ui-batch-sources {
+  display: grid;
+  gap: 0.25rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-source-row {
+  border-bottom: 1px solid var(--border);
+}
+.hosted-ui-console-page .hosted-ui-consent-source-row > .hosted-ui-consent-source {
+  border-bottom: 0;
+}
+.hosted-ui-console-page .hosted-ui-consent-source-row > .hosted-ui-details {
+  margin-top: 0;
+}
+.hosted-ui-console-page .hosted-ui-consent-source-row > .hosted-ui-details > summary {
+  padding-left: 2.5rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair > form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair > .hosted-ui-actions {
+  margin: 0;
+}
+.hosted-ui-console-page .hosted-ui-consent-pair .hosted-ui-button[data-variant="ghost"] {
+  color: var(--foreground);
+  border-color: var(--border);
+}
 .hosted-ui-console-page .hosted-ui-code {
   font-family: var(--font-sans);
   font-size: 0.9375rem;
@@ -1182,6 +1261,15 @@ html[data-theme="dark"][data-console-style="true"] {
   }
   .hosted-ui-console-page .pdpp-display {
     font-size: 23px;
+  }
+}
+
+@media (max-width: 480px) {
+  .hosted-ui-console-page .hosted-ui-consent-pair {
+    gap: 0.5rem;
+  }
+  .hosted-ui-console-page .hosted-ui-consent-pair .hosted-ui-button {
+    padding-inline: 0.5rem;
   }
 }
 `;

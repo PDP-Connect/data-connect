@@ -649,7 +649,7 @@ test("HTTP batch final review resumes the exact result without duplicate issuanc
     );
     const hostedByApprovalIdHtml = await hostedByApprovalId.text();
     assert.equal(hostedByApprovalId.status, 200, hostedByApprovalIdHtml);
-    assert.match(hostedByApprovalIdHtml, /Confirm each source/);
+    assert.match(hostedByApprovalIdHtml, /Choose data sources/);
     assert.ok(
       !hostedByApprovalId.url.includes(deviceCode),
       "hosted approval-id link must not put the device-code-equivalent request URI in the browser URL"
@@ -695,7 +695,7 @@ test("HTTP batch final review resumes the exact result without duplicate issuanc
     assert.match(resumedReviewHtml, /name="approval_review_revision"/);
     assert.match(resumedReviewHtml, /name="confirm_reviewed_decision"/);
     assert.doesNotMatch(resumedReviewHtml, /name="approved_source_indexes"/);
-    assert.doesNotMatch(resumedReviewHtml, /Confirm each source/);
+    assert.doesNotMatch(resumedReviewHtml, /Choose data sources/);
     assert.doesNotMatch(resumedReviewHtml, /aria-label="Source 1"/);
     assert.match(resumedReviewHtml, /aria-label="Reviewed source 2"/);
 

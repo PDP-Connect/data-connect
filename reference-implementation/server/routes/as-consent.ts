@@ -168,33 +168,32 @@ async function renderApproveHtml(
   return ctx.consentUi.renderHostedDocument({
     body: [
       ctx.consentUi.renderPageIntro({
-        eyebrow: "Consent result",
-        lede: "A grant was issued for this request. Hand the exchange code below to the client that requested access; it will redeem the code for an access token over a fresh JSON request.",
         title: "Access approved",
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "You can revoke this access later from your grants page. The exchange code is single-use and expires shortly.",
-          title: "Grant issued",
-          tone: "success",
+          body: "Access is ready. You can close this page and go back to the app.",
+          title: "You allowed this app to read your data",
+          tone: "neutral",
         }),
         surface: "human",
       }),
       ctx.consentUi.renderSurface({
         ariaLabel: "Technical grant details",
-        children: ctx.consentUi.renderKeyValueList([
+        children: `<details class="hosted-ui-details"><summary>Details</summary>${ctx.consentUi.renderKeyValueList([
           { html: `<code>${ctx.consentUi.escapeHtml(grant.grant_id)}</code>`, label: "Grant ID" },
           {
             html: `<code>${ctx.consentUi.escapeHtml(exchangeCode)}</code>`,
             label: "Consent exchange code",
           },
           { html: "<code>POST /consent/exchange</code>", label: "Redeem at" },
-        ]),
+        ])}</details>`,
         surface: "protocol",
       }),
     ].join("\n"),
+    consoleStyle: true,
     providerName: ctx.providerName,
-    title: `${ctx.providerName} — Access approved`,
+    title: "Access approved",
   });
 }
 
@@ -209,9 +208,7 @@ async function renderPackageApproveHtml(
   return ctx.consentUi.renderHostedDocument({
     body: [
       ctx.consentUi.renderPageIntro({
-        eyebrow: "Consent result",
-        lede: "The request was approved as independent source-bounded grants grouped under one package for audit.",
-        title: "Source grants issued",
+        title: "Access approved",
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
@@ -222,15 +219,15 @@ async function renderPackageApproveHtml(
           // `/grants/packages/:packageId`. Reversibility is what makes "yes"
           // feel safe, so promising a granularity the owner cannot reach is
           // worse than saying less.
-          body: "You can revoke this access later from your grants page.",
-          title: `${childGrants.length} grant${childGrants.length === 1 ? "" : "s"} issued`,
-          tone: "success",
+          body: "Access is ready. You can close this page and go back to the app.",
+          title: "You allowed this app to read your data",
+          tone: "neutral",
         }),
         surface: "human",
       }),
       ctx.consentUi.renderSurface({
         ariaLabel: "Technical package details",
-        children: ctx.consentUi.renderKeyValueList([
+        children: `<details class="hosted-ui-details"><summary>Details</summary>${ctx.consentUi.renderKeyValueList([
           { html: `<code>${ctx.consentUi.escapeHtml(packageId)}</code>`, label: "Package ID" },
           {
             html: childGrants
@@ -243,12 +240,13 @@ async function renderPackageApproveHtml(
             label: "Consent exchange code",
           },
           { html: "<code>POST /consent/exchange</code>", label: "Redeem at" },
-        ]),
+        ])}</details>`,
         surface: "protocol",
       }),
     ].join("\n"),
+    consoleStyle: true,
     providerName: ctx.providerName,
-    title: `${ctx.providerName} — Access approved`,
+    title: "Access approved",
   });
 }
 
@@ -908,8 +906,7 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           ctx.consentUi.renderHostedDocument({
             body: [
               ctx.consentUi.renderPageIntro({
-                eyebrow: "Consent result",
-                title: "Access Denied",
+                title: "Nothing was shared",
               }),
               ctx.consentUi.renderSurface({
                 children: ctx.consentUi.renderResultState({
@@ -922,8 +919,9 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
                 }),
               }),
             ].join("\n"),
+            consoleStyle: true,
             providerName: ctx.providerName,
-            title: `${ctx.providerName} — Access denied`,
+            title: "Nothing was shared",
           })
         );
       } catch (err) {

@@ -220,8 +220,9 @@ test("picker exposes Select all / Clear all / Expand all / Collapse all controls
   // Owner-facing labels.
   assert.match(html, />Select every source</, "bulk select is owner-labelled");
   assert.match(html, />Clear selection</, "bulk clear is owner-labelled");
-  assert.match(html, />Show all data types</, "expand is owner-labelled");
-  assert.match(html, />Hide all data types</, "collapse is owner-labelled");
+  // server-consent.md item 2: owner-facing copy says "kinds of records".
+  assert.match(html, />Show all kinds of records</, "expand is owner-labelled");
+  assert.match(html, />Hide all kinds of records</, "collapse is owner-labelled");
   // The 54 per-source buttons are gone: the tri-state parent checkbox already
   // selects and clears its own source, and 27 sources x 2 buttons was the
   // page compensating for a list that should have been shorter.
@@ -250,6 +251,68 @@ test("no source and no stream checkbox is checked on first render", async () => 
   for (const group of groups) {
     assert.match(group, /data-source-selected="false"/, "each source group starts unselected");
   }
+});
+
+test("the source picker keeps its posted field names and values", async () => {
+  const html = await renderPicker();
+  const form = html.match(/<form method="POST" action="\/oauth\/authorize\/mcp-package"[^>]*>[\s\S]*?<\/form>/);
+  assert.ok(form, "the package picker form remains present");
+  const inputs = [...form[0].matchAll(/<input\b[^>]*>/g)].map((match) => mustExist(match[0], "input tag exists"));
+  const attribute = (tag: string, name: string): string => {
+    const match = new RegExp(`\\b${name}="([^"]*)"`).exec(tag);
+    assert.ok(match, `${name} attribute exists`);
+    return match[1] ?? "";
+  };
+  const namedInputs = inputs.map((tag) => [attribute(tag, "name"), attribute(tag, "value")] as const);
+
+  // The render copy may change; hidden OAuth/CSRF inputs and their values may not.
+  assert.deepEqual(
+    namedInputs.filter(([name]) => ["_csrf", "review_digest", "decision_digest", "client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method"].includes(name)),
+    [
+      ["_csrf", "csrf-token"],
+      ["review_digest", "sha256:9_-Ke1wSUeMseuSJdR5YeVVEHYD9CJZi1r_3UmhjewQ"],
+      ["decision_digest", ""],
+      ["client_id", "client_demo"],
+      ["redirect_uri", "https://client.example/callback"],
+      ["response_type", "code"],
+      ["scope", "mcp"],
+      ["state", "render-test"],
+      ["code_challenge", "a".repeat(43)],
+      ["code_challenge_method", "S256"],
+    ]
+  );
+
+  const sourceIds = [
+    [SPOTIFY_ID, "cin_spotify_1"],
+    [GITHUB_ID, "cin_github_url"],
+    [GITHUB_ID, "cin_github_placeholder"],
+    [GITHUB_ID, "cin_github_echo"],
+  ] as const;
+  assert.deepEqual(
+    namedInputs.filter(([name]) => name === "selection").map(([, value]) => value).sort(),
+    sourceIds.map(([connectorId, connectionId]) => encodeHostedMcpSelection({ connectorId, connectionId })).sort()
+  );
+  const expectedStreams = sourceIds.flatMap(([connectorId, connectionId]) =>
+    (MANIFESTS[connectorId]?.streams ?? []).map(({ name }) =>
+      encodeHostedMcpStreamSelection({ connectorId, connectionId, streamName: name })
+    )
+  );
+  assert.deepEqual(
+    namedInputs.filter(([name]) => name === "stream").map(([, value]) => value).sort(),
+    expectedStreams.sort()
+  );
+  assert.deepEqual(namedInputs.filter(([name]) => name === "access_mode"), [
+    ["access_mode", "continuous"],
+    ["access_mode", "single_use"],
+  ]);
+  assert.deepEqual(namedInputs.filter(([name]) => name === "grant_expiry"), [
+    ["grant_expiry", "90d"],
+    ["grant_expiry", "1y"],
+    ["grant_expiry", "never"],
+  ]);
+
+  assert.match(html, /name="decision" value="cancel" formaction="\/oauth\/authorize\/mcp-package\/cancel" formnovalidate/);
+  assert.match(html, /name="decision" value="allow"/);
 });
 
 // ── Acceptance criterion 4: placeholder/URL labels not owner-visible ─────────
@@ -306,7 +369,8 @@ test("picker row meta never repeats a URL-shaped connector id as the technical k
   for (const meta of metas) {
     assert.equal(meta.includes("https"), false, "row meta must not echo a registry URL");
     assert.equal(meta.includes("/connectors/"), false, "row meta must not echo a registry URL path");
-    assert.match(meta, /\d+ data types?/, "row meta still summarizes the count of data the owner holds");
+    // server-consent.md item 2: "data types" is replaced by "kinds of records".
+    assert.match(meta, /\d+ kinds of records?/, "row meta still summarizes the count of data the owner holds");
     assert.equal(/\bstreams?\b/.test(meta), false, '"stream" is a protocol noun, not owner-facing copy');
   }
 });
@@ -422,8 +486,9 @@ test("a held connector's 'streams available' count reflects real per-connection 
   const row = mustExist(rows[0], "the GitHub connection row must exist");
 
   // Real holdings (2), not the manifest's full offering (3) and not 0.
-  assert.match(row.meta, /\b2 data types\b/, `expected the real held count of 2, got meta: ${row.meta}`);
-  assert.equal(row.meta.includes("3 streams available"), false, "must not fall back to the manifest catalog count");
+  // server-consent.md item 2: the count keeps the same value in plain words.
+  assert.match(row.meta, /\b2 kinds of records\b/, `expected the real held count of 2, got meta: ${row.meta}`);
+  assert.equal(row.meta.includes("3 kinds of records"), false, "must not fall back to the manifest catalog count");
 
   // The full manifest catalog must still be present in the grantable stream
   // list — including `starred_repos`, which has no data yet — so the owner
@@ -456,7 +521,8 @@ test("picker carries the source-first validation guards and an inline error bann
 
   // The two guard messages that keep an orphaned stream / sourceless submit
   // from ever reaching the server as a confusing grant.
-  assert.match(html, /Choose at least one data type to continue/i, "guards against a sourceless submit");
+  // server-consent.md item 2: validation uses the same plain record wording.
+  assert.match(html, /Choose at least one kind of record to continue/i, "guards against a sourceless submit");
   assert.match(
     html,
     /Choose data from each selected source, or clear the source/i,
@@ -500,7 +566,7 @@ test("picker copy carries no instructions for its own checkbox, and no revoke pr
     false,
     "no per-source revoke promise: the route exists but no UI calls it"
   );
-  assert.match(html, /You can revoke this access later from your grants page/i, "the package-level promise is kept");
+  assert.match(html, /You can stop this app reading your data later in DataConnect\./i, "the access reminder remains available in Details");
   assert.equal(html.includes("retention limit"), false, 'copy avoids the jargon "retention limit"');
 
   // No technical-demo phrasing or registry leakage in the *visible prose*. The
@@ -655,17 +721,14 @@ test("picker never states a retention the client did not declare", async () => {
 
 // ── Trust varies, which is what makes the unverified state mean anything ──
 
-test("a client that proved no domain stays unverified, with a monogram and no logo", async () => {
+test("an app without a verified domain says so, with a monogram and no logo", async () => {
   // The counterpart to the domain-verified case: this client registered
   // without publishing a metadata document at an https client_id, so nothing
   // about it has been verified and the surface must say so plainly.
   const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
 
-  assert.match(
-    html,
-    /This app isn't registered with your server\. Its name and logo are self-reported\./,
-    "an unverified client is named as such"
-  );
+  // server-consent.md item 1: the trust line is the domain and its state.
+  assert.match(html, /Website \(not verified\)/, "an app without a domain remains unverified");
   assert.equal(html.includes("Verified domain"), false, "nothing was verified, so nothing is claimed");
   // spec-core.md:676 — never a remote logo for a client with no positive
   // trust signal. The monogram is the safe stand-in.
@@ -689,14 +752,12 @@ test("H1 uses the resolved display name, never the client_id URL", async () => {
   );
   // The domain is still shown, as its own quiet line, and the trust status
   // sits with it so a resolved name is never presented as more than it is.
-  assert.match(html, /hosted-ui-client-identity-domain[^>]*>chatgpt\.com</, "the domain renders as a quiet second line");
-  // This client published a valid metadata document at its own https
-  // client_id, which proves control of that domain — a positive trust signal
-  // spec-core.md:675 requires to be rendered distinctly.
+  assert.match(html, /hosted-ui-client-identity-domain[^>]*>chatgpt\.com</, "the domain remains available in Details");
+  // server-consent.md item 1: verified apps show only the tone-colored word.
   assert.match(
     html,
-    /Verified domain: chatgpt\.com — this app controls that domain\./,
-    "the trust status names what was actually proven"
+    /<p class="hosted-ui-client-trust" data-trust="domain-verified"><span class="hosted-ui-trust-verified">Verified<\/span><\/p>/,
+    "the trust line is concise and visually marked"
   );
   // The claim never widens past domain control. "Verified app" would be the
   // more flattering phrasing and the more dangerous one.
@@ -713,6 +774,42 @@ test("H1 falls back to the registered name for a client with no distinct origin 
   // their registered display name — `titleName` IS the client-authored name.
   const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
   assert.match(html, /<h1[^>]*>Demo App wants to read your data<\/h1>/, "H1 uses the single registered name");
+});
+
+test("the approval surface follows the console wording and order", async () => {
+  const html = await renderPicker(makeCaps(), {
+    client: {
+      ...CIMD_CLIENT_SELF_DESCRIBED,
+      client_display: {
+        name: "ChatGPT",
+        policy_uri: "https://chatgpt.com/privacy",
+        tos_uri: "https://chatgpt.com/terms",
+      },
+    },
+  });
+  const titleIndex = html.indexOf("<h1>ChatGPT wants to read your data</h1>");
+  const trustIndex = html.indexOf('data-trust="domain-verified"><span class="hosted-ui-trust-verified">Verified');
+  const sourceIndex = html.indexOf(">Choose data sources</h2>");
+  const allowIndex = html.indexOf('name="decision" value="allow"');
+  const refuseIndex = html.indexOf('name="decision" value="cancel"');
+  const privacyIndex = html.indexOf("Privacy policy");
+  const termsIndex = html.indexOf("Terms of service");
+
+  assert.ok(titleIndex >= 0 && titleIndex < trustIndex, "title comes before trust");
+  assert.ok(trustIndex < sourceIndex, "trust comes before the source choices");
+  assert.ok(sourceIndex < allowIndex && allowIndex < refuseIndex, "source choices come before Allow and Don't allow");
+  assert.ok(refuseIndex < privacyIndex && privacyIndex < termsIndex, "policy links sit below the decision buttons");
+  assert.match(html, /"It will read " \+ total \+ " " \+ typeWord \+ " from " \+ namedSources \+ "\."/);
+
+  const visible = html
+    .replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+  assert.doesNotMatch(
+    visible,
+    /\b(?:grant|client|scope|stream|token|oauth|pkce|par|request_uri|data types?)\b/i,
+    "technical terms stay inside Details or machine-only form fields"
+  );
 });
 
 test("the metadata-document URL never reaches the owner surface", async () => {
@@ -800,36 +897,28 @@ test("picker offers grant expiry as its own control, tied to the access-mode cho
   const expiryIndex = html.indexOf("data-hosted-mcp-grant-expiry");
   assert.ok(accessModeIndex >= 0, "access-mode fieldset must be present");
   assert.ok(expiryIndex > accessModeIndex, "expiry control must render after the access-mode fieldset, not before it");
-  const protocolLabelIndex = html.indexOf('aria-label="Streams and access mode your server will enforce"');
-  assert.ok(protocolLabelIndex >= 0, "the protocol-enforced streams/access-mode block must be present");
-  assert.ok(
-    protocolLabelIndex < accessModeIndex && accessModeIndex < expiryIndex,
-    "the expiry control must be co-located inside the same protocol-enforced block as the access-mode control"
-  );
+  const sourceSelectionIndex = html.indexOf('aria-label="Data sources"');
+  const reviewSummaryIndex = html.indexOf("data-hosted-mcp-review-scope");
+  assert.ok(sourceSelectionIndex >= 0, "the source choices must be named in plain words");
+  assert.ok(sourceSelectionIndex < accessModeIndex && accessModeIndex < expiryIndex, "access controls follow source choices");
+  assert.ok(expiryIndex < reviewSummaryIndex, "the decision summary follows the access choices");
 });
 
 // ── FIX 5: resolved fields and time range are stated ──────────────────────────
 
 test("picker states the resolved field/time-range scope once, on the approval artifact", async () => {
   const html = await renderPicker();
-  // The default is still everything; the copy now states that as a default
-  // and points at the control, rather than describing the breadth as a
-  // property of the protocol.
+  // server-consent.md item 2: this technical explanation stays in Details.
   assert.match(
     html,
-    /Each data type you check is shared in full unless you narrow it\./,
-    "picker must state the resolved field/time-range scope"
+    /<details class="hosted-ui-details"><summary>Details<\/summary>[\s\S]*Each kind of record you check is shared in full unless you narrow it\./,
+    "picker states the resolved field/time-range scope in Details"
   );
+  // The approval artifact keeps the same terms available in Details.
   assert.match(
     html,
-    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}Each data type you check is shared in full/,
-    "the fields/time-range statement must render inside the protocol-enforced block, above the source list"
-  );
-  // The approval artifact restates the same term (spec-core.md:873-877).
-  assert.match(
-    html,
-    /data-hosted-mcp-review[\s\S]*<dt>Coverage<\/dt><dd>Everything in each data type you check, unless you narrowed it above\.<\/dd>/,
-    "the coverage term renders on the artifact the owner approves"
+    /data-hosted-mcp-review[\s\S]*data-hosted-mcp-review-terms[\s\S]*<dt>What it includes<\/dt><dd>Everything in each kind of record you check, unless you narrowed it above\.<\/dd>/,
+    "the reviewed terms remain available in Details"
   );
   // The old wording asserted an absence the server no longer has.
   assert.equal(html.includes("with no date limit"), false, "the unbuilt-feature phrasing must not survive");
@@ -901,7 +990,8 @@ test("a source row's meta line states holdings, never the connector key", async 
   );
   assert.ok(metas.length >= 2, "fixture must render source meta lines");
   for (const meta of metas) {
-    assert.match(meta, /^\d+ data types?$/, `meta must state holdings alone, got: ${meta}`);
+    // server-consent.md item 2: labels count kinds of records in plain words.
+    assert.match(meta, /^\d+ kinds of records?$/, `meta must state holdings alone, got: ${meta}`);
   }
   assert.equal(/·\s*src\d/.test(html), false, "the registry connector key must not reach the owner surface");
 });
@@ -920,11 +1010,21 @@ test("every source row emits a closed <details> tag with its summary inside it",
   // `<details>` in prose, and a document-wide scan would count those.
   const openTags = [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*?>/g)].map((m) => m[0]);
   assert.ok(openTags.length >= 2, "fixture must render at least two source rows");
-  assert.equal(
-    [...html.matchAll(/<\/details>/g)].length,
-    openTags.length,
-    "every source <details> must be closed exactly once"
-  );
+  const markup = html.split("<script>")[0] ?? html;
+  const detailTags = [...markup.matchAll(/<details\b[^>]*>|<\/details>/g)].map((match) => match[0]);
+  const stack: string[] = [];
+  let closedSourceCount = 0;
+  for (const tag of detailTags) {
+    if (tag.startsWith("</")) {
+      const openTag = stack.pop();
+      assert.ok(openTag, "every <details> close must have an open tag");
+      if (openTag.includes("hosted-ui-option-source")) closedSourceCount += 1;
+    } else {
+      stack.push(tag);
+    }
+  }
+  assert.equal(stack.length, 0, "every <details> must be closed exactly once");
+  assert.equal(closedSourceCount, openTags.length, "every source <details> must be closed exactly once");
 
   // An unterminated open tag swallows the element that follows it, so the
   // next `<` lands inside the tag. That is the exact signature of the bug.
@@ -944,7 +1044,7 @@ test("every source row emits a closed <details> tag with its summary inside it",
   );
 });
 
-// ── List reduction: filter above the threshold, live counter always ──────────
+// ── List reduction: filter above the threshold, one live decision summary ────
 
 /** Builds a caps fixture with `count` distinct connectors, each with 2 streams. */
 function makeWideCaps(count: number): ConsentPickerCapabilities {
@@ -999,24 +1099,21 @@ test("the filter names what it searches, and is not a form field", async () => {
   assert.match(html, /Filter sources/, "the filter is labelled for screen readers and sighted users alike");
 });
 
-test("the picker renders a live selection counter, starting at nothing selected", async () => {
+test("the picker renders one live decision summary, starting at nothing selected", async () => {
   const html = await renderPicker();
-  assert.match(html, /data-hosted-mcp-counter/, "a selection counter must render");
-  // The counter is the owner's running answer to "what am I about to allow".
-  // It starts honest: before any interaction the answer is nothing.
+  // server-consent.md item 1: the page has one changing read summary above the buttons.
   assert.match(
     html,
-    /data-hosted-mcp-counter[^>]*>\s*Nothing selected yet\.?\s*</,
-    "the counter starts at 'Nothing selected yet.'"
+    /data-hosted-mcp-review-scope[^>]*>Nothing selected yet\.</,
+    "the decision summary starts at 'Nothing selected yet.'"
   );
 });
 
-test("the counter is wired to selection changes, not rendered dead", async () => {
+test("the decision summary updates from the selected records", async () => {
   const html = await renderPicker();
-  // Guard against a counter that renders once and never updates — the whole
-  // point is that it tracks the selection as it changes.
-  assert.match(html, /data-hosted-mcp-counter[\s\S]*<script/, "the counter renders before the behavior script");
+  // The summary uses the current checked inputs, and stays tied to its live region.
+  assert.match(html, /data-hosted-mcp-review[^>]*aria-live="polite"/, "the summary is announced to assistive technology");
   const script = /<script>([\s\S]*)<\/script>/.exec(html);
   assert.ok(script, "picker behavior script must render");
-  assert.match(script[1] ?? "", /data-hosted-mcp-counter/, "the script must bind the counter");
+  assert.match(script[1] ?? "", /reviewScope\.textContent = hasSelection[\s\S]*It will read /, "selection changes rewrite the decision summary");
 });

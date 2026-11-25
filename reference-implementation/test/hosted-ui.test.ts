@@ -165,6 +165,30 @@ function assertHostedShell(html: string): void {
   assert.doesNotMatch(html, /<style>[\s\S]*body\s*{\s*font-family:\s*system-ui/, "no route-local inline style block");
 }
 
+function visibleTextOutsideDetails(html: string): string {
+  const detailsTag = /<\/?details\b[^>]*>/gi;
+  let visible = "";
+  let depth = 0;
+  let visibleStart = 0;
+  let match = detailsTag.exec(html);
+  while (match) {
+    if (match[0].startsWith("</")) {
+      depth -= 1;
+      if (depth === 0) visibleStart = detailsTag.lastIndex;
+    } else {
+      if (depth === 0) visible += html.slice(visibleStart, match.index);
+      depth += 1;
+    }
+    match = detailsTag.exec(html);
+  }
+  if (depth === 0) visible += html.slice(visibleStart);
+  return visible
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 test("hosted-ui: shared stylesheet is served under /__pdpp/hosted-ui.css", async () => {
   await withServer({}, async ({ asUrl }) => {
     const resp = await fetch(`${asUrl}${HOSTED_UI_CSS_PATH}`);
@@ -188,8 +212,40 @@ test("hosted-ui: /consent uses the shared hosted-UI layer", async () => {
     assert.match(html, /Longview/, "shows client name");
     assert.match(html, /concert-recommendation profile/, "shows purpose");
     assert.match(html, /data-surface="human"/, "frames consent as a human surface");
+    // server-consent.md #1 and #2: first-look copy follows the shared title and plain summary.
+    assert.match(html, /Longview wants to read your data/);
+    assert.match(html, /It will read 1 kind of record from this data source\./);
+    // RAISE-RULES 7: Allow and Don't allow are the two equal cells of one pair, not one cell of a nested pair.
+    assert.doesNotMatch(html, /<div class="hosted-ui-consent-pair">\s*<div class="hosted-ui-consent-pair">/);
+    assert.doesNotMatch(
+      visibleTextOutsideDetails(html),
+      /\b(?:grant|client|scope|stream|token|oauth|pkce|par|request_uri|data types?)\b/i
+    );
     assert.match(html, /action="\/consent\/review"/, "keeps review-first allow action");
     assert.match(html, /action="\/consent\/deny"/, "keeps deny action");
+  });
+});
+
+test("hosted-ui: reviewed /consent keeps the same words and folds protocol facts into Details", async () => {
+  await withServer({}, async ({ asUrl }) => {
+    const requestUri = await startPendingConsent(asUrl);
+    const reviewResp = await fetch(`${asUrl}/consent/review`, {
+      body: JSON.stringify({ request_uri: requestUri, subject_id: "owner_local" }),
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(reviewResp.status, 200);
+    const resp = await fetch(`${asUrl}/consent?request_uri=${encodeURIComponent(requestUri)}`);
+    const html = await resp.text();
+    assert.equal(resp.status, 200);
+    // server-consent.md #1 and #2: reviewed approval repeats the owner copy and hides protocol facts.
+    assert.match(html, /Longview wants to read your data/);
+    assert.match(html, /<summary>Details<\/summary>/);
+    assert.doesNotMatch(
+      visibleTextOutsideDetails(html),
+      /\b(?:grant|client|scope|stream|token|oauth|pkce|par|request_uri|data types?)\b/i
+    );
+    assert.match(html, /name="approval_review_revision"/);
   });
 });
 
@@ -287,7 +343,8 @@ test("hosted-ui: /consent/deny result page uses the shared hosted-UI layer", asy
     assert.equal(resp.status, 200);
     const html = await resp.text();
     assertHostedShell(html);
-    assert.match(html, /Access Denied/, "shows denial result");
+    // server-consent.md #1: the denial result uses the shared owner-facing copy.
+    assert.match(html, /Nothing was shared/, "shows denial result");
   });
 });
 

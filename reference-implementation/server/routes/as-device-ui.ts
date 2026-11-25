@@ -23,6 +23,7 @@ import {
   executeAsDeviceDecision,
 } from "../../operations/as-device-decision/index.ts";
 import type { RouteArg } from "./_route-contract.ts";
+import { getRegisteredClient } from "../auth.ts";
 
 // ─── Minimal structural types ────────────────────────────────────────────────
 
@@ -228,17 +229,25 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
       return;
     }
 
+    const registeredClient = await getRegisteredClient(pending.client_id).catch(() => null);
+    const registeredName = registeredClient?.metadata.client_name;
+    const appName = typeof registeredName === "string" && registeredName.trim() ? registeredName.trim() : "Unnamed app";
     const facts = ui.renderKeyValueList([
-      { label: "App", value: pending.client_id },
+      { label: "App", value: appName },
       { html: `<span class="hosted-ui-code">${ui.escapeHtml(pending.user_code)}</span>`, label: "Code" },
       { label: "Expires", value: formatDeviceExpiry(pending.expires_at) },
     ]);
+    // RAISE-RULES 1: the raw app ID and the signed-in account ID stay reachable in one folded "Details".
+    const detailRows = [{ html: `<code>${ui.escapeHtml(pending.client_id)}</code>`, label: "App ID" }];
+    if (ctx.ownerAuthEnabled) {
+      detailRows.push({ html: `<code>${ui.escapeHtml(ctx.ownerSubjectId)}</code>`, label: "Account ID" });
+    }
+    const appDetails = `<details class="hosted-ui-details"><summary>Details</summary>
+${ui.renderKeyValueList(detailRows)}
+</details>`;
 
     const ownerBlock = ctx.ownerAuthEnabled
-      ? // RAISE-RULES 1: the signed-in account ID stays reachable in a folded "Details".
-        `<details class="hosted-ui-details"><summary>Details</summary>
-${ui.renderKeyValueList([{ html: `<code>${ui.escapeHtml(ctx.ownerSubjectId)}</code>`, label: "Account ID" }])}
-</details>`
+      ? ""
       : `<div class="hosted-ui-field">
   <label for="hosted-ui-subject_id">Account name</label>
   <input id="hosted-ui-subject_id" name="subject_id" value="owner_local" type="text" />
@@ -251,6 +260,7 @@ ${ui.renderKeyValueList([{ html: `<code>${ui.escapeHtml(ctx.ownerSubjectId)}</co
   ${csrfField}
   <input type="hidden" name="user_code" value="${ui.escapeHtml(pending.user_code)}" />
   ${facts}
+  ${appDetails}
   ${ownerBlock}
   <div class="hosted-ui-actions">
     <button type="submit" class="hosted-ui-button" data-variant="primary">Approve</button>

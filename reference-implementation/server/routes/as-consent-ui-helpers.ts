@@ -53,9 +53,9 @@ export interface ConsentUiRenderer {
       hidden: Array<{ name: string; value: string }>;
     }>
   ) => string;
-  renderHostedDocument: (opts: { title: string; providerName: string; body: string }) => string;
+  renderHostedDocument: (opts: { title: string; providerName: string; body: string; consoleStyle?: boolean }) => string;
   renderKeyValueList: (items: Array<{ label: string; value?: unknown; html?: string }>) => string;
-  renderPageIntro: (opts: { eyebrow: string; title: string; lede?: string }) => string;
+  renderPageIntro: (opts: { eyebrow?: string; title: string; lede?: string }) => string;
   renderResultState: (opts: { tone: string; title: string; body: string }) => string;
   renderSurface: (opts: { surface?: string; ariaLabel?: string; children: string }) => string;
 }
@@ -1171,7 +1171,7 @@ function buildPickerRowMeta({
   // now", not "will exist".
   // "Data types", not "streams": `stream` is a protocol noun the owner never
   // agreed to learn, and it means nothing on a screen about sharing data.
-  const availabilityPhrase = streamCount === 1 ? "1 data type" : `${streamCount} data types`;
+  const availabilityPhrase = streamCount === 1 ? "1 kind of record" : `${streamCount} kinds of records`;
   parts.push(availabilityPhrase);
   // The connector key used to be appended here whenever it differed from the
   // display label — so a row read "5 data types · chase-bank". That is a
@@ -1333,16 +1333,74 @@ export function renderPendingConsentNotFoundHtml(providerName: string, ui: Conse
       ui.renderSurface({
         ariaLabel: "Consent request expired",
         children: ui.renderResultState({
-          body: "This approval link has expired, was already approved or denied, or was created on a different session. Return to the app that asked for access and start the request again to get a fresh link.",
-          title: "Link expired or already used",
+          body: "This link is no longer available. Go back to the app and start again.",
+          title: "Nothing was shared",
           tone: "neutral",
         }),
         surface: "human",
       }),
     ].join("\n"),
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Consent request expired`,
+    title: "Nothing was shared",
   });
+}
+
+function renderConsentTrustLine(clientDisplay: ConsentClientDisplay | null, ui: ConsentUiRenderer): string {
+  if (!clientDisplay) {
+    return '<p class="hosted-ui-client-trust" data-trust="unverified">Website (not verified)</p>';
+  }
+  if (clientDisplay.isUnverified) {
+    const domain = clientDisplay.domainLabel || "Website";
+    return `<p class="hosted-ui-client-trust" data-trust="unverified">${ui.escapeHtml(domain)} (not verified)</p>`;
+  }
+  const trust = clientDisplay.verifiedDomain ? "domain-verified" : "registered";
+  return `<p class="hosted-ui-client-trust" data-trust="${trust}"><span class="hosted-ui-trust-verified">Verified</span></p>`;
+}
+
+function renderConsentPolicyLinks(clientDisplay: ConsentClientDisplay | null, ui: ConsentUiRenderer): string {
+  if (!clientDisplay || clientDisplay.policyLinks.length === 0) return "";
+  return `<p class="hosted-ui-client-policy-links">${clientDisplay.policyLinks
+    .map(
+      (link) =>
+        `<a href="${ui.escapeHtml(link.href)}" target="_blank" rel="noopener noreferrer">${ui.escapeHtml(link.label)}</a>`
+    )
+    .join(" · ")}</p>`;
+}
+
+function renderConsentSummary(
+  clientDisplay: ConsentClientDisplay,
+  sourceNames: string[],
+  recordCount: number,
+  ui: ConsentUiRenderer,
+  { includeSourceRows = true, includeTrustLine = true }: { includeSourceRows?: boolean; includeTrustLine?: boolean } = {}
+): string {
+  const sources = sourceNames.length > 0 ? sourceNames : ["this data source"];
+  const names = sources.length === 1 ? sources[0] : `${sources.slice(0, -1).join(", ")} and ${sources.at(-1)}`;
+  const rows = includeSourceRows
+    ? sources
+        .map(
+          (name) =>
+            `<div class="hosted-ui-consent-source"><input type="checkbox" checked disabled aria-hidden="true" /><span>${ui.escapeHtml(
+              name
+            )}</span></div>`
+        )
+        .join("\n")
+    : "";
+  const recordPhrase = recordCount === 1 ? "kind of record" : "kinds of records";
+  return `<div class="hosted-ui-consent-summary">
+${includeTrustLine ? renderConsentTrustLine(clientDisplay, ui) : ""}
+${rows}
+<p data-hosted-consent-summary>It will read ${recordCount} ${recordPhrase} from ${ui.escapeHtml(names)}.</p>
+</div>`;
+}
+
+function renderConsentDetails(children: string): string {
+  return `<details class="hosted-ui-details"><summary>Details</summary>${children}</details>`;
+}
+
+function renderConsentActionPair(actions: string): string {
+  return `<div class="hosted-ui-consent-pair">${actions}</div>`;
 }
 
 interface PendingClientClaims {
@@ -1941,11 +1999,20 @@ ${ui.renderKeyValueList(items)}`,
   });
 }
 
-function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRenderer): string {
+function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRenderer, selectionFormId?: string): string {
   return cards
     .map((card) => {
       const sourceLabel = card.source?.id || `source ${card.index + 1}`;
+      const rowLabel = `Data source ${card.index + 1}`;
       const streams = Array.isArray(card.resolvedStreams) ? card.resolvedStreams : [];
+      const sourceCheckbox = selectionFormId
+        ? `<label class="hosted-ui-consent-source"><input type="checkbox" name="approved_source_indexes" value="${ui.escapeHtml(
+            String(card.index)
+          )}" checked form="${ui.escapeHtml(selectionFormId)}" data-hosted-consent-source-checkbox data-source-name="${ui.escapeHtml(
+            rowLabel
+          )}" data-record-count="${streams.length}" /><span>${ui.escapeHtml(rowLabel)}</span></label>`
+        : "";
+      const selectionDetails = selectionFormId ? buildSourceNarrowingControls(card, ui, selectionFormId) : "";
       // MANIFEST: the requested streams, named/described by the manifest.
       const manifestBlock = renderAuthorshipBlock(
         "manifest",
@@ -1974,13 +2041,18 @@ function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRendere
         ui
       );
       const clientClaimsBlock = buildClientClaimsBlock(card.client_claims, ui);
-      return ui.renderSurface({
+      const details = ui.renderSurface({
         ariaLabel: `Source ${card.index + 1}`,
         children: `<h3 class="pdpp-title">${ui.escapeHtml(
           sourceLabel
-        )}</h3>${clientPurposeBlock}${clientClaimsBlock}${manifestBlock}${protocolBlock}`,
+        )}</h3>${clientPurposeBlock}${clientClaimsBlock}${manifestBlock}${protocolBlock}${selectionDetails}`,
         surface: "human",
       });
+      return selectionFormId
+        ? `<div class="hosted-ui-consent-source-row" data-hosted-consent-source>${sourceCheckbox}<details class="hosted-ui-details hosted-ui-consent-source-details"><summary>Choose kinds of records</summary>${details}</details></div>`
+        : `<details class="hosted-ui-details hosted-ui-consent-source-details"><summary>${ui.escapeHtml(
+            rowLabel
+          )}</summary>${details}</details>`;
     })
     .join("\n");
 }
@@ -1993,18 +2065,20 @@ function encodeStreamKey(name: string): string {
   return Buffer.from(name, "utf8").toString("base64url");
 }
 
-// Per-source owner narrowing controls, rendered inside the per-source confirm
-// form. The owner may drop staged streams (uncheck), reduce a stream's fields
+// Per-source owner narrowing controls, rendered in each source's Details
+// disclosure and associated with that source's confirm form. The owner may
+// drop staged streams (uncheck), reduce a stream's fields
 // (uncheck), and tighten a stream's existing time bound (date input). Every
 // control defaults to the staged value, so submitting without touching them
 // reproduces the staged request unchanged. Widening is not representable: the
 // controls only offer what the client staged, and the server re-validates the
 // posted narrowing against the staged baseline.
-function buildSourceNarrowingControls(card: PendingConsentCard, ui: ConsentUiRenderer): string {
+function buildSourceNarrowingControls(card: PendingConsentCard, ui: ConsentUiRenderer, formId: string): string {
   const streams = Array.isArray(card.resolvedStreams) ? card.resolvedStreams : [];
   if (streams.length === 0) {
     return "";
   }
+  const formAttribute = ` form="${ui.escapeHtml(formId)}"`;
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const index = card.index;
   const streamRows = streams
@@ -2012,7 +2086,7 @@ function buildSourceNarrowingControls(card: PendingConsentCard, ui: ConsentUiRen
       const encoded = encodeStreamKey(stream.name);
       const streamToggle = `<label class="hosted-ui-narrow-stream"><input type="checkbox" name="narrow_streams_${index}" value="${ui.escapeHtml(
         stream.name
-      )}" checked /> <span class="hosted-ui-stream-name">${ui.escapeHtml(stream.name)}</span></label>`;
+      )}" checked${formAttribute} /> <span class="hosted-ui-stream-name">${ui.escapeHtml(stream.name)}</span></label>`;
 
       const fields = Array.isArray(stream.fields) ? stream.fields : null;
       const fieldControls = fields
@@ -2021,7 +2095,7 @@ function buildSourceNarrowingControls(card: PendingConsentCard, ui: ConsentUiRen
               (field) =>
                 `<label class="hosted-ui-narrow-field"><input type="checkbox" name="narrow_fields_${index}__${encoded}" value="${ui.escapeHtml(
                   field
-                )}" checked /> ${ui.escapeHtml(field)}</label>`
+                )}" checked${formAttribute} /> ${ui.escapeHtml(field)}</label>`
             )
             .join("")}</div>`
         : "";
@@ -2030,7 +2104,7 @@ function buildSourceNarrowingControls(card: PendingConsentCard, ui: ConsentUiRen
       const sinceControl = since
         ? `<label class="hosted-ui-narrow-since">Start no earlier than <input type="text" name="narrow_since_${index}__${encoded}" value="${ui.escapeHtml(
             since
-          )}" placeholder="${ui.escapeHtml(since)}" /></label>`
+          )}" placeholder="${ui.escapeHtml(since)}"${formAttribute} /></label>`
         : "";
 
       return `<div class="hosted-ui-narrow-stream-row">${streamToggle}${sinceControl}${fieldControls}</div>`;
@@ -2049,7 +2123,6 @@ const APPROVE_ALL_SUPPRESSION_LABELS: Record<string, string> = {
 };
 
 function buildPerSourceConfirmForm(
-  cards: PendingConsentCard[],
   requestUri: string,
   reviewRevision: string | null | undefined,
   csrfToken: string | null,
@@ -2059,22 +2132,11 @@ function buildPerSourceConfirmForm(
   const csrfInput = csrfToken
     ? `<input type="hidden" name="${ui.escapeHtml(csrfFieldName)}" value="${ui.escapeHtml(csrfToken)}" />`
     : "";
-  const checkboxes = cards
-    .map((card) => {
-      const sourceLabel = card.source?.id || `source ${card.index + 1}`;
-      const narrowControls = buildSourceNarrowingControls(card, ui);
-      return `<div class="hosted-ui-source-block"><label class="hosted-ui-source-toggle"><input type="checkbox" name="approved_source_indexes" value="${ui.escapeHtml(
-        String(card.index)
-      )}" checked /> ${ui.escapeHtml(sourceLabel)}</label>${narrowControls}</div>`;
-    })
-    .join("\n");
   const reviewInput = reviewRevision
     ? `<input type="hidden" name="approval_review_revision" value="${ui.escapeHtml(reviewRevision)}" />`
     : "";
-  return `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Confirm each source">
+  return `<form id="hosted-ui-batch-per-source-form" class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Choose data sources">
   ${csrfInput}${reviewInput}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
-<div class="hosted-ui-source-toggles"><span class="pdpp-title">Confirm each source</span>${checkboxes}</div>
-<button type="submit" class="hosted-ui-button" data-variant="primary">Confirm selected sources</button>
 </form>`;
 }
 
@@ -2088,12 +2150,39 @@ function buildApproveAllForm(
   const csrfInput = csrfToken
     ? `<input type="hidden" name="${ui.escapeHtml(csrfFieldName)}" value="${ui.escapeHtml(csrfToken)}" />`
     : "";
-  const sourceList = cards.map((card) => ui.escapeHtml(card.source?.id || `source ${card.index + 1}`)).join(", ");
-  return `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Allow all sources">
+  const sourceList = cards.map((_, index) => `data source ${index + 1}`).join(", ");
+  return `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Allow every data source">
   ${csrfInput}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
-<label class="hosted-ui-source-toggle"><input type="checkbox" name="confirm_approve_all" value="1" required /> I confirm allowing all ${cards.length} sources: ${sourceList}</label>
-<button type="submit" class="hosted-ui-button" data-variant="default">Allow all sources</button>
+<label class="hosted-ui-source-toggle"><input type="checkbox" name="confirm_approve_all" value="1" required /> I confirm allowing all ${cards.length} data sources: ${sourceList}</label>
+<button type="submit" class="hosted-ui-button" data-variant="default">Allow every data source</button>
 </form>`;
+}
+
+function buildBatchConsentSummaryScript(): string {
+  return `<script>
+(() => {
+  const summary = document.querySelector("[data-hosted-consent-summary]");
+  const sources = Array.from(document.querySelectorAll("[data-hosted-consent-source-checkbox]"));
+  if (!summary || sources.length === 0) return;
+  const update = () => {
+    const selected = sources.filter((source) => source.checked);
+    const total = selected.reduce((count, source) => count + Number(source.dataset.recordCount || 0), 0);
+    if (total === 0) {
+      summary.textContent = "Nothing selected yet.";
+      return;
+    }
+    const names = selected.map((source) => source.dataset.sourceName || "data source");
+    const namedSources = names.length === 1
+      ? names[0]
+      : names.length === 2
+        ? names.join(" and ")
+        : names.slice(0, -1).join(", ") + ", and " + names[names.length - 1];
+    summary.textContent = "It will read " + total + " " + (total === 1 ? "kind of record" : "kinds of records") + " from " + namedSources + ".";
+  };
+  for (const source of sources) source.addEventListener("change", update);
+  update();
+})();
+</script>`;
 }
 
 function buildFinalBatchReviewForm(
@@ -2108,14 +2197,14 @@ function buildFinalBatchReviewForm(
     ? `<input type="hidden" name="${ui.escapeHtml(csrfFieldName)}" value="${ui.escapeHtml(csrfToken)}" />`
     : "";
   const sourceList = cards
-    .map((card) => `<li>${ui.escapeHtml(card.source?.id || `source ${card.index + 1}`)}</li>`)
+    .map((card, index) => `<li>Data source ${index + 1} <code>${ui.escapeHtml(card.source?.id || `source ${index + 1}`)}</code></li>`)
     .join("");
   return `<form class="hosted-ui-form" method="POST" action="/consent/approve" aria-label="Confirm reviewed batch decision">
   ${csrfInput}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
   <input type="hidden" name="approval_review_revision" value="${ui.escapeHtml(reviewRevision)}" />
-<div class="hosted-ui-source-toggles"><span class="pdpp-title">Reviewed sources</span><ul>${sourceList}</ul></div>
+<div class="hosted-ui-source-toggles"><span class="pdpp-title">Reviewed data sources</span><details class="hosted-ui-details"><summary>Details</summary><ul>${sourceList}</ul></details></div>
 <label class="hosted-ui-source-toggle"><input type="checkbox" name="confirm_reviewed_decision" value="1" required /> I confirm this reviewed decision</label>
-<button type="submit" class="hosted-ui-button" data-variant="primary">Approve reviewed decision</button>
+<button type="submit" class="hosted-ui-button" data-variant="primary">Allow</button>
 </form>`;
 }
 
@@ -2145,9 +2234,9 @@ function renderReviewedBatchConsentHtml(
     {
       action: "/consent/deny",
       hidden: [...csrfHidden, { name: "request_uri", value: requestUri }],
-      label: "Deny",
+      label: "Don't allow",
       method: "POST",
-      variant: "danger",
+      variant: "ghost",
     },
   ]);
   const sourceSections = review.sources
@@ -2170,17 +2259,19 @@ function renderReviewedBatchConsentHtml(
       })
     )
     .join("\n");
+  const clientDisplay = buildConsentClientDisplay(review.client, ui);
+  const sourceNames = review.sources.map((_, index) => `Data source ${index + 1}`);
+  const recordCount = review.sources.reduce((count, source) => count + source.resolved_streams.length, 0);
   const actions = [
     buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision, csrfToken, csrfFieldName, ui),
     denyForm,
   ].join("\n");
   const body = [
     ui.renderPageIntro({
-      eyebrow: "Final approval",
-      lede: "These are the exact facts your server saved when you completed review.",
-      title: "Approve the reviewed sources",
+      title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    ui.renderSurface({
+    renderConsentSummary(clientDisplay, sourceNames, recordCount, ui),
+    renderConsentDetails(ui.renderSurface({
       ariaLabel: "Reviewed batch decision",
       children: ui.renderKeyValueList([
         ...buildReviewedClientFacts(review.client),
@@ -2191,14 +2282,15 @@ function renderReviewedBatchConsentHtml(
         { label: "Approved source order", value: review.approved_source_indexes.join(", ") },
       ]),
       surface: "human",
-    }),
-    sourceSections,
-    ui.renderSurface({ ariaLabel: "Consent actions", children: actions, surface: "human" }),
+    }) + sourceSections),
+    renderConsentActionPair(actions),
+    renderConsentPolicyLinks(clientDisplay, ui),
   ].join("\n");
   return ui.renderHostedDocument({
     body,
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Reviewed batch consent`,
+    title: `${clientDisplay.displayName} wants to read your data`,
   });
 }
 
@@ -2257,30 +2349,42 @@ function renderBatchConsentHtml(
     {
       action: "/consent/deny",
       hidden: [...csrfHidden, { name: "request_uri", value: requestUri }],
-      label: "Deny",
+      label: "Don't allow",
       method: "POST",
-      variant: "danger",
+      variant: "ghost",
     },
   ]);
-  const actions = pending.reviewRevision
-    ? [buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision, csrfToken, csrfFieldName, ui), denyForm]
-        .filter(Boolean)
-        .join("\n")
-    : [
-        suppressionNote,
-        buildPerSourceConfirmForm(cards, requestUri, null, csrfToken, csrfFieldName, ui),
-        approveAllSuppressed ? "" : buildApproveAllForm(cards, requestUri, csrfToken, csrfFieldName, ui),
-        denyForm,
-      ]
-        .filter(Boolean)
-        .join("\n");
+  const hasReviewedDecision = Boolean(pending.reviewRevision);
+  const sourceFormId = hasReviewedDecision ? null : "hosted-ui-batch-per-source-form";
+  const perSourceForm = sourceFormId
+    ? buildPerSourceConfirmForm(requestUri, null, csrfToken, csrfFieldName, ui)
+    : "";
+  const sourceCards = buildBatchSourceCards(cards, ui, sourceFormId ?? undefined);
+  const allowButton = sourceFormId
+    ? `<button type="submit" form="${ui.escapeHtml(sourceFormId)}" class="hosted-ui-button" data-variant="primary">Allow</button>`
+    : "";
+  const actions = hasReviewedDecision
+    ? renderConsentActionPair(
+        [buildFinalBatchReviewForm(cards, requestUri, pending.reviewRevision as string, csrfToken, csrfFieldName, ui), denyForm]
+          .filter(Boolean)
+          .join("\n")
+      )
+    : renderConsentActionPair([allowButton, denyForm].filter(Boolean).join("\n"));
 
-  const body = [
-    ui.renderPageIntro({
-      eyebrow: "Data access request",
-      lede: "Review each source. Your server will only issue grants for sources you confirm.",
-      title: `${clientDisplay.titleName} wants access to several sources`,
-    }),
+  const sourceNames = cards.map((_, index) => `Data source ${index + 1}`);
+  const recordCount = cards.reduce((count, card) => count + (Array.isArray(card.resolvedStreams) ? card.resolvedStreams.length : 0), 0);
+  const sourceSelection = sourceFormId
+    ? `<section class="hosted-ui-batch-sources" aria-label="Data sources">
+        <h2 class="pdpp-title">Choose data sources</h2>
+        <p class="pdpp-caption">Anything you leave unchecked stays private.</p>
+        ${perSourceForm}${sourceCards}
+      </section>`
+    : "";
+  const summary = renderConsentSummary(clientDisplay, sourceNames, recordCount, ui, {
+    includeSourceRows: !sourceFormId,
+    includeTrustLine: !sourceFormId,
+  });
+  const batchDetails = [
     ui.renderSurface({
       ariaLabel: "Client identity",
       children: [
@@ -2303,16 +2407,32 @@ function renderBatchConsentHtml(
     overCapWarning,
     broadWarning,
     buildBatchRiskHeader(pending.cumulativeRisk, ui),
-    buildBatchSourceCards(cards, ui),
-    ui.renderSurface({ ariaLabel: "Consent actions", children: actions, surface: "human" }),
+    suppressionNote,
+    hasReviewedDecision ? sourceCards : "",
+    sourceFormId && !approveAllSuppressed
+      ? buildApproveAllForm(cards, requestUri, csrfToken, csrfFieldName, ui)
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const body = [
+    ui.renderPageIntro({
+      title: `${clientDisplay.displayName} wants to read your data`,
+    }),
+    ...(sourceFormId ? [renderConsentTrustLine(clientDisplay, ui), sourceSelection, summary] : [summary]),
+    renderConsentDetails(batchDetails),
+    actions,
+    renderConsentPolicyLinks(clientDisplay, ui),
+    sourceFormId ? buildBatchConsentSummaryScript() : "",
   ]
     .filter(Boolean)
     .join("\n");
 
   return ui.renderHostedDocument({
     body,
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Batch consent request`,
+    title: `${clientDisplay.displayName} wants to read your data`,
   });
 }
 
@@ -2346,7 +2466,7 @@ function buildSingleConsentActions({
         {
           action: "/consent/approve",
           hidden: [...csrfHidden, ...reviewHidden, { name: "request_uri", value: requestUri }],
-          label: "Allow access",
+          label: "Allow",
           method: "POST",
           variant: "primary",
         },
@@ -2358,18 +2478,18 @@ ${
     ? '<label class="hosted-ui-source-toggle"><input type="checkbox" name="ai_training_consented" value="1" required /> I explicitly agree to AI training use</label>'
     : ""
 }
-<button type="submit" class="hosted-ui-button" data-variant="primary">Allow access</button>
+<button type="submit" class="hosted-ui-button" data-variant="primary">Allow</button>
 </form>`;
   const denyAction = ui.renderActionRow([
     {
       action: "/consent/deny",
       hidden: [...csrfHidden, { name: "request_uri", value: requestUri }],
-      label: "Deny",
+      label: "Don't allow",
       method: "POST",
-      variant: "danger",
+      variant: "ghost",
     },
   ]);
-  return [allowAction, denyAction].join("\n");
+  return renderConsentActionPair([allowAction, denyAction].join("\n"));
 }
 
 function renderReviewedSingleConsentHtml(
@@ -2389,13 +2509,14 @@ function renderReviewedSingleConsentHtml(
     requestUri,
     ui,
   });
+  const clientDisplay = buildConsentClientDisplay(review.client, ui);
+  const recordCount = review.resolved_streams.length;
   const body = [
     ui.renderPageIntro({
-      eyebrow: "Final approval",
-      lede: "These are the exact facts your server saved when you completed review.",
-      title: "Approve the reviewed data access",
+      title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    ui.renderSurface({
+    renderConsentSummary(clientDisplay, ["this data source"], recordCount, ui),
+    renderConsentDetails(ui.renderSurface({
       ariaLabel: "Reviewed consent decision",
       children: [
         renderAuthorshipBlock(
@@ -2431,15 +2552,17 @@ function renderReviewedSingleConsentHtml(
           ui
         ),
         `<span class="pdpp-title">Exact reviewed streams</span>${renderReviewedStreams(review.resolved_streams, ui)}`,
-        actions,
       ].join("\n"),
       surface: "human",
-    }),
+    })),
+    actions,
+    renderConsentPolicyLinks(clientDisplay, ui),
   ].join("\n");
   return ui.renderHostedDocument({
     body,
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Reviewed consent`,
+    title: `${clientDisplay.displayName} wants to read your data`,
   });
 }
 
@@ -2552,14 +2675,16 @@ export function renderPendingGrantConsentHtml(
     requestUri,
     ui,
   });
+  const recordCount = requestedStreams.length === 1 && requestedStreams[0]?.name === "*"
+    ? manifestStreamNames?.length || 1
+    : requestedStreams.length;
 
   const body = [
     ui.renderPageIntro({
-      eyebrow: "Data access request",
-      lede: "Review what this app is asking for. Your server will only release what you allow here.",
-      title: `${clientDisplay.titleName} wants access to your data`,
+      title: `${clientDisplay.displayName} wants to read your data`,
     }),
-    ui.renderSurface({
+    renderConsentSummary(clientDisplay, ["this data source"], recordCount, ui),
+    renderConsentDetails(ui.renderSurface({
       ariaLabel: "Consent request",
       children: [
         codeBlock,
@@ -2568,18 +2693,20 @@ export function renderPendingGrantConsentHtml(
         manifestBlock,
         protocolBlock,
         continuousBlock,
-        actions,
       ]
         .filter(Boolean)
         .join("\n"),
       surface: "human",
-    }),
+    })),
+    actions,
+    renderConsentPolicyLinks(clientDisplay, ui),
   ].join("\n");
 
   return ui.renderHostedDocument({
     body,
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Consent request`,
+    title: `${clientDisplay.displayName} wants to read your data`,
   });
 }
 
@@ -2726,7 +2853,11 @@ function renderStreamScopeControls(
  * forbids for a client with no positive trust signal (every CIMD-resolved
  * client today).
  */
-function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay, ui: ConsentUiRenderer): string {
+function renderHostedMcpClientIdentityBlock(
+  clientDisplay: ConsentClientDisplay,
+  ui: ConsentUiRenderer,
+  includePolicyLinks = true
+): string {
   // Trust status as a neutral fact, not a warning badge. spec-core.md:675 has
   // two limbs — render a positive signal distinctly when one exists, and
   // treat a client with none as unverified. Both are now reachable: a client
@@ -2741,12 +2872,14 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
   // honest or safe. "Verified app" would be the more flattering phrasing and
   // the more dangerous one, because an owner would act on it.
   const trustLine = clientDisplay.isUnverified
-    ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">This app isn't registered with your server. Its name and logo are self-reported.</p>`
+    ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">${ui.escapeHtml(
+        clientDisplay.domainLabel || "Website"
+      )} (not verified)</p>`
     : clientDisplay.verifiedDomain
-      ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status">Verified domain: ${ui.escapeHtml(
+      ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status"><span class="hosted-ui-trust-verified">Verified</span> · ${ui.escapeHtml(
           clientDisplay.verifiedDomain
-        )} — this app controls that domain. Your server hasn't checked anything else about it.</p>`
-      : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registered with your server by you.</p>`;
+        )}</p>`
+      : `<p class="hosted-ui-client-trust" data-trust="registered" role="status"><span class="hosted-ui-trust-verified">Verified</span></p>`;
   const domainLine = clientDisplay.domainLabel
     ? `<span class="hosted-ui-client-identity-domain">${ui.escapeHtml(clientDisplay.domainLabel)}</span>`
     : "";
@@ -2776,7 +2909,7 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
   // them under two eyebrows said the same two things three times. The
   // client-authored register survives where it still carries information:
   // policy/terms links the client published, attributed once.
-  const clientBlock = policyLinksHtml
+  const clientBlock = includePolicyLinks && policyLinksHtml
     ? renderAuthorshipBlock("client", "Links this app published", policyLinksHtml, ui)
     : "";
   return ui.renderSurface({
@@ -2882,8 +3015,8 @@ export async function renderHostedMcpSourceSelection(
     /**
      * Absolute URL of the console's connections page, if the route can resolve
      * one. The empty picker uses it to give an owner with nothing connected
-     * somewhere to go; when it is absent the page still offers Cancel, so this
-     * only ever adds an exit, never removes one.
+     * somewhere to go; when it is absent the page still offers a refusal, so
+     * this only ever adds an exit, never removes one.
      *
      * INTEGRATOR: `as-authorize.ts` owns resolving this (it has
      * `resolvePublicUrl`); this renderer never constructs a URL itself.
@@ -2899,7 +3032,6 @@ export async function renderHostedMcpSourceSelection(
   // any MCP client) ever reaches, and it previously showed no requester
   // identity at all.
   const clientDisplay = opts.client ? buildConsentClientDisplay(opts.client, ui) : null;
-  const clientIdentityBlock = clientDisplay ? renderHostedMcpClientIdentityBlock(clientDisplay, ui) : "";
   // The name the owner reads, used in every sentence that talks about the
   // requester, so the page never says "this app" where it knows the name.
   const clientName = clientDisplay?.displayName ?? "This app";
@@ -3050,11 +3182,11 @@ export async function renderHostedMcpSourceSelection(
       // available. An owner who reaches it must still be able to tell the
       // client no, and must be told what to do next.
       // A link only when the route resolved one — this renderer never
-      // constructs a URL it cannot stand behind, and Cancel is present either
-      // way, so the link can only ever add an exit.
+      // constructs a URL it cannot stand behind, and the refusal is present
+      // either way, so the link can only ever add an exit.
       `<p class="pdpp-body">You haven&#39;t connected any data sources yet. Connect one, then start this request again.</p>
-        <div class="hosted-ui-actions hosted-ui-decision-actions">
-          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
+        <div class="hosted-ui-consent-pair hosted-ui-decision-actions">
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Don't allow</button>
           ${
             typeof opts.connectionsUrl === "string" && opts.connectionsUrl
               ? `<a class="hosted-ui-button" data-variant="primary" href="${ui.escapeHtml(opts.connectionsUrl)}">Connect a source</a>`
@@ -3076,33 +3208,31 @@ export async function renderHostedMcpSourceSelection(
   const reviewPanel = rows.length
     ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
           <h2 class="pdpp-title">What you're allowing</h2>
-          <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
-          <dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
+          <p class="hosted-ui-review-scope" data-hosted-mcp-review-scope>Nothing selected yet.</p>
+        </section>`
+    : "";
+  const reviewTerms = rows.length
+    ? `<dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
             <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
-            <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
-            <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
+            <dt>What it includes</dt><dd>Everything in each kind of record you check, unless you narrowed it above.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
             <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
             <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
-          </dl>
-        </section>`
+          </dl>`
     : "";
 
-  // Allow and Cancel sit together as a pair. Every consent screen in the
+  // Allow and Don't allow sit together as a pair. Every consent screen in the
   // prior-art corpus has a refusal; this one had 59 buttons and every one of
   // them was affirmative, so the only exit was to close the tab — which
   // leaves the client with no response at all rather than the
   // `error=access_denied` RFC 6749 §4.1.2.1 requires.
   //
-  // `Cancel`, not `Deny`: declining is not an error and should not be dressed
-  // as one. Both appear in the corpus; `Cancel` is the more common shipped
-  // label and carries no implication the owner did something adversarial.
-  // It posts to the same form (carrying state, redirect_uri, and CSRF) with
-  // `decision=cancel`, using formaction so no nested form is needed.
+  // The visible refusal stays plain while its existing posted value remains
+  // `decision=cancel`; formaction keeps it on the same form without nesting.
   const submit = rows.length
-    ? `<div class="hosted-ui-actions hosted-ui-decision-actions">
-          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
-          <button type="submit" class="hosted-ui-button" data-variant="primary" name="decision" value="allow">Allow access</button>
+    ? `<div class="hosted-ui-consent-pair hosted-ui-decision-actions">
+          <button type="submit" class="hosted-ui-button" data-variant="primary" name="decision" value="allow">Allow</button>
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Don't allow</button>
         </div>`
     : "";
 
@@ -3122,7 +3252,7 @@ export async function renderHostedMcpSourceSelection(
       // people know from every file manager; the behavior was already
       // implemented correctly (the parent goes `indeterminate` on partial
       // selection) and the copy was apologizing for a control that works.
-      `<p class="pdpp-body">You can revoke this access later from your grants page.</p>`
+      `<p class="pdpp-body">You can stop this app reading your data later in DataConnect.</p>`
     : "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
@@ -3134,7 +3264,7 @@ export async function renderHostedMcpSourceSelection(
   // one message that explains why the page just changed.
   const validationBanner =
     rows.length || validationError
-      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Choose at least one data type to continue."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
+      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Choose at least one kind of record to continue."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
       : "";
 
   // A filter earns its place only once the list stops being scannable. On
@@ -3155,26 +3285,14 @@ export async function renderHostedMcpSourceSelection(
       `
       : "";
 
-  // The owner's running answer to "what am I about to allow", kept beside the
-  // controls that change it. It starts honest — before any interaction the
-  // answer is nothing — and it is the one place the page states the size of
-  // the decision without the owner having to count checkboxes.
-  const selectionCounter = rows.length
-    ? `<p class="hosted-ui-picker-counter" role="status" aria-live="polite" data-hosted-mcp-counter>Nothing selected yet.</p>`
-    : "";
-
   const bulkControls = rows.length
-    ? `
-        ${sourceFilter}
-        <div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Source bulk controls">
+    ? `<div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Source bulk controls">
           <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Select every source</button>
           <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Clear selection</button>
           <span class="hosted-ui-toolbar-divider" aria-hidden="true"></span>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Show all data types</button>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Hide all data types</button>
-        </div>
-        ${selectionCounter}
-      `
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Show all kinds of records</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Hide all kinds of records</button>
+        </div>`
     : "";
 
   const accessModeControl = rows.length
@@ -3270,11 +3388,6 @@ export async function renderHostedMcpSourceSelection(
   font-size: 0.8125rem;
   color: var(--muted-foreground);
 }
-.hosted-ui-picker-counter {
-  margin: 0.25rem 0 0.75rem;
-  font-size: 0.8125rem;
-  color: var(--muted-foreground);
-}
 .hosted-ui-option-source[hidden] {
   display: none;
 }
@@ -3299,21 +3412,6 @@ export async function renderHostedMcpSourceSelection(
       error.textContent = "";
       error.hidden = true;
     }
-  };
-  // The running total, recomputed from the checkboxes themselves rather than
-  // tracked incrementally — there is no second source of truth to drift.
-  const counter = form.querySelector("[data-hosted-mcp-counter]");
-  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
-  const updateCounter = () => {
-    if (!counter) return;
-    const streams = Array.from(form.querySelectorAll("[data-hosted-mcp-stream-checkbox]")).filter((b) => b.checked);
-    if (streams.length === 0) {
-      counter.textContent = "Nothing selected yet.";
-      return;
-    }
-    const sourceCount = sources.filter((s) => streamsFor(s).some((b) => b.checked)).length;
-    counter.textContent =
-      plural(sourceCount, "source", "sources") + " · " + plural(streams.length, "data type", "data types");
   };
   // Keep the disclosure's own state in sync with the <details>. The label and
   // aria-expanded are on a real control now, so both must track "open"
@@ -3350,7 +3448,6 @@ export async function renderHostedMcpSourceSelection(
       source.open = true;
     }
     syncDisclosure(source);
-    updateCounter();
   };
   for (const source of sources) {
     // The summary hosts two controls that do different things, so neither may
@@ -3468,7 +3565,6 @@ export async function renderHostedMcpSourceSelection(
   // only ever narrow or fail — it never widens a grant.
   const decisionField = form.querySelector("[data-hosted-mcp-decision-digest]");
   const review = form.querySelector("[data-hosted-mcp-review]");
-  const reviewEmpty = form.querySelector("[data-hosted-mcp-review-empty]");
   const reviewTerms = form.querySelector("[data-hosted-mcp-review-terms]");
   const reviewScope = form.querySelector("[data-hosted-mcp-review-scope]");
   const reviewDuration = form.querySelector("[data-hosted-mcp-review-duration]");
@@ -3559,13 +3655,22 @@ export async function renderHostedMcpSourceSelection(
     const total = decision.sources.reduce((sum, source) => sum + source.streams.length, 0);
     const hasSelection = total > 0;
     if (review) {
-      if (reviewEmpty) reviewEmpty.hidden = hasSelection;
       if (reviewTerms) reviewTerms.hidden = !hasSelection;
     }
     if (reviewScope) {
-      const sourceWord = decision.sources.length === 1 ? "source" : "sources";
-      const typeWord = total === 1 ? "data type" : "data types";
-      reviewScope.textContent = total + " " + typeWord + " from " + decision.sources.length + " " + sourceWord;
+      const typeWord = total === 1 ? "kind of record" : "kinds of records";
+      const names = decision.sources.map((selected) => {
+        const source = sources.find((row) => row.dataset.sourceKey === selected.sourceKey);
+        return source?.querySelector(".hosted-ui-connector-type")?.textContent?.trim() || "data source";
+      });
+      const namedSources = names.length === 1
+        ? names[0]
+        : names.length === 2
+          ? names.join(" and ")
+          : names.slice(0, -1).join(", ") + ", and " + names[names.length - 1];
+      reviewScope.textContent = hasSelection
+        ? "It will read " + total + " " + typeWord + " from " + namedSources + "."
+        : "Nothing selected yet.";
     }
     if (reviewDuration) {
       reviewDuration.textContent =
@@ -3602,6 +3707,15 @@ export async function renderHostedMcpSourceSelection(
     // The decision moved, so the one-shot submit retry is owed again.
     delete form.dataset.decisionRetried;
     refreshDecision();
+  });
+
+  // Enter in a field (the search box, a date) must never decide. Browsers
+  // submit a form on Enter through its first submit button, which is Allow;
+  // only a click on Allow or Don't allow may answer the request.
+  form.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
+      event.preventDefault();
+    }
   });
 
   form.addEventListener("submit", (event) => {
@@ -3653,21 +3767,7 @@ export async function renderHostedMcpSourceSelection(
 </script>`
     : "";
 
-  // The headline carries the two facts that decide the page: who is asking,
-  // and that they want to READ. The URL is not one of them — it moved to the
-  // identity block's quiet domain line, where it does its anti-phishing job
-  // without occupying headline weight. The trust status sits directly beneath
-  // the name in `clientIdentityBlock`, so a resolved name is never shown as
-  // though the server had verified it (spec-core.md:706-730).
-  const pickerTitle = clientDisplay
-    ? `${clientDisplay.displayName} wants to read your data`
-    : "Choose what this app can read";
-
-  // The uniform-kind summary ("All sources below are connector-backed") is
-  // gone with the per-row badge: it stated a protocol classification the
-  // owner has no decision to make about. `source.kind` remains in the grant
-  // and the audit record.
-  const sourceKindSummaryInline = "";
+  const pickerTitle = `${clientDisplay?.displayName ?? "This app"} wants to read your data`;
 
   // Resolved field/time-range scope (Grant fields: `streams[].fields`,
   // `streams[].time_constraint`; approval-artifact requirement,
@@ -3686,43 +3786,50 @@ export async function renderHostedMcpSourceSelection(
   // control, rather than describing the breadth as inevitable. The approval
   // artifact restates the same term (spec-core.md:873-877).
   const fieldsAndTimeRangeSummary =
-    '<p class="hosted-ui-fields-timerange-summary">Each data type you check is shared in full unless you narrow it. Open a data type to choose fields or a date range.</p>';
+    '<p class="hosted-ui-fields-timerange-summary">Each kind of record you check is shared in full unless you narrow it. Open one to choose fields or a date range.</p>';
 
-  // PROTOCOL: the stream-selection controls and the access-mode fieldset are
-  // both server-enforced (spec section 706) — wrap them together so the whole
-  // picker, not only the new client-identity/purpose additions above, keeps
-  // its categories visually distinct.
-  const protocolSelectionBlock = renderAuthorshipBlock(
-    "protocol",
-    "Streams and access mode your server will enforce",
-    `${sourceKindSummaryInline}${fieldsAndTimeRangeSummary}<div class="hosted-ui-option-group">${options}</div>${accessModeControl}`,
-    ui
-  );
+  const clientDetails = clientDisplay ? renderHostedMcpClientIdentityBlock(clientDisplay, ui, false) : "";
+  const detailContent = [
+    clientDetails,
+    termsBlock,
+    rows.length ? fieldsAndTimeRangeSummary : "",
+    riskCopy,
+    reviewTerms,
+    bulkControls,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const requestDetails = detailContent ? renderConsentDetails(detailContent) : "";
+  const sourceSelection = rows.length
+    ? `${sourceFilter}<div class="hosted-ui-option-group">${options}</div>`
+    : options;
 
   return ui.renderHostedDocument({
     body: [
       ui.renderPageIntro({
-        eyebrow: "Data access request",
-        lede: "Choose what it can read. Anything you leave unchecked stays private.",
         title: pickerTitle,
       }),
-      clientIdentityBlock,
+      renderConsentTrustLine(clientDisplay, ui),
       ui.renderSurface({
         children: `
             ${pickerBehaviorStyles}
-            ${riskCopy}
             <form method="POST" action="/oauth/authorize/mcp-package" data-hosted-mcp-picker-form>
               <input type="hidden" name="_csrf" value="${ui.escapeHtml(csrfToken)}" />
               <input type="hidden" name="review_digest" value="${ui.escapeHtml(reviewSnapshotDigest)}" />
               <input type="hidden" name="decision_digest" value="" data-hosted-mcp-decision-digest />
               ${hidden}
               ${validationBanner}
-              ${termsBlock}
-              ${bulkControls}
-              ${protocolSelectionBlock}
+              <section class="hosted-ui-picker-sources" aria-label="Data sources">
+                <h2 class="pdpp-title">Choose data sources</h2>
+                <p class="pdpp-caption">Anything you leave unchecked stays private.</p>
+                ${sourceSelection}
+              </section>
+              ${accessModeControl}
               ${reviewPanel}
+              ${requestDetails}
               ${submit}
             </form>
+            ${renderConsentPolicyLinks(clientDisplay, ui)}
             ${pickerBehaviorScript}
           `,
         surface: "human",
@@ -3731,7 +3838,8 @@ export async function renderHostedMcpSourceSelection(
       .filter(Boolean)
       .join("\n"),
     providerName,
-    title: `${providerName} — Choose data sources`,
+    consoleStyle: true,
+    title: pickerTitle,
   });
 }
 
@@ -3754,19 +3862,19 @@ export async function renderHostedMcpSourceSelection(
 /** Owner-facing copy for the failures a browser can actually reach. */
 const HOSTED_ERROR_PAGE_COPY: Record<string, { title: string; body: string }> = {
   expired_link: {
-    body: "This approval link expired or was already used. Start the request again from the app that sent you here. Nothing was shared.",
+    body: "This link expired or was already used. Go back to the app and start again.",
     title: "Nothing was shared",
   },
   server_error: {
-    body: "Something went wrong on your server. Nothing was shared. Try again in a moment; if it keeps happening, check your server's logs.",
-    title: "Your server couldn't finish this",
+    body: "Your server could not finish this. Go back to the app and try again.",
+    title: "Nothing was shared",
   },
   stale_review: {
-    body: "This request changed since you loaded the page. Review and approve again. Your available sources changed while it was open, so nothing was shared.",
-    title: "Start over from the app",
+    body: "This request changed while you were reviewing it. Go back to the app and start again.",
+    title: "Nothing was shared",
   },
   unknown_client: {
-    body: "Your server doesn't recognize this app. It won't send it anything, and nothing was shared.",
+    body: "Your server does not recognize this app, so nothing was shared. You can close this page.",
     title: "Unrecognized app",
   },
 };
@@ -3781,12 +3889,11 @@ const HOSTED_ERROR_PAGE_COPY: Record<string, { title: string; body: string }> = 
  * happened to their data.
  *
  * Refusing is a normal, correct outcome, not an error, so the copy does not
- * dress it as one. `Access denied` survives as the page title because that is
- * the OAuth-facing name of the outcome and several suites pin it; the words
- * the owner reads are these.
+ * dress it as one. The page title states the result; the body says what
+ * happened to the owner's data and where to go next.
  */
 export const HOSTED_DENIAL_COPY = {
-  body: "The app didn't get any of your data. You can close this tab.",
+  body: "The app didn't get any of your data. You can close this page and go back to the app.",
   title: "You didn't share anything",
 } as const;
 
@@ -3838,7 +3945,8 @@ export function renderHostedErrorPage({
   ].join("\n");
   return ui.renderHostedDocument({
     body,
+    consoleStyle: true,
     providerName,
-    title: `${providerName} — Request stopped`,
+    title: copy.title,
   });
 }

@@ -77,7 +77,7 @@ function fakeEchoAdmitRunConnection(): (input: {
   };
 }
 
-const REGEXP_1 = /Access Denied/;
+const REGEXP_1 = /Nothing was shared/;
 const REGEXP_2 = /view and fields are mutually exclusive/;
 const REGEXP_3 = /Unknown field: not_a_real_field/;
 const REGEXP_4 = /Unknown connector: missing_spotify_connector/;

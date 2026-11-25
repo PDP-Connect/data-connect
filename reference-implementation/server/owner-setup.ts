@@ -33,7 +33,12 @@ function matchesToken(submitted: string, expected: string): boolean {
 }
 
 function renderSetupPage(
-  { error, errorField, success = false }: { error?: string; errorField?: "token" | "password"; success?: boolean } = {}
+  {
+    error,
+    errorField,
+    success = false,
+    token = "",
+  }: { error?: string; errorField?: "token" | "password"; success?: boolean; token?: string } = {}
 ): string {
   const fieldError = (field: "token" | "password") =>
     error && errorField === field ? `<div class="hosted-ui-error" role="alert">${escapeHtml(error)}</div>` : "";
@@ -53,7 +58,7 @@ function renderSetupPage(
         `<form class="hosted-ui-surface" method="post" aria-label="Set up DataConnect">
   <div class="hosted-ui-field">
     <label for="setup-token">Setup code</label>
-    <input id="setup-token" name="token" required autocomplete="off" />
+    <input id="setup-token" name="token" value="${escapeHtml(token)}" required autocomplete="off" />
     ${fieldError("token")}
   </div>
   <div class="hosted-ui-field">
@@ -114,11 +119,12 @@ export function mountOwnerSetupRoutes(
 
   app.post("/setup", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    const submittedToken = typeof req.body?.token === "string" ? req.body.token : "";
     const retryAfter = attempts.check(req);
     if (retryAfter !== null) {
       res.setHeader("Retry-After", String(retryAfter));
       res.status(429).send(
-        renderSetupPage({ error: "Too many attempts. Try again in a little while.", errorField: "password" })
+        renderSetupPage({ error: "Too many attempts. Try again in a little while.", errorField: "password", token: submittedToken })
       );
       return;
     }
@@ -127,21 +133,20 @@ export function mountOwnerSetupRoutes(
       return;
     }
 
-    const submittedToken = typeof req.body?.token === "string" ? req.body.token : "";
     const password = typeof req.body?.password === "string" ? req.body.password : "";
     if (!matchesToken(submittedToken, token)) {
-      res.status(403).send(renderSetupPage({ error: "That setup code did not work.", errorField: "token" }));
+      res.status(403).send(renderSetupPage({ error: "That setup code did not work.", errorField: "token", token: submittedToken }));
       return;
     }
     if (Array.from(password).length < 15) {
       res
         .status(400)
-        .send(renderSetupPage({ error: "Use a password with at least 15 characters.", errorField: "password" }));
+        .send(renderSetupPage({ error: "Use a password with at least 15 characters.", errorField: "password", token: submittedToken }));
       return;
     }
 
     if (isBlockedOwnerPassword(password)) {
-      res.status(400).send(renderSetupPage({ error: "Choose a less common password.", errorField: "password" }));
+      res.status(400).send(renderSetupPage({ error: "Choose a less common password.", errorField: "password", token: submittedToken }));
       return;
     }
 
@@ -159,7 +164,7 @@ export function mountOwnerSetupRoutes(
       tokenConsumed = false;
       res
         .status(500)
-        .send(renderSetupPage({ error: "We could not save your password. Try again.", errorField: "password" }));
+        .send(renderSetupPage({ error: "We could not save your password. Try again.", errorField: "password", token: submittedToken }));
     }
   });
 }

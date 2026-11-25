@@ -57,9 +57,9 @@ test("no surface promises per-source revoke while no UI can perform it", () => {
 });
 
 test("the revoke promise that remains is the package-level one the product keeps", () => {
-  const consent = ownerFacingStrings(CONSENT_RESULT_PAGES);
+  // server-consent raise: result pages are one sentence and a next step, so
+  // the remaining promise lives on the picker, in plain words.
   const picker = ownerFacingStrings(PICKER);
-  const promise = "You can revoke this access later from your grants page.";
-  assert.ok(consent.includes(promise), "the consent result pages keep the deliverable promise");
-  assert.ok(picker.includes(promise), "the picker keeps the same deliverable promise, worded identically");
+  const promise = "You can stop this app reading your data later in DataConnect.";
+  assert.ok(picker.includes(promise), "the picker keeps the package-level promise");
 });

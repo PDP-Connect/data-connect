@@ -22,7 +22,7 @@ import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 // Regexes for the server-page copy assertions (hoisted for lint/performance/useTopLevelRegex).
 const SERVER_PAGES_RE_1 = /Choose a less common password\./u;
 const SERVER_PAGES_RE_2 = /Set up DataConnect/;
-const SERVER_PAGES_RE_3 = /name="token" required autocomplete="off"/;
+const SERVER_PAGES_RE_3 = /name="token" value="" required autocomplete="off"/;
 const SERVER_PAGES_RE_4 = /type="password" name="password" required minlength="15"\s+autocomplete="new-password"/;
 const SERVER_PAGES_RE_5 = /<form class="hosted-ui-surface" method="post"/;
 const SERVER_PAGES_RE_6 = /<form[^>]+action=/;
@@ -414,6 +414,35 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     assert.equal(devicePage.status, 200);
     const deviceText = await devicePage.text();
     assert.ok(deviceText.includes("Account name"), "unauth mode shows the existing account field");
+    // server-consent.md #3: the device page keeps the registered name and folds its id into Details.
+    assert.match(deviceText, /<dt>App<\/dt><dd>Longview<\/dd>/, "shows the registered app name");
+    assert.match(deviceText, /<details class="hosted-ui-details">[\s\S]*<dt>App ID<\/dt><dd><code>longview<\/code>/, "keeps the app id in Details");
+  });
+});
+
+// server-consent.md #3: test both registered names and the safe fallback.
+test("device approval shows a registered app name and keeps the app id in Details", async () => {
+  const preRegisteredPublicClients = [
+    { client_id: "cli_named_test", metadata: { client_name: "Named app", token_endpoint_auth_method: "none" } },
+    { client_id: "cli_unnamed_test", metadata: { token_endpoint_auth_method: "none" } },
+  ];
+  await withServer({ preRegisteredPublicClients }, async ({ asUrl }) => {
+    for (const [clientId, expectedName] of [
+      ["cli_named_test", "Named app"],
+      ["cli_unnamed_test", "Unnamed app"],
+    ] as const) {
+      const device = await initiateOwnerDeviceAuthorization(clientId, { baseUrl: asUrl });
+      const userCode = device.user_code;
+      assert.ok(typeof userCode === "string");
+      const response = await fetch(`${asUrl}/device?user_code=${encodeURIComponent(userCode)}`, {
+        headers: { Accept: "text/html" },
+      });
+      const html = await response.text();
+      assert.equal(response.status, 200);
+      // server-consent.md #3: the display name is owner-facing and the raw id stays folded.
+      assert.ok(html.includes(`<dt>App</dt><dd>${expectedName}</dd>`));
+      assert.ok(html.includes(`<dt>App ID</dt><dd><code>${clientId}</code></dd>`));
+    }
   });
 });
 
@@ -595,6 +624,9 @@ test("setup throttles wrong tokens and does not override an environment password
       const invalidHtml = await invalidToken.text();
       assert.match(invalidHtml, SERVER_PAGES_RE_9);
       assert.ok(invalidHtml.indexOf("That setup code did not work.") > invalidHtml.indexOf('name="token"'));
+      // server-consent.md #5: setup retries retain the code but leave the password empty.
+      assert.match(invalidHtml, /name="token" value="wrong" required autocomplete="off"/, "keeps the typed setup code");
+      assert.doesNotMatch(invalidHtml, /name="password"[^>]*value=/, "keeps the password empty");
 
       const throttled = await submit();
       assert.equal(throttled.status, 429);

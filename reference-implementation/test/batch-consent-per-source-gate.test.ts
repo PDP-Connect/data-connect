@@ -20,7 +20,8 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 
-const REGEXP_1 = /Confirm each source/;
+// server-consent.md #1: the batch screen uses the console's plain source-choice heading.
+const REGEXP_1 = /Choose data sources/;
 const REGEXP_2 = /Reference-experimental batch consent/;
 const REGEXP_3 = /name="approved_source_indexes"/;
 const REGEXP_4 = /Per-source confirmation required/;
@@ -248,6 +249,30 @@ function sourceCardHtml(html: string, sourceIndex: number): string {
   return next === -1 ? html.slice(start) : html.slice(start, next);
 }
 
+function visibleTextOutsideDetails(html: string): string {
+  const detailsTag = /<\/?details\b[^>]*>/gi;
+  let visible = "";
+  let depth = 0;
+  let visibleStart = 0;
+  let match = detailsTag.exec(html);
+  while (match) {
+    if (match[0].startsWith("</")) {
+      depth -= 1;
+      if (depth === 0) visibleStart = detailsTag.lastIndex;
+    } else {
+      if (depth === 0) visible += html.slice(visibleStart, match.index);
+      depth += 1;
+    }
+    match = detailsTag.exec(html);
+  }
+  if (depth === 0) visible += html.slice(visibleStart);
+  return visible
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function approve(
   asUrl: string,
   requestBody: Record<string, unknown>,
@@ -465,6 +490,25 @@ test("batch consent gate: page defaults to per-source confirmation and suppresse
     assert.match(html, REGEXP_3);
     assert.match(html, REGEXP_4);
     assert.doesNotMatch(html, REGEXP_5);
+    // server-consent.md #1 and #6: source rows and the action pair keep the existing decision contract.
+    assert.match(html, /name="approved_source_indexes" value="0" checked form="hosted-ui-batch-per-source-form"/);
+    assert.match(
+      html,
+      /class="hosted-ui-consent-source-row"[^>]*>[\s\S]*?Choose kinds of records/,
+      "each source selection row has its record details folded below it"
+    );
+    const actionStart = html.indexOf('<div class="hosted-ui-consent-pair">');
+    const policyStart = html.indexOf('<p class="hosted-ui-client-policy-links"', actionStart);
+    const actionPair = html.slice(actionStart, policyStart);
+    assert.equal((actionPair.match(/<button\b/g) || []).length, 2, "only Allow and Don't allow are visible actions");
+    assert.match(actionPair, /data-variant="primary"[^>]*>Allow<\/button>/);
+    assert.match(actionPair, /data-variant="ghost"[^>]*>Don&#39;t allow<\/button>|data-variant="ghost"[^>]*>Don't allow<\/button>/);
+    assert.match(html, /data-hosted-consent-summary/);
+    assert.doesNotMatch(
+      visibleTextOutsideDetails(html),
+      /\b(?:grant|client|scope|stream|token|oauth|pkce|par|request_uri|data types?)\b/i,
+      "server-consent.md #2: protocol terms stay folded under Details"
+    );
   });
 });
 
@@ -696,11 +740,26 @@ test("batch consent gate: low-risk approve-all requires re-asserting confirmatio
       detail({ id: reddit.connector_id, kind: "connector" }, [{ name: "posts" }], { access_mode: "single_use" }),
     ];
     const first = await par(asUrl, entries);
+    const firstRequestUri = unwrapBody(first).request_uri;
+    assert.ok(firstRequestUri);
+    const { html: firstPage } = await consentPage(asUrl, firstRequestUri);
+    const detailsIndex = firstPage.indexOf("<summary>Details</summary>");
+    const approveAllIndex = firstPage.indexOf("I confirm allowing all");
+    const detailsEnd = firstPage.indexOf("</details>", detailsIndex);
+    // server-consent.md #1: the primary page has two visible choices; approve-all remains available in Details.
+    assert.ok(detailsIndex >= 0 && detailsIndex < approveAllIndex && approveAllIndex < detailsEnd);
+    const pairStart = firstPage.indexOf('<div class="hosted-ui-consent-pair">');
+    const pairEnd = firstPage.indexOf('<p class="hosted-ui-client-policy-links"', pairStart);
+    const pair = firstPage.slice(pairStart, pairEnd);
+    assert.equal((pair.match(/<button\b/g) || []).length, 2);
+    // RAISE-RULES 3: one filled button per page; approve-all in Details names what it does.
+    assert.match(firstPage, /data-variant="default">Allow every data source<\/button>/);
+    assert.equal((firstPage.match(/data-variant="primary"/g) || []).length, 1);
 
     const missingConfirmation = await approve(
       asUrl,
       {
-        request_uri: unwrapBody(first).request_uri,
+        request_uri: firstRequestUri,
         subject_id: "owner_local",
       },
       { confirmReviewedDecision: false }
