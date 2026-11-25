@@ -37,8 +37,11 @@ export function publishRootsFromConfig(configText: string): string[] {
   const config = load(configText) as { plugins?: unknown[] }
   const roots: string[] = []
   for (const plugin of config.plugins ?? []) {
-    if (!Array.isArray(plugin) || plugin[0] !== "@semantic-release/npm") continue
-    const options = plugin[1] as { pkgRoot?: unknown } | undefined
+    // semantic-release takes a plugin as a bare name or as [name, options]. A
+    // bare npm step publishes the repository root, which is not a lockstep
+    // package, so both forms must name a pkgRoot.
+    const [name, options] = (Array.isArray(plugin) ? plugin : [plugin]) as [unknown, { pkgRoot?: unknown }?]
+    if (name !== "@semantic-release/npm") continue
     if (typeof options?.pkgRoot !== "string" || options.pkgRoot === "") {
       throw new Error("every @semantic-release/npm step in .releaserc.yaml must name its pkgRoot")
     }

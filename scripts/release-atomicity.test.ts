@@ -28,7 +28,7 @@ import {
   normalizeVersion,
 } from "./release-registry-state.js"
 import { awaitPublished } from "./verify-release-complete.js"
-import { lockstepPackages } from "./lockstep-packages.js"
+import { lockstepPackages, publishRootsFromConfig } from "./lockstep-packages.js"
 import { barrierFailureMessage, barrierFor } from "./verify-lockstep-dependencies-published.js"
 
 const REPO_ROOT = resolve(__dirname, "..")
@@ -335,6 +335,15 @@ describe("release pipeline wiring", () => {
         name: "@pdpp/mcp-server",
         root: "reference-implementation/vendor/mcp-server",
       },
+    ])
+  })
+
+  it("refuses an npm step that names no pkgRoot, in either plugin form", () => {
+    for (const step of ['"@semantic-release/npm"', '["@semantic-release/npm", {}]']) {
+      expect(() => publishRootsFromConfig(`plugins:\n  - ${step}\n`), step).toThrow(/must name its pkgRoot/)
+    }
+    expect(publishRootsFromConfig('plugins:\n  - ["@semantic-release/npm", { pkgRoot: packages/a }]\n')).toEqual([
+      "packages/a",
     ])
   })
 
