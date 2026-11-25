@@ -18,8 +18,8 @@
  * observable change from the pre-migration behavior.
  */
 
-import { formatConnectorNameForDisplay } from "@pdpp/display";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
+import { connectionDisplayName } from "../../../lib/connection-display-name.ts";
 
 export interface ConnectorContext {
   connectorId: string;
@@ -51,10 +51,6 @@ export function resolveConnectorSummaryRouteId(connectorId: string, connectorIns
 export function buildConnectorContext(connectorId: string, match: ConnectorSummaryLike | undefined): ConnectorContext {
   return {
     connectorId,
-    displayName: formatConnectorNameForDisplay({
-      connectorId,
-      displayName: match?.display_name,
-      name: match?.connector_display_name,
-    }),
+    displayName: connectionDisplayName(match?.display_name, match?.connector_display_name, connectorId),
   };
 }

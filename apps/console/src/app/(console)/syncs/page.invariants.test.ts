@@ -126,6 +126,13 @@ test("recent syncs list drills into the run detail route", async () => {
   assert.match(src, RECENT_ROW_PREFETCH_FALSE_RE, "recent sync rows must not prefetch dynamic run routes");
 });
 
+test("manifest connection names are indexed by both connector identity forms", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+
+  assert.match(src, /connectorDisplayNames\.set\(manifest\.connector_id, displayName\)/);
+  assert.match(src, /connectorDisplayNames\.set\(manifest\.connector_key, displayName\)/);
+});
+
 test("syncs first-paint run feed is bounded to the overview budget", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const limitMatch = src.match(SYNCS_OVERVIEW_RUN_LIMIT_RE);

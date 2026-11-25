@@ -42,6 +42,7 @@ import {
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { formatStreamCollectionFacts, indexCollectionReportByStream } from "../lib/collection-report.ts";
 import { isConnectorNotInstalled } from "../lib/connector-implementation.ts";
+import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import type { FormattedNextAction } from "../lib/next-action.ts";
 import type {
@@ -704,11 +705,11 @@ export function toSourceInstanceView(
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
   const sourceStreamNames = streamNamesForSource(summary, collectionFactsByStream, streamRecordsByStream);
 
-  const baseDisplayName = formatConnectorNameForDisplay({
-    connectorId,
-    displayName: summary.display_name,
-    name: summary.connector_display_name,
-  });
+  const baseDisplayName = connectionDisplayName(
+    summary.display_name,
+    summary.connector_display_name,
+    connectorId
+  );
   const hasFallbackLabel = isFallbackConnectionLabel({
     connectorId,
     displayName: summary.display_name,

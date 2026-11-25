@@ -36,21 +36,21 @@ function row(overrides: Partial<RefConnectorRetainedCountSummary> = {}): RefConn
   };
 }
 
-test("installed source projection keeps added sources outside the catalog by their display name", async () => {
-  const { projectInstalledSourceCatalog } = await catalogModule;
-  const result = projectInstalledSourceCatalog(
-    [
+test("installed source reader keeps added sources outside the catalog by their display name", async () => {
+  const { readInstalledSourceCatalog } = await catalogModule;
+  fetchPage = async () => ({
+    data: [
       row(),
-      row({ connector_id: "spotify", connector_instance_id: "connection-2", display_name: "Spotify" }),
+      row({ connector_display_name: "Spotify", connector_id: "spotify", connector_instance_id: "connection-2", display_name: "Spotify" }),
       row({ connector_instance_id: "connection-revoked", status: "revoked" }),
     ],
-    ["spotify"]
-  );
+    has_more: false,
+  });
+  const result = await readInstalledSourceCatalog(["spotify"]);
 
   assert.deepEqual(result.uncataloguedSources, [
     { connectorId: "seed-reddit", connectionId: "connection-1", displayName: "My Reddit archive" },
   ]);
-  assert.deepEqual(result.byConnector["seed-reddit"]?.map((source) => source.displayName), ["My Reddit archive"]);
   assert.equal(result.byConnector.spotify?.[0]?.displayName, "Spotify");
 });
 
@@ -67,8 +67,8 @@ test("installed source catalog follows cursors and requests the retained-count f
     { connectorId: "seed-reddit", connectionId: "connection-1", displayName: "My Reddit archive" },
   ]);
   assert.deepEqual(requests, [
-    { cursor: undefined, limit: 100, profile: "retained_count_summary" },
-    { cursor: "next-page", limit: 100, profile: "retained_count_summary" },
+    { connectorId: undefined, cursor: undefined, limit: 100, profile: "retained_count_summary" },
+    { connectorId: undefined, cursor: "next-page", limit: 100, profile: "retained_count_summary" },
   ]);
 });
 
@@ -87,4 +87,17 @@ test("installed source catalog keeps rows from earlier pages when a continuation
     { connectorId: "seed-reddit", connectionId: "connection-1", displayName: "My Reddit archive" },
   ]);
   assert.equal(requests.length, 2);
+});
+
+test("installed source catalog treats a refused first page as an incomplete list, not a read failure", async () => {
+  const { readInstalledSourceCatalog } = await catalogModule;
+  requests.length = 0;
+  fetchPage = () => Promise.reject(Object.assign(new Error("header too large"), { status: 431 }));
+
+  assert.deepEqual(await readInstalledSourceCatalog(["spotify"]), {
+    byConnector: {},
+    truncated: true,
+    uncataloguedSources: [],
+  });
+  assert.equal(requests.length, 1);
 });

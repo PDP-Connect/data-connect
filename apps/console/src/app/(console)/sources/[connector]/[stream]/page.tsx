@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcTimestamp } from "@pdpp/brand-react";
+import { buttonVariants as outlineButtonVariants } from "@pdpp/operator-ui/ui/button";
 import {
   buildRecordPreview,
   classifyRecordKind,
@@ -152,11 +153,13 @@ export default async function StreamPage({
   searchParams,
 }: {
   params: Promise<{ connector: string; stream: string }>;
-  searchParams: Promise<{ cursors?: string; columns?: string } & Record<string, string | string[] | undefined>>;
+  searchParams: Promise<{ columns?: string; cursors?: string; view?: string } & Record<string, string | string[] | undefined>>;
 }) {
   const { connector, stream } = await params;
   const resolvedSearchParams = await searchParams;
-  const { cursors: cursorsParam, columns: columnsParam } = resolvedSearchParams;
+  const { columns: columnsParam, cursors: cursorsParam } = resolvedSearchParams;
+  const viewParam = typeof resolvedSearchParams.view === "string" ? resolvedSearchParams.view : undefined;
+  const tableView = viewParam === "table";
   const exactFilters = readExactFilters(resolvedSearchParams);
   const filtered = hasExactFilters(exactFilters);
   const order = readRecordOrder(resolvedSearchParams.order);
@@ -271,10 +274,10 @@ export default async function StreamPage({
   }
 
   const allColumns = deriveAllColumns(page.data);
-  const defaultColumns = computeDefaultColumns(page.data, streamManifest);
+  const defaultColumns = computeDefaultColumns(page.data, streamManifest).filter((column) => column !== "id");
   const { columns, mode } = resolveSelectedColumns(columnsParam, allColumns, defaultColumns);
   const streamPath = `/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(streamName)}`;
-  const hrefState = { columnsParam, exactFilters, order };
+  const hrefState = { columnsParam, exactFilters, order, view: tableView ? "table" as const : undefined };
   const prevHref = trail.length ? hrefFor(streamPath, trail.slice(0, -1), hrefState) : null;
   const nextHref = page.next_cursor ? hrefFor(streamPath, [...trail, page.next_cursor], hrefState) : null;
   const recordHref = (id: string) => `${streamPath}/${encodeURIComponent(id)}`;
@@ -342,7 +345,22 @@ export default async function StreamPage({
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <p className="pdpp-caption text-muted-foreground">{pageCount}</p>
         <div className="flex flex-wrap items-center gap-2">
-          {allColumns.length > 0 && (
+          {tableView ? (
+            <Link
+              className={outlineButtonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
+              href={hrefFor(streamPath, trail, { columnsParam, exactFilters, order })}
+            >
+              Show as rows
+            </Link>
+          ) : (
+            <Link
+              className={outlineButtonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
+              href={hrefFor(streamPath, trail, { columnsParam, exactFilters, order, view: "table" })}
+            >
+              Show as table
+            </Link>
+          )}
+          {tableView && allColumns.length > 0 && (
             <ColumnsMenu
               allColumns={allColumns}
               defaultColumns={defaultColumns}
@@ -410,47 +428,49 @@ export default async function StreamPage({
                   </span>
                 </Link>
 
-                <div className="px-3 pb-2 pt-3">
-                  <div className="sm:hidden">
-                    <RecordCard columns={columns} declaredFieldTypes={declaredFieldTypes} record={r} />
-                  </div>
+                {tableView ? (
+                  <div className="px-3 pb-2 pt-3">
+                    <div className="sm:hidden">
+                      <RecordCard columns={columns} declaredFieldTypes={declaredFieldTypes} record={r} />
+                    </div>
 
-                  <div className="hidden overflow-x-auto sm:block">
-                    <table className="min-w-full">
-                      <thead className="bg-muted/40">
-                        <tr>
-                          {columns.map((c) => (
-                            <th className={TH} key={c}>
-                              {humanizeFieldLabel(c)}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr className="transition-colors hover:bg-muted/30">
-                          {columns.map((c) => {
-                            const display = cellText(r, c);
-                            const rawValue = r.data?.[c];
-                            const dateValue = isDateValue(rawValue) ? rawValue : null;
-                            return (
-                              <td className={`${TD} align-top`} key={c}>
-                                <Link
-                                  aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
-                                  className="block"
-                                  href={recordHref(r.id)}
-                                >
-                                  <span className="block max-w-[24rem] truncate">
-                                    {dateValue ? <IcTimestamp value={dateValue} /> : display}
-                                  </span>
-                                </Link>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      </tbody>
-                    </table>
+                    <div className="hidden overflow-x-auto sm:block">
+                      <table className="min-w-full">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            {columns.map((c) => (
+                              <th className={TH} key={c}>
+                                {c === "id" ? "Record id" : humanizeFieldLabel(c)}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="transition-colors hover:bg-muted/30">
+                            {columns.map((c) => {
+                              const display = cellText(r, c);
+                              const rawValue = r.data?.[c];
+                              const dateValue = isDateValue(rawValue) ? rawValue : null;
+                              return (
+                                <td className={`${TD} align-top`} key={c}>
+                                  <Link
+                                    aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
+                                    className="block"
+                                    href={recordHref(r.id)}
+                                  >
+                                    <span className="block max-w-[24rem] truncate">
+                                      {dateValue ? <IcTimestamp value={dateValue} /> : display}
+                                    </span>
+                                  </Link>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
+                ) : null}
               </li>
             );
           })}
@@ -641,9 +661,7 @@ function RecordCard({
           }
           return (
             <Fragment key={c}>
-              <dt className="truncate text-muted-foreground">
-                {humanizeFieldLabel(c)}
-              </dt>
+              <dt className="truncate text-muted-foreground">{c === "id" ? "Record id" : humanizeFieldLabel(c)}</dt>
               <dd className="break-words" title={structured?.detail}>
                 {dateValue ? <IcTimestamp value={dateValue} /> : truncate(v, 120)}
               </dd>
@@ -662,6 +680,7 @@ function hrefFor(
     columnsParam?: string;
     exactFilters?: Record<string, string>;
     order?: "asc" | "desc";
+    view?: "table";
   } = {}
 ): string {
   const parts: string[] = [];
@@ -676,6 +695,9 @@ function hrefFor(
   }
   if (state.order) {
     parts.push(`order=${state.order}`);
+  }
+  if (state.view === "table") {
+    parts.push("view=table");
   }
   return parts.length ? `${base}?${parts.join("&")}` : base;
 }

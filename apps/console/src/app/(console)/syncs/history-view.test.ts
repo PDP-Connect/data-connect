@@ -33,7 +33,7 @@ const paging: RecentSyncsPaging = {
   ],
 };
 
-function visibleHistoryText(model: typeof DEMO_SYNCS_MODEL, pagingState: RecentSyncsPaging) {
+function visibleHistoryText(model: typeof DEMO_SYNCS_MODEL, pagingState: RecentSyncsPaging, includeDetails = false) {
   const html = renderToStaticMarkup(
     createElement(SyncsView, {
       model,
@@ -42,7 +42,9 @@ function visibleHistoryText(model: typeof DEMO_SYNCS_MODEL, pagingState: RecentS
     })
   );
   const document = new JSDOM(html).window.document;
-  for (const details of document.querySelectorAll("details")) details.remove();
+  if (!includeDetails) {
+    for (const details of document.querySelectorAll("details")) details.remove();
+  }
   return { document, text: document.body.textContent ?? "" };
 }
 
@@ -52,7 +54,7 @@ test("history rows use one plain phrase for the result", () => {
     recentSyncPhrase({ outcome: "ok", status: "succeeded" } as RecentSyncEntry, false),
     "Sync finished"
   );
-  assert.equal(recentSyncPhrase({ outcome: "failed", status: "failed" } as RecentSyncEntry, false), "Failed");
+  assert.equal(recentSyncPhrase({ outcome: "failed", status: "failed" } as RecentSyncEntry, false), "Sync failed");
   assert.equal(recentSyncPhrase({ outcome: "ok", status: "succeeded" } as RecentSyncEntry, true), "Needs you");
 });
 
@@ -80,6 +82,10 @@ test("history empty, row, and filtered states show their values without banned w
   assert.match(rows.text, /Show more/);
   assert.doesNotMatch(rows.document.querySelector("a > span:nth-child(2) > span:first-child")?.className ?? "", /\btruncate\b/);
   assert.doesNotMatch(rows.text, BANNED_VISIBLE_WORDS);
+
+  const details = visibleHistoryText(DEMO_SYNCS_MODEL, paging, true);
+  assert.match(details.text, /Sync failed/);
+  assert.doesNotMatch(details.text, /sync failed/);
 });
 
 test("history filters show the applied values on compact keyboard popovers", async () => {

@@ -19,19 +19,6 @@ export interface ConnectStatusLinkStatus {
   readonly status: string;
 }
 
-export function connectionSetupDisplayName(
-  connectionName: string | null | undefined,
-  manifestName: string | null | undefined,
-  connectorId: string
-): string {
-  // A saved name that is only the connector key (the server's default, e.g. "spotify") is not a display name.
-  const named = (value: string | null | undefined) => {
-    const trimmed = value?.trim();
-    return trimmed && trimmed !== connectorId.trim() ? trimmed : null;
-  };
-  return named(connectionName) ?? named(manifestName) ?? "this data source";
-}
-
 export function setupHref(status: ConnectStatusLinkStatus): string {
   const encoded = encodeURIComponent(status.connector_id);
   if (status.setup_kind === "manual_upload") {

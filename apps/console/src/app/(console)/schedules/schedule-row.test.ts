@@ -163,6 +163,20 @@ test("schedule row empty and populated states use plain visible words", async ()
   assert.doesNotMatch(rowText, BANNED_VISIBLE_WORDS);
 });
 
+test("schedule rows use the manifest name when the saved connection name is its key", async () => {
+  const { ScheduleRow } = await import("./schedule-row.tsx");
+  const markup = renderToStaticMarkup(
+    createElement(ScheduleRow, {
+      runsHref: "/syncs",
+      summary: makeSummary({ connector_display_name: "Sample", display_name: "SAMPLE" }),
+    })
+  );
+  const text = new JSDOM(markup).window.document.body.textContent ?? "";
+
+  assert.match(text, /Sample/);
+  assert.doesNotMatch(text, /SAMPLE/);
+});
+
 test("the final Schedules row leaves one hairline before page Details", async () => {
   const src = await readFile(ROW_FILE, "utf8");
   // history-repair brief P3: the final row border must not double with the page Details border.

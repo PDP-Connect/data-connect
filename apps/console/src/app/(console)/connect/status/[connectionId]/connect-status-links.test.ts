@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { connectionSetupDisplayName, setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
+import { setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 const STATIC_SECRET_HREF_WITH_QUERY = /^\/connect\/static-secret\/apple%20contacts\?/;
 
@@ -60,17 +60,4 @@ for (const connectorId of ["gmail", "steam", "jellyfin", "apple_contacts"]) {
 test("sourceDetailHref and sourceRecordsHref still carry the connection identity", () => {
   assert.equal(sourceDetailHref(status()), "/sources/steam?connection_id=cin_1f446755642eec0161a7c55f");
   assert.equal(sourceRecordsHref(status()), "/explore?connection=cin_1f446755642eec0161a7c55f");
-});
-
-test("connection setup names use the saved name, then manifest name, then a generic fallback", () => {
-  assert.equal(connectionSetupDisplayName("Spotify archive", "Spotify", "spotify"), "Spotify archive");
-  assert.equal(connectionSetupDisplayName(null, "Spotify", "spotify"), "Spotify");
-  assert.equal(connectionSetupDisplayName(null, null, "spotify"), "this data source");
-});
-
-test("a saved name that is only the connector key is never shown", () => {
-  // Seen live: the sample Spotify connection's saved name is "spotify", so the page read "Open spotify".
-  assert.equal(connectionSetupDisplayName("spotify", "Spotify", "spotify"), "Spotify");
-  assert.equal(connectionSetupDisplayName(" spotify ", null, "spotify"), "this data source");
-  assert.equal(connectionSetupDisplayName("spotify", "spotify", "spotify"), "this data source");
 });

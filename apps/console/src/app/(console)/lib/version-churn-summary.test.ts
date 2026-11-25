@@ -37,7 +37,7 @@ import {
   summarizeVersionChurn,
 } from "./version-churn-summary.ts";
 
-const HIGHEST_SIGNAL_RE = /ynab \/ budgets retains 273\.75 versions per current record\./;
+const HIGHEST_SIGNAL_RE = /this data source \/ budgets retains 273\.75 versions per current record\./;
 const NOT_COMPACTABLE_RE = /[Nn]ot compactable/;
 const CANNOT_COMPACT_RE = /compact(able|ed)/;
 const APPEND_KEYED_RE = /append-keyed/;
@@ -229,8 +229,8 @@ test("isExpectedRetainedHistory / needsReview predicates agree with the disposit
   assert.equal(needsReview(unclassifiedRow()), true);
 });
 
-test("churnRowLabel falls back to the connector key when no display name is set", () => {
-  assert.equal(churnRowLabel(row({ connector_id: "ynab", display_name: null })), "ynab / budgets");
+test("churnRowLabel uses a generic name when no manifest display name is available", () => {
+  assert.equal(churnRowLabel(row({ connector_id: "ynab", display_name: "YNAB" })), "this data source / budgets");
 });
 
 test("churnRowLabel prefers an owner-set display name", () => {
@@ -243,12 +243,12 @@ test("buildChurnDrilldownRows surfaces all supplied rows in order", () => {
   const rows = [candidateRow({ stream: "budgets" }), candidateRow({ risk_level: "watch", stream: "accounts" })];
   const built = buildChurnDrilldownRows(rows);
   assert.equal(built.length, 2);
-  assert.equal(built[0]?.label, "ynab / budgets");
+  assert.equal(built[0]?.label, "this data source / budgets");
   assert.equal(built[0]?.risk, "high");
   assert.equal(built[0]?.connectorId, "ynab");
   assert.equal(built[0]?.connectorInstanceId, "cin_ynab_1");
   assert.equal(built[0]?.stream, "budgets");
-  assert.equal(built[1]?.label, "ynab / accounts");
+  assert.equal(built[1]?.label, "this data source / accounts");
   assert.equal(built[1]?.risk, "watch");
 });
 

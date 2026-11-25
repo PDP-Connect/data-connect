@@ -16,7 +16,8 @@ import {
 } from "../../../lib/ref-client.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
-import { connectionSetupDisplayName, setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
+import { connectionDisplayName } from "../../../lib/connection-display-name.ts";
+import { setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -694,7 +695,7 @@ export default async function ConnectionSetupStatusPage({
   const described = describeState(status);
   const importPhases = importPhaseProgress(status);
   const connectorManifest = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id);
-  const displayName = connectionSetupDisplayName(status.display_name, connectorManifest?.display_name, status.connector_id);
+  const displayName = connectionDisplayName(status.display_name, connectorManifest?.display_name, status.connector_id);
   const connectorIcon = connectorManifest?.icon;
   return (
     <RecordroomShellWithPalette>

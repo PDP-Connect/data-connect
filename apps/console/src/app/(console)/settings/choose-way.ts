@@ -57,7 +57,7 @@ const copy: Record<string, { title: string; line: string; group: GroupId }> = {
   },
   "ngrok-tcp-passthrough": {
     title: "ngrok network address",
-    line: "Uses an address without a domain name.",
+    line: "Uses an address without a domain name. The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
   "tunnl-gg": { title: "Temporary hosted address", line: "Free. Needs no account.", group: "advanced" },

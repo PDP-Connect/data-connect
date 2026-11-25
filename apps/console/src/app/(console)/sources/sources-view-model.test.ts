@@ -44,7 +44,7 @@ const HEALTHY_RE = /Healthy/;
 const SYNCING_NOW_RE = /Syncing now/;
 const EXPLORE_HREF_RE = /^\/explore\?connection=conn_1&stream=/;
 const MESSAGES_STREAM_HREF_RE = /stream=messages/;
-const CHURN_SIGNAL_RE = /ynab \/ budgets retains 273\.75 versions/;
+const CHURN_SIGNAL_RE = /this data source \/ budgets retains 273\.75 versions/;
 const CHURN_CLASSIFIED_RE = /classified/;
 const CHURN_NEEDS_REVIEW_RE = /needs review/;
 const RECORDS_42_RE = /42 records/;
@@ -127,6 +127,18 @@ function summary(partial: Partial<RefConnectorSummary> = {}): RefConnectorSummar
     ...partial,
   };
 }
+
+test("source titles use the manifest or generic label when the saved name is the connector key", () => {
+  const named = toSourceInstanceView(
+    summary({ connector_id: "reddit", connector_display_name: "Reddit", display_name: "REDDIT" })
+  );
+  const unnamed = toSourceInstanceView(
+    summary({ connector_id: "new_source", connector_display_name: "", display_name: "NEW_SOURCE" })
+  );
+
+  assert.equal(named.displayName, "Reddit");
+  assert.equal(unnamed.displayName, "this data source");
+});
 
 function lastRun(status: string): NonNullable<RefConnectorSummary["last_run"]> {
   return {

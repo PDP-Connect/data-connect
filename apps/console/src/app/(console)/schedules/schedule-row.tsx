@@ -4,12 +4,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
-import { formatConnectorKeyForDisplay, formatConnectorNameForDisplay } from "@pdpp/display";
+import { formatConnectorKeyForDisplay } from "@pdpp/display";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import { ConnectorMark } from "../components/connector-mark.tsx";
 import { SourceStatusText } from "../components/source-status-text.tsx";
+import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import type { RefConnectorSummary, RefSchedule } from "../lib/ref-client.ts";
 import { sourceStatusWords } from "../lib/source-status-words.ts";
 import { activeScheduleRunId, scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
@@ -218,11 +219,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
   const schedule = remoteScheduleFor(summary);
   const showScheduleSetup = !localDevice && schedule === null;
   const policy = summary.refresh_policy;
-  const displayName = formatConnectorNameForDisplay({
-    connectorId: summary.connector_id,
-    displayName: summary.display_name,
-    name: summary.connector_display_name,
-  });
+  const displayName = connectionDisplayName(summary.display_name, summary.connector_display_name, summary.connector_id);
   const connectorKey = formatConnectorKeyForDisplay(summary.connector_id);
   const recordsHref = recordsHrefForSummary(summary);
   const activeRunId = activeScheduleRunId(schedule);

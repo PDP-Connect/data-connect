@@ -134,7 +134,22 @@ test("catalog lookup keeps the pages already read when a continuation is refused
 test("catalog lookup that is refused on its first page returns no sources and says it is incomplete", async () => {
   const { existingSourcesByConnectorCatalog } = await moduleApi;
   fetchPage = () => Promise.reject(refusal(431, "Request Header Fields Too Large"));
-  assert.deepEqual(await existingSourcesByConnectorCatalog(["goodreads"]), { byConnector: {}, truncated: true });
+  assert.deepEqual(await existingSourcesByConnectorCatalog(["goodreads"]), {
+    byConnector: {},
+    truncated: true,
+    uncataloguedSources: [],
+  });
+});
+
+test("catalog connections whose saved name is the connector key use the manifest name", async () => {
+  const { existingSourcesByConnectorCatalog } = await moduleApi;
+  fetchPage = async () => ({
+    data: [row("cin_reddit", "reddit", { connector_display_name: "Reddit", display_name: " REDDIT " })],
+    has_more: false,
+  });
+
+  const result = await existingSourcesByConnectorCatalog(["reddit"]);
+  assert.equal(result.byConnector.reddit?.[0]?.displayName, "Reddit");
 });
 
 test("catalog lookup still throws for other failures, including a refusal-shaped status that is not one", async () => {

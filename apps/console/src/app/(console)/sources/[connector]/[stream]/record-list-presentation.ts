@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { deriveSourceDisplayNameFallback, formatConnectorNameForDisplay, isFallbackConnectionLabel } from "@pdpp/display";
 import type { CanonicalReadWarning } from "../../../lib/read-envelope.ts";
+import { connectionDisplayName } from "../../../lib/connection-display-name.ts";
 
 export function partialReadSentence(warnings: readonly CanonicalReadWarning[]): string | null {
   return warnings.some((warning) => warning.code === "partial_results") ? "Some records could not be read." : null;
@@ -18,10 +18,5 @@ export function sourceDisplayName(summary: {
   connector_id: string;
   display_name?: string | null;
 }): string {
-  const input = {
-    connectorId: summary.connector_id,
-    displayName: summary.display_name,
-    name: summary.connector_display_name,
-  };
-  return isFallbackConnectionLabel(input) ? deriveSourceDisplayNameFallback(input) : formatConnectorNameForDisplay(input);
+  return connectionDisplayName(summary.display_name, summary.connector_display_name, summary.connector_id);
 }

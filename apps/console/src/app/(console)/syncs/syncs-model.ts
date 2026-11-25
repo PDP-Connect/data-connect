@@ -27,6 +27,7 @@
  */
 
 import { formatConnectorNameForDisplay, isFallbackConnectionLabel } from "@pdpp/display";
+import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import { indexCollectionReportByStream } from "../lib/collection-report.ts";
 import type { FailureSummary } from "../lib/connection-evidence.ts";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
@@ -449,6 +450,7 @@ export function describeRecentSyncOutcome(outcome: RecentSyncOutcome): string {
  */
 export function buildRecentSyncs(input: {
   connectors: readonly RefConnectorSummary[];
+  connectorDisplayNames?: ReadonlyMap<string, string>;
   limit?: number;
   runs: readonly RunSummary[];
 }): RecentSyncEntry[] {
@@ -472,12 +474,17 @@ export function buildRecentSyncs(input: {
       .map((id) => byConnection.get(id))
       .find((connector): connector is RefConnectorSummary => connector !== undefined);
     const connectorId = runConnectorKey(run);
+    const nameConnectorId = matched?.connector_id ?? connectorId;
     const outcome = recentSyncOutcome(run.status);
     entries.push({
       at: run.last_at,
       connectionId: matched?.connection_id ?? run.connection_id ?? null,
       connectorId,
-      connectionName: matched?.display_name ?? connectorId ?? run.run_id,
+      connectionName: connectionDisplayName(
+        matched?.display_name,
+        matched?.connector_display_name ?? (nameConnectorId ? input.connectorDisplayNames?.get(nameConnectorId) : null),
+        nameConnectorId
+      ),
       duration: describeDuration(run.first_at, run.last_at),
       href: `/syncs/${encodeURIComponent(run.run_id)}`,
       live: !isTerminalRunStatus(run.status),
@@ -505,6 +512,10 @@ function connectorKind(connector: RefConnectorSummary): string {
     displayName: connector.connector_display_name,
     name: connector.connector_display_name,
   });
+}
+
+function connectionNameForSummary(connector: RefConnectorSummary): string {
+  return connectionDisplayName(connector.display_name, connector.connector_display_name, connector.connector_id);
 }
 
 function hasFallbackConnectionLabel(connector: RefConnectorSummary): boolean {
@@ -556,10 +567,10 @@ export function describeCadence(schedule: RefSchedule | null | undefined): strin
 
 /** The run list's event count is not a record count, so its row shows outcome only. */
 export function describeLastRunOutcome(input: { failed: boolean; status: string }): string {
-  if (input.failed) return "sync failed";
+  if (input.failed) return "Sync failed";
   switch (recentSyncOutcome(input.status)) {
     case "failed":
-      return "sync failed";
+      return "Sync failed";
     case "partial":
       return "Sync finished with gaps";
     case "running":
@@ -799,7 +810,7 @@ function toFailureCard(projection: SyncProjection): FailureCard {
   return {
     connectionId: projection.connector.connection_id,
     connectorId: projection.connector.connector_id,
-    name: projection.connector.display_name,
+    name: connectionNameForSummary(projection.connector),
     summary: projection.summary as FailureSummary,
     work: projection.work,
   };
@@ -824,7 +835,7 @@ function toPendingSetupCard(connector: RefConnectorSummary): PendingSetupCard {
     connectionId: connector.connection_id,
     connectorId: connector.connector_id,
     continueHref: `/connect/status/${encodeURIComponent(routeId)}`,
-    name: connector.display_name,
+    name: connectionNameForSummary(connector),
     statusLabel: work.statusLabel,
     what: work.what,
   };
@@ -847,7 +858,7 @@ function pendingSetupWorkItem(connector: RefConnectorSummary): SourceWorkItem {
     deviceLocal: false,
     group: "needsOwner",
     id: `needsOwner:${routeId}`,
-    label: connector.display_name,
+    label: connectionNameForSummary(connector),
     routeId,
     statusLabel: "needs you",
     what: "Finish connecting this source to start its first sync.",
@@ -859,6 +870,7 @@ function projectSyncProjection(input: {
   runs: readonly RunSummary[];
 }): SyncProjection | null {
   const { connector, runs } = input;
+  const connectionName = connectionNameForSummary(connector);
   // Revoked connections are not active syncs; skip them from the live surface.
   if (connector.revoked_at) {
     return null;
@@ -898,7 +910,7 @@ function projectSyncProjection(input: {
       lastRunOutcome,
       lastRunDuration,
       lastRunRhythm,
-      name: connector.display_name,
+      name: connectionName,
       next,
       nextAt,
       scheduleReason: connector.auto_enroll_skip_reason ?? null,
@@ -921,6 +933,7 @@ function projectSyncProjection(input: {
  */
 export function buildSyncsViewModel(input: {
   connectors: readonly RefConnectorSummary[];
+  connectorDisplayNames?: ReadonlyMap<string, string>;
   runs: readonly RunSummary[];
 }): SyncsViewModel {
   const projections: SyncProjection[] = [];
@@ -967,6 +980,7 @@ export function buildSyncsViewModel(input: {
   const band = buildHealthBand({ failureCards, groups: allGroups, pendingSetupWork, projections: ordered });
   const recentSyncs = buildRecentSyncs({
     connectors: input.connectors,
+    connectorDisplayNames: input.connectorDisplayNames,
     runs: input.runs,
   });
   return {

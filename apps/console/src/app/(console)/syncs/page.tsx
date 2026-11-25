@@ -115,13 +115,16 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   let runsResult: ListResponse<RunSummary>;
   let connectorsPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>>;
   let connectorIcons: Awaited<ReturnType<typeof buildConnectorIconMap>>;
+  let connectorManifests: Awaited<ReturnType<typeof listConnectorManifests>>;
   let filterFirstPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>> | undefined;
   try {
-    [runsResult, connectorsPage, connectorIcons, filterFirstPage] = await Promise.all([
+    const manifestsPromise = listConnectorManifests().catch(() => []);
+    [runsResult, connectorsPage, connectorIcons, filterFirstPage, connectorManifests] = await Promise.all([
       listRuns(runListQuery(params)),
       fetchSyncsConnectorsPage(pageState),
-      listConnectorManifests().catch(() => []).then((manifests) => buildConnectorIconMap(manifests, [])),
+      manifestsPromise.then((manifests) => buildConnectorIconMap(manifests, [])),
       filterFirstPagePromise,
+      manifestsPromise,
     ]);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
@@ -170,8 +173,17 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
     params.connector_id
   );
 
+  const connectorDisplayNames = new Map<string, string>();
+  for (const manifest of connectorManifests) {
+    const displayName = manifest.display_name?.trim();
+    if (!displayName) continue;
+    connectorDisplayNames.set(manifest.connector_id, displayName);
+    if (manifest.connector_key) connectorDisplayNames.set(manifest.connector_key, displayName);
+  }
+
   const model = buildSyncsViewModel({
     connectors: connectorsPage.items,
+    connectorDisplayNames,
     runs: runsResult.data,
   });
 

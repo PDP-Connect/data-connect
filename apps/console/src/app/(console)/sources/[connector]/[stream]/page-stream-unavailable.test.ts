@@ -44,6 +44,7 @@ import { partialReadSentence, sourceDisplayName } from "./record-list-presentati
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
+const COLUMNS_MENU_FILE = `${HERE}columns-menu.tsx`;
 
 const IMPORTS_HTTP_ERROR =
   /import\s*\{[^}]*ResourceServerHttpError[^}]*\}\s*from\s*"\.\.\/\.\.\/\.\.\/lib\/owner-token\.ts"/;
@@ -213,9 +214,29 @@ test("the kind page keeps Columns at list level and relationships on the record 
   assert.doesNotMatch(src, /parentLinkForCell|ReverseChildLinks/);
 });
 
-test("the kind page names its data source as Explore does, never by the lowercase key", async () => {
-  // Round 2 sources brief 5d: the header, breadcrumb and rows use the display name.
-  assert.equal(sourceDisplayName({ connector_display_name: "Spotify", connector_id: "spotify", display_name: "spotify" }), "Spotify source");
+test("the kind page defaults to summary rows and only shows the record table in table view", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const tableMode = src.match(/\{tableView \? \([\s\S]*?<table className="min-w-full">[\s\S]*?\n\s+\) : null\}/)?.[0];
+
+  assert.match(src, /const tableView = viewParam === "table"/);
+  assert.match(src, />\s*Show as table\s*<\/Link>/);
+  assert.ok(tableMode, "the selected-field table should be behind table view");
+  assert.match(tableMode, /<table className="min-w-full">/);
+  assert.match(tableMode, /Record id/);
+  assert.match(src, /\{tableView && allColumns\.length > 0 && \([\s\S]*?<ColumnsMenu/);
+  assert.match(src, /computeDefaultColumns\(page\.data, streamManifest\)\.filter\(\(column\) => column !== "id"\)/);
+  assert.match(src, /<Link[\s\S]*?aria-label=\{`Open \$\{row\.title\}/);
+});
+
+test("the column picker names the id field Record id", async () => {
+  const src = await readFile(COLUMNS_MENU_FILE, "utf8");
+  assert.match(src, /column === "id" \? "Record id" : humanizeFieldLabel\(column\)/);
+  assert.match(src, /href="\?columns=\*&view=table"/);
+});
+
+test("the kind page uses the shared connection-name rule, never the lowercase key", async () => {
+  // Round 3 brief item 2: the header, breadcrumb and rows use the manifest name when the saved label is the connector key.
+  assert.equal(sourceDisplayName({ connector_display_name: "Spotify", connector_id: "spotify", display_name: "spotify" }), "Spotify");
   assert.equal(sourceDisplayName({ connector_id: "spotify", display_name: "Family Spotify" }), "Family Spotify");
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, /sourceLabel = sourceDisplayName\(connection\);/);

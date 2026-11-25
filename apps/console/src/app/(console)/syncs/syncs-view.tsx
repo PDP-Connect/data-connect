@@ -343,7 +343,7 @@ export function recentSyncPhrase(entry: RecentSyncEntry, needsYou: boolean): str
   if (entry.outcome === "partial") {
     return "Sync finished with gaps";
   }
-  if (entry.outcome === "failed") return "Failed";
+  if (entry.outcome === "failed") return "Sync failed";
   if (entry.outcome === "running") return "Syncing now";
   return entry.status === "cancelled" ? "Cancelled" : "Status not available";
 }
@@ -596,7 +596,7 @@ function formatCollectedThisRun(row: SyncRow): string | null {
     return "skipped";
   }
   if (row.collectedThisRun === null) {
-    return row.failed ? "sync failed" : null;
+    return row.failed ? "Sync failed" : null;
   }
   // A real per-stream collected count is per-stream truth and wins over the
   // connection-level failure flag: a stream that collected rows did not fail,
@@ -605,7 +605,7 @@ function formatCollectedThisRun(row: SyncRow): string | null {
     return `+${row.collectedThisRun.toLocaleString()} collected`;
   }
   if (row.failed) {
-    return "sync failed";
+    return "Sync failed";
   }
   return "no change";
 }
@@ -735,7 +735,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
         </span>
         <span className="rr-sync-group__cin">{group.connectionId}</span>
         <span className="rr-sync-group__count">
-          {group.streams.length} {group.streams.length === 1 ? "stream" : "streams"}
+          {group.streams.length} {group.streams.length === 1 ? "kind of record" : "kinds of records"}
         </span>
         <SyncGroupLastRun
           outcome={group.lastRunOutcome}

@@ -226,7 +226,7 @@ export const DEMO_SYNCS_MODEL: SyncsViewModel = {
       connectorId: "first_meridian",
       health: "failing",
       lastRunAt: "2026-06-11T05:00:00Z",
-      lastRunOutcome: "sync failed",
+      lastRunOutcome: "Sync failed",
       lastRunDuration: "2 s",
       lastRunRhythm: FAIL_RHYTHM,
       name: "First Meridian — checking",

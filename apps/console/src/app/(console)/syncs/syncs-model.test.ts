@@ -38,6 +38,7 @@ const DEFERRED_RUN_NOT_LIVE_RE =
   /return !\["cancelled", "completed", "deferred", "failed", "rejected", "succeeded"\]\.includes\(run\.status\);/;
 
 const SYNC_MODEL_SOURCE = readFileSync(new URL("./syncs-model.ts", import.meta.url), "utf8");
+const SYNCS_VIEW_SOURCE = readFileSync(new URL("./syncs-view.tsx", import.meta.url), "utf8");
 
 // ─── Health fixtures ──────────────────────────────────────────────────────────
 
@@ -541,7 +542,7 @@ test("browser surface profile keys attribute a run only to the matching connecti
   const byConnection = new Map(model.groups.map((group) => [group.connectionId, group]));
   assert.equal(byConnection.get("cin_chase_a")?.lastRunOutcome, null);
   assert.equal(byConnection.get("cin_chase_a")?.streams[0]?.failed, false);
-  assert.equal(byConnection.get("cin_chase_b")?.lastRunOutcome, "sync failed");
+  assert.equal(byConnection.get("cin_chase_b")?.lastRunOutcome, "Sync failed");
   assert.equal(byConnection.get("cin_chase_b")?.streams[0]?.failed, true);
 });
 
@@ -718,12 +719,32 @@ test("syncs carries a durable auto-enrollment skip reason for an unscheduled sou
   assert.equal(model.groups[0]?.scheduleReason, "public_listing.tier=preview");
 });
 
+test("sync groups use the manifest name when a saved connection name is its key", () => {
+  const model = buildSyncsViewModel({
+    connectors: [
+      connector({
+        connector_display_name: "Reddit",
+        connector_id: "reddit",
+        display_name: "REDDIT",
+        streams: ["comments"],
+      }),
+    ],
+    runs: [],
+  });
+
+  assert.equal(model.groups[0]?.name, "Reddit");
+});
+
 test("describeLastRunOutcome reports run status without presenting event count as records", () => {
   assert.equal(describeLastRunOutcome({ failed: false, status: "succeeded" }), "Sync finished");
   assert.equal(describeLastRunOutcome({ failed: false, status: "in_progress" }), "Syncing now");
   assert.equal(describeLastRunOutcome({ failed: false, status: "succeeded_with_gaps" }), "Sync finished with gaps");
   assert.equal(describeLastRunOutcome({ failed: false, status: "deferred" }), "Status not available");
-  assert.equal(describeLastRunOutcome({ failed: true, status: "failed" }), "sync failed");
+  assert.equal(describeLastRunOutcome({ failed: true, status: "failed" }), "Sync failed");
+});
+
+test("sync groups call their count kinds of records", () => {
+  assert.match(SYNCS_VIEW_SOURCE, /group\.streams\.length === 1 \? "kind of record" : "kinds of records"/);
 });
 
 test("describeDuration formats sub-minute and minute spans", () => {
@@ -742,10 +763,10 @@ test("a failing connection holds its next and marks rows failed", () => {
   assert.equal(group?.health, "failing");
   assert.equal(group?.streams[0]?.failed, true);
   assert.equal(group?.next, "held");
-  assert.equal(group?.lastRunOutcome, "sync failed");
+  assert.equal(group?.lastRunOutcome, "Sync failed");
 });
 
-test("a broken connector does not rewrite a successful last run into sync failed", () => {
+test("a broken connector does not rewrite a successful last run into a failure", () => {
   const model = buildSyncsViewModel({
     connectors: [
       connector({
@@ -1740,15 +1761,34 @@ test("recent syncs list every run newest-first and links each to its run detail 
   assert.equal(model.recentSyncs[0]?.connectionName, "Gmail — personal");
 });
 
-test("a recent sync for a connection outside the current page keeps the connector key, never an invented name", () => {
+test("a recent sync without a loaded connection or manifest name uses the generic label", () => {
   const model = buildSyncsViewModel({
     connectors: [],
     runs: [run({ connection_id: "cin_absent", connector_id: "gmail", run_id: "run_x" })],
   });
 
   const [entry] = model.recentSyncs;
-  assert.equal(entry?.connectionName, "gmail");
+  assert.equal(entry?.connectionName, "this data source");
   assert.equal(entry?.connectionId, "cin_absent");
+});
+
+test("recent sync names use the manifest display name when the saved connection name is its key", () => {
+  const model = buildSyncsViewModel({
+    connectors: [connector({ connector_id: "reddit", connector_display_name: "Reddit", display_name: "REDDIT" })],
+    runs: [run({ connection_id: "cin_test", connector_id: "reddit" })],
+  });
+
+  assert.equal(model.recentSyncs[0]?.connectionName, "Reddit");
+});
+
+test("recent sync names can use a manifest name when the connection is outside the summary page", () => {
+  const model = buildSyncsViewModel({
+    connectorDisplayNames: new Map([["reddit", "Reddit"]]),
+    connectors: [],
+    runs: [run({ connection_id: "cin_absent", connector_id: "reddit" })],
+  });
+
+  assert.equal(model.recentSyncs[0]?.connectionName, "Reddit");
 });
 
 test("recentSyncOutcome keeps succeeded_with_gaps distinct from a clean success", () => {
