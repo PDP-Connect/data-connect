@@ -682,6 +682,15 @@ test("duplicate summaries remain visible without assessing that connection", () 
   assert.equal(result.state, "indeterminate");
 });
 
+for (const status of ["paused", "draft", "setup_in_progress"] as const) {
+  test(`duplicate summaries of a ${status} connection keep it out of the unassessed set`, () => {
+    const id = "duplicate-fixture";
+    const result = compose([inventory(id, { status })], [summary(id), summary(id)]);
+    assert.deepEqual(result.scope.assessed, []);
+    assert.deepEqual(result.scope.unassessed, []);
+  });
+}
+
 test("a foreign summary cannot assess an inventory connection", () => {
   const result = compose([inventory("configured-fixture")], [summary("foreign-fixture")]);
   assert.deepEqual(result.scope.assessed, []);

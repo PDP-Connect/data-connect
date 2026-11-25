@@ -405,7 +405,15 @@ function reconcileFleetScope(
   }
 
   for (const summary of summaries) {
-    if (ambiguousSummaryIds.has(summary.connection_id) || !inventoryByConnectionId.has(summary.connection_id)) {
+    const connection = inventoryByConnectionId.get(summary.connection_id);
+    if (!connection) {
+      unassessed.push(summaryReference(summary));
+      continue;
+    }
+    // Duplicates make a connection unassessable only where it would be assessed;
+    // an excluded or setup-pending connection is reported by its lifecycle.
+    const scope = inventoryScope(connection);
+    if (ambiguousSummaryIds.has(summary.connection_id) && scope !== "excluded" && scope !== "setup_pending") {
       unassessed.push(summaryReference(summary));
     }
   }
