@@ -87,16 +87,31 @@ function assertJsonPointerTarget(reference: string, resource: unknown, path: str
   }
 }
 
+// JSON Schema 2020-12 applicators (plus the draft-07 spellings Ajv still
+// accepts), by the shape of their value. Every other keyword holds data or an
+// annotation (`examples`, `default`, `const`, `enum`, ...), so a "$ref" inside
+// it is a literal value, not a reference.
+const SCHEMA_KEYWORDS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const SCHEMA_ARRAY_KEYWORDS = new Set(["allOf", "anyOf", "items", "oneOf", "prefixItems"]);
+const SCHEMA_MAP_KEYWORDS = new Set(["$defs", "definitions", "dependencies", "dependentSchemas", "patternProperties", "properties"]);
+
 /** Check the local JSON Pointer references of an embedded schema without resolving remote schemas. */
 export function assertLocalSchemaReferences(schema: unknown, path: string): void {
-  function visit(value: unknown, at: string, resource: unknown): void {
-    if (Array.isArray(value)) {
-      for (const [index, child] of value.entries()) {
-        visit(child, `${at}/${index}`, resource);
-      }
-      return;
-    }
-    if (!(value && typeof value === "object")) {
+  function visitSchema(value: unknown, at: string, resource: unknown): void {
+    if (!(value && typeof value === "object" && !Array.isArray(value))) {
       return;
     }
     const object = value as JsonObject;
@@ -108,11 +123,20 @@ export function assertLocalSchemaReferences(schema: unknown, path: string): void
           throw new InvalidSourceDeclarationError(`${childPath} must be a local fragment reference`);
         }
         assertJsonPointerTarget(child, currentResource, childPath);
+      } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(child)) {
+        for (const [index, member] of child.entries()) {
+          visitSchema(member, `${childPath}/${index}`, currentResource);
+        }
+      } else if (SCHEMA_KEYWORDS.has(key)) {
+        visitSchema(child, childPath, currentResource);
+      } else if (SCHEMA_MAP_KEYWORDS.has(key) && child && typeof child === "object" && !Array.isArray(child)) {
+        for (const [name, member] of Object.entries(child as JsonObject)) {
+          visitSchema(member, `${childPath}/${name.replace(/~/g, "~0").replace(/\//g, "~1")}`, currentResource);
+        }
       }
-      visit(child, childPath, currentResource);
     }
   }
-  visit(schema, path, schema);
+  visitSchema(schema, path, schema);
 }
 
 function requireEmbeddedStreamSchemas(declaration: SourceDeclaration): void {
