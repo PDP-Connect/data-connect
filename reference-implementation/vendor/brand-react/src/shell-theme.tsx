@@ -4,7 +4,9 @@
 "use client";
 
 import { Moon, Sun } from "lucide-react";
-import { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
+// The vendor tests compile JSX with the classic runtime, which needs React in scope.
+// biome-ignore lint/correctness/noUnusedImports: classic-runtime JSX in the vendor tests reads React from scope.
+import React, { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
 
 type Theme = "dark" | "light";
 const ThemeSetterContext = createContext<((next: Theme) => void) | null>(null);
