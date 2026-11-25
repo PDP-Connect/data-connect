@@ -33,13 +33,13 @@ export interface SourceStatusWords {
   words: string;
   tone: SourceStatusTone;
   action: SourceStatusAction | null;
-  /** True when the person must act before this data source can sync (rows 2, 4, 5, 6, 8, 9). */
+  /** True when the person must act before this data source can sync (rows 4, 5, 6, 8, 9). */
   needsYou: boolean;
 }
 
 type MatchedStatus = Omit<SourceStatusWords, "needsYou">;
 
-const NEEDS_YOU_ROWS: ReadonlySet<SourceStatusRow> = new Set<SourceStatusRow>([2, 4, 5, 6, 8, 9]);
+const NEEDS_YOU_ROWS: ReadonlySet<SourceStatusRow> = new Set<SourceStatusRow>([4, 5, 6, 8, 9]);
 
 /** A sentence for the data source's own page. `slot` names a fact only the page holds. */
 export interface SourceStateSentence {
@@ -63,6 +63,7 @@ function formatWhen(value: string | null, now: Date): string | null {
   if (Number.isNaN(date.getTime())) return null;
 
   const age = now.getTime() - date.getTime();
+  if (age < 0) return "just now";
   if (age < 7 * DAY_MS) return formatRelative(date, now.getTime());
 
   const sameYear = date.getUTCFullYear() === now.getUTCFullYear();
@@ -70,6 +71,7 @@ function formatWhen(value: string | null, now: Date): string | null {
     day: "numeric",
     month: "short",
     ...(sameYear ? {} : { year: "numeric" }),
+    // UTC is acceptable for this server-rendered page, which has no viewer-local timezone.
     timeZone: "UTC",
   }).format(date);
 }
@@ -100,7 +102,7 @@ function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
 function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof projectSourceActionability>): MatchedStatus | null {
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null };
   if (projection.renderedStatus.kind === "setup_failed") {
-    return { row: 2, words: "Setup never completed", tone: "attention", action: action("continue_setup", "Continue setup", true) };
+    return { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };
   if (source.connector_implementation?.state === "not_installed") {
@@ -117,6 +119,14 @@ function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof
   }
 
   const resolver = source.owner_state?.resolver;
+  if (projection.paused) {
+    const pausedAction = source.source_kind === "local_device"
+      ? action("view_device", "View this device", false)
+      : source.source_binding_kind === "historical_archive"
+        ? action("repair_credential", "Reconnect", false)
+        : action("resume", "Resume", false);
+    return { row: 10, words: "Paused", tone: "faint", action: pausedAction };
+  }
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
     const surface = requiredAction?.surface?.kind;
@@ -139,15 +149,7 @@ function lifecycleRow(source: RefConnectorSummary, projection: ReturnType<typeof
   if (resolver === "setup_in_progress") {
     return { row: 9, words: "Setup in progress", tone: "attention", action: action("continue_setup", "Continue setup", true) };
   }
-  if (projection.paused || resolver === "owner_paused") {
-    const pausedAction = source.source_kind === "local_device"
-      ? action("view_device", "View this device", false)
-      : source.source_binding_kind === "historical_archive"
-        ? action("repair_credential", "Reconnect", false)
-        : action("resume", "Resume", false);
-    return { row: 10, words: "Paused", tone: "faint", action: pausedAction };
-  }
-  if (resolver === "collecting" || projection.renderedStatus.kind === "pending") {
+  if (resolver === "collecting" || (!source.owner_state && projection.renderedStatus.kind === "pending")) {
     return { row: 11, words: "Syncing now", tone: "accent", action: null };
   }
   return null;
@@ -179,14 +181,27 @@ function matchSourceStatus(source: RefConnectorSummary, { now }: SourceStatusOpt
   if (lifecycle) return lifecycle;
 
   const resolver = source.owner_state?.resolver;
+  const schedulerBackoff = source.schedule?.scheduler_backoff;
   const when = formatWhen(lastSuccessfulSync(source), now);
   const withWhen = (prefix: string) => when ? `${prefix} · last synced ${when}` : prefix;
 
-  if (source.schedule?.scheduler_backoff?.backoff_applied) {
-    return { row: 12, words: withWhen("Trying again on its own"), tone: "plain", action: null };
+  if (resolver === "owner_paused") {
+    const reattachAction = source.rendered_verdict?.required_actions.find((item) => item.kind === "reattach_schedule");
+    const ownerPausedAction = source.source_kind === "local_device"
+      ? action("view_device", "View this device", false)
+      : reattachAction
+        ? action("server_cta", reattachAction.cta, false)
+        : null;
+    return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction };
   }
   if (resolver === "blocked_maintainer") {
     return { row: 13, words: "Waiting on a fix from the DataConnect maintainers", tone: "plain", action: null };
+  }
+  if (
+    schedulerBackoff?.backoff_applied &&
+    schedulerBackoff.recommended_health_state === "cooling_off"
+  ) {
+    return { row: 12, words: withWhen("Trying again on its own"), tone: "plain", action: null };
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
@@ -234,6 +249,10 @@ function matchSourceStatus(source: RefConnectorSummary, { now }: SourceStatusOpt
 export function sourceStatusWords(source: RefConnectorSummary, options: SourceStatusOptions): SourceStatusWords {
   const matched = matchSourceStatus(source, options);
   return { ...matched, needsYou: NEEDS_YOU_ROWS.has(matched.row) };
+}
+
+export function isUpToDateRow(row: SourceStatusRow): boolean {
+  return row === 18 || row === 19;
 }
 
 /** "in 20 minutes", "in 4 hours": a coming time without a clock time, so no time zone is assumed. */
@@ -289,14 +308,23 @@ function matchStateSentence(
       return { text: `${sentence}${extra}${when ? ` Last successful sync ${when}.` : ""}` };
     }
     case 9: return { text: "Setup is in progress." };
-    case 10: return { text: withLastSync("Paused. Your records and sign-in are kept.") };
+    case 10:
+      return source.status === "paused"
+        ? { text: withLastSync("Paused. Your records and sign-in are kept.") }
+        : { text: when ? `Automatic sync is off. Last synced ${when}.` : "Automatic sync is off." };
     case 11: {
-      const started = source.owner_state?.evidence_as_of ?? source.last_run?.started_at ?? source.schedule?.last_started_at ?? null;
+      const started = source.last_run && ["pending", "started", "in_progress", "running"].includes(source.last_run.status)
+        ? source.last_run.started_at
+        : null;
       const startedWhen = formatWhen(started, options.now);
       return { text: startedWhen ? `Syncing now. Started ${startedWhen}.` : "Syncing now." };
     }
     case 12: {
-      const coming = formatComing(source.schedule?.scheduler_backoff?.next_run_at, options.now);
+      const backoff = source.schedule?.scheduler_backoff;
+      const coming = formatComing(backoff?.next_run_at, options.now);
+      if (backoff?.reason_class === "source_pressure" || backoff?.consecutive_failures === 0) {
+        return { text: `${options.name} asked DataConnect to slow down. It will try again on its own${coming ? ` ${coming}` : ""}.` };
+      }
       return { text: `The last sync did not finish. DataConnect will try again on its own${coming ? ` ${coming}` : ""}.` };
     }
     case 13: return { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do." };
@@ -316,11 +344,9 @@ function matchStateSentence(
     case 20: {
       const lateness = source.connection_health.lateness?.state;
       const late = lateness === "late" || lateness === "overdue" ? " The next sync is late." : "";
-      const unchecked =
-        source.owner_state?.posture === "frozen-since-last-run" ||
-        source.rendered_verdict?.pill.label === "Collected, not independently checked"
-          ? " DataConnect has not checked this against the source."
-          : "";
+      const unchecked = source.owner_state?.posture === "frozen-since-last-run"
+        ? " DataConnect has not checked this against the source."
+        : "";
       return { text: `Synced${when ? ` ${when}` : ""}.${late}${unchecked}` };
     }
     case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not yet checked this for gaps.` };
