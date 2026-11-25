@@ -74,6 +74,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/forced-release.test.ts",
       "scripts/release-atomicity.test.ts",
       "scripts/package-verify-classifier.test.ts",
+      "scripts/pin-lockstep-dependencies.test.ts",
       "scripts/railway-mcp-query-smoke.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
       "scripts/package-macos-node-helper.test.mjs",
