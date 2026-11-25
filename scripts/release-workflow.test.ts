@@ -62,6 +62,20 @@ function filesRunByInstallerBuild() {
   return [...seen].sort()
 }
 
+// GitHub's `paths` rule: patterns apply in order, a `!` pattern excludes what
+// earlier patterns included, and a file is included if the last pattern that
+// matches it is positive.
+function includedByPaths(file: string, paths: readonly string[]) {
+  let included = false
+  for (const pattern of paths) {
+    const negated = pattern.startsWith("!")
+    if (matchesGlob(file, negated ? pattern.slice(1) : pattern)) {
+      included = !negated
+    }
+  }
+  return included
+}
+
 function readWorkflowStep(workflow: string, name: string) {
   const marker = `      - name: ${name}\n`
   const start = workflow.indexOf(marker)
@@ -317,7 +331,7 @@ describe("release workflow", () => {
     expect(scripts[3].script).toContain("pwsh -NoProfile")
   })
 
-  it("builds installers on a pull request whenever it changes a script the build runs", () => {
+  it("builds installers on a pull request whenever it changes a file the build runs", () => {
     const { paths } = (load(readReleaseWorkflow()) as ReleaseWorkflow).on
       .pull_request
     const files = filesRunByInstallerBuild()
@@ -327,14 +341,12 @@ describe("release workflow", () => {
     expect(files).toContain(
       "personal-server/scripts/verify-artifact-relocatable.js"
     )
-    expect(
-      files.filter(file => !paths.some(pattern => matchesGlob(file, pattern)))
-    ).toEqual([])
-    // A filter that names a file the build no longer runs is stale.
-    const staleScripts = paths.filter(
-      pattern => pattern.startsWith("scripts/") && !files.includes(pattern)
+    expect(files.filter(file => !includedByPaths(file, paths))).toEqual([])
+    // The negation drops test files only, never a helper the build runs.
+    expect(includedByPaths("scripts/release-workflow.test.ts", paths)).toBe(
+      false
     )
-    expect(staleScripts).toEqual([])
+    expect(includedByPaths("scripts/lib/helper.mjs", paths)).toBe(true)
   })
 
   it("builds manual-install artifacts on demand without an updater", () => {

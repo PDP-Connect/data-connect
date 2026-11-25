@@ -17,8 +17,11 @@ on:
     # request builds it only when it changes an input of the packaging itself.
     # Every merge to main still builds all four installers through the
     # automatic desktop release, and workflow_dispatch builds any branch.
-    # scripts/release-workflow.test.ts checks that this list covers every
-    # repository script the build job runs, with its local imports.
+    # All of scripts/ counts, except its tests: build steps reach helpers
+    # through npm scripts and child processes as well as direct imports, and
+    # a per-file list cannot be checked against those edges.
+    # scripts/release-workflow.test.ts checks that every file the build job
+    # runs, with its local imports, falls under these paths.
     paths:
       - .github/workflows/release.yml
       - .github/workflows/desktop-release.yml
@@ -32,21 +35,8 @@ on:
       - playwright-runner/**
       - personal-server/**
       - pdpp-runtime/**
-      - scripts/check-staged-console-connectors.mjs
-      - scripts/create-macos-dmg.mjs
-      - scripts/desktop-release.mjs
-      - scripts/ensure-connectors.js
-      - scripts/ensure-console-stack.js
-      - scripts/ensure-pdpp-runtime.js
-      - scripts/ensure-reference-stack.js
-      - scripts/finalize-linux-appimage.js
-      - scripts/is-main-module.js
-      - scripts/package-macos-node-helper.mjs
-      - scripts/stage-generations.js
-      - scripts/stage-pdpp-node.mjs
-      - scripts/verify-bundled-personal-server.mjs
-      - scripts/verify-reference-stack.mjs
-      - scripts/verify-release-ref.mjs
+      - scripts/**
+      - "!scripts/**/*.test.*"
   release:
     types: [created]
   workflow_dispatch:
