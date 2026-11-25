@@ -13,6 +13,30 @@ on:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
     branches-ignore: [testeng/integration]
+    # The installer matrix takes 20 to 50 minutes per platform, so a pull
+    # request builds it only when it changes an input of the packaging itself.
+    # Every merge to main still builds all four installers through the
+    # automatic desktop release, and workflow_dispatch builds any branch.
+    # All of scripts/ counts, tests included: build steps reach helpers
+    # through npm scripts and child processes as well as direct imports, and
+    # neither a per-file list nor a test-file exclusion can be checked
+    # against those edges.
+    # scripts/release-workflow.test.ts checks that every file the build job
+    # runs, with its local imports, falls under these paths.
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/desktop-release.yml
+      - package.json
+      - package-lock.json
+      - index.html
+      - tsconfig*.json
+      - vite.config.ts
+      - src/**
+      - src-tauri/**
+      - playwright-runner/**
+      - personal-server/**
+      - pdpp-runtime/**
+      - scripts/**
   release:
     types: [created]
   workflow_dispatch:

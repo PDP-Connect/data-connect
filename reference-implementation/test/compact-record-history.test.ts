@@ -1007,8 +1007,10 @@ if (POSTGRES_URL) {
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
+      ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0;
       CREATE TABLE IF NOT EXISTS retained_size_stream (
         connector_instance_id TEXT NOT NULL,
         connector_id TEXT NOT NULL,
@@ -1190,6 +1192,14 @@ if (POSTGRES_URL) {
 
       const plan = await planCompaction({ connectorInstanceId, limitKeys: null, policy, pool, stream });
       const result = await applyCompaction({ plan, pool, runId });
+
+      // Removed rows 2..5 were superseded by 3..6, so cursors below 6 can no
+      // longer be reconstructed: the same transaction raises the floor to 6.
+      const floorRow = await pool.query(
+        "SELECT changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+        [connectorInstanceId, stream]
+      );
+      assert.equal(floorRow.rows[0].changes_floor, 6);
 
       assert.equal(result.deleted, 4);
       assert.equal(result.inserted, 4);

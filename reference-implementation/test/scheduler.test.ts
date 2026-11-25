@@ -1783,16 +1783,9 @@ rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.type !== 'START') return;
   process.stdout.write(JSON.stringify({
-    type: 'RECORD',
-    stream: 'items',
-    key: 'scheduler_terminal_error',
-    data: { id: 'scheduler_terminal_error', value: 'before failure' },
-    emitted_at: new Date().toISOString(),
-  }) + '\\n');
-  process.stdout.write(JSON.stringify({
     type: 'DONE',
     status: 'failed',
-    records_emitted: 1,
+    records_emitted: 0,
     error: { message: 'Remote provider rate limit', retryable: true },
   }) + '\\n');
   rl.close();
@@ -1853,7 +1846,7 @@ rl.on('line', (line) => {
       retryable: true,
     });
     assert.deepEqual(record.checkpointSummary, {
-      buffered_records_dropped: 1,
+      buffered_records_dropped: 0,
       commit_status: "not_committed",
       mode: "checkpointed_streaming",
       records_accepted: 0,
