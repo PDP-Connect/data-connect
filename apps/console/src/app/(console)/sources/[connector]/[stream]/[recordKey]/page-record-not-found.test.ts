@@ -54,6 +54,12 @@ const HUMAN_KIND_RE = /humanizeFieldLabel\(streamName\)/;
 const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
 const KIND_TITLE_FALLBACK_RE = /const detailPreview = recordTitlePreview\(/;
 const OMITS_REDUNDANT_KIND_CRUMB_RE = /\.\.\.\(recordCrumb \? \[\{ label: recordCrumb \}\] : \[\]\)/;
+const SHARED_CONNECTION_NAME_RE = /connectionDisplayName\(\s*connection\.display_name,\s*connection\.connector_display_name,\s*connection\.connector_id\s*\)/;
+const UPDATED_TIME_RE = /Updated \{updatedAt\}/;
+const SOURCE_TIME_FALLBACK_RE = /const sourceUpdatedAt = semanticTs \? exploreRecordTime\(semanticTs\.value\) : "";[\s\S]*?const updatedAt = sourceUpdatedAt \|\| exploreRecordTime\(record\.emitted_at\);/;
+const HIDDEN_KIND_GLYPH_RE = /<RecordIdentity[^>]*showGlyph=\{false\}/;
+const SCHEMA_TYPES_TO_INSPECTOR_RE = /<RecordInspector[\s\S]*?fieldSchemaTypes=\{deriveFieldSchemaTypes\(recordMetadata\)\}/;
+const HIDDEN_SOURCE_TIME_FIELD_RE = /<RecordInspector[\s\S]*?hiddenBodyFields=\{semanticTs \? \[semanticTs\.field\] : undefined\}/;
 
 test("record detail page imports the typed ResourceServerHttpError so it can branch on status", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -87,12 +93,20 @@ test("record detail page does not reintroduce the brittle message-substring 404 
 
 test("the record page humanizes the kind breadcrumb and uses the kind name when no declared title exists", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // data-pages.md, decision 1: use the human kind name in titles and breadcrumbs.
+  // DIRECTION.md, “One data source”: kind and record titles use human names.
   assert.match(src, HUMAN_KIND_RE);
-  // data-pages.md, decision 1: show the data source label instead of its ID.
+  // Round 3 item 2: all console surfaces use the shared connection-name rule.
+  assert.match(src, SHARED_CONNECTION_NAME_RE);
   assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
-  // data-pages.md, decision 3: the title rule lives in record-title.ts (behaviour pinned by record-title.test.ts).
+  // DIRECTION.md, “What must stay true” #4: keep the existing detail address and align its title with the kind row.
   assert.match(src, KIND_TITLE_FALLBACK_RE);
-  // data-pages.md, decision 3: avoid repeating the kind label for the fallback title.
   assert.match(src, OMITS_REDUNDANT_KIND_CRUMB_RE);
+  // Round 4 items 2 and 3: no kind glyph before the record title; one relative Updated time.
+  assert.match(src, HIDDEN_KIND_GLYPH_RE);
+  assert.match(src, HIDDEN_SOURCE_TIME_FIELD_RE);
+  // Round 4 item 4: number grouping reads the JSON-Schema type, so the inspector needs it.
+  assert.match(src, SCHEMA_TYPES_TO_INSPECTOR_RE);
+  assert.match(src, SOURCE_TIME_FALLBACK_RE);
+  assert.match(src, UPDATED_TIME_RE);
+  assert.doesNotMatch(src, /sourceLabelForConnection/);
 });

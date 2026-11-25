@@ -17,7 +17,7 @@ import type {
   ExplorerPeekData,
 } from "@pdpp/operator-ui/components/views/records-explorer-view";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
-import { humanizeFieldLabel } from "@pdpp/display";
+import { formatRecordFieldValue, humanizeFieldLabel } from "@pdpp/display";
 import type { ParentBackLink, RelatedLink, ReverseChildListLink } from "../sources/lib/relationships.ts";
 
 const IMAGE_MIME_RE = /^image\//i;
@@ -31,6 +31,9 @@ export interface RecordInspectorRelationships {
 }
 
 export interface RecordInspectorProps {
+  /** Field name → JSON-Schema `type`, so large whole-number quantities show grouping separators. */
+  fieldSchemaTypes?: Readonly<Record<string, string>>;
+  hiddenBodyFields?: readonly string[];
   record: ExplorerPeekData | null;
   relationships?: RecordInspectorRelationships | null;
   streamRecordsHref?: string | null;
@@ -150,7 +153,7 @@ function BlobAffordanceView({
   );
 }
 
-export function RecordInspector({ record, relationships, streamRecordsHref, recordHref }: RecordInspectorProps) {
+export function RecordInspector({ fieldSchemaTypes = {}, hiddenBodyFields = [], record, relationships, streamRecordsHref, recordHref }: RecordInspectorProps) {
   if (!record) {
     return null;
   }
@@ -160,13 +163,22 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
     ...Object.keys(body),
     ...record.fields.map((field) => field.name),
   ].filter(isIdentifierField))];
-  const visibleBody = Object.fromEntries(Object.entries(body).filter(([name]) => !isIdentifierField(name)));
+  const hiddenBodyFieldNames = new Set(hiddenBodyFields);
+  const visibleBody = Object.fromEntries(
+    Object.entries(body).filter(([name]) => !isIdentifierField(name) && !hiddenBodyFieldNames.has(name))
+  );
   const declaredTypes: Record<string, string> = {};
   for (const field of record.fields) {
     if (field.type) {
       declaredTypes[field.name] = field.type;
     }
   }
+  const readableBody = Object.fromEntries(
+    Object.entries(visibleBody).map(([name, value]) => {
+      const formatted = formatRecordFieldValue(value, name, declaredTypes[name], fieldSchemaTypes[name]);
+      return [name, formatted?.kind === "plain" ? formatted.text : value];
+    })
+  );
   const withheld = record.fields.filter((field) => field.state === "withheld");
   const visibleFieldCount = record.fields.filter((field) => field.state === "visible").length;
   const blob = blobAffordance(record);
@@ -189,7 +201,7 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
         {record.error ? (
           <p className="rr-x-warn__msg">This could not be loaded. Try again.</p>
         ) : (
-          <RecordBody blobAffordance={blob ?? undefined} data={visibleBody} declaredTypes={declaredTypes} stream={record.stream} />
+          <RecordBody blobAffordance={blob ?? undefined} data={readableBody} declaredTypes={declaredTypes} stream={record.stream} />
         )}
         {blob ? <BlobAffordanceView affordance={blob} mimeType={blobMime} /> : null}
         {relationGroups.length > 0 ? (
@@ -220,6 +232,18 @@ export function RecordInspector({ record, relationships, streamRecordsHref, reco
                   <dd>{field.type ?? "Type not declared"} · {field.state}</dd>
                 </div>
               ))}
+            </dl>
+            <dl className="rr-x-inspector-details__fields">
+              {record.semanticTimestamp ? (
+                <div className="rr-x-inspector-details__row">
+                  <dt>Source time · {record.semanticTimestamp.label}</dt>
+                  <dd>{record.semanticTimestamp.value}</dd>
+                </div>
+              ) : null}
+              <div className="rr-x-inspector-details__row">
+                <dt>Ingested</dt>
+                <dd>{record.emittedAt}</dd>
+              </div>
             </dl>
             <p>{visibleFieldCount} of {record.fields.length} fields readable</p>
             {withheld.length > 0 ? <p>Withheld fields: {withheld.map((field) => field.name).join(" · ")}</p> : null}

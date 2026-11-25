@@ -21,8 +21,8 @@ import {
 import {
   connectorInstanceIdForConnection,
   resolveConnectionForRecordsRoute,
-  sourceLabelForConnection,
 } from "../../../connection-route.ts";
+import { connectionDisplayName } from "../../../../lib/connection-display-name.ts";
 import { findManifestForConnectorId } from "../../../lib/relationships.ts";
 
 export const dynamic = "force-dynamic";
@@ -61,7 +61,11 @@ export default async function StreamHealthPage({
     }
     connectorId = connection.connector_id;
     connectionId = connection.connection_id;
-    sourceLabel = sourceLabelForConnection(connection);
+    sourceLabel = connectionDisplayName(
+      connection.display_name,
+      connection.connector_display_name,
+      connection.connector_id
+    );
     const [manifests, streamHealthResult] = await Promise.all([
       listConnectorManifests().catch(() => []),
       streamHealth(connectorId, streamName, {

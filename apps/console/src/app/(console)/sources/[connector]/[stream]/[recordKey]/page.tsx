@@ -1,12 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { IcTimestamp } from "@pdpp/brand-react";
-import { buildRecordPreview, classifyRecordKind, deriveDeclaredFieldTypes, humanizeFieldLabel } from "@pdpp/display";
+import {
+  buildRecordPreview,
+  classifyRecordKind,
+  deriveDeclaredFieldTypes,
+  deriveFieldSchemaTypes,
+  humanizeFieldLabel,
+} from "@pdpp/display";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
 import { buildBlobAffordance, buildPeekFields } from "@pdpp/operator-ui/components/views/explorer-utils";
 import { declaredRolesFromCapabilities } from "@pdpp/operator-ui/explore/explore-data-assembler";
+import { exploreRecordTime } from "../../../../explore/explore-presentation.ts";
 import { notFound } from "next/navigation";
 import { RecordInspector } from "@/app/(console)/components/record-inspector.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
@@ -14,12 +20,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../../components/warnings-banner.tsx";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../../lib/owner-token.ts";
-import {
-  formatSemanticTimestamp,
-  humanizeFieldName,
-  pickSemanticTimestamp,
-  primaryTimestamp,
-} from "../../../../lib/record-timestamps.ts";
+import { pickSemanticTimestamp } from "../../../../lib/record-timestamps.ts";
 import {
   type ExpandCapability,
   type ConnectorManifest,
@@ -32,8 +33,8 @@ import {
 import {
   connectorInstanceIdForConnection,
   resolveConnectionForRecordsRoute,
-  sourceLabelForConnection,
 } from "../../../connection-route.ts";
+import { connectionDisplayName } from "../../../../lib/connection-display-name.ts";
 import {
   buildRelatedLinks,
   candidateParentStreamsForChild,
@@ -81,7 +82,11 @@ export default async function RecordDetailPage({
     const connection = await resolveRecordsConnection(routeId);
     connectionId = connection.connection_id;
     connectorId = connection.connector_id;
-    sourceLabel = sourceLabelForConnection(connection);
+    sourceLabel = connectionDisplayName(
+      connection.display_name,
+      connection.connector_display_name,
+      connection.connector_id
+    );
     const connectorInstanceId = connectorInstanceIdForConnection(connection);
     // Fetch the record, this stream's metadata (for parent → child relations),
     // and the connector manifest together. The manifest is used only to prune
@@ -160,7 +165,8 @@ export default async function RecordDetailPage({
       }
     : null;
   const semanticTs = pickSemanticTimestamp(tsMetadata, record.data);
-  const ts = primaryTimestamp(semanticTs, record.emitted_at);
+  const sourceUpdatedAt = semanticTs ? exploreRecordTime(semanticTs.value) : "";
+  const updatedAt = sourceUpdatedAt || exploreRecordTime(record.emitted_at);
   const inspectorRecord = {
     bodyJson: JSON.stringify(record.data, null, 2),
     connectionDisplayName: sourceLabel,
@@ -172,10 +178,10 @@ export default async function RecordDetailPage({
     readUrl: recordReadUrl,
     recordId: record.id,
     recordSizeBytes: typeof record.record_json_bytes === "number" ? record.record_json_bytes : null,
-    // Honest: the authored date only when a semantic field is actually declared;
-    // null otherwise (the inspector falls back to showing "Emitted").
+    // Honest: the authored date is shown only when a semantic field is declared;
+    // the inspector keeps its raw value under Details.
     semanticTimestamp: semanticTs
-      ? { label: humanizeFieldName(semanticTs.field), value: formatSemanticTimestamp(semanticTs.value) }
+      ? { label: semanticTs.field, value: semanticTs.value }
       : null,
     stream: streamName,
   };
@@ -243,17 +249,11 @@ export default async function RecordDetailPage({
               <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
               <span>{sourceLabel}</span>
             </span>
-            {ts.label} <IcTimestamp className="text-foreground" value={ts.value} />
-            {ts.secondary ? (
-              <>
-                {" · "}
-                {ts.secondary.label} <IcTimestamp className="text-muted-foreground" value={ts.secondary.value} />
-              </>
-            ) : null}
+            Updated {updatedAt}
           </>
         }
         title={
-          <RecordIdentity hasImage={detailHasImage} preview={detailPreview} recordKey={recordId} variant="header" />
+          <RecordIdentity hasImage={detailHasImage} preview={detailPreview} recordKey={recordId} showGlyph={false} variant="header" />
         }
       />
 
@@ -267,6 +267,8 @@ export default async function RecordDetailPage({
       ) : null}
 
       <RecordInspector
+        fieldSchemaTypes={deriveFieldSchemaTypes(recordMetadata)}
+        hiddenBodyFields={semanticTs ? [semanticTs.field] : undefined}
         record={inspectorRecord}
         relationships={{
           parentBackLinks: allParentBackLinks,

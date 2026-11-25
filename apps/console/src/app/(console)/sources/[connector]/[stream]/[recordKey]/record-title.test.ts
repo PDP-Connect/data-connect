@@ -3,10 +3,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rowPrimary } from "@pdpp/display";
+import { buildRecordPreview, rowPrimary } from "@pdpp/display";
 import { recordCrumbLabel, recordTitlePreview } from "./record-title.ts";
 
-// data-pages.md, decision 3: the record title follows Explore's rule and never shows "field: value".
+// DIRECTION.md, “One data source”: the record page identifies its own content; round 4 item 2 adopts the kind-row title rule.
 
 test("a declared title is the record title and the last breadcrumb", () => {
   const preview = recordTitlePreview({ kind: "generic", title: "Blue Monday" }, "generic", "top_tracks");
@@ -34,4 +34,19 @@ test("a record with only generic fields falls back to the kind name, not a field
 test("a record with no preview or a blank title falls back to the kind name", () => {
   assert.equal(rowPrimary(recordTitlePreview(null, "generic", "saved_posts")), "Saved posts");
   assert.equal(rowPrimary(recordTitlePreview({ kind: "generic", title: "  " }, "generic", "saved_posts")), "Saved posts");
+});
+
+test("record page uses the same human title as the kind row", () => {
+  const data = {
+    followers: 98_000_000,
+    id: "spotify:artist:0L8ExT028jH3ddEcZwqJJ5",
+    name: "Taylor Swift",
+    popularity: 100,
+  };
+  const preview = buildRecordPreview("generic", data, {}, {});
+  const title = recordTitlePreview(preview, "generic", "top_artists");
+
+  // DIRECTION.md, “What must stay true” #4: keep working addresses; round 4 item 2 aligns the detail title with its kind row.
+  assert.equal(rowPrimary(title), "Taylor Swift");
+  assert.doesNotMatch(rowPrimary(title), /•/);
 });

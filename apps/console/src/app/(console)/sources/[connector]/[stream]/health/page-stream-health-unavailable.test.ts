@@ -55,6 +55,7 @@ const BOUNDED_STATE_COPY = /not\s+available/i;
 const RETHROWS_UNKNOWN = /throw\s+err;/;
 const HUMAN_KIND_RE = /humanizeFieldLabel\(streamName\)/;
 const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
+const SHARED_CONNECTION_NAME_RE = /connectionDisplayName\(\s*connection\.display_name,\s*connection\.connector_display_name,\s*connection\.connector_id\s*\)/;
 const HEALTH_TITLE_RE = /what arrived/;
 const TECHNICAL_SECTIONS_FOLDED_RE =
   /<details[\s\S]*?<Section title="Summary">[\s\S]*?<Section title="Freshness">[\s\S]*?<\/details>/;
@@ -91,6 +92,9 @@ test("the health page humanizes the kind name and keeps technical checks inside 
   assert.match(src, HUMAN_KIND_RE);
   // data-pages.md, decision 1: use the data source label in the breadcrumb.
   assert.match(src, SOURCE_LABEL_BREADCRUMB_RE);
+  // Round 3 item 2: all console surfaces use the shared connection-name rule.
+  assert.match(src, SHARED_CONNECTION_NAME_RE);
+  assert.doesNotMatch(src, /sourceLabelForConnection/);
   assert.match(src, HEALTH_TITLE_RE);
   assert.match(src, TECHNICAL_SECTIONS_FOLDED_RE);
 

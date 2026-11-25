@@ -121,6 +121,26 @@ test("WebPushSettings renders unsupported, denied-permission, insecure-context, 
   }
 });
 
+test("server-not-ready wording tells the owner what is missing and where to set it", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  const config = {
+    enabled: false,
+    object: "web_push_config" as const,
+    public_key: null,
+    unavailable_reason: "VAPID public/private keys are not configured",
+  };
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions: [] }));
+  const detailsStart = markup.indexOf("<details");
+
+  // DIRECTION.md, “Few words”: a state is one plain sentence; round 4 item 6 names the server environment as its fix.
+  assert.equal(unavailableSentence(config.unavailable_reason, true), "This server needs its notification keys set in its environment.");
+  assert.ok(detailsStart >= 0);
+  assert.doesNotMatch(src, /ask its administrator to set them up/);
+  assert.match(markup.slice(detailsStart), /PDPP_WEB_PUSH_VAPID_PUBLIC_KEY/);
+  assert.match(markup.slice(detailsStart), /PDPP_WEB_PUSH_VAPID_PRIVATE_KEY/);
+  assert.match(src, /unavailableSentence\(unavailable, !\(config\.enabled && config\.public_key\)\)/);
+});
+
 test("dashboard service worker fails closed and click-through targets clean owner URLs", async () => {
   const src = await readFile(join(APP_ROOT, "public", "pdpp-dashboard-sw.js"), "utf8");
   assert.match(src, SERVICE_WORKER_KNOWN_TYPES_PATTERN);
@@ -210,7 +230,8 @@ test("notification availability uses plain words and explains the next step", as
   assert.match(src, /export function unavailableSentence/);
   assert.match(src, /This browser can't receive notifications\. Install DataConnect as an app on your phone or computer to get them\./);
   assert.match(src, /notifications are blocked in your browser or device settings; allow them there, then return here/i);
-  assert.match(src, /Notifications are not set up on this DataConnect server yet; ask its administrator to set them up\./);
+  // Round 4 item 6: the server provides its keys through environment settings.
+  assert.match(src, /This server needs its notification keys set in its environment\./);
   // DIRECTION.md, Notifications: browser support details are folded under Details.
   assert.match(src, /<summary className="min-h-11 cursor-pointer py-3 text-\[13px\] text-muted-foreground">Details<\/summary>/);
 });

@@ -74,6 +74,43 @@ test("record inspector keeps readable fields visible and technical facts under D
   assert.match(details, FIELD_TYPE_RE);
 });
 
+test("record inspector uses the shared field formatter and keeps both raw times under Details", () => {
+  Object.assign(globalThis, { React: { createElement } });
+  const record: ExplorerPeekData = {
+    ...RECORD,
+    bodyJson: JSON.stringify({
+      genres: ["pop", "country pop"],
+      followers: 98_000_000,
+      source_updated_at: "2026-11-25T18:50:00.000Z",
+    }),
+    emittedAt: "2026-11-25T18:55:00.000Z",
+    fields: [
+      { name: "genres", state: "visible", valueJson: '["pop","country pop"]' },
+      { name: "followers", state: "visible", valueJson: "98000000" },
+      { name: "source_updated_at", state: "visible", type: "timestamp", valueJson: '"2026-11-25T18:50:00.000Z"' },
+    ],
+    semanticTimestamp: { label: "source_updated_at", value: "2026-11-25T18:50:00.000Z" },
+  };
+  const markup = renderToStaticMarkup(createElement(RecordInspector, {
+      // Spotify `followers` has schema `type: integer` and no declared presentation type.
+      fieldSchemaTypes: { followers: "integer", genres: "array" },
+      hiddenBodyFields: ["source_updated_at"],
+      record,
+    }));
+  const detailsStart = markup.indexOf("<details");
+  const visible = markup.slice(0, detailsStart);
+  const details = markup.slice(detailsStart);
+
+  // DIRECTION.md, “Values”: field values stay plain and readable; round 4 item 4 defines the shared formatting rules.
+  assert.match(visible, /pop, country pop/);
+  assert.match(visible, /98,000,000/);
+  assert.doesNotMatch(visible, /Source updated at/);
+  // Round 4 item 3: keep the source and arrival timestamps under folded Details.
+  assert.doesNotMatch(visible, /2026-11-25T18:(?:50|55):00\.000Z/);
+  assert.match(details, /Source time · source_updated_at<\/dt><dd>2026-11-25T18:50:00\.000Z/);
+  assert.match(details, /Ingested<\/dt><dd>2026-11-25T18:55:00\.000Z/);
+});
+
 test("record inspector hides only identifier fields, not content fields that end in or contain id", () => {
   Object.assign(globalThis, { React: { createElement } });
   const nearMisses = { valid: "value-valid", paid: "value-paid", android: "value-android", video: "value-video", ideas: "value-ideas", isPaid: "value-is-paid" };

@@ -105,6 +105,18 @@ test("the kind page uses a human name in its title and breadcrumb and keeps tech
   assert.doesNotMatch(src, REMOVED_DUPLICATE_SOURCE_LINK_RE);
 });
 
+test("the kind page uses outlined view controls and sentence-case paging copy", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+
+  // DIRECTION.md, “Values”: buttons are outlined unless they are the page's one main action.
+  assert.equal(src.match(/buttonVariants\(\{ className: "min-h-11", size: "sm", variant: "ghost" \}\)/g)?.length, 2);
+  // DIRECTION.md, “Values”: section and control labels use sentence case.
+  assert.match(src, /const pagePrefix = `Page \$\{input\.pageNumber\} · \$\{input\.shown\}`/);
+  assert.doesNotMatch(src, /pagePrefix = `page /);
+  assert.doesNotMatch(src, /shown of \$\{/);
+  assert.match(src, /\$\{pagePrefix\} of \$\{input\.totalHeld\.toLocaleString\(\)\}`/);
+});
+
 test("the kind page shows its title, display name and time once in the row", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, EXPLORE_ROW_TITLE_RE);

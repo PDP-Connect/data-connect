@@ -45,6 +45,10 @@ export interface FormattedAmount {
   text: string;
 }
 
+export type FormattedRecordFieldValue =
+  | { kind: "amount"; positive: boolean; text: string }
+  | { kind: "plain"; text: string };
+
 function normalizeType(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -79,6 +83,85 @@ export function formatDeclaredAmount(value: unknown, declaredType: unknown): For
   }
   if (MILLI_UNITS_TYPE_RE.test(declared)) {
     return formatDollars(value / 1000);
+  }
+  return null;
+}
+
+const GROUPED_NUMBER_TYPES = new Set(["number", "integer"]);
+// Numbers a person reads as a label, a date or a time, never as a quantity: ids, years, codes,
+// phone and postal numbers, and epoch times. Grouping them ("2,024", "1,700,000,000") misleads.
+const UNGROUPED_FIELD_NAME_RE =
+  /(?:^id$|_id$|Id$|ID$|year$|Year$|^zip|zip$|Zip$|postal|Postal|code$|Code$|phone|Phone|_at$|_ts$|timestamp|Timestamp|epoch|Epoch)/;
+const WHOLE_NUMBER_FORMAT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+
+function isIdentifierLikeField(name: string): boolean {
+  return UNGROUPED_FIELD_NAME_RE.test(name);
+}
+
+/**
+ * The JSON-Schema `type` of a field as one lower-case word: a plain string type, or the
+ * single non-null member of a type list (`["integer", "null"]` → `integer`). Null otherwise.
+ */
+export function fieldSchemaType(schema: unknown): string | null {
+  if (!schema || typeof schema !== "object") {
+    return null;
+  }
+  const type = (schema as { type?: unknown }).type;
+  if (Array.isArray(type)) {
+    const nonNull = type.filter((item) => item !== "null");
+    return nonNull.length === 1 ? normalizeType(nonNull[0]) : null;
+  }
+  return normalizeType(type);
+}
+
+/** Map each field to its JSON-Schema `type` from a stream's `field_capabilities[field].schema`. */
+export function deriveFieldSchemaTypes(
+  metadata: { field_capabilities?: Record<string, { schema?: unknown } | null | undefined> | null } | null | undefined
+): Readonly<Record<string, string>> {
+  const raw = metadata?.field_capabilities;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+  const entries: Array<readonly [string, string]> = [];
+  for (const [name, cap] of Object.entries(raw)) {
+    const type = fieldSchemaType(cap?.schema);
+    if (type) {
+      entries.push([name, type]);
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Format a field only when its value and types make the display safe: a declared monetary
+ * amount; a list of plain strings joined with ", "; or a whole number of 10,000 or more with
+ * grouping separators, only when the field's JSON-Schema type is number/integer and its name
+ * is not id-, year-, code-, phone-, postal- or time-like. Returns null to keep the caller's
+ * plain rendering.
+ */
+export function formatRecordFieldValue(
+  value: unknown,
+  fieldName: string,
+  declaredType: unknown,
+  schemaType?: unknown
+): FormattedRecordFieldValue | null {
+  const amount = formatDeclaredAmount(value, declaredType);
+  if (amount) {
+    return { kind: "amount", positive: amount.positive, text: amount.text };
+  }
+  if (Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string")) {
+    return { kind: "plain", text: value.join(", ") };
+  }
+  const normalizedSchemaType = normalizeType(schemaType);
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    Math.abs(value) >= 10_000 &&
+    normalizedSchemaType !== null &&
+    GROUPED_NUMBER_TYPES.has(normalizedSchemaType) &&
+    !isIdentifierLikeField(fieldName)
+  ) {
+    return { kind: "plain", text: WHOLE_NUMBER_FORMAT.format(value) };
   }
   return null;
 }

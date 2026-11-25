@@ -372,14 +372,14 @@ function deviceStatus({
 
 export function unavailableSentence(reason: string, serverNotReady = false): string {
   if (serverNotReady) {
-    return "Notifications are not set up on this DataConnect server yet; ask its administrator to set them up.";
+    return "This server needs its notification keys set in its environment.";
   }
   const normalized = reason.toLowerCase();
   if (normalized.includes("denied")) {
     return "Notifications are blocked in your browser or device settings; allow them there, then return here.";
   }
   if (normalized.includes("vapid") || normalized.includes("key") || normalized.includes("server")) {
-    return "Notifications are not set up on this DataConnect server yet; ask its administrator to set them up.";
+    return "This server needs its notification keys set in its environment.";
   }
   return "This browser can't receive notifications. Install DataConnect as an app on your phone or computer to get them.";
 }
@@ -958,6 +958,9 @@ function WebPushSetupDetails({
     <div className="mt-4 border-border/60 border-t pt-4" id="web-push-setup">
       <p className="pdpp-caption max-w-3xl text-muted-foreground">{detail}</p>
       <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">{caveat}</p>
+      <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">
+        Server environment: <code>PDPP_WEB_PUSH_VAPID_PUBLIC_KEY</code> and <code>PDPP_WEB_PUSH_VAPID_PRIVATE_KEY</code>.
+      </p>
       <div className="mt-4 grid gap-3 text-[13px] text-muted-foreground md:grid-cols-3">
         <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
         <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>

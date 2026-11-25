@@ -19,7 +19,7 @@ export function RecordOrderSelect({
 
   return (
     <label className="flex items-center gap-2 text-muted-foreground text-sm">
-      <span>sort</span>
+      <span>Sort</span>
       <select
         aria-label="sort records"
         className="rounded-md border border-border bg-background px-2 py-1 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

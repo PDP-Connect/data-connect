@@ -46,10 +46,13 @@ export {
 } from "./record/declared-field-roles.ts";
 export type { DeclaredFieldTypes } from "./record/declared-field-types.ts";
 export { humanizeFieldLabel } from "./record/field-label.ts";
-export type { FormattedAmount } from "./record/record-format.ts";
+export type { FormattedAmount, FormattedRecordFieldValue } from "./record/record-format.ts";
 export {
   deriveDeclaredFieldTypes,
+  deriveFieldSchemaTypes,
+  fieldSchemaType,
   formatDeclaredAmount,
+  formatRecordFieldValue,
   isMonetaryDeclaredType,
 } from "./record/record-format.ts";
 export type {

@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcTimestamp } from "@pdpp/brand-react";
-import { buttonVariants as outlineButtonVariants } from "@pdpp/operator-ui/ui/button";
 import {
   buildRecordPreview,
   classifyRecordKind,
   type DeclaredFieldTypes,
   deriveDeclaredFieldTypes,
-  formatDeclaredAmount,
+  deriveFieldSchemaTypes,
+  formatRecordFieldValue,
   formatStructuredCell,
   humanizeFieldLabel,
   parseTimestampValue,
@@ -74,7 +74,7 @@ function formatStreamPageCount(input: {
   shown: number;
   totalHeld: number | null;
 }): string {
-  const pagePrefix = `page ${input.pageNumber} · ${input.shown} shown`;
+  const pagePrefix = `Page ${input.pageNumber} · ${input.shown}`;
   if (input.filtered) {
     if (input.matchingCount !== null) {
       const matchingNoun = input.matchingCount === 1 ? "matching record" : "matching records";
@@ -90,7 +90,7 @@ function formatStreamPageCount(input: {
   }
   return input.totalHeld === null
     ? `${pagePrefix}${input.hasMore ? " · more available" : ""}`
-    : `${pagePrefix} of ${input.totalHeld.toLocaleString()} total`;
+    : `${pagePrefix} of ${input.totalHeld.toLocaleString()}`;
 }
 
 function exactCountFromPage(page: RecordsPage): number | null {
@@ -178,6 +178,7 @@ export default async function StreamPage({
   let latestSourceRun: RefConnectorRunSummary | null = null;
   let streamCollectionFacts: StreamCollectionFacts | null = null;
   let declaredFieldTypes: DeclaredFieldTypes = {};
+  let fieldSchemaTypes: Readonly<Record<string, string>> = {};
   // Declared field roles drive the row's honest title and money preview.
   let fieldCapabilities: ExplorerFieldCapability[] = [];
   let listStreamMetadata: ListStreamMetadata = null;
@@ -216,6 +217,7 @@ export default async function StreamPage({
     ]);
     page = pageResult;
     declaredFieldTypes = deriveDeclaredFieldTypes(streamMetadata);
+    fieldSchemaTypes = deriveFieldSchemaTypes(streamMetadata);
     fieldCapabilities = Object.entries(streamMetadata?.field_capabilities ?? {}).map(([name, capability]) => ({
       granted: capability.granted !== false,
       name,
@@ -297,9 +299,9 @@ export default async function StreamPage({
   // the existing empty-cell handling holds.
   const cellText = (record: StreamRecord, column: string): string => {
     const value = record.data?.[column];
-    const amount = formatDeclaredAmount(value, declaredFieldTypes[column]);
-    if (amount) {
-      return amount.text;
+    const formatted = formatRecordFieldValue(value, column, declaredFieldTypes[column], fieldSchemaTypes[column]);
+    if (formatted) {
+      return formatted.text;
     }
     const structured = formatStructuredCell(value);
     return structured ? structured.text : stringifyCell(value);
@@ -347,14 +349,14 @@ export default async function StreamPage({
         <div className="flex flex-wrap items-center gap-2">
           {tableView ? (
             <Link
-              className={outlineButtonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
+              className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })}
               href={hrefFor(streamPath, trail, { columnsParam, exactFilters, order })}
             >
               Show as rows
             </Link>
           ) : (
             <Link
-              className={outlineButtonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
+              className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })}
               href={hrefFor(streamPath, trail, { columnsParam, exactFilters, order, view: "table" })}
             >
               Show as table
@@ -431,7 +433,12 @@ export default async function StreamPage({
                 {tableView ? (
                   <div className="px-3 pb-2 pt-3">
                     <div className="sm:hidden">
-                      <RecordCard columns={columns} declaredFieldTypes={declaredFieldTypes} record={r} />
+                      <RecordCard
+                        columns={columns}
+                        declaredFieldTypes={declaredFieldTypes}
+                        fieldSchemaTypes={fieldSchemaTypes}
+                        record={r}
+                      />
                     </div>
 
                     <div className="hidden overflow-x-auto sm:block">
@@ -635,22 +642,24 @@ function RecordCard({
   record,
   columns,
   declaredFieldTypes,
+  fieldSchemaTypes,
 }: {
   record: StreamRecord;
   columns: string[];
   declaredFieldTypes: DeclaredFieldTypes;
+  fieldSchemaTypes: Readonly<Record<string, string>>;
 }) {
   return (
     <div>
       <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         {columns.map((c) => {
           const raw = record.data?.[c];
-          const amount = formatDeclaredAmount(raw, declaredFieldTypes[c]);
-          const structured = amount ? null : formatStructuredCell(raw);
+          const formatted = formatRecordFieldValue(raw, c, declaredFieldTypes[c], fieldSchemaTypes[c]);
+          const structured = formatted ? null : formatStructuredCell(raw);
           const dateValue = isDateValue(raw) ? raw : null;
           let v: string;
-          if (amount) {
-            v = amount.text;
+          if (formatted) {
+            v = formatted.text;
           } else if (structured) {
             v = structured.text;
           } else {
