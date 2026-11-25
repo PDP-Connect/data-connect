@@ -3,8 +3,8 @@
 
 "use client";
 
-import React, { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
 import { Moon, Sun } from "lucide-react";
+import { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
 
 type Theme = "dark" | "light";
 const ThemeSetterContext = createContext<((next: Theme) => void) | null>(null);

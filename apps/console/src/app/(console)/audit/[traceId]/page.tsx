@@ -197,8 +197,9 @@ function EventTableRow({ event, index }: { event: SpineEvent; index: number }) {
           <summary className="pdpp-caption" style={{ color: "var(--color-muted-foreground)", cursor: "pointer" }}>
             data
           </summary>
+          {/* Capped to the screen so a long payload scrolls inside its own box at 390px. */}
           <pre
-            className="pdpp-caption mt-1 overflow-x-auto"
+            className="pdpp-caption mt-1 max-w-[calc(100vw-3rem)] overflow-x-auto"
             style={{
               background: "var(--color-card)",
               border: "1px solid var(--color-border)",

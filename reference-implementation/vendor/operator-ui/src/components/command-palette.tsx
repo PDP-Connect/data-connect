@@ -99,7 +99,7 @@ export function CommandPaletteTrigger() {
       type="button"
     >
       <span>Jump to…</span>
-      <kbd className="rounded border border-border bg-muted/50 px-1 py-px font-mono text-foreground/80">⌘K</kbd>
+      <kbd className="rounded border border-border bg-muted/50 px-1 py-px font-sans text-foreground">⌘K</kbd>
     </button>
   );
 }
@@ -207,13 +207,15 @@ export function CommandPalette({
         >
           <Input
             aria-label="Search commands"
-            className="h-10 py-2 font-mono"
+            className="h-10 py-2"
             data-testid="command-palette-input"
             // biome-ignore lint/performance/noJsxPropsBind: Handler captures the current row or component state; extracting it would add indirection without a stable consumer boundary.
             onChange={(e) => setQuery(e.target.value)}
             // biome-ignore lint/performance/noJsxPropsBind: Handler captures the current row or component state; extracting it would add indirection without a stable consumer boundary.
             onKeyDown={onInputKeyDown}
-            placeholder="Search commands, or type to search records…"
+            // A short placeholder so it is not cut off on a 390px screen; it is the
+            // menu box's own wording.
+            placeholder="Search or jump to…"
             ref={inputRef}
             type="text"
             value={query}
@@ -230,7 +232,7 @@ export function CommandPalette({
             searchRow={searchRow}
           />
 
-          <div className="pdpp-caption text-muted-foreground/70">↑↓ move · ⏎ open · ⎋ close · ⌘/ctrl+k toggle</div>
+          <div className="pdpp-caption text-muted-foreground">↑↓ move · ⏎ open · ⎋ close · ⌘/ctrl+k toggle</div>
         </DialogPopup>
       </DialogPortal>
     </Dialog>
@@ -255,7 +257,7 @@ function PaletteList({
   searchRow: PaletteRow | undefined;
 }) {
   if (rows.length === 0) {
-    return <div className="pdpp-caption px-1 text-muted-foreground/70">No matching commands.</div>;
+    return <div className="pdpp-caption px-1 text-muted-foreground">No matching commands.</div>;
   }
   // Index in the flat `rows` array drives the highlight so keyboard and pointer
   // selection agree.
@@ -340,7 +342,7 @@ function PaletteGroup({
                 type="button"
               >
                 <span className="pdpp-body">{label}</span>
-                <span className="pdpp-caption text-muted-foreground/70">{description}</span>
+                <span className="pdpp-caption text-muted-foreground">{description}</span>
               </button>
             </li>
           );

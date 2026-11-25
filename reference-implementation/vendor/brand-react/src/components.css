@@ -57,8 +57,9 @@
   font-weight: 700;
 }
 .pdpp-sheet__serial {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -123,7 +124,7 @@
 .pdpp-scope__terms {
   align-self: center;
   font-family: var(--font-sans);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -208,22 +209,24 @@
   white-space: nowrap;
 }
 .pdpp-data-row__id {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .pdpp-data-row__detail {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .pdpp-data-row__meta {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   text-align: right;
@@ -245,8 +248,9 @@
   justify-content: center;
   width: 26px;
   height: 26px;
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
@@ -256,6 +260,8 @@
 }
 .pdpp-connector-icon {
   border-radius: 26%;
+  /* A 1px hairline in both themes so a dark logo on a dark row keeps its edge. */
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .pdpp-monogram::before {
   content: attr(data-initials);
@@ -282,7 +288,7 @@
 .pdpp-endorse {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-weight: 500;
   letter-spacing: 0.06em;
   white-space: nowrap;
@@ -319,7 +325,7 @@
 .pdpp-tag {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
   white-space: nowrap;
@@ -412,7 +418,8 @@
 .pdpp-input {
   width: 100%;
   padding: 8px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   background: var(--card);
@@ -440,13 +447,13 @@
 }
 .pdpp-field__label {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--foreground);
 }
 .pdpp-field__hint {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -473,7 +480,8 @@
   width: 100%;
   /* Right padding leaves room for the › caret. */
   padding: 8px 30px 8px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   text-align: left;
@@ -508,7 +516,8 @@
   position: absolute;
   top: 50%;
   right: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.95rem;
   line-height: 1;
   color: var(--muted-foreground);
@@ -556,7 +565,8 @@
   gap: 6px;
   align-items: center;
   padding: 7px 32px 7px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   cursor: pointer;
@@ -676,12 +686,12 @@
 }
 .pdpp-kv__k {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--muted-foreground);
 }
 .pdpp-kv__v {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   overflow-wrap: break-word;
@@ -713,7 +723,7 @@
   letter-spacing: -0.01em;
 }
 .pdpp-band__k {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -736,15 +746,15 @@
 /* Protocol-data compatibility classes. The shared .pdpp-* typography aliases
    live in packages/pdpp-brand/styles/typography.css. */
 .pdpp-typed {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8125rem;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1.55;
 }
 .pdpp-typed-sm {
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
@@ -784,7 +794,7 @@
   padding: 4px 0 14px;
 }
 .rr-hero--money .rr-hero__amount {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 2rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -800,7 +810,7 @@
   color: var(--foreground);
 }
 .rr-hero__wire {
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -822,7 +832,7 @@
   border: 1px solid var(--border);
 }
 .rr-rec-image__cap {
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -836,7 +846,7 @@
   background: var(--muted);
 }
 .rr-bodytext__label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -878,13 +888,15 @@
   font-weight: 500;
 }
 .rr-fld__wire {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-fld__val {
   min-width: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8rem;
   text-align: right;
   overflow-wrap: anywhere;
@@ -925,8 +937,9 @@
    ═══════════════════════════════════════════════════════════════════ */
 .rr-copyid {
   padding: 0;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
   cursor: pointer;
@@ -1021,7 +1034,7 @@
   min-width: 1.4em;
   padding: 0 5px;
   margin-left: 4px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
@@ -1060,8 +1073,9 @@
 .rr-recent-row__run {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1072,7 +1086,7 @@
   min-width: 0;
 }
 .rr-recent-row__duration {
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -1087,7 +1101,7 @@
    stays neutral on purpose — an unclassified run must not read as a success. */
 .rr-recent-row__chip {
   padding: 1px 7px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--muted-foreground);
   white-space: nowrap;
@@ -1117,7 +1131,7 @@
 .rr-sync__overflow {
   max-width: 78ch;
   margin: -6px 0 0;
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -1133,7 +1147,7 @@
 .rr-sync-health__note {
   max-width: 80ch;
   margin: 0;
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -1188,13 +1202,10 @@
   border-color: var(--border-strong);
   box-shadow: inset 3px 0 0 var(--border-strong);
 }
-.rr-fix[data-source-work="systemIssue"] {
-  background: var(--destructive-tint);
-  border-color: var(--destructive);
-  box-shadow: inset 3px 0 0 var(--destructive);
-}
 .rr-fix[data-source-work="checking"],
-.rr-fix[data-source-work="other"] {
+.rr-fix[data-source-work="notMeasured"],
+.rr-fix[data-source-work="other"],
+.rr-fix[data-source-work="systemIssue"] {
   background: var(--muted);
   border-color: var(--border-strong);
   box-shadow: inset 3px 0 0 var(--muted-foreground);
@@ -1218,6 +1229,12 @@
   font-size: 0.95rem;
   font-weight: 700;
 }
+/* "Not measured" and system-side issues are not the person's to act on:
+   faint words, no red (red is only for removing things and real failures). */
+.rr-fix[data-source-work="notMeasured"] .rr-fix__title,
+.rr-fix[data-source-work="systemIssue"] .rr-fix__title {
+  color: var(--foreground-faint);
+}
 .rr-fix__expl {
   max-width: 70ch;
   margin: 0;
@@ -1228,7 +1245,7 @@
 .rr-fix__meta {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-fix__act {
@@ -1244,7 +1261,7 @@
 .rr-fix__waiting {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   white-space: nowrap;
@@ -1262,7 +1279,7 @@
   display: block;
   margin-bottom: 5px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -1282,7 +1299,7 @@
 .rr-sync-duplicates__link {
   display: inline-block;
   margin-top: 8px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
 }
 /* At mobile the side-by-side (body | action) layout crushes both columns.
    Stack body then action full-width so Reconnect / wait badge sits clearly
@@ -1327,6 +1344,7 @@
   align-self: center;
   width: 7px;
   height: 7px;
+  border-radius: 50%;
 }
 .rr-sync-group__dot.is-ok {
   background: var(--success);
@@ -1340,7 +1358,7 @@
 }
 .rr-sync-group__status {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
   white-space: nowrap;
@@ -1356,15 +1374,16 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .rr-sync-group__count {
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1373,7 +1392,7 @@
   gap: 8px;
   align-items: center;
   margin-left: auto;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-sync-group__delta {
@@ -1387,7 +1406,7 @@
   white-space: nowrap;
 }
 .rr-sync-group__run-link {
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 700;
   color: var(--foreground);
   white-space: nowrap;
@@ -1427,8 +1446,9 @@
   white-space: nowrap;
 }
 .rr-sync-row__cadence {
-  font-family: var(--font-mono);
-  font-size: 0.69rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1449,8 +1469,9 @@
   color: var(--warning);
 }
 .rr-sync-row__when {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
 }
@@ -1459,13 +1480,13 @@
   color: var(--muted-foreground);
 }
 .rr-sync-row__coverage {
-  font-size: 0.69rem;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
 }
 .rr-sync-row__next {
-  font-family: var(--font-mono);
-  font-size: 0.69rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   white-space: nowrap;
@@ -1524,7 +1545,7 @@
   border-bottom: 1px solid var(--border);
 }
 .rr-sync-detail__browse {
-  font-size: 0.72rem;
+  font-size: 0.75rem;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1551,7 +1572,7 @@
 }
 .rr-stand-hero__kicker {
   font-family: var(--font-sans);
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -1676,7 +1697,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-sans);
-  font-size: 0.64rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1686,7 +1707,7 @@
   align-self: baseline;
   padding: 2px 7px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--human);
   letter-spacing: 0;
@@ -1697,8 +1718,9 @@
 .rr-bearer__how {
   grid-row: 2;
   grid-column: 1 / 3;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
@@ -1790,8 +1812,9 @@
 }
 .rr-rel__meta {
   grid-column: 1;
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 /* biome-ignore lint/style/noDescendingSpecificity: the bearer-row override intentionally retains its more-specific grid placement. */
@@ -1845,8 +1868,9 @@
   line-height: 1.45;
 }
 .rr-lately__when {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1875,8 +1899,9 @@
   letter-spacing: 0;
 }
 .rr-attn__section-count {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1911,8 +1936,9 @@
 }
 .rr-attn__why {
   grid-column: 1;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   line-height: 1.45;
   color: var(--muted-foreground);
 }
@@ -2095,7 +2121,7 @@
 .rr-x-views__label {
   margin-bottom: 4px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -2116,8 +2142,8 @@
   background: color-mix(in oklab, var(--primary) 8%, transparent);
 }
 .rr-x-views__count {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -2177,7 +2203,7 @@
 /* Count rides ONLY on the active tab → mono (machine value), muted. */
 .rr-x-views-tab__count {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -2237,7 +2263,7 @@
   /* Give the section eyebrow real room below before the first facet row. */
   margin-bottom: 8px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   border-bottom: 1px solid var(--border-strong);
@@ -2245,8 +2271,8 @@
 /* F4: the "N in view" magnitude badge beside a facet section eyebrow, so the
    stream rail reads as a bounded, countable set rather than an endless wall. */
 .rr-x-facets__count {
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
@@ -2267,7 +2293,7 @@
 }
 .rr-x-facets__note {
   padding: 0 0 4px;
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.4;
   color: var(--muted-foreground);
 }
@@ -2279,8 +2305,9 @@
   width: 100%;
   padding: 5px 8px;
   margin-bottom: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--foreground);
   background: var(--input);
   border: 1px solid var(--border);
@@ -2340,7 +2367,7 @@
 }
 .rr-x-source-group__n {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2355,8 +2382,9 @@
 .rr-x-source-group__more {
   align-self: flex-start;
   padding: 4px 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -2404,8 +2432,9 @@
   white-space: nowrap;
 }
 .rr-x-facet__name--mono {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 .rr-x-facet.is-revoked .rr-x-facet__name {
   text-decoration: line-through;
@@ -2413,7 +2442,7 @@
 }
 .rr-x-facet__flag {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -2421,8 +2450,8 @@
   color: var(--warning);
 }
 .rr-x-facet__n {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 /* "in view" qualifier — a facet/day count is the LOADED-window count, never a
@@ -2430,7 +2459,7 @@
    the bare number unmistakably "what's loaded", not "the total". */
 .rr-x-facet__inview {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   /* Sidebar count contrast (verifier polish): lifted from 0.75 so the "in view"
@@ -2489,7 +2518,7 @@
   padding: 1px 5px;
   margin-right: 7px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   vertical-align: 1px;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -2501,7 +2530,7 @@
 .rr-lens {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -2523,7 +2552,7 @@
 .rr-link {
   padding: 0;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   cursor: pointer;
@@ -2587,7 +2616,7 @@
 }
 .rr-x-sort__label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -2660,7 +2689,7 @@
   align-items: center;
   justify-content: center;
   padding: 4px 6px 4px 2px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   color: var(--primary);
   cursor: pointer;
@@ -2735,7 +2764,7 @@
 }
 .rr-x-datechip__custom-label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -2753,7 +2782,7 @@
 }
 .rr-x-datechip__field-label {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 /* The literal date inputs are MACHINE values → mono (the mono-rule). */
@@ -2761,7 +2790,8 @@
   width: 100%;
   min-width: 0;
   padding: 5px 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--foreground);
   background: var(--background);
@@ -2813,7 +2843,7 @@
 }
 .rr-x-browse-all-escape {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -2835,7 +2865,7 @@
 }
 .rr-x-goto__label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   white-space: nowrap;
@@ -2845,7 +2875,7 @@
 }
 .rr-x-goto__feedback {
   grid-column: 2 / -1;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   color: var(--muted-foreground);
 }
@@ -2884,7 +2914,8 @@
 .rr-x-queryinput__chevron {
   flex: 0 0 auto;
   padding: 4px 7px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   line-height: 1;
   color: var(--muted-foreground);
@@ -2907,7 +2938,7 @@
   padding: 4px 9px;
   margin-top: 6px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--primary);
   cursor: pointer;
   background: var(--primary-tint);
@@ -2975,7 +3006,7 @@
 }
 .rr-x-typeahead__op {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -2985,7 +3016,7 @@
   padding: 6px 8px 2px;
   /* Separate from the previous group without a visible divider. */
   margin-top: 2px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -2996,8 +3027,9 @@
 /* Count badge: honest record count shown next to source/stream suggestions. */
 .rr-x-typeahead__count {
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -3015,8 +3047,9 @@
   min-width: 0;
   max-width: 100%;
   padding: 4px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   border: 1px solid var(--border);
@@ -3032,8 +3065,9 @@
   position: relative;
 }
 .rr-x-help > summary {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   cursor: pointer;
   outline: none;
@@ -3066,7 +3100,7 @@
      border-top uses --primary at low opacity so the card reads visually
      anchored to its trigger (the primary-colored "operators" summary). */
   padding: 14px 16px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 2;
   color: var(--muted-foreground);
   /* D-12: allow inline code chips to wrap rather than overflow */
@@ -3082,7 +3116,7 @@
   display: inline-block;
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--foreground);
   background: var(--muted);
 }
@@ -3145,7 +3179,7 @@
 }
 .rr-x-options__label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -3168,7 +3202,7 @@
   align-items: center;
   overflow: hidden;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   /* keep the legacy color on the container for border/background tinting */
   color: var(--primary);
   user-select: none;
@@ -3178,7 +3212,7 @@
 /* Property zone — muted label so the value leads */
 .rr-x-chip__property {
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--primary);
   background: var(--primary-tint);
@@ -3187,7 +3221,7 @@
 /* Operator zone — secondary; click toggles is ↔ is not when canNegate */
 .rr-x-chip__op {
   padding: 3px 5px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--muted-foreground);
   background: color-mix(in oklab, var(--primary-tint) 60%, var(--background));
@@ -3217,7 +3251,7 @@
 /* Value zone */
 .rr-x-chip__value {
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--primary);
   background: var(--primary-tint);
@@ -3247,7 +3281,7 @@
 .rr-x-clearall {
   padding: 4px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   cursor: pointer;
   background: none;
@@ -3271,7 +3305,7 @@
   gap: 4px;
   align-items: center;
   font-family: var(--font-sans);
-  font-size: 9.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -3315,7 +3349,7 @@
 .rr-x-raw > summary {
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -3329,7 +3363,7 @@
   margin: 0;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--foreground);
   word-break: break-word;
@@ -3338,7 +3372,7 @@
 }
 .rr-x-stream-all {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--foreground);
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -3350,7 +3384,7 @@
 /* ─── Count + lens-description line ─── */
 .rr-x-pulse__note {
   font-family: var(--font-sans);
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-scope-note {
@@ -3359,7 +3393,7 @@
 .rr-x-feeddesc {
   max-width: 70ch;
   margin: 0;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -3394,11 +3428,11 @@
 }
 .rr-x-chart__caption {
   /* Prose caption (sans) — names the set kind + bucket unit; never a machine wall. */
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-chart__total {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -3467,8 +3501,9 @@
   opacity: 0.32;
 }
 .rr-x-chart__readout {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   letter-spacing: 0.04em;
 }
@@ -3501,8 +3536,9 @@
 /* The machine code is secondary — present for engineers/reviewers but not shouting.
    Ink Carbon: state colors live only inside .pdpp-endorse; free-floating neutral. */
 .rr-x-warn__line {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   font-weight: 400;
   color: var(--muted-foreground);
   text-transform: lowercase;
@@ -3540,21 +3576,21 @@
      structure (read via weight + caps + tracking), recessive in COLOR so it never
      out-shouts the actual records below it. An earlier polish made this 12.5px full-
      foreground non-caps — that out-competed the row titles; reverted to the gate. */
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
   white-space: nowrap;
 }
 .rr-x-day__n {
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
 /* "in view" qualifier on the day header — the count is records LOADED for the day,
    not a true day total (review red line: a bare number reads like a total). */
 .rr-x-day__inview {
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0;
   opacity: 0.7;
 }
@@ -3592,7 +3628,7 @@
   color: var(--foreground);
 }
 .rr-x-upcoming__hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -3672,7 +3708,7 @@
    stream) within the day, not a claimed complete day-total — so it reads "N in
    view", never implying completeness the client can't prove. */
 .rr-x-burst__inview {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -3783,8 +3819,8 @@ a.rr-x-row {
   /* A timestamp is a machine value → MONO (the SLVP type rule: mono only for
      ids/timestamps/amounts/operators). It was sans; this aligns it with the
      verified target type scale. tabular-nums keeps the times column-aligned. */
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.45;
   color: var(--muted-foreground);
@@ -3793,7 +3829,7 @@ a.rr-x-row {
 .rr-x-row__action {
   flex: 0 0 auto;
   padding: 1px 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   white-space: nowrap;
@@ -3924,8 +3960,9 @@ a.rr-x-row {
    muted, never the visual lead. */
 .rr-x-identity__key {
   flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -3958,7 +3995,8 @@ a.rr-x-row {
 .rr-x-identity--header .rr-x-identity__primary.is-derived {
   overflow: visible;
   text-overflow: clip;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   font-weight: 400;
   color: var(--muted-foreground);
@@ -3982,7 +4020,7 @@ a.rr-x-row {
 }
 .rr-x-kv__label {
   min-width: 0;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
@@ -4067,8 +4105,9 @@ a.rr-x-row {
   align-items: center;
   align-self: flex-start;
   padding: 5px 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -4335,8 +4374,9 @@ a.rr-x-row {
   align-self: center;
   padding: 2px 9px;
   margin-left: 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -4367,7 +4407,7 @@ a.rr-x-row {
 .rr-x-role {
   flex-shrink: 0;
   padding: 1px 5px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   box-shadow: inset 0 0 0 1px var(--border-strong);
@@ -4383,7 +4423,7 @@ a.rr-x-row {
 }
 .rr-x-empty__eyebrow {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -4414,7 +4454,7 @@ a.rr-x-row {
 }
 .rr-x-empty__preview-k {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
   white-space: nowrap;
@@ -4459,7 +4499,7 @@ a.rr-x-row {
 .rr-x-zero__label {
   margin-top: 4px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0;
@@ -4510,13 +4550,14 @@ a.rr-x-row {
   color: var(--foreground);
 }
 .rr-x-zero__action-desc {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-zero__action-count {
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   opacity: 0.8;
 }
@@ -4555,7 +4596,7 @@ a.rr-x-row {
 }
 .rr-ex-lens__label {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0;
 }
@@ -4575,17 +4616,18 @@ a.rr-x-row {
   border-top: 1px solid var(--border);
 }
 .rr-ex-keep__label {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
 }
 .rr-ex-keep__fields {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
 .rr-ex-keep__note {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 
@@ -4615,8 +4657,9 @@ a.rr-x-row {
   color: var(--primary);
 }
 .rr-x-rel__k {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -4660,8 +4703,9 @@ a.rr-x-row {
   border: 1px solid var(--border);
 }
 .rr-x-blob__open {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   text-underline-offset: 2px;
@@ -4672,8 +4716,9 @@ a.rr-x-row {
 .rr-x-blob--off {
   align-self: flex-start;
   padding: 2px 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   border-radius: 999px;
@@ -4798,8 +4843,8 @@ a.rr-x-row {
     border-color: var(--border-strong);
   }
   .rr-x-rail__toggle-n {
-    font-family: var(--font-mono);
-    font-size: 10px;
+    font-family: var(--font-sans);
+    font-size: 12px;
     font-variant-numeric: tabular-nums;
     color: var(--primary);
   }
@@ -5038,11 +5083,11 @@ a.rr-x-row {
    label text. No JS toggle needed. */
 @media (max-width: 640px) {
   .rr-x-compiled__label {
-    font-size: 8.5px;
+    font-size: 12px;
   }
   /* Operators help text — also secondary on mobile */
   .rr-x-help > summary {
-    font-size: 9px;
+    font-size: 12px;
   }
 }
 
@@ -5232,8 +5277,9 @@ a.rr-x-row {
   white-space: nowrap;
 }
 .rr-s-item__kind {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   opacity: 0.75;
 }
 .rr-s-item__flag {
@@ -5243,5 +5289,5 @@ a.rr-x-row {
   margin-top: 1px;
 }
 .rr-s-dot {
-  font-size: 10px;
+  font-size: 12px;
 }

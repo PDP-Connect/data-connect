@@ -26,10 +26,10 @@
  */
 "use client";
 
+import { AppWindow, Compass, Database, Home, type LucideIcon, Menu, Settings2 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useCallback, useState, useSyncExternalStore } from "react";
-import { AppWindow, Compass, Database, Home, Menu, Settings2, type LucideIcon } from "lucide-react";
 import "./components.css";
 import {
   IcDialog,

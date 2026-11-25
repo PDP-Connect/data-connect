@@ -3,9 +3,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { buttonVariants } from "@pdpp/brand-react";
 import { Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import type { StatusVocabulary } from "@pdpp/operator-ui/components/status-vocabularies";
-import { buttonVariants } from "@pdpp/brand-react";
 import { useEffect, useState } from "react";
 import {
   embeddingCacheRow,
@@ -181,7 +181,7 @@ function ReadinessRowItem({ row }: { row: ReadinessRow }) {
         <StatusChip status={row.status} />
       </div>
       <p className="pdpp-body text-muted-foreground">{row.detail}</p>
-      {row.hint ? <p className="pdpp-caption text-muted-foreground/80">Hint: {row.hint}</p> : null}
+      {row.hint ? <p className="pdpp-caption text-muted-foreground">Hint: {row.hint}</p> : null}
       {row.action ? (
         <button className={buttonVariants({ size: "sm", variant: "default" })} onClick={row.action.onClick} type="button">
           {row.action.label}

@@ -24,7 +24,7 @@ function LogoTile({ iconId, name, size = "small" }: { iconId: string; name: stri
   return (
     <span
       aria-hidden="true"
-      className={`${dimensions} inline-flex shrink-0 items-center justify-center rounded-[26%] border border-border/70 bg-muted`}
+      className={`${dimensions} inline-flex shrink-0 items-center justify-center rounded-[26%] border border-border bg-muted`}
     >
       <ConnectorMark connectorId={iconId} name={name} />
     </span>

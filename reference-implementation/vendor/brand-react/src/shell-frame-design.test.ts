@@ -237,6 +237,20 @@ test("second and third text meet 4.5:1 contrast on page and menu surfaces", asyn
   }
 });
 
+test("success text meets 4.5:1 contrast on page and menu surfaces", async () => {
+  const css = await readFile(TOKENS, "utf8");
+  // The active endorsement chip ("succeeded", "active") draws --success text; light measured 4.47:1 before.
+  for (const [theme, tokens] of [["light", cssBlock(css, ":root")], ["dark", cssBlock(css, '[data-theme="dark"]')]] as const) {
+    for (const backgroundToken of ["--background", "--sidebar", "--muted"]) {
+      const text = declaration(tokens, "--success");
+      const background = declaration(tokens, backgroundToken);
+      assert.ok(text && background, `${theme} --success and ${backgroundToken} tokens exist`);
+      const ratio = contrastRatio(text, background);
+      assert.ok(ratio >= 4.5, `${theme} --success on ${backgroundToken}: ${ratio.toFixed(2)}:1`);
+    }
+  }
+});
+
 test("frame styles use shared tokens and contain no literal colours", async () => {
   const [frame, css] = await Promise.all([readFile(FRAME, "utf8"), readFile(SHELL_CSS, "utf8")]);
   const source = `${frame}\n${css}`.replace(/\/\*[\s\S]*?\*\//g, "");

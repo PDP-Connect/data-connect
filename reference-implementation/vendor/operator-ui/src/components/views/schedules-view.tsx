@@ -83,7 +83,7 @@ export function ScheduleReadRow({ summary }: { summary: RefConnectorSummary }) {
         <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <div className="min-w-0 flex-1">
             <span className="pdpp-body font-medium text-foreground">{displayName}</span>
-            <div className="pdpp-caption mt-0.5 truncate font-mono text-muted-foreground">{connectorKey}</div>
+            <div className="pdpp-caption mt-0.5 truncate text-muted-foreground">{connectorKey}</div>
           </div>
           {schedule && (
             <div className="pdpp-caption shrink-0 text-muted-foreground">
