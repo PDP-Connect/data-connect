@@ -3,8 +3,8 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import { createRequire } from "node:module";
+import test from "node:test";
 import {
   clientFilterBinding,
   compileClientRequestFilters,
@@ -23,12 +23,12 @@ import { buildReadRequest } from "../vendor/cli/src/read/commands.ts";
 const qs = createRequire(import.meta.url)("qs") as { parse: (raw: string) => Record<string, unknown> };
 
 const filter_fields: Record<string, FilterField> = {
-  text: { type: "string", range: [] },
-  flag: { type: "boolean", range: [] },
-  int: { type: "integer", range: ["gt", "gte", "lt", "lte"] },
-  num: { type: "number", range: ["gte", "lt"] },
-  day: { type: "date", range: ["gte", "lt"] },
-  time: { type: "date-time", range: ["gte", "lt"] },
+  day: { range: ["gte", "lt"], type: "date" },
+  flag: { range: [], type: "boolean" },
+  int: { range: ["gt", "gte", "lt", "lte"], type: "integer" },
+  num: { range: ["gte", "lt"], type: "number" },
+  text: { range: [], type: "string" },
+  time: { range: ["gte", "lt"], type: "date-time" },
 };
 const grant = { fields: [...Object.keys(filter_fields), "opaque"], filter_fields };
 function query(raw: string) {
@@ -41,7 +41,7 @@ function matches(type: FilterField["type"], operand: string, json: string) {
       { value: operand },
       {
         fields: ["value"],
-        filter_fields: { value: { type, range: [] } },
+        filter_fields: { value: { range: [], type } },
       }
     )
   );
@@ -52,8 +52,8 @@ test("client filter errors authorize all fields before typed validation", () => 
     () => compileClientRequestFilters(query("filter[num]=bad&filter[hidden]=x&filter[absent]=x").filter, grant),
     {
       code: "field_not_granted",
-      param: "filter[hidden]",
       message: "Fields not in grant: hidden, absent",
+      param: "filter[hidden]",
     }
   );
 });
@@ -100,7 +100,14 @@ test("frozen strings and booleans require the correct stored JSON type", () => {
 });
 
 test("absent, null and wrong JSON types never satisfy a frozen filter", () => {
-  for (const [type, operand] of [["string", "null"], ["boolean", "false"], ["number", "0"], ["integer", "0"], ["date", "2026-01-01"], ["date-time", "2026-01-01T00:00:00Z"]] as const) {
+  for (const [type, operand] of [
+    ["string", "null"],
+    ["boolean", "false"],
+    ["number", "0"],
+    ["integer", "0"],
+    ["date", "2026-01-01"],
+    ["date-time", "2026-01-01T00:00:00Z"],
+  ] as const) {
     for (const json of ["{}", '{"value":null}', '{"value":[]}', '{"value":{}}']) {
       assert.equal(matches(type, operand, json), false, `${type}: ${json}`);
     }
@@ -183,30 +190,30 @@ test("issuance negotiates versions and freezes nullable scalar types and declare
     {
       name: "items",
       primary_key: ["text"],
-      semantics: "mutable_state",
-      selection: { fields: true, resources: true },
+      query: { range_filters: { int: ["gte"], num: ["gte", "lt"], time: ["lt"] } },
       schema: {
-        type: "object",
-        required: ["text"],
         properties: {
-          text: { type: "string" },
+          array: { items: { type: "string" }, type: "array" },
+          day: { format: "date", type: "string" },
           flag: { type: ["null", "boolean"] },
           int: { type: ["integer", "null"] },
-          num: { type: "number" },
-          time: { type: ["string", "null"], format: "date-time" },
-          day: { type: "string", format: "date" },
-          array: { type: "array", items: { type: "string" } },
           mixed: { type: ["integer", "string"] },
+          num: { type: "number" },
+          text: { type: "string" },
+          time: { format: "date-time", type: ["string", "null"] },
         },
+        required: ["text"],
+        type: "object",
       },
-      query: { range_filters: { int: ["gte"], time: ["lt"], num: ["gte", "lt"] } },
+      selection: { fields: true, resources: true },
+      semantics: "mutable_state",
     },
   ];
   const selection = {
-    type: "https://pdpp.dev/data-access",
     access_mode: "continuous",
     purpose_code: "https://pdpp.dev/purpose/personalization",
-    streams: [{ name: "items", instance_ids: ["instance_1"] }],
+    streams: [{ instance_ids: ["instance_1"], name: "items" }],
+    type: "https://pdpp.dev/data-access",
   };
   const snapshot = createRetainedCoreConsentSnapshot({
     declaration,
@@ -230,23 +237,27 @@ test("issuance negotiates versions and freezes nullable scalar types and declare
   assert.equal(legacy.streams[0]?.filter_fields, undefined);
   const [selected] = snapshot.resolved_streams;
   assert.ok(selected);
-  const noScalars = materializeCoreResolvedGrant({ ...args, grantVersion: "0.2.0", resolvedStreams: [{ ...selected, fields: ["array"] }] });
+  const noScalars = materializeCoreResolvedGrant({
+    ...args,
+    grantVersion: "0.2.0",
+    resolvedStreams: [{ ...selected, fields: ["array"] }],
+  });
   assert.equal(noScalars.streams[0]?.filter_fields, undefined);
   const modern = materializeCoreResolvedGrant({ ...args, grantVersion: "0.2.0" });
   assert.equal(modern.version, "0.2.0");
   assert.deepEqual(modern.streams[0]?.filter_fields, {
-    text: { type: "string", range: [] },
-    flag: { type: "boolean", range: [] },
-    int: { type: "integer", range: ["gte"] },
-    num: { type: "number", range: ["gte", "lt"] },
-    day: { type: "date", range: [] },
-    time: { type: "date-time", range: ["lt"] },
+    day: { range: [], type: "date" },
+    flag: { range: [], type: "boolean" },
+    int: { range: ["gte"], type: "integer" },
+    num: { range: ["gte", "lt"], type: "number" },
+    text: { range: [], type: "string" },
+    time: { range: ["lt"], type: "date-time" },
   });
   assert.throws(() => parseCoreResolvedGrant({ ...modern, version: "0.1.0" }));
   assert.throws(() =>
     parseCoreResolvedGrant({
       ...modern,
-      streams: [{ ...modern.streams[0], filter_fields: { outside: { type: "string", range: [] } } }],
+      streams: [{ ...modern.streams[0], filter_fields: { outside: { range: [], type: "string" } } }],
     })
   );
 });

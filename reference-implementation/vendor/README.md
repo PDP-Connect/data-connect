@@ -66,6 +66,8 @@ install`. No other code changes are needed — the package's public surface (all
 in a scratch directory under `~/.tmp/`, with source copied from the read-only
 checkout. The exports point to compiled JS and declarations; source is retained.
 This adds grant schema 0.2.0 and selection-request `grant_version`.
+The repacked package's `files` allowlist includes `dist`, `src`, `test`, and
+`README.md`, so npm retains compiled output even when `.gitignore` excludes it.
 
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 

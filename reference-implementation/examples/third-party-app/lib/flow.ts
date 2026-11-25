@@ -34,6 +34,7 @@ interface StreamsResponse {
 }
 interface ParRequest {
   authorization_details: Array<{
+    grant_version?: "0.1.0" | "0.2.0";
     access_mode?: string;
     purpose_code?: string;
     purpose_description?: string;
@@ -172,6 +173,7 @@ export function buildParRequest({
     authorization_details: [
       {
         source: { id: sourceId, kind: sourceKind },
+        grant_version: "0.2.0",
         type: "https://pdpp.dev/data-access",
         ...(purposeCode ? { purpose_code: purposeCode } : {}),
         ...(purposeDescription ? { purpose_description: purposeDescription } : {}),

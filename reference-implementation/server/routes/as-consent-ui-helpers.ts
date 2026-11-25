@@ -423,7 +423,8 @@ export function buildHostedMcpAuthorizationDetailsForConnector(
       ...(HOSTED_MCP_PICKER_RETENTION ? { retention: HOSTED_MCP_PICKER_RETENTION } : {}),
       source,
       streams: [{ name: "*" }],
-      type: "https://pdpp.dev/data-access",
+      grant_version: "0.2.0",
+        type: "https://pdpp.dev/data-access",
     },
   ];
 }
@@ -460,6 +461,7 @@ export function buildHostedMcpAuthorizationDetailForConnector(
    */
   streamScopes: ReadonlyMap<string, StreamScopeSelection> | null = null
 ): {
+  grant_version: "0.2.0";
   type: string;
   source: { kind: string; id: string };
   purpose_code: string;
@@ -511,7 +513,8 @@ export function buildHostedMcpAuthorizationDetailForConnector(
     ...(HOSTED_MCP_PICKER_RETENTION ? { retention: HOSTED_MCP_PICKER_RETENTION } : {}),
     source,
     streams,
-    type: "https://pdpp.dev/data-access",
+    grant_version: "0.2.0",
+        type: "https://pdpp.dev/data-access",
   };
 }
 

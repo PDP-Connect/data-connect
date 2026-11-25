@@ -11,6 +11,7 @@
  * Spec: openspec/changes/add-postgres-runtime-storage/
  */
 
+import { parseFilterRecordJson, type FilterField } from "./client-request-filters.ts";
 import { createHash } from "node:crypto";
 import {
   buildLimitClampedWarning,
@@ -73,6 +74,12 @@ import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-stor
 import { markSearchIndexDirtyPostgres } from "./stores/search-index-dirty-store.ts";
 
 type JsonObject = Record<string, unknown>;
+function filterRecordData(value: unknown): JsonObject | null {
+  if (typeof value === "string") {
+    return parseFilterRecordJson(value);
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
+}
 
 async function sequentially<T>(items: readonly T[], visit: (item: T) => Promise<void>): Promise<void> {
   const item = items.at(0);
@@ -116,6 +123,7 @@ interface ConnectorManifest {
 }
 
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   fields?: string[] | null;
   instance_ids?: string[];
   name: string;
@@ -838,7 +846,7 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
           [connectorId, connectorInstanceId, stream, chunk]
         );
         const derived = current.rows.map((row) => {
-          const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+          const data = filterRecordData(row.record_json);
           return {
             cursor: cursorValue(data, manifestStream),
             primary: primaryKeyText(data, row.record_key, manifestStream),
@@ -1214,6 +1222,9 @@ function buildFilterClause(
   const clauses: string[] = [];
   for (const filter of compiledFilters) {
     assertNonEmptyJsonField(filter.field, "filter");
+    if (filter.kind === "client") {
+      continue;
+    }
     if (filter.kind === "range") {
       clauses.push(...buildRangeFilterClauses(filter, rawFilter, params));
       continue;
@@ -1291,7 +1302,7 @@ async function getPostgresSnapshotAtVersion(
     return null;
   }
   const result = await postgresQuery(
-    `SELECT version, record_json, emitted_at, deleted, deleted_at
+    `SELECT version, record_json::text AS record_json, emitted_at, deleted, deleted_at
        FROM record_changes
       WHERE connector_instance_id = $1
         AND stream = $2
@@ -1306,7 +1317,7 @@ async function getPostgresSnapshotAtVersion(
     return null;
   }
   return {
-    data: row.record_json && typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json,
+    data: filterRecordData(row.record_json),
     deleted: row.deleted === true,
     deleted_at: row.deleted_at ?? null,
     emitted_at: row.emitted_at,
@@ -1375,7 +1386,7 @@ function childResponseRecord({
   row: PgRow;
   fields: string[] | null;
 }): ResponseRecord {
-  const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+  const rawData = filterRecordData(row.record_json);
   return {
     data: projectFields(rawData, fields),
     emitted_at: row.emitted_at,
@@ -2220,10 +2231,21 @@ async function visiblePostgresChange({
       : null;
   }
   if (!(current && currentVisible && passesRequestFilters(current.data, compiledFilters))) {
+    if (
+      compiledFilters?.some((filter) => filter.kind === "client") &&
+      previous &&
+      previousVisible &&
+      passesRequestFilters(previous.data, compiledFilters)
+    ) {
+      return deletedResponseRecord({ identity, row: { ...row, deleted_at: row.emitted_at }, stream });
+    }
     return null;
   }
   const fields = effective.fields ?? null;
-  const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
+  const previousProjection =
+    previous && previousVisible && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, fields)
+      : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;
@@ -2528,6 +2550,30 @@ export async function postgresQueryRecords(
   appendGrantVisibilityClauses(whereParts, params, effective);
   let where = `WHERE ${whereParts.join(" AND ")}`;
   where += buildFilterClause(compiledFilters, requestParams.filter, params);
+  if (compiledFilters.some((filter) => filter.kind === "client")) {
+    const keys: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      // Each keyset batch starts after the previous batch's terminal key.
+      // biome-ignore lint/performance/noAwaitInLoops: The next batch depends on this result.
+      const batch = await postgresQuery(
+        "SELECT record_key, record_json::text AS record_json FROM records WHERE connector_instance_id = $1 AND stream = $2 AND deleted = FALSE AND ($3::text IS NULL OR record_key > $3) ORDER BY record_key LIMIT 500",
+        [connectorInstanceId, stream, after]
+      );
+      for (const row of batch.rows) {
+        if (passesRequestFilters(filterRecordData(row.record_json), compiledFilters)) {
+          keys.push(row.record_key);
+        }
+      }
+      const last = batch.rows.at(-1);
+      if (batch.rows.length < 500 || !last) {
+        break;
+      }
+      after = last.record_key;
+    }
+    params.push(keys);
+    where += ` AND record_key = ANY($${params.length}::text[])`;
+  }
   // Snapshot the filter-only WHERE clause / params for the graded-count
   // query. The count MUST reflect matching visible rows BEFORE pagination
   // or the cursor — matching the SQLite semantics in
@@ -2794,7 +2840,7 @@ export async function postgresGetRecord(
     throw err;
   }
   if (effective.timeConstraint) {
-    const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+    const rawData = filterRecordData(row.record_json);
     if (!passesTimeConstraint(rawData, effective.timeConstraint)) {
       const err: PgQueryError = new Error("Record not found");
       err.code = "not_found";

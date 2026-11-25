@@ -7,8 +7,8 @@ export type { FilterField } from "@pdpp/reference-contract/public/source";
 export interface ClientFilter {
   field: string;
   kind: "client";
-  type: FilterField["type"];
   operator: string | null;
+  type: FilterField["type"];
   value: string;
 }
 
@@ -110,7 +110,7 @@ export function parseClientFilterParameters(filter: unknown) {
     if (!match) {
       throw error(name, "Invalid filter syntax");
     }
-    return { field: match[1] as string, operator: match[2] ?? null, name, value };
+    return { field: match[1] as string, name, operator: match[2] ?? null, value };
   });
 }
 

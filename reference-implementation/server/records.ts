@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { parseFilterRecordJson, type FilterField } from "./client-request-filters.ts";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 /**
@@ -303,6 +304,7 @@ interface ManifestStream {
 }
 type RequestParams = Record<string, unknown>;
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   connection_id?: string;
   fields?: string[] | null;
   instance_ids?: string[];
@@ -752,7 +754,7 @@ function requireStreamList(value: unknown): StreamListEntry[] {
 }
 
 function parseStoredRecordData(recordJson: string): RecordData {
-  const parsed: unknown = JSON.parse(recordJson);
+  const parsed: unknown = parseFilterRecordJson(recordJson);
   if (!isRecordData(parsed)) {
     throw new Error("[records] stored record_json must contain an object");
   }
@@ -5261,11 +5263,31 @@ function resolveChangeGroupRecord(
   }
 
   if (!(currentVisible && current?.data && passesRequestFilters(current.data, compiledFilters))) {
+    if (
+      compiledFilters.some((filter) => filter.kind === "client") &&
+      previousVisible &&
+      previous?.data &&
+      passesRequestFilters(previous.data, compiledFilters) &&
+      current
+    ) {
+      const tombstone: ResponseRecord = {
+        object: "record",
+        stream,
+        id: group.record_key,
+        deleted: true,
+        deleted_at: current.emitted_at,
+        emitted_at: current.emitted_at,
+      };
+      decorateRecordWithConnectionIdentity(tombstone, recordIdentity);
+      return tombstone;
+    }
     return null;
   }
 
   const previousProjection =
-    previousVisible && previous?.data ? projectFields(previous.data, effective.fields ?? undefined) : null;
+    previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, effective.fields ?? undefined)
+      : null;
   const currentProjection = projectFields(current.data, effective.fields ?? undefined);
 
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
