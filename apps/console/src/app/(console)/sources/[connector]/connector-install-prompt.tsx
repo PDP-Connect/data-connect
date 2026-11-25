@@ -13,11 +13,13 @@ import {
   connectorNotInstalledCopy,
 } from "../../lib/connector-implementation.ts";
 import { installConnectorForSourceAction } from "./install-connector-action.ts";
+import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 interface Props {
   /** Bare connector key the owner install route accepts (e.g. `chase`). */
   connectorKey: string;
   displayName: string;
+  actionLabel?: string;
   /** Route id of this source page, so the action revalidates it. */
   routeId: string;
   /**
@@ -31,12 +33,16 @@ interface Props {
 
 type Feedback = { message: string; tone: "error" | "success" } | null;
 
+function plainInstallCopy(value: string): string {
+  return plainDataSourceCopy(value);
+}
+
 /**
  * Says that this source's connector is not installed and offers the one
  * action that fixes it. Installing is the owner's decision, so nothing runs
  * until the button is pressed; afterwards the page re-reads its state.
  */
-export function ConnectorInstallPrompt({ connectorKey, displayName, onInstalled, routeId, variant }: Props) {
+export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName, onInstalled, routeId, variant }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -46,7 +52,7 @@ export function ConnectorInstallPrompt({ connectorKey, displayName, onInstalled,
     startTransition(async () => {
       const result = await installConnectorForSourceAction(connectorKey, routeId);
       if (!result.ok) {
-        setFeedback({ message: connectorInstallFailureCopy(displayName, result.message), tone: "error" });
+        setFeedback({ message: plainInstallCopy(connectorInstallFailureCopy(displayName, result.message)), tone: "error" });
         return;
       }
       setFeedback({ message: "Installed. Refreshing…", tone: "success" });
@@ -60,18 +66,18 @@ export function ConnectorInstallPrompt({ connectorKey, displayName, onInstalled,
     <div
       className={
         notice
-          ? "grid min-w-0 gap-2 rounded-sm border border-status-warning-border bg-status-warning-bg p-3 text-status-warning-fg"
+          ? "grid min-w-0 gap-2 rounded-sm border border-attention/30 bg-attention/5 p-3 text-attention"
           : "grid min-w-0 gap-1.5"
       }
       data-connector-key={connectorKey}
       data-testid={notice ? "connector-not-installed-notice" : "connector-not-installed-inline"}
       role={notice ? "status" : undefined}
     >
-      <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-status-warning-fg"}`}>
-        {connectorNotInstalledCopy(displayName)}
+      <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
+        {plainInstallCopy(connectorNotInstalledCopy(displayName))}
       </p>
       {notice ? (
-        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">{connectorInstallExplainer(displayName)}</p>
+        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">{plainInstallCopy(connectorInstallExplainer(displayName))}</p>
       ) : null}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <IcButton
@@ -82,13 +88,13 @@ export function ConnectorInstallPrompt({ connectorKey, displayName, onInstalled,
           type="button"
           variant="default"
         >
-          {isPending ? "Installing…" : connectorInstallActionLabel(displayName)}
+          {isPending ? "Installing…" : actionLabel ?? connectorInstallActionLabel(displayName)}
         </IcButton>
         {feedback ? (
           <span
             aria-live="polite"
             className={`pdpp-caption min-w-0 break-words ${
-              feedback.tone === "error" ? "text-destructive" : "text-status-success-fg"
+              feedback.tone === "error" ? "text-destructive" : "text-muted-foreground"
             }`}
             data-testid="connector-install-feedback"
             role={feedback.tone === "error" ? "alert" : "status"}

@@ -82,10 +82,10 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
         </div>
         <TechnicalDetails>
           <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-            <dt className="text-muted-foreground">Connector</dt>
-            <dd className="font-mono">{config.connector_key}</dd>
+            <dt className="text-muted-foreground">Data source type</dt>
+            <dd className="text-xs break-words">{config.connector_key}</dd>
             <dt className="text-muted-foreground">Schema status</dt>
-            <dd className="font-mono">{config.options_schema_status}</dd>
+            <dd className="text-xs break-words">{config.options_schema_status}</dd>
           </dl>
         </TechnicalDetails>
       </ConfigShell>
@@ -96,7 +96,7 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
     return (
       <ConfigShell>
         <p className="pdpp-caption text-muted-foreground">
-          This connector has described its settings and has none to change.
+          This data source has settings but none to change.
         </p>
         <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={availability.schema} />
       </ConfigShell>
@@ -116,7 +116,7 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
 
 function ConfigShell({ children }: { children: React.ReactNode }) {
   return (
-    <Section description="What this source collects, and how collection runs." id="configuration" title="Configuration">
+    <Section description="What this data source syncs, and how it is set up." id="configuration" title="Settings for this data source">
       <div className="flex flex-col gap-4">{children}</div>
     </Section>
   );
@@ -230,8 +230,8 @@ function ConfigEditor({
   return (
     <ConfigShell>
       {applied ? (
-        <div className="pdpp-caption rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5">
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">
+        <div className="pdpp-caption rounded-md border border-border bg-muted/40 px-4 py-2.5">
+          <span className="font-medium text-muted-foreground">
             Revision {applied.revision} is active. Future syncs use this configuration.
           </span>
         </div>
@@ -244,13 +244,13 @@ function ConfigEditor({
       ) : null}
 
       {stale ? (
-        <div className="pdpp-caption flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-4 py-2.5">
-          <span className="font-medium text-amber-700 dark:text-amber-400">{stale.message}</span>
+        <div className="pdpp-caption flex flex-col gap-2 rounded-md border border-attention/30 bg-attention/5 px-4 py-2.5">
+          <span className="font-medium text-attention">{stale.message}</span>
           <span className="text-muted-foreground">
             Your edits are still here. Review them against the latest configuration before saving.
           </span>
           <div>
-            <IcButton onClick={reviewAgainstLatest} size="sm" type="button">
+            <IcButton onClick={reviewAgainstLatest} size="sm" type="button" variant="ghost">
               Review against latest
             </IcButton>
           </div>
@@ -335,11 +335,11 @@ function CurrentSettings({
         </p>
       ) : (
         <p className="pdpp-caption text-muted-foreground">
-          No owner-set configuration yet. These are the connector's own defaults.
+          No owner-set configuration yet. These are the data source's own defaults.
         </p>
       )}
       <div>
-        <IcButton onClick={onEdit} size="sm" type="button">
+        <IcButton onClick={onEdit} size="sm" type="button" variant="ghost">
           Edit configuration
         </IcButton>
       </div>
@@ -386,7 +386,7 @@ function DraftEditor({
         </fieldset>
       ))}
       <div className="flex flex-wrap gap-2">
-        <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button">
+        <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button" variant="ghost">
           Review changes
         </IcButton>
         <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
@@ -612,7 +612,7 @@ function ReviewChanges({
         <IcButton onClick={onBack} size="sm" type="button" variant="ghost">
           Back to edit
         </IcButton>
-        <IcButton disabled={isPending} onClick={onCommit} size="sm" type="button">
+        <IcButton disabled={isPending} onClick={onCommit} size="sm" type="button" variant="ghost">
           {isPending ? "Saving…" : commit.buttonLabel}
         </IcButton>
       </div>
@@ -640,9 +640,9 @@ function PendingProposal({
   const byKey = new Map(schema.options.map((option) => [option.option_key, option]));
   const proposedBy = revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by);
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4">
+    <div className="flex flex-col gap-3 rounded-md border border-attention/30 bg-attention/5 p-4">
       <div className="flex flex-col gap-0.5">
-        <h3 className="pdpp-body font-medium text-amber-700 dark:text-amber-400">Awaiting your confirmation</h3>
+        <h3 className="pdpp-body font-medium text-attention">Awaiting your confirmation</h3>
         <p className="pdpp-caption text-muted-foreground">
           Revision {revision.revision}, proposed by {proposedBy}. Nothing changes until you confirm.
         </p>
@@ -663,7 +663,7 @@ function PendingProposal({
       </dl>
       <p className="pdpp-caption text-muted-foreground">Reason: “{revision.source_of_change}”</p>
       <div>
-        <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button">
+        <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
           {isPending ? "Confirming…" : "Confirm and make active"}
         </IcButton>
       </div>
@@ -704,7 +704,7 @@ function HistoryBlock({
       <TechnicalDetails>
         <ul className="flex flex-col gap-2">
           {entries.map((entry) => (
-            <li className="font-mono" key={entry.revision.revision}>
+            <li className="break-words text-xs" key={entry.revision.revision}>
               rev {entry.revision.revision} · {entry.revision.status} · {entry.revision.option_kind} ·{" "}
               {entry.revision.origin} · set_by {entry.revision.set_by} · {entry.revision.set_at}
               {entry.revision.confirmed_by ? ` · confirmed_by ${entry.revision.confirmed_by}` : ""}

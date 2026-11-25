@@ -52,12 +52,12 @@ const CONFIRM_WORD_RE = /confirm/i;
 const ENTIRE_CHANGE_RE = /entire change needs your confirmation/;
 const NOT_CLASSIFIED_YET_RE = /has not been classified yet/;
 const NOT_CLASSIFIED_SETTING_RE = /has not classified this setting yet/;
-const WHAT_SOURCE_COLLECTS_RE = /what this source collects/;
+const WHAT_SOURCE_COLLECTS_RE = /what this data source collects/;
 const MIN_BOUND_RE = /1 or more/;
 const MAX_BOUND_RE = /365 or less/;
 const NOT_ALLOWED_CHOICE_RE = /not one of the allowed choices/;
 const SAY_WHY_RE = /Say why/;
-const NOT_AVAILABLE_YET_RE = /not available for this connector yet/;
+const NOT_AVAILABLE_YET_RE = /not available for this data source yet/;
 const HAS_NO_OPTIONS_RE = /has no options/i;
 const INVALID_SCHEMA_RE = /invalid/;
 const PROPOSED_BY_CLIENT_RE = /Proposed by helper/;
@@ -276,6 +276,7 @@ test("an empty change set never classifies as transport", () => {
 
 test("a transport option carries no per-field confirmation warning", () => {
   assert.equal(confirmationReason(SKIP_FILES), null);
+  // DIRECTION.md §One data source: use “data source” in visible settings copy.
   assert.match(confirmationReason(LOOKBACK) ?? "", WHAT_SOURCE_COLLECTS_RE);
 });
 
@@ -285,7 +286,8 @@ test("with no active revision every value reads as a connector default", () => {
   const rows = buildCurrentSettings(schema(), null);
   for (const row of rows) {
     assert.equal(row.provenance, "connector_default");
-    assert.equal(row.provenanceLabel, "Connector default");
+    // DIRECTION.md §One data source: labels use plain product language.
+    assert.equal(row.provenanceLabel, "Data source default");
   }
 });
 
@@ -370,6 +372,7 @@ test("an undeclared schema says settings are not available yet, never that there
   const availability = resolveAvailability(config({ options_schema: null, options_schema_status: "not_declared" }));
   assert.equal(availability.kind, "not_declared");
   const message = "message" in availability ? availability.message : "";
+  // DIRECTION.md §One data source: keep settings copy in plain product language.
   assert.match(message, NOT_AVAILABLE_YET_RE);
   assert.doesNotMatch(message, HAS_NO_OPTIONS_RE);
 });
@@ -412,7 +415,8 @@ test("status and origin read as owner language, never as raw enum values", () =>
   assert.equal(statusLabel("superseded", false), "Replaced by a newer revision");
   assert.equal(statusLabel("quarantined", false), "Blocked; not used by syncs");
   assert.equal(originLabel("owner", "owner"), "Changed by you");
-  assert.equal(originLabel("default", "system"), "Connector default");
+  // DIRECTION.md §One data source: labels use plain product language.
+  assert.equal(originLabel("default", "system"), "Data source default");
   assert.equal(originLabel("migration", "script"), "Carried over during upgrade");
 });
 

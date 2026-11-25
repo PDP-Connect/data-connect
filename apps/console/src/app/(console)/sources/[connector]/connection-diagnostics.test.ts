@@ -142,8 +142,8 @@ const BACKGROUND_DRAIN_PENDING = /const pending = localDeviceProgress\.records_p
 const BACKGROUND_DRAIN_DEADLETTER_GUARD = /\(counts\?\.dead_letter \?\? 0\) > 0/;
 const BACKGROUND_DRAIN_STALE_LEASE_GUARD = /\(counts\?\.stale_leases \?\? 0\) > 0/;
 const BACKGROUND_DRAIN_REMEDIATION_GUARD = /if \(hasDeviceLocalRemediation \|\| !localDeviceProgress\)/;
-const BACKGROUND_DRAIN_RENDERED_ABOVE_DETAILS =
-  /\{backgroundDrain \? <BackgroundLocalDeviceDrainPanel summary=\{backgroundDrain\} \/> : null\}[\s\S]{0,180}<details/;
+const BACKGROUND_DRAIN_RENDERED_IN_SUMMARY =
+  /\{backgroundDrain \? <BackgroundLocalDeviceDrainPanel summary=\{backgroundDrain\} \/> : null\}/;
 const BACKGROUND_DRAIN_USES_HOST_LABELS = /hostLabels: boundHostLabels\(sourceInstances\)/;
 const DIAGNOSTICS_DEVICE_LOCAL_RECOVERY_PREDICATE =
   /required_actions\.some\(\(action\) => action\.remediation\?\.target\.kind === "local_device"\)/;
@@ -164,8 +164,8 @@ const SUPPRESSED_EVIDENCE_DETAIL_FIELD_ATTR = /data-detail-field=\{signal\.detai
 const AXES_TESTID = /data-testid="diagnostics-axes"/;
 const AXIS_CHIPS_HELPER = /summarizeAxisChips/;
 const AXIS_CHIPS_USE_TONE_CLASS = /diagnosticsAxisChipClass\(c\.tone\)/;
-const AXIS_CHIP_SUCCESS_CLASS = /function diagnosticsAxisChipClass[\s\S]*emerald-500/;
-const AXIS_CHIP_WARNING_CLASS = /function diagnosticsAxisChipClass[\s\S]*var\(--warning\)/;
+const AXIS_CHIP_SUCCESS_CLASS = /function diagnosticsAxisChipClass[\s\S]*bg-muted\/40 text-muted-foreground/;
+const AXIS_CHIP_WARNING_CLASS = /function diagnosticsAxisChipClass[\s\S]*border-attention\/40 bg-attention\/5 text-attention/;
 const AXIS_CHIP_DANGER_CLASS = /function diagnosticsAxisChipClass[\s\S]*destructive/;
 const REDUNDANT_OUTBOX_LINE_TESTID = /data-testid="diagnostics-outbox"/;
 
@@ -230,6 +230,7 @@ test("connection-diagnostics applies the axis tone to visible chip classes", asy
   // using that tone in the actual class list. This keeps active/success,
   // warning, and danger axes materially distinct on the detail page.
   const src = await readFile(DIAG_FILE, "utf8");
+  // PAGE-RULES: colors use shared tokens and the rebuilt pages do not use green.
   assert.match(src, AXIS_CHIPS_USE_TONE_CLASS);
   assert.match(src, AXIS_CHIP_SUCCESS_CLASS);
   assert.match(src, AXIS_CHIP_WARNING_CLASS);
@@ -413,6 +414,7 @@ test("device-local recovery opens Diagnostics so commands are immediately visibl
 
 test("active local-device drain renders calm background upload progress, not recovery commands", async () => {
   const src = await readFile(DIAG_FILE, "utf8");
+  const page = await readFile(PAGE_FILE, "utf8");
   assert.match(src, BACKGROUND_DRAIN_SUMMARY_HELPER);
   assert.match(src, BACKGROUND_DRAIN_PANEL);
   assert.match(src, BACKGROUND_DRAIN_TESTID);
@@ -425,7 +427,11 @@ test("active local-device drain renders calm background upload progress, not rec
   assert.match(src, BACKGROUND_DRAIN_DEADLETTER_GUARD);
   assert.match(src, BACKGROUND_DRAIN_STALE_LEASE_GUARD);
   assert.match(src, BACKGROUND_DRAIN_USES_HOST_LABELS);
-  assert.match(src, BACKGROUND_DRAIN_RENDERED_ABOVE_DETAILS);
+  assert.match(src, BACKGROUND_DRAIN_RENDERED_IN_SUMMARY);
+  // DIRECTION.md §One data source: owner-relevant recovery progress sits beside the state sentence; technical diagnostics stay folded.
+  assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf("<ConnectionRecoverySummary"));
+  assert.ok(page.indexOf("<ConnectionRecoverySummary") < page.indexOf('<summary className="cursor-pointer text-sm font-medium text-muted-foreground">Details</summary>'));
+  assert.match(page, /showRecoverySummary=\{false\}/);
 });
 
 test("connection-diagnostics remediation command carries no base-url, token, or filesystem path", async () => {

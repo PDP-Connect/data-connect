@@ -7,11 +7,18 @@ import type {
   RefCollectionReportEntry,
   RefConnectionHealthSnapshot,
   RefConnectorRunSummary,
+  RefConnectorSummary,
   RefRenderedVerdict,
+  RefRequiredAction,
+  RefSchedule,
   RunSummary,
 } from "../../lib/ref-client.ts";
 import type { StreamSummary } from "../../lib/rs-client.ts";
+import { type SourceStatusRow, sourceStatusWords } from "../../lib/source-status-words.ts";
 import type { ConnectorPageModel } from "./page.tsx";
+
+const DEMO_NOW = new Date("2026-11-24T12:00:00.000Z");
+const DEMO_SUCCESS = "2026-11-24T10:00:00.000Z";
 
 function toRunRef(summary: RefConnectorRunSummary | null) {
   if (!summary) {
@@ -28,7 +35,7 @@ function toRunRef(summary: RefConnectorRunSummary | null) {
   };
 }
 
-export function buildRecoveryDemoModel(): ConnectorPageModel {
+export function buildRecoveryDemoModel(statusRow: SourceStatusRow = 16): ConnectorPageModel {
   const connectionId = "cin_demo_claude_code_workstation";
   const run: RunSummary = {
     connection_id: connectionId,
@@ -248,7 +255,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     totalRecords: 464,
     totalRetainedBytes: null,
   };
-  return {
+  const model: ConnectorPageModel = {
     activeRunId: null,
     collectionFactsByStream,
     collectionOwnerActionByStream: { messages: true, sessions: true },
@@ -269,9 +276,10 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectorNotInstalled: false,
     coverageAsOf: null,
     coverageHorizons: [],
+    accountDeviceLabels: ["workstation"],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",
-    headerCount: "464 records, 2 streams",
+    headerCount: "464 records, 2 kinds of record",
     latestKnownGaps: [],
     manifest: {
       connector_id: "claude-code",
@@ -288,9 +296,283 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     scheduleError: null,
     setupFailed: false,
     sourceBindingKind: null,
+    source: {
+      connection_health: connectionHealth,
+      connection_id: connectionId,
+      connector_id: "claude-code",
+      display_name: "Claude Code workstation",
+      freshness: {},
+      last_run: null,
+      last_successful_run: null,
+      manifest_version: null,
+      next_action: null,
+      owner_state: {
+        evidence_as_of: connectionHealth.last_success_at,
+        owner_of_state: "system",
+        posture: "observed",
+        resolver: "system_degraded",
+      },
+      rendered_verdict: renderedVerdict,
+      schedule: null,
+      source_kind: "local_device",
+      status: "active",
+      streams: ["messages", "sessions"],
+      total_records: 464,
+    } as RefConnectorSummary,
     sourceInstances,
     sourceInstancesError: null,
     streams,
     totalRecords: 464,
+  };
+  return applyStatusRow(model, statusRow);
+}
+
+function statusSchedule(
+  effectiveMode: RefSchedule["effective_mode"],
+  backoff: RefSchedule["scheduler_backoff"] = null,
+  nextDueAt: string | null = null
+): RefSchedule {
+  return {
+    active_run_id: null,
+    automation_mode: "unattended",
+    automation_summary: effectiveMode === "manual" ? "Manual" : "Automatic",
+    connector_id: "claude-code",
+    created_at: DEMO_SUCCESS,
+    effective_mode: effectiveMode,
+    enabled: effectiveMode === "automatic",
+    human_attention_needed: false,
+    ineligibility_reason: null,
+    interval_seconds: 3600,
+    jitter_seconds: 0,
+    last_error_code: null,
+    last_finished_at: null,
+    last_started_at: null,
+    last_successful_at: DEMO_SUCCESS,
+    minimum_interval_warning: null,
+    next_due_at: nextDueAt,
+    notification_posture: "none",
+    object: "schedule",
+    recommended_policy: null,
+    scheduler_backoff: backoff,
+    trigger_kind: "scheduled",
+    updated_at: DEMO_SUCCESS,
+  };
+}
+
+function ownerAction(
+  label: string,
+  kind: RefRequiredAction["kind"] = "refresh_now",
+  surface: NonNullable<RefRequiredAction["surface"]>["kind"] = "runtime_retry"
+): RefRequiredAction {
+  return {
+    affects: ["messages"],
+    audience: "owner",
+    cta: label,
+    kind,
+    satisfied_when: { kind: kind === "reauth" ? "credential_present_and_unrejected" : "attention_resolved" },
+    surface: { kind: surface },
+    terminal: false,
+    urgency: "now",
+  };
+}
+
+function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow): ConnectorPageModel {
+  if (row === 16) {
+    return model;
+  }
+
+  const demoHealth = model.connectionHealth!;
+  const statusActionSource = {
+    ...model.source,
+    connection_health: { ...demoHealth, last_success_at: DEMO_SUCCESS },
+    display_name: `Status example ${row}`,
+    last_successful_run: {
+      event_count: 8,
+      failure_reason: null,
+      finished_at: DEMO_SUCCESS,
+      first_at: DEMO_SUCCESS,
+      last_at: DEMO_SUCCESS,
+      run_id: "run_demo_previous_success",
+      started_at: DEMO_SUCCESS,
+      status: "succeeded",
+    },
+    owner_state: {
+      evidence_as_of: DEMO_SUCCESS,
+      owner_of_state: "system" as const,
+      posture: "observed" as const,
+      resolver: "healthy" as const,
+    },
+    rendered_verdict: {
+      ...model.connectionRenderedVerdict!,
+      channel: "calm",
+      pill: { label: "Healthy", tone: "green" },
+      required_actions: [],
+    },
+    schedule: null,
+    source_binding_kind: null,
+    source_kind: "account",
+    source_visibility: "active",
+    status: "active",
+    revoked_at: null,
+    terminal_setup_disposition: null,
+  } satisfies RefConnectorSummary;
+
+  let source: RefConnectorSummary = statusActionSource;
+  let schedule: RefSchedule | null = null;
+  let connectionStatus = "active";
+  let running = false;
+  let setupFailed = false;
+  let connectorNotInstalled = false;
+
+  switch (row) {
+    case 1:
+      source = { ...source, source_kind: "local_device", source_visibility: "archived", status: "paused" };
+      break;
+    case 2:
+      source = { ...source, revoked_at: DEMO_SUCCESS, source_visibility: "setup_failed", status: "revoked" };
+      connectionStatus = "revoked";
+      setupFailed = true;
+      break;
+    case 3:
+      source = { ...source, revoked_at: DEMO_SUCCESS, status: "revoked" };
+      connectionStatus = "revoked";
+      break;
+    case 4:
+      source = { ...source, connector_implementation: { connector_id: source.connector_id, state: "not_installed" } };
+      connectorNotInstalled = true;
+      break;
+    case 5:
+    case 6:
+    case 7: {
+      const disposition = row === 5 ? "unverified_missing_counts" : row === 6 ? "unverified_zero" : "verified_empty";
+      const label = row === 5 ? "Review setup" : row === 6 ? "Retry first sync" : "Review result";
+      source = {
+        ...source,
+        terminal_setup_disposition: disposition,
+        rendered_verdict: {
+          ...source.rendered_verdict!,
+          required_actions: [ownerAction(label)],
+        },
+      };
+      break;
+    }
+    case 8:
+      source = {
+        ...source,
+        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "needs_owner" },
+        rendered_verdict: {
+          ...source.rendered_verdict!,
+          pill: { label: "Can't collect", tone: "red" },
+          required_actions: [ownerAction("Sign in again", "reauth", "browser_session")],
+        },
+        source_binding_kind: "browser_collector",
+      };
+      break;
+    case 9:
+      source = {
+        ...source,
+        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "setup_in_progress" },
+      };
+      break;
+    case 10:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "owner_paused" }, status: "paused" };
+      connectionStatus = "paused";
+      break;
+    case 11: {
+      const startedAt = "2026-11-24T11:58:00.000Z";
+      source = {
+        ...source,
+        last_run: { event_count: 0, failure_reason: null, finished_at: null, first_at: startedAt, last_at: startedAt, run_id: "run_demo_active", started_at: startedAt, status: "started" },
+        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "collecting" },
+      };
+      running = true;
+      break;
+    }
+    case 12:
+      schedule = statusSchedule("automatic", {
+        backoff_applied: true,
+        consecutive_failures: 2,
+        next_run_at: "2026-11-24T12:20:00.000Z",
+        reason_class: "retry",
+        recommended_health_state: "cooling_off",
+      });
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Missing data", tone: "amber" } }, schedule };
+      break;
+    case 13:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "blocked_maintainer" } };
+      break;
+    case 14:
+    case 15: {
+      const label = row === 14 ? "Missing optional data" : "Some records stuck";
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label, tone: "amber" } } };
+      break;
+    }
+    case 17:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "refresh_due" }, schedule: statusSchedule("manual") };
+      schedule = source.schedule;
+      break;
+    case 18:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Import complete", tone: "green" } }, source_kind: "manual" };
+      break;
+    case 19:
+      schedule = statusSchedule("automatic", null, "2026-11-24T16:00:00.000Z");
+      source = { ...source, connection_health: { ...source.connection_health, lateness: { state: "on_time" } }, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, schedule };
+      break;
+    case 20:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "frozen-since-last-run", resolver: "healthy" } };
+      break;
+    case 21:
+      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Collected, not independently checked", tone: "grey" } } };
+      break;
+    case 22:
+      source = { ...source, connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: null, source_kind: "manual" };
+      break;
+    case 23:
+      source = { ...source, owner_state: undefined };
+      break;
+    case 24:
+      source = { ...source, owner_state: undefined, rendered_verdict: null, status: undefined, source_visibility: undefined };
+      break;
+  }
+
+  const status = sourceStatusWords(source, { now: DEMO_NOW });
+  if (["review_setup", "retry_first_sync", "review_result"].includes(status.action?.kind ?? "")) {
+    const action = status.action;
+    source = {
+      ...source,
+      rendered_verdict: {
+        ...source.rendered_verdict!,
+        required_actions: [ownerAction(action!.label)],
+      },
+    };
+  }
+  const sourceRun = source.last_run ?? null;
+  const recentRuns = row === 11 && sourceRun
+    ? [{ ...model.recentRuns[0]!, event_count: sourceRun.event_count, failure_reason: null, first_at: sourceRun.first_at, last_at: sourceRun.last_at, run_id: sourceRun.run_id, status: sourceRun.status }]
+    : model.recentRuns;
+
+  return {
+    ...model,
+    connectionHealth: source.connection_health,
+    connectionPrimaryAction: source.rendered_verdict?.required_actions[0] ?? null,
+    connectionRenderedVerdict: source.rendered_verdict ?? null,
+    connectorNotInstalled,
+    deviceLabels: row === 1 ? model.deviceLabels : [],
+    overview: {
+      ...model.overview,
+      connectionHealth: source.connection_health,
+      connectionStatus,
+      isRunning: running,
+      lastRun: sourceRun ? toRunRef(sourceRun) : null,
+      lastSuccessfulRun: source.last_successful_run ? toRunRef(source.last_successful_run) : null,
+      localDeviceProgress: row === 1 ? model.overview.localDeviceProgress : null,
+      revokedAt: source.revoked_at ?? null,
+    },
+    recentRuns,
+    schedule,
+    setupFailed,
+    source,
+    sourceBindingKind: source.source_binding_kind ?? null,
+    sourceInstances: row === 1 ? model.sourceInstances : [],
   };
 }

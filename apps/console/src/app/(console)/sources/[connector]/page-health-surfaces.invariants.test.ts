@@ -32,17 +32,19 @@ const RE_DERIVE_STREAK_DOTS = /deriveStreakDots/;
 const RE_STREAK_DOTS_CONDITIONAL = /streakDots\.length\s*>\s*0/;
 const RE_STREAK_STRIP_COMPONENT = /<StreakStrip/;
 const RE_STREAK_STRIP_TESTID = /data-testid="streak-strip"/;
+const RE_STREAK_STRIP_IN_LATEST_SYNCS =
+  /function RecentRunsSection[\s\S]*?title="Latest syncs"[\s\S]*?streakDots\.length > 0 \? <StreakStrip dots=\{streakDots\} \/> : null/;
 const RE_DERIVE_AUTO_PAUSED_BANNER = /deriveAutoPausedBanner/;
 const RE_AUTO_PAUSED_BANNER_CONDITIONAL = /autoPausedBanner\s*\?/;
 const RE_AUTO_PAUSED_BANNER_ROW_COMPONENT = /<AutoPausedBannerRow/;
 const RE_AUTO_PAUSED_BANNER_ROW_TESTID = /data-testid="auto-paused-banner-row"/;
 const RE_AUTO_PAUSED_BANNER_TESTID = /data-testid="auto-paused-banner"/;
-const RE_RECENT_RUNS_SECTION = /Recent syncs/;
+const RE_RECENT_RUNS_SECTION = /title="Latest syncs"/;
 const RE_ACQUISITION_COVERAGE_MAPPING = /acquisitionCoverage: summary\.acquisition_coverage \?\? null/;
 const RE_ACQUISITION_COVERAGE_SECTION = /function AcquisitionCoverageSection/;
-const RE_ACQUISITION_COVERAGE_TITLE = /title="Acquisition coverage"/;
+const RE_ACQUISITION_COVERAGE_TITLE = /title="What was collected"/;
 const RE_ACQUISITION_COVERAGE_RECEIPT_LINK = /\/connect\/status\//;
-const RE_ACQUISITION_COVERAGE_OWNER_COPY = /coverage receipts, not generic sync status/;
+const RE_ACQUISITION_COVERAGE_OWNER_COPY = /Recent imports and device transfers/;
 const RE_ACQUISITION_COVERAGE_SOURCE_NEUTRAL = /\bWhatsApp\b|\bTimeline\b|\bGoogle\b/i;
 const RE_STORED_CREDENTIAL_ACTION_USES_EXPLICIT_COPY = /case "stored_credential"[\s\S]*label: "Update credential"/;
 const RE_BROWSER_SESSION_ACTION_USES_SERVER_CTA = /case "browser_session"[\s\S]*label: action\.cta/;
@@ -96,6 +98,13 @@ test("page renders StreakStrip when streakDots is non-empty", async () => {
   assert.match(src, RE_STREAK_STRIP_COMPONENT);
 });
 
+test("recent sync strip stays inside Latest syncs", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md §One data source: the recent-sync strip stays in Latest syncs.
+  assert.match(src, RE_STREAK_STRIP_IN_LATEST_SYNCS);
+  assert.match(src, /<RecentRunsSection[\s\S]{0,240}streakDots=\{streakDots\}/);
+});
+
 test("streak strip has a data-testid for integration targeting", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, RE_STREAK_STRIP_TESTID);
@@ -119,24 +128,25 @@ test("auto-paused banner row has a data-testid for integration targeting", async
   assert.match(src, RE_AUTO_PAUSED_BANNER_ROW_TESTID);
 });
 
-test("auto-paused banner is placed inside the runs DataList, not outside", async () => {
+test("auto-paused banner is placed inside Latest syncs, not outside", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // The banner li must appear after the "Recent runs" section heading.
+  // The banner li must appear after the "Latest syncs" section heading.
   // Check positional ordering via indexOf so we don't need another regex.
   const bannerStr = 'data-testid="auto-paused-banner"';
-  const runsSectionStr = "Recent syncs";
+  const latestSyncsSectionStr = 'title="Latest syncs"';
   const bannerIdx = src.indexOf(bannerStr);
-  const runsSectionIdx = src.indexOf(runsSectionStr);
+  const latestSyncsSectionIdx = src.indexOf(latestSyncsSectionStr);
   assert.match(src, RE_AUTO_PAUSED_BANNER_TESTID);
   assert.match(src, RE_RECENT_RUNS_SECTION);
-  assert.ok(bannerIdx > runsSectionIdx, "auto-paused banner should be inside the Recent syncs section");
+  assert.ok(bannerIdx > latestSyncsSectionIdx, "auto-paused banner should be inside Latest syncs");
 });
 
-test("connector detail page threads owner-only acquisition coverage into a source-neutral receipt section", async () => {
+test("detail page keeps acquisition evidence in the plain-language collected section", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const sectionStart = src.indexOf("function AcquisitionCoverageSection");
-  const sectionEnd = src.indexOf("/**\n * Recent syncs", sectionStart);
+  const sectionEnd = src.indexOf("/**\n * Latest syncs", sectionStart);
   const sectionSrc = src.slice(sectionStart, sectionEnd);
+  // DIRECTION.md: acquisition evidence stays in the main column with plain headings.
   assert.match(src, RE_ACQUISITION_COVERAGE_MAPPING);
   assert.match(src, RE_ACQUISITION_COVERAGE_SECTION);
   assert.match(src, RE_ACQUISITION_COVERAGE_TITLE);

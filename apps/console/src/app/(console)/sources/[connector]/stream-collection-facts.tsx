@@ -3,6 +3,7 @@
 
 import type { EvidenceTone } from "@pdpp/display";
 import { type StreamCollectionFacts, streamOwnerActionCueNeeded } from "../../lib/collection-report.ts";
+import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 /**
  * Per-stream collection facts rendered under a stream row on the connector
@@ -43,11 +44,11 @@ export function StreamCollectionFactsLine({
         className={`pdpp-caption inline-flex items-center gap-0 px-2 py-0.5 ${streamFactsChipClass(coverage.tone)}`}
         data-axis-tone={coverage.tone}
         data-testid="stream-coverage-chip"
-        title={coverage.title}
+        title={plainCollectionCopy(coverage.title)}
       >
-        <span className="sr-only">{coverage.label}</span>
+        <span className="sr-only">{plainCollectionCopy(coverage.label)}</span>
         <span aria-hidden className="opacity-60">
-          {coverage.dimension}
+          {coverage.dimension.toLowerCase() === "coverage" ? "Records" : coverage.dimension}
         </span>
         <span aria-hidden className="mx-1 opacity-40">
           ·
@@ -62,9 +63,9 @@ export function StreamCollectionFactsLine({
           className="pdpp-caption text-muted-foreground"
           data-disposition={disposition.value}
           data-testid="stream-forward-disposition"
-          title={disposition.title}
+          title={plainCollectionCopy(disposition.title)}
         >
-          Next run: <span className={streamFactsTextClass(disposition.tone)}>{disposition.label}</span>
+          Next sync: <span className={streamFactsTextClass(disposition.tone)}>{plainCollectionCopy(disposition.label)}</span>
           {streamOwnerActionCueNeeded(disposition, ownerActionAvailable) ? (
             <span className="ml-1 text-muted-foreground">(needs you)</span>
           ) : null}
@@ -75,7 +76,7 @@ export function StreamCollectionFactsLine({
         <span
           className="pdpp-caption text-muted-foreground tabular-nums"
           data-testid="stream-collected-counts"
-          title={countsTitle}
+          title={plainCollectionCopy(countsTitle)}
         >
           {countsLabel}
         </span>
@@ -83,12 +84,12 @@ export function StreamCollectionFactsLine({
 
       {pendingDetailGaps > 0 ? (
         <span
-          className="pdpp-caption text-[color:var(--warning)] tabular-nums"
+          className="pdpp-caption text-attention tabular-nums"
           data-testid="stream-pending-gaps"
           title={
             facts.pendingDetailGapsIsFloor
               ? "Recoverable detail gaps from a bounded read; there may be more beyond this count. Records already collected stay valid."
-              : "Recoverable detail gaps the next ordinary run is expected to fill. Records already collected stay valid."
+              : "Recoverable detail gaps the next sync is expected to fill. Records already collected stay valid."
           }
         >
           {pendingDetailGapsLabel ?? "pending gaps"}
@@ -99,9 +100,9 @@ export function StreamCollectionFactsLine({
         <span
           className="pdpp-caption text-muted-foreground"
           data-testid="stream-skip-label"
-          title="The runtime reported this stream as skipped on the last run; the coverage chip carries what that means for completeness."
+          title="The system reported this kind of record as skipped on the last sync."
         >
-          {skipLabel}
+          {plainCollectionCopy(skipLabel)}
         </span>
       ) : null}
     </div>
@@ -116,10 +117,10 @@ export function StreamCollectionFactsLine({
  */
 function streamFactsChipClass(tone: EvidenceTone): string {
   if (tone === "success") {
-    return "border border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300";
+    return "border border-border bg-muted/40 text-muted-foreground";
   }
   if (tone === "warning") {
-    return "border border-[color:var(--warning)]/40 bg-[color:var(--warning)]/5 text-[color:var(--warning)]";
+    return "border border-attention/40 bg-attention/5 text-attention";
   }
   if (tone === "danger") {
     return "border border-destructive/40 bg-destructive/5 text-destructive";
@@ -130,13 +131,17 @@ function streamFactsChipClass(tone: EvidenceTone): string {
 /** Inline text colour for the forward-disposition word (mirrors the detail diagnostics block). */
 function streamFactsTextClass(tone: EvidenceTone): string {
   if (tone === "success") {
-    return "text-emerald-700 dark:text-emerald-300";
+    return "text-muted-foreground";
   }
   if (tone === "warning") {
-    return "text-[color:var(--warning)]";
+    return "text-attention";
   }
   if (tone === "danger") {
     return "text-destructive";
   }
   return "text-foreground";
+}
+
+function plainCollectionCopy(value: string): string {
+  return plainDataSourceCopy(value);
 }

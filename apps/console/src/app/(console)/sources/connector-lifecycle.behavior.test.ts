@@ -88,11 +88,13 @@ test("reset control requires confirmation and reports refusal or success", async
   resetFailure = new Error("A collection run is already active.");
   try {
     await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1" })));
-    const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Reset and re-sync");
+    // Detail brief item 8 (DIRECTION.md "This data source"): today's "Reset and re-sync" is named "Sync again from the start".
+    const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Sync again from the start");
     assert.ok(button);
     assert.equal(button.disabled, true);
     const checkbox = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-      input.closest("label")?.textContent?.includes("Clear sync state and start a full sync")
+      // DIRECTION.md "This data source": the confirmation keeps its meaning in plain words.
+      input.closest("label")?.textContent?.includes("Clear the saved sync position and start a full sync")
     );
     assert.ok(checkbox);
     await act(async () => checkbox.click());
@@ -100,7 +102,8 @@ test("reset control requires confirmation and reports refusal or success", async
     await act(async () => button.click());
     assert.equal(resetCalls, 1);
     assert.equal(runCalls, 0);
-    assert.equal(container.querySelector('[role="alert"]')?.textContent, "A collection run is already active.");
+    // PAGE-RULES item 6: "run" is shown as "sync" outside Details.
+    assert.equal(container.querySelector('[role="alert"]')?.textContent, "A collection sync is already active.");
 
     resetFailure = null;
     await act(async () => button.click());

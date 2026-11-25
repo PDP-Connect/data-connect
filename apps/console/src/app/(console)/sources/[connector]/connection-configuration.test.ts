@@ -60,7 +60,7 @@ const EMPTY_ONLY_CLAIM_RE = /has none to change|no settings to change/i;
  * say the options are undescribed, and must not assert the connector has none.
  */
 const VM_NOT_DECLARED_MESSAGE_RE =
-  /kind: "not_declared",\s*message:\s*\n?\s*"[^"]*not available for this connector yet[^"]*"/;
+  /kind: "not_declared",\s*message:\s*\n?\s*"[^"]*not available for this data source yet[^"]*"/;
 /** Both writes must be owner-initiated, i.e. inside a transition callback. */
 const COMMIT_IN_TRANSITION_RE = /startTransition\(async \(\) => \{\s*const result = await proposeConfigAction/;
 const CONFIRM_IN_TRANSITION_RE = /startTransition\(async \(\) => \{\s*const result = await confirmConfigAction/;
@@ -87,11 +87,11 @@ const RENDERS_PERSISTED_STATUS_RE = /result\.revision\.status === "active"/;
 const PENDING_FROM_PERSISTED_RE = /revision\.config\[key\]/;
 const CONFIRM_BY_NUMBER_RE = /onConfirm\(revision\.revision\)/;
 
-const NOT_DECLARED_COPY_RE = /not available for this connector yet/;
+const NOT_DECLARED_COPY_RE = /not available for this data source yet/;
 const NO_OPTIONS_CLAIM_RE = /has no options/i;
 const UNREADABLE_COPY_RE = /settings description is invalid/;
 const TECHNICAL_DETAILS_RE = /<summary className="cursor-pointer text-muted-foreground">Technical details<\/summary>/;
-const CONNECTOR_DEFAULT_RE = /Connector default/;
+const DATA_SOURCE_DEFAULT_RE = /Data source default/;
 
 /** Owner copy must not leak protocol nouns. */
 const RAW_COLLECTION_SCOPE_COPY_RE = />[^<]*collection_scope[^<]*</;
@@ -110,7 +110,7 @@ const ACT_CONFIRM_TAKES_REVISION_RE = /confirmConnectionConfigRevision\(input\.c
 const ACT_ECHOES_BASE_RE = /baseEpoch: input\.baseEpoch,\s*baseRevision: input\.baseRevision/;
 
 const PAGE_RENDERS_CONFIG_RE = /<ConnectionConfiguration/;
-const PAGE_CONFIG_BEFORE_DANGER_RE = /<ConnectionConfiguration[\s\S]*<ConnectionDangerZone/;
+const PAGE_DANGER_BEFORE_CONFIG_RE = /<ConnectionDangerZone[\s\S]*<ConnectionConfiguration/;
 
 async function read(file: string): Promise<string> {
   return await readFile(file, "utf8");
@@ -179,6 +179,7 @@ test("an undeclared schema never claims the connector has no options", async () 
   // are authored once in the view-model, which is where they are pinned.
   const src = await read(COMPONENT_FILE);
   const viewModelSrc = await read(VIEW_MODEL_FILE);
+  // DIRECTION.md §One data source: use “data source” in the owner-facing label.
   assert.match(viewModelSrc, NOT_DECLARED_COPY_RE);
   assert.doesNotMatch(viewModelSrc, NO_OPTIONS_CLAIM_RE);
   assert.match(viewModelSrc, UNREADABLE_COPY_RE);
@@ -188,14 +189,16 @@ test("an undeclared schema never claims the connector has no options", async () 
   assert.notEqual(branch, "", "the not_declared branch must exist");
   assert.doesNotMatch(branch, EMPTY_ONLY_CLAIM_RE);
   const viewModel = await read(VIEW_MODEL_FILE);
+  // DIRECTION.md §One data source: use “data source” in the owner-facing label.
   assert.match(viewModel, VM_NOT_DECLARED_MESSAGE_RE);
 });
 
-test("defaults are labelled as connector defaults and machine evidence stays disclosed", async () => {
+test("defaults are labelled as data source defaults and machine evidence stays disclosed", async () => {
   const component = await read(COMPONENT_FILE);
   const viewModel = await read(VIEW_MODEL_FILE);
   assert.match(component, TECHNICAL_DETAILS_RE);
-  assert.match(viewModel, CONNECTOR_DEFAULT_RE);
+  // DIRECTION.md §One data source: labels use plain product language.
+  assert.match(viewModel, DATA_SOURCE_DEFAULT_RE);
 });
 
 test("owner-visible copy carries no protocol vocabulary", async () => {
@@ -228,8 +231,9 @@ test("confirmation sends a revision number, never a config body", async () => {
   assert.match(src, ACT_CONFIRM_TAKES_REVISION_RE);
 });
 
-test("the configuration section renders on the source detail page above the danger zone", async () => {
+test("the source controls render before settings and Details", async () => {
   const src = await read(PAGE_FILE);
   assert.match(src, PAGE_RENDERS_CONFIG_RE);
-  assert.match(src, PAGE_CONFIG_BEFORE_DANGER_RE);
+  // DIRECTION.md §One data source: this data source's controls precede Settings and Details.
+  assert.match(src, PAGE_DANGER_BEFORE_CONFIG_RE);
 });

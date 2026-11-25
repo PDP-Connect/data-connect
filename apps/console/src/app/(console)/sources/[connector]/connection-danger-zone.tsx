@@ -8,6 +8,7 @@ import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
+import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 interface Props {
   /**
@@ -47,9 +48,9 @@ interface Props {
 export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
   return (
     <Section
-      description="These actions affect only this connection. Sibling connections of the same connector type, and their saved browser sessions, are untouched."
+      description="These actions affect only this data source. Other data sources and their saved sign-in sessions are unchanged."
       id="danger-zone"
-      title="Danger zone"
+      title="Destructive actions"
     >
       {error ? (
         <div className="pdpp-caption mb-4 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
@@ -57,22 +58,22 @@ export function ConnectionDangerZone({ activeRunId = null, connectionId, error, 
         </div>
       ) : null}
       {message ? (
-        <div className="pdpp-caption mb-4 rounded-md border border-emerald-500/30 border-l-4 border-l-emerald-500/60 bg-emerald-500/5 px-4 py-2.5">
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">{message}</span>
+        <div className="pdpp-caption mb-4 rounded-md border border-border px-4 py-2.5">
+          <span className="font-medium text-muted-foreground">{message}</span>
         </div>
       ) : null}
 
       {connectionId === null ? (
         <p className="pdpp-caption text-muted-foreground italic">
-          This connector type has no addressable connection yet, so there is nothing to revoke or delete.
+          This data source has no ID yet, so there is nothing to disconnect or delete.
         </p>
       ) : (
         <div className="flex flex-col gap-6 rounded-md border border-border p-4">
           {setupFailed ? null : (
             <>
-              <RevokeForm connectionId={connectionId} />
-              <div className="border-border border-t" />
               <ResetSourceForm connectionId={connectionId} />
+              <div className="border-border border-t" />
+              <RevokeForm connectionId={connectionId} />
               <div className="border-border border-t" />
             </>
           )}
@@ -90,18 +91,18 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
   const [isPending, startTransition] = useTransition();
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-foreground">Reset and re-sync</h3>
+      <h3 className="pdpp-body font-medium text-destructive">Sync again from the start</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Clears this source’s cursor and sync checkpoints, then starts a full sync. Records, credentials, and browser
-        profile are kept.
+        Clears the saved sync position, then starts a full sync. Records and sign-in details are kept.
       </p>
       <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
         <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-        <span>Clear sync state and start a full sync for {connectionId}.</span>
+        <span>Clear the saved sync position and start a full sync for this data source.</span>
       </label>
       <div className="flex flex-wrap items-center gap-3">
         <IcButton
           disabled={!confirmed || isPending}
+          className="text-destructive"
           onClick={() => {
             setMessage(null);
             startTransition(async () => {
@@ -110,18 +111,19 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
               setMessage(
                 result.ok
                   ? { text: "Sync state cleared. Full sync started.", tone: "success" }
-                  : { text: result.message, tone: "error" }
+                  : { text: plainDataSourceCopy(result.message).replaceAll(connectionId, "this data source"), tone: "error" }
               );
             });
           }}
           type="button"
+          variant="ghost"
         >
-          {isPending ? "Resetting…" : "Reset and re-sync"}
+          {isPending ? "Starting…" : "Sync again from the start"}
         </IcButton>
         {message ? (
           <span
             aria-live="polite"
-            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-status-success-fg"}`}
+            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-muted-foreground"}`}
             role={message.tone === "error" ? "alert" : "status"}
           >
             {message.text}
@@ -135,21 +137,20 @@ function ResetSourceForm({ connectionId }: { connectionId: string }) {
 function RevokeForm({ connectionId }: { connectionId: string }) {
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-foreground">Revoke</h3>
+      <h3 className="pdpp-body font-medium text-destructive">Disconnect</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Stops future collection and signs out the saved browser session for this source. Records, grants, and audit
-        history are retained. To resume, reconnect this source.
+        Stops future syncing and signs out its saved browser session. Your records, app access, and activity history are kept.
       </p>
       <form action={revokeConnectionAction} className="mt-1 flex flex-wrap items-center gap-3">
         <input name="connection_id" type="hidden" value={connectionId} />
         <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
           <input name="confirm_revoke" type="checkbox" value="yes" />
           <span>
-            Stop future collection for <code className="font-mono">{connectionId}</code>; keep its records.
+            Stop future syncing for this data source; keep its records.
           </span>
         </label>
-        <IcButton type="submit" variant="ghost">
-          Revoke connection
+        <IcButton className="text-destructive" type="submit" variant="ghost">
+          Disconnect
         </IcButton>
       </form>
     </div>
@@ -163,40 +164,35 @@ function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null;
     <div className="flex flex-col gap-2">
       <h3 className="pdpp-body font-medium text-destructive">Delete</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Permanently erases this connection's records, including everything already collected, its sync position, and
-        the saved browser session, and removes the connection. This cannot be undone.
+        Permanently erases this data source's records, its sync position, and its saved browser session. This cannot be undone.
       </p>
       <p className="pdpp-caption text-muted-foreground">
-        Apps you granted access stay authorized. They stop receiving this source's data, and they keep any copies they
-        already received. To end their access, revoke their grants.
+        Apps that can read your data stay authorized. They keep any copies they already received.
       </p>
       {activeRunId ? (
         <p className="pdpp-caption text-muted-foreground">
-          A collection run is in progress. Deleting cancels run <code className="font-mono">{activeRunId}</code> first;
-          records it already saved are erased with the rest.
+          A sync is in progress. Deleting cancels it first; its saved records are erased with the rest.
         </p>
       ) : null}
       <form action={deleteConnectionAction} className="mt-1 flex flex-col gap-2">
         <input name="connection_id" type="hidden" value={connectionId} />
         {activeRunId ? <input name="cancel_run_id" type="hidden" value={activeRunId} /> : null}
         <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground" htmlFor="confirm-delete-input">
-          <span>
-            Type the connection id <code className="font-mono">{connectionId}</code> to confirm.
-          </span>
+          <span>Type the ID shown in Details to confirm.</span>
           <IcInput
-            aria-label="Type the connection id to confirm deletion"
+            aria-label="Type the data source ID to confirm deletion"
             autoComplete="off"
-            className="w-full max-w-md font-mono"
+            className="w-full max-w-md"
             id="confirm-delete-input"
             name="confirm_delete"
             onChange={(e) => setTyped(e.target.value)}
-            placeholder={connectionId}
+            placeholder="Data source ID"
             value={typed}
           />
         </label>
         <div>
-          <IcButton disabled={!confirmed} type="submit" variant="destructive">
-            {activeRunId ? "Cancel run and delete" : "Delete connection and erase its records"}
+          <IcButton className="text-destructive" disabled={!confirmed} type="submit" variant="ghost">
+            {activeRunId ? "Cancel sync and delete" : "Delete data source and erase its records"}
           </IcButton>
         </div>
       </form>

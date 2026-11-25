@@ -12,6 +12,7 @@ import { connectorNotInstalledCopy } from "../../lib/connector-implementation.ts
 import { type RunNowResult, runConnectorNowAction } from "../actions.ts";
 import { markSyncStartToast, readSyncStartToast, syncStartToastDismissDelayMs } from "../last-known-sync-start.ts";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
+import { plainDataSourceCopy } from "./source-detail-copy.ts";
 
 const RUNNING_POLL_MS = 3000;
 const TOAST_TTL_MS = 15_000;
@@ -21,7 +22,7 @@ function syncToastToneClass(tone: "info" | "error" | "warning"): string {
     return "text-destructive";
   }
   if (tone === "warning") {
-    return "text-[color:var(--warning)]";
+    return "text-attention";
   }
   return "text-muted-foreground";
 }
@@ -55,6 +56,10 @@ interface SyncToast {
 type IcButtonVariant = "default" | "destructive" | "ghost";
 function toIcVariant(v: "default" | "destructive" | "outline"): IcButtonVariant {
   return v === "outline" ? "ghost" : v;
+}
+
+function plainSyncCopy(value: string): string {
+  return plainDataSourceCopy(value);
 }
 
 function syncRunHref(runId: string | undefined): string | null {
@@ -166,7 +171,7 @@ export function SyncNowButton({
       }
       if (res.reason === "connector_not_installed") {
         if (installPromptShown) {
-          setToast({ message: connectorNotInstalledCopy(displayName), tone: "warning" });
+          setToast({ message: plainSyncCopy(connectorNotInstalledCopy(displayName)), tone: "warning" });
           return;
         }
         setNotInstalledKey(res.connector_id);
@@ -174,7 +179,7 @@ export function SyncNowButton({
       }
       // Stay on this connection and say whether the request reached the server.
       setToast({
-        message: `${syncStartFailureLead(res.phase)} ${res.message}`.trim(),
+        message: plainSyncCopy(`${syncStartFailureLead(res.phase)} ${res.message}`.trim()),
         tone: res.phase === "before_server" ? "warning" : "error",
       });
     });
@@ -187,11 +192,11 @@ export function SyncNowButton({
   return (
     <div className="inline-flex min-w-0 max-w-full flex-col items-start gap-1">
       <IcButton
-        aria-label={`${buttonLabel} for ${displayName}`}
+        aria-label={`${plainSyncCopy(buttonLabel)} for ${displayName}`}
         disabled={busy}
         onClick={handleClick}
         size="sm"
-        title={title}
+        title={title ? plainSyncCopy(title) : undefined}
         variant={toIcVariant(variant)}
       >
         {buttonLabel}

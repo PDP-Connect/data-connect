@@ -116,7 +116,7 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
         }}
       >
         <IcInput
-          aria-label="Connection label"
+          aria-label="Data source name"
           className="w-56"
           disabled={isPending}
           maxLength={200}
@@ -130,7 +130,7 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
           ref={inputRef}
           value={value}
         />
-        <IcButton disabled={isPending || !value.trim()} size="sm" type="submit">
+        <IcButton disabled={isPending || !value.trim()} size="sm" type="submit" variant="ghost">
           {isPending ? "Saving…" : "Save"}
         </IcButton>
         <IcButton disabled={isPending} onClick={cancel} size="sm" type="button" variant="ghost">

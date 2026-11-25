@@ -14,7 +14,7 @@ import { DetailLoadingSkeleton } from "../../components/route-loading.tsx";
 export default function ConnectorDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="this connection" />
+      <DetailLoadingSkeleton label="this data source" />
     </RecordroomShellWithPalette>
   );
 }

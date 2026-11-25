@@ -21,7 +21,8 @@ test("the detail route keeps setup-failed identity and renders same-connection r
   assert.match(page, /setupFailed:\s*isSetupFailedSource\(summary\)/);
   assert.match(page, /setupFailed \? <ResumeSetupSection connectionId=\{connectionId\} \/> : null/);
   assert.match(page, /<ConnectionDangerZone[\s\S]*connectionId=\{connectorInstanceId \?\? connectionId\}/);
-  assert.match(page, /function ResumeSetupSection[\s\S]*>\s*Resume setup\s*<\/IcButton>/);
+  // DIRECTION.md status table row 2: the resume-setup action is named "Continue setup".
+  assert.match(page, /function ResumeSetupSection[\s\S]*>\s*Continue setup\s*<\/IcButton>/);
 });
 
 test("the reference client carries source visibility on scoped connection reads", async () => {
