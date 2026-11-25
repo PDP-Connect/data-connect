@@ -7,7 +7,7 @@ import { afterEach, test } from "node:test";
 import userEvent from "@testing-library/user-event";
 import { JSDOM } from "jsdom";
 import { PathnameContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime";
-import { act, createElement, type ReactNode } from "react";
+import React, { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 interface BrowserGlobals {
@@ -31,6 +31,9 @@ function globalValue(name: string, dom: JSDOM, windowObject: Record<string, unkn
   if (name === "IS_REACT_ACT_ENVIRONMENT") {
     return true;
   }
+  if (name === "React") {
+    return React;
+  }
   return windowObject[name];
 }
 
@@ -38,8 +41,14 @@ function installBrowserGlobals(): BrowserGlobals {
   const dom = new JSDOM("<!doctype html><html data-theme=dark><body></body></html>", {
     url: "http://localhost/",
   });
+  Object.defineProperty(dom.window, "innerWidth", { configurable: true, value: 390 });
   const style = dom.window.document.createElement("style");
-  style.textContent = readFileSync(new URL("./shell.css", import.meta.url), "utf8");
+  style.textContent = [
+    readFileSync(new URL("./shell.css", import.meta.url), "utf8"),
+    // JSDOM does not apply the shell's max-width media rule.
+    ".rr-head { display: flex; }",
+    ".rr-menu-btn { display: inline-flex; }",
+  ].join("\n");
   dom.window.document.head.append(style);
   const host = dom.window.document.createElement("div");
   dom.window.document.body.append(host);
@@ -81,6 +90,7 @@ function installBrowserGlobals(): BrowserGlobals {
     "requestAnimationFrame",
     "cancelAnimationFrame",
     "IS_REACT_ACT_ENVIRONMENT",
+    "React",
   ];
   for (const name of globals) {
     previous.set(name, Object.getOwnPropertyDescriptor(globalObject, name));
@@ -119,7 +129,7 @@ function app(children: ReactNode) {
 }
 
 async function pressTab(user: ReturnType<typeof userEvent.setup>, options?: { shift?: boolean }) {
-  await user.tab(options);
+  await act(async () => user.tab(options));
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
 }
 
@@ -146,7 +156,7 @@ test("mobile drawer opens as a named dialog, traps focus, and restores the trigg
   const trigger = host.querySelector<HTMLButtonElement>(".rr-menu-btn");
   assert.ok(trigger);
   trigger.focus();
-  act(() => trigger.click());
+  await act(async () => user.click(trigger));
   await settle();
 
   const dialog = currentBrowser.dom.window.document.querySelector<HTMLElement>('[role="dialog"]');
@@ -195,12 +205,12 @@ test("mobile drawer opens as a named dialog, traps focus, and restores the trigg
   assert.equal(currentBrowser.dom.window.document.activeElement?.closest('[role="dialog"]'), dialog);
   assert.notEqual(currentBrowser.dom.window.document.activeElement, outside);
 
-  act(() => {
-    dialog.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
-  });
+  await act(async () => user.keyboard("{Escape}"));
   await settle();
-  assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
-  assert.equal(currentBrowser.dom.window.document.activeElement, trigger);
+  const dialogAfterEscape = currentBrowser.dom.window.document.querySelector('[role="dialog"]');
+  assert.equal(dialogAfterEscape, null);
+  const activeAfterEscape = currentBrowser.dom.window.document.activeElement;
+  assert.equal(activeAfterEscape, trigger);
 });
 
 test("backdrop and close button dismiss the drawer", async () => {
