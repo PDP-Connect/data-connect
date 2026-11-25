@@ -255,8 +255,9 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // OS reauth handoff state, never connector/provider policy.
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
-  // readManifest(root) in local-source.ts: readSync on openSync(manifestPath)
-  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
+  // readConfinedFile(file, limit) in local-source.ts: readSync on the
+  // descriptor of file.path. Its only caller, readManifest(root), passes
+  // checkConfinedFile(root, MANIFEST_PATH, ...) --
   // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
   // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
   // developer-supplied absolute directory path given to the public
@@ -265,7 +266,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // caller-supplied, the filename component is an RI-owned generic literal,
   // and this feature is explicitly unsigned/unregistered developer tooling
   // (see this file's own module doc comment), not connector catalog data.
-  'reference-implementation/server/connector-install/local-source.ts::readManifest::readSync(fd, buffer, length, buffer.length - length, null)',
+  'reference-implementation/server/connector-install/local-source.ts::readConfinedFile::readSync(fd, buffer, length, buffer.length - length, null)',
   // SQLite file checks: readSync compares the 16-byte SQLite header or
   // streams the file into a SHA-256 digest. The bytes never reach a parser,
   // so they cannot carry connector or provider identity.
