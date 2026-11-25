@@ -5,6 +5,7 @@ import { strict as assert } from "node:assert"
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
   existsSync,
@@ -113,10 +114,37 @@ test("reload refreshes hashes and drift blocks a selected local run until reload
   assert.equal(drifted.status, "invalid")
   const reloaded = await store.reload(source.sourceId)
   assert.notEqual(reloaded.entrypointSha256, source.entrypointSha256)
+  const addedAgain = await store.add(sourcePath)
+  assert.equal(addedAgain.sourceId, source.sourceId)
+  assert.equal(addedAgain.selected, true)
+  assert.equal(addedAgain.entrypointSha256, reloaded.entrypointSha256)
+  assert.equal(
+    (await store.getSelectedForConnector(source.connectorKey))?.sourceId,
+    source.sourceId
+  )
   assert.equal(
     (await inspectActiveLocalConnectorSource(store, source.connectorId)).status,
     "active"
   )
+})
+
+test("adding an existing root again refuses a changed connector identity", async () => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const sourcePath = fixture()
+  const store = createFileLocalConnectorSourceStore(dataDir)
+  const source = await store.add(sourcePath)
+  const manifestPath = join(sourcePath, "profile", "collection-profile.json")
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+  writeFileSync(
+    manifestPath,
+    JSON.stringify({ ...manifest, connector_key: `${source.connectorKey}-renamed` })
+  )
+  await assert.rejects(
+    () => store.add(sourcePath),
+    /changed connector identity/
+  )
+  assert.equal((await store.list())[0]?.connectorKey, source.connectorKey)
 })
 
 test("local admission rejects unsupported runtime bindings", async () => {
