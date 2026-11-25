@@ -5,7 +5,8 @@
  * Acceptance: a connector whose key no build of this server has seen installs
  * from a catalog entry, validates, runs with its declared tuning environment
  * and gets a manifest-derived setup plan, with no rebuild and no code change.
- * `catalog-only-example` appears nowhere else in the repository. The catalog
+ * The key is generated for each run, so no list in the repository can name
+ * it, now or later; its tuning namespace is derived from it. The catalog
  * entry comes from an injected loader, so "in the signed catalog" is not
  * claimed here: see the last paragraph.
  *
@@ -15,7 +16,7 @@
  *   out-of-namespace rejection fails on that code.
  * - spawn and install-and-run: tuning bindings were kept only when a list
  *   lookup named this connector as the key's owner, so the child never saw
- *   PDPP_CATALOG_ONLY_EXAMPLE_PAGE_SIZE. Install-and-run installs an
+ *   its own PDPP_<KEY>_PAGE_SIZE knob. Install-and-run installs an
  *   executable through the real install service, registers its manifest
  *   through the server's validation, then runs that installed entrypoint with
  *   that registered manifest. The spawn test runs a hostile manifest that
@@ -34,6 +35,7 @@
  */
 
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,13 +54,17 @@ import { installedConnectorManifestRegistration } from "../server/connector-inst
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, initDb } from "../server/db.ts";
 
-const KEY = "catalog-only-example";
+// A fresh key per run: a built-in list that happened to include a fixed
+// fixture key would satisfy every positive assertion below.
+const KEY = `catalog-only-${randomBytes(4).toString("hex")}`;
 const REGISTRY_ID = `https://registry.pdpp.dev/connectors/${KEY}`;
-const OWN_KNOB = "PDPP_CATALOG_ONLY_EXAMPLE_PAGE_SIZE";
+// The tuning namespace of a key, as the manifest contract states it.
+const NAMESPACE = `PDPP_${KEY.toUpperCase().replaceAll("-", "_")}_`;
+const OWN_KNOB = `${NAMESPACE}PAGE_SIZE`;
 const OTHER_KNOB = "PDPP_OTHER_THING_PAGE_SIZE";
 // Not *_PAGE_SIZE: a leak of either would be invisible to a knob-only capture.
 const FOREIGN_SECRET = "PDPP_OTHER_THING_TOKEN";
-const UNDECLARED_OWN_SECRET = "PDPP_CATALOG_ONLY_EXAMPLE_TOKEN";
+const UNDECLARED_OWN_SECRET = `${NAMESPACE}TOKEN`;
 const SERVER_ENV = {
   [OWN_KNOB]: "25",
   [OTHER_KNOB]: "9",
@@ -235,7 +241,7 @@ test("validation: its own tuning namespace is accepted and another connector's i
   assert.doesNotThrow(() => validateConnectorManifest(exampleManifest([OWN_KNOB])));
   assert.throws(
     () => validateConnectorManifest(exampleManifest([OTHER_KNOB])),
-    /PDPP_OTHER_THING_PAGE_SIZE is outside the catalog-only-example tuning namespace/
+    (error: Error) => error.message.includes(`PDPP_OTHER_THING_PAGE_SIZE is outside the ${KEY} tuning namespace`)
   );
 });
 
