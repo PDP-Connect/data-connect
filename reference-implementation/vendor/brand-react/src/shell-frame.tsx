@@ -29,7 +29,7 @@
 import { AppWindow, Compass, Database, Home, type LucideIcon, Menu, Settings2 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -43,6 +43,12 @@ import { DEFAULT_JUMP_SHORTCUT_LABEL, jumpShortcutLabel } from "./jump-shortcut.
 import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
 import { ShellThemeButton } from "./shell-theme.tsx";
 import "./shell.css";
+import {
+  DRAWER_SWIPE_MAX_WIDTH,
+  drawerSwipeDecision,
+  shouldIgnoreDrawerSwipeTarget,
+  type SwipePoint,
+} from "./drawer-swipe-gesture.ts";
 
 export interface NavItem {
   /** Real route href (pinned by redirects/tests). */
@@ -325,6 +331,47 @@ export function RecordroomShell({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
+  useEffect(() => {
+    let start: { point: SwipePoint; time: number } | null = null;
+    const handleTouchStart = (event: TouchEvent) => {
+      if (
+        event.touches.length !== 1 ||
+        window.innerWidth > DRAWER_SWIPE_MAX_WIDTH ||
+        shouldIgnoreDrawerSwipeTarget(event.target, drawerOpen)
+      ) {
+        start = null;
+        return;
+      }
+      const touch = event.touches[0];
+      start = touch ? { point: { x: touch.clientX, y: touch.clientY }, time: event.timeStamp } : null;
+    };
+    const handleTouchEnd = (event: TouchEvent) => {
+      const origin = start;
+      start = null;
+      const touch = event.changedTouches[0];
+      if (!origin || event.changedTouches.length !== 1 || !touch) return;
+      const decision = drawerSwipeDecision(
+        origin.point,
+        { x: touch.clientX, y: touch.clientY },
+        event.timeStamp - origin.time,
+        window.innerWidth,
+        drawerOpen,
+      );
+      if (decision === "open") setDrawerOpen(true);
+      if (decision === "close") setDrawerOpen(false);
+    };
+    const handleTouchCancel = () => { start = null; };
+
+    window.addEventListener("touchstart", handleTouchStart, { passive: true });
+    window.addEventListener("touchend", handleTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", handleTouchCancel, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchend", handleTouchEnd);
+      window.removeEventListener("touchcancel", handleTouchCancel);
+    };
+  }, [drawerOpen]);
 
   return (
     <IcDialog modal onOpenChange={setDrawerOpen} open={drawerOpen}>
