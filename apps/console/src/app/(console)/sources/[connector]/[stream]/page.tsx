@@ -11,11 +11,9 @@ import {
   formatStructuredCell,
   humanizeFieldLabel,
   parseTimestampValue,
-  type RecordPreview,
 } from "@pdpp/display";
 import { DataList, PageHeader, Pager, Section } from "@pdpp/operator-ui/components/primitives";
-import { RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
-import { buildBlobAffordance, type ExplorerFieldCapability } from "@pdpp/operator-ui/components/views/explorer-utils";
+import type { ExplorerFieldCapability } from "@pdpp/operator-ui/components/views/explorer-utils";
 import { declaredRolesFromCapabilities } from "@pdpp/operator-ui/explore/explore-data-assembler";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -34,7 +32,6 @@ import {
   computeDefaultColumns,
   type ConnectorManifest,
   deriveAllColumns,
-  type ExpandCapability,
   getStreamMetadata,
   listConnectorManifests,
   queryRecords,
@@ -49,21 +46,10 @@ import {
 import {
   connectorInstanceIdForConnection,
   resolveConnectionForRecordsRoute,
-  sourceLabelForConnection,
 } from "../../connection-route.ts";
-import {
-  candidateParentStreamsForChild,
-  childHasOneBackLinkForField,
-  childHasOneLinkFields,
-  findManifestForConnectorId,
-  findParentBackLink,
-  parentRelationsForChild,
-  type ReverseChildListLink,
-  reverseChildListEdgesFromManifest,
-  reverseChildListLinksFromManifest,
-} from "../../lib/relationships.ts";
+import { findManifestForConnectorId } from "../../lib/relationships.ts";
 import { ColumnsMenu } from "./columns-menu.tsx";
-import { partialReadSentence } from "./record-list-presentation.ts";
+import { partialReadSentence, sourceDisplayName } from "./record-list-presentation.ts";
 import { RecordOrderSelect } from "./record-order-select.tsx";
 
 export const dynamic = "force-dynamic";
@@ -161,7 +147,6 @@ function readExactFilters(searchParams: Record<string, string | string[] | undef
   return filters;
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: StreamPage composes route data, table rendering, and relationship links; this lane keeps the RecordIdentity port scoped.
 export default async function StreamPage({
   params,
   searchParams,
@@ -190,22 +175,9 @@ export default async function StreamPage({
   let latestSourceRun: RefConnectorRunSummary | null = null;
   let streamCollectionFacts: StreamCollectionFacts | null = null;
   let declaredFieldTypes: DeclaredFieldTypes = {};
-  // Declared presentation CAPABILITIES for this stream's fields (granted/role/type),
-  // sourced from streamMetadata.field_capabilities — already fetched, so the shared
-  // RecordIdentity preview is a pure transform on data in hand (no new request). The
-  // role map drives the honest declared-or-generic identity; the blob capability is
-  // the reliable, surface-supplied image signal RecordIdentity renders the mark from.
+  // Declared field roles drive the row's honest title and money preview.
   let fieldCapabilities: ExplorerFieldCapability[] = [];
   let listStreamMetadata: ListStreamMetadata = null;
-  let parentRelations: Array<{ parentStream: string; capability: ExpandCapability }> = [];
-  // All streams in this connector's manifest — used to enumerate child streams
-  // whose declared `has_one` points back at the displayed (parent) stream, for
-  // per-row reverse parent → filtered-child-list links.
-  interface ManifestStream {
-    name: string;
-    relationships?: Array<{ name: string; stream?: string; foreign_key?: string; cardinality?: string }>;
-  }
-  let connectorStreams: ManifestStream[] = [];
   let connectorIcon: ConnectorManifest["icon"] = null;
   try {
     const connection = await resolveConnectionForRecordsRoute(routeId);
@@ -214,25 +186,16 @@ export default async function StreamPage({
     }
     connectorId = connection.connector_id;
     connectionId = connection.connection_id;
-    sourceLabel = sourceLabelForConnection(connection);
+    sourceLabel = sourceDisplayName(connection);
     connectorInstanceId = connectorInstanceIdForConnection(connection);
     latestSourceRun = connection.last_run;
     streamCollectionFacts = collectionFactsForStream(connection.collection_report, streamName);
     const sourceStreamRecordTotal =
       connection.stream_records?.find((row) => row.stream === streamName)?.record_count ?? null;
-    // The parent-metadata reads depend only on the connector manifests (to
-    // enumerate which parent streams declare an expand into this child) — not on
-    // the records query or this stream's own metadata. Chaining them onto the
-    // manifests promise and folding the result into the same `Promise.all`,
-    // rather than awaiting a second batch after the first settles, lets the
-    // parent reads start the moment manifests resolve and overlap the still-
-    // in-flight records query. Same fetches, same inputs, same soft-failure
-    // handling (`.catch(() => null)`); only the composition changes, so the
-    // rendered result is identical.
     const manifestsPromise = listConnectorManifests().catch(
       () => [] as Awaited<ReturnType<typeof listConnectorManifests>>
     );
-    const [pageResult, manifests, streamMetadata, parentMetadata] = await Promise.all([
+    const [pageResult, manifests, streamMetadata] = await Promise.all([
       queryRecords(connectorId, streamName, {
         connectionId,
         connectorInstanceId,
@@ -247,33 +210,9 @@ export default async function StreamPage({
       // minor-unit cells render as money (chase `amount` → `$30.00`). Soft:
       // a metadata read failure leaves cells on plain stringification.
       getStreamMetadata(connectorId, streamName, { connectionId, connectorInstanceId }).catch(() => null),
-      // The manifest is used only to prune parent metadata reads. Link semantics
-      // come from the parent streams' live `expand_capabilities`, never from
-      // payload-shaped guesses or fabricated manifest fields.
-      (async () => {
-        const resolvedManifests = await manifestsPromise;
-        const manifest = findManifestForConnectorId(resolvedManifests, connectorId);
-        return Promise.all(
-          candidateParentStreamsForChild(manifest?.streams, streamName).map(async (parentStream) => {
-            let metadata: Awaited<ReturnType<typeof getStreamMetadata>> | null;
-            try {
-              metadata = await getStreamMetadata(connectorId, parentStream, { connectionId, connectorInstanceId });
-            } catch {
-              metadata = null;
-            }
-            return {
-              expandCapabilities: Array.isArray(metadata?.expand_capabilities) ? metadata.expand_capabilities : [],
-              parentStream,
-            };
-          })
-        );
-      })(),
     ]);
     page = pageResult;
     declaredFieldTypes = deriveDeclaredFieldTypes(streamMetadata);
-    // Same projection the detail page builds (page.tsx:141) — carry granted/role/type
-    // so the shared identity preview uses declared roles (honest title) and the
-    // declared blob field (the reliable image signal), never a field-name guess.
     fieldCapabilities = Object.entries(streamMetadata?.field_capabilities ?? {}).map(([name, capability]) => ({
       granted: capability.granted !== false,
       name,
@@ -283,14 +222,12 @@ export default async function StreamPage({
     listStreamMetadata = listStreamMetadataFrom(streamMetadata);
     const connectorManifest = findManifestForConnectorId(manifests, connectorId);
     connectorIcon = connectorManifest?.icon ?? null;
-    connectorStreams = (connectorManifest?.streams ?? []) as ManifestStream[];
-    const maybeStream = connectorStreams.find((s) => s.name === streamName);
+    const maybeStream = connectorManifest?.streams?.find((s) => s.name === streamName);
     streamManifest = (maybeStream ?? null) as StreamManifest | null;
     streamRecordTotal =
       typeof streamMetadata?.record_count === "number" && Number.isFinite(streamMetadata.record_count)
         ? Math.max(0, Math.floor(streamMetadata.record_count))
         : sourceStreamRecordTotal;
-    parentRelations = parentRelationsForChild(parentMetadata, streamName);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -350,44 +287,6 @@ export default async function StreamPage({
     totalHeld: streamRecordTotal,
   });
 
-  // Fields on this (child) stream that link a cell back to its parent record.
-  // The linkable set is taken only from declared relations — never from a field
-  // that merely looks like a foreign key — and from two manifest sources, the
-  // same two the record detail page renders:
-  //   1. a parent stream's `expand_capabilities` (`findParentBackLink`); and
-  //   2. this child stream's own declared `has_one` relationships
-  //      (`childHasOneBackLinksFromManifest`), which is the only source for the
-  //      belongs-to edges (Chase/USAA/YNAB transactions → accounts, Slack
-  //      messages → channels/users, …) that the parent-side `expand_capabilities`
-  //      path does not surface.
-  // Without source 2 the list page rendered those foreign-key cells as plain
-  // text even though the same field on the record detail page is a link.
-  const childManifestStream = streamManifest as {
-    name: string;
-    relationships?: Array<{ name: string; stream?: string; foreign_key?: string; cardinality?: string }>;
-  } | null;
-  const expandCapabilityLinkFields = new Set(
-    parentRelations
-      .map(({ capability }) => capability.child_parent_key_field ?? capability.foreign_key)
-      .filter((field): field is string => typeof field === "string")
-  );
-  const childDeclaredLinkFields = childHasOneLinkFields(childManifestStream ?? undefined);
-  // Resolve a cell to its parent back-link, preferring the `expand_capabilities`
-  // source so a field declared by both sources collapses to one edge exactly as
-  // `mergeParentBackLinks` does on the detail page.
-  const parentLinkForCell = (record: StreamRecord, column: string) => {
-    if (expandCapabilityLinkFields.has(column)) {
-      return findParentBackLink(streamName, record.data, parentRelations, {
-        childParentKeyField: column,
-        connectionId,
-      });
-    }
-    if (childDeclaredLinkFields.has(column)) {
-      return childHasOneBackLinkForField(childManifestStream ?? undefined, record.data, column, { connectionId });
-    }
-    return null;
-  };
-
   // Format a non-linked cell: declared-currency formatting (chase `amount` ->
   // `$30.00`) first, then a readable array/object rendering (a `cc` array of
   // `{name,email}` reads as names, not raw JSON) before falling back to plain
@@ -403,59 +302,23 @@ export default async function StreamPage({
     return structured ? structured.text : stringifyCell(value);
   };
 
-  // The declared role map for this stream (constant per page) — the ONE seam that
-  // makes the shared RecordIdentity render the honest declared title here exactly as
-  // the feed/peek/detail do, instead of the table's old raw `id`-mono lead. Computed
-  // once from the field_capabilities already in hand.
+  // Declared roles keep title and amount previews tied to the stream's metadata.
   const declaredRoles = declaredRolesFromCapabilities(fieldCapabilities);
-  // The shared identity props for one row: the SAME canonical RecordPreview the feed
-  // and detail build, plus the reliable surface-supplied image signal (the declared
-  // blob field decorated with a usable fetch_url). No new fetch, no field-name guess.
-  const recordIdentityFor = (record: StreamRecord) => {
+  const recordPreviewFor = (record: StreamRecord) => {
     const data = record.data ?? {};
     const { kind } = classifyRecordKind(streamName, data, declaredFieldTypes, undefined, declaredRoles);
-    const preview = buildRecordPreview(kind, data, declaredFieldTypes, declaredRoles);
-    const hasImage = buildBlobAffordance(data, fieldCapabilities)?.state === "available";
-    return { hasImage, kind, preview };
+    return buildRecordPreview(kind, data, declaredFieldTypes, declaredRoles);
   };
 
-  // Reverse parent → filtered-child-list links, rendered per row. The displayed
-  // stream is the same for every row, so the set of child streams that declare a
-  // `has_one` back to it is constant per page and computed once here; each row
-  // then substitutes its own record key as the filter value. When no child
-  // declares a `has_one` against this stream the set is empty and no per-row
-  // reverse work is done. This is the list-page counterpart to the parent detail
-  // page's reverse links, and the inverse of the per-cell child → parent links
-  // above; it loads no child records (href construction only) and reuses the
-  // detail page's link semantics via `reverseChildListLinksFromManifest`.
-  const hasReverseChildEdges = reverseChildListEdgesFromManifest(connectorStreams, streamName).length > 0;
-  const reverseChildListLinksForRow = (record: StreamRecord): ReverseChildListLink[] =>
-    hasReverseChildEdges
-      ? reverseChildListLinksFromManifest(connectorStreams, {
-          connectionId,
-          parentRecordKey: record.id,
-          parentStream: streamName,
-        })
-      : [];
   const partialReadMessage = partialReadSentence(page.warnings);
 
   return (
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          <>
-            {allColumns.length > 0 && (
-              <ColumnsMenu
-                allColumns={allColumns}
-                defaultColumns={defaultColumns}
-                mode={mode}
-                selectedColumns={columns}
-              />
-            )}
-            <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={`${streamPath}/health`}>
-              What arrived →
-            </Link>
-          </>
+          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={`${streamPath}/health`}>
+            What arrived →
+          </Link>
         }
         breadcrumbs={[
           { href: "/sources", label: "Data sources" },
@@ -478,10 +341,17 @@ export default async function StreamPage({
 
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <p className="pdpp-caption text-muted-foreground">{pageCount}</p>
-        <RecordOrderSelect
-          currentOrder={order ?? "desc"}
-          pathname={streamPath}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          {allColumns.length > 0 && (
+            <ColumnsMenu
+              allColumns={allColumns}
+              defaultColumns={defaultColumns}
+              mode={mode}
+              selectedColumns={columns}
+            />
+          )}
+          <RecordOrderSelect currentOrder={order ?? "desc"} pathname={streamPath} />
+        </div>
       </div>
 
       <details className="mb-6 border-border/70 border-y py-3">
@@ -507,133 +377,83 @@ export default async function StreamPage({
         <p className="pdpp-caption text-muted-foreground italic">No records.</p>
       ) : (
         <ul className="divide-y divide-border/70 border-border/70 border-y">
-            {page.data.map((r) => {
-              const reverseLinks = reverseChildListLinksForRow(r);
-              const identity = recordIdentityFor(r);
-              const timestamp = primaryTimestamp(pickSemanticTimestamp(listStreamMetadata, r.data), r.emitted_at);
-              // Explore's own row rule over the same preview Explore builds: title,
-              // then first human text (e.g. an artist's name), then the kind name.
-              const row = exploreRecordRow({
-                connectionDisplayName: sourceLabel,
-                displayAt: timestamp.value,
-                preview: identity.preview ?? undefined,
-                stream: streamName,
-              });
-              return (
-                <li className="py-2" key={r.id}>
-                  <Link
-                    aria-label={`Open ${row.title} · ${row.kind} · ${row.source}`}
-                    className="rr-x-row"
-                    href={recordHref(r.id)}
-                  >
-                    <span aria-hidden="true" className="rr-x-record-logo">
-                      <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
+          {page.data.map((r) => {
+            const preview = recordPreviewFor(r);
+            const timestamp = primaryTimestamp(pickSemanticTimestamp(listStreamMetadata, r.data), r.emitted_at);
+            const row = exploreRecordRow({
+              connectionDisplayName: sourceLabel,
+              displayAt: timestamp.value,
+              preview: preview ?? undefined,
+              stream: streamName,
+            });
+            return (
+              <li className="py-2" key={r.id}>
+                <Link
+                  aria-label={`Open ${row.title} · ${row.kind} · ${row.source}`}
+                  className="rr-x-row"
+                  href={recordHref(r.id)}
+                >
+                  <span aria-hidden="true" className="rr-x-record-logo">
+                    <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
+                  </span>
+                  <span className="rr-x-row__body">
+                    <span className="rr-x-row__title text-[15px]">{row.title}</span>
+                    <span className="rr-x-row__meta truncate text-[13px] text-muted-foreground">
+                      {row.source}
                     </span>
-                    <span className="rr-x-row__body">
-                      <span className="rr-x-row__title text-[15px]">{row.title}</span>
-                      <span className="rr-x-row__meta truncate text-[13px] text-muted-foreground">
-                        {row.kind} · {row.source}
-                      </span>
-                    </span>
+                  </span>
+                  <span className="ml-auto flex shrink-0 items-center gap-4">
                     {row.time ? <span className="rr-x-row__time text-[13px]">{row.time}</span> : null}
-                  </Link>
+                    {preview?.amount ? (
+                      <span className="text-[13px] tabular-nums text-foreground">{preview.amount}</span>
+                    ) : null}
+                  </span>
+                </Link>
 
-                  <details className="px-3 pb-2">
-                    <summary className="pdpp-caption cursor-pointer text-muted-foreground">Details</summary>
-                    <div className="pt-3">
-                      <div className="sm:hidden">
-                        <RecordCard
-                          columns={columns}
-                          declaredFieldTypes={declaredFieldTypes}
-                          hasImage={identity.hasImage}
-                          preview={identity.preview}
-                          record={r}
-                          streamMetadata={listStreamMetadata}
-                        />
-                      </div>
+                <div className="px-3 pb-2 pt-3">
+                  <div className="sm:hidden">
+                    <RecordCard columns={columns} declaredFieldTypes={declaredFieldTypes} record={r} />
+                  </div>
 
-                      <div className="hidden overflow-x-auto sm:block">
-                        <table className="min-w-full">
-                          <thead className="bg-muted/40">
-                            <tr>
-                              <th className={TH}>date</th>
-                              <th className={TH}>record</th>
-                              {columns.map((c) => (
-                                <th className={TH} key={c}>
-                                  {humanizeFieldLabel(c)}
-                                </th>
-                              ))}
-                              {hasReverseChildEdges && <th className={TH}>related</th>}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr className="transition-colors hover:bg-muted/30">
-                              <td className={`${TD} whitespace-nowrap text-muted-foreground`}>
-                                <Link className="block" href={recordHref(r.id)}>
-                                  <RecordDateLabel
-                                    emittedAt={r.emitted_at}
-                                    recordData={r.data}
-                                    streamMetadata={listStreamMetadata}
-                                  />
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="min-w-full">
+                      <thead className="bg-muted/40">
+                        <tr>
+                          {columns.map((c) => (
+                            <th className={TH} key={c}>
+                              {humanizeFieldLabel(c)}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr className="transition-colors hover:bg-muted/30">
+                          {columns.map((c) => {
+                            const display = cellText(r, c);
+                            const rawValue = r.data?.[c];
+                            const dateValue = isDateValue(rawValue) ? rawValue : null;
+                            return (
+                              <td className={`${TD} align-top`} key={c}>
+                                <Link
+                                  aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
+                                  className="block"
+                                  href={recordHref(r.id)}
+                                >
+                                  <span className="block max-w-[24rem] truncate">
+                                    {dateValue ? <IcTimestamp value={dateValue} /> : display}
+                                  </span>
                                 </Link>
                               </td>
-                              <td className={`${TD} align-top`}>
-                                <Link className="block" href={recordHref(r.id)}>
-                                  <RecordIdentity
-                                    hasImage={identity.hasImage}
-                                    preview={identity.preview}
-                                    recordKey={r.id}
-                                    showKey
-                                    variant="table-cell"
-                                  />
-                                </Link>
-                              </td>
-                              {columns.map((c) => {
-                                const parentLink = parentLinkForCell(r, c);
-                                if (parentLink) {
-                                  return (
-                                    <td className={`${TD} align-top`} key={c}>
-                                      <Link
-                                        className="block max-w-[24rem] truncate font-mono text-foreground underline underline-offset-2 hover:no-underline"
-                                        href={parentLink.href}
-                                        title={`${humanizeFieldLabel(parentLink.parentStream)} · ${stringifyCell(r.data?.[c])}`}
-                                      >
-                                        {stringifyCell(r.data?.[c])}
-                                      </Link>
-                                    </td>
-                                  );
-                                }
-                                const display = cellText(r, c);
-                                const rawValue = r.data?.[c];
-                                const dateValue = isDateValue(rawValue) ? rawValue : null;
-                                return (
-                                  <td className={`${TD} align-top`} key={c}>
-                                    <Link
-                                      aria-label={display ? undefined : `Open record, ${humanizeFieldLabel(c)} not set`}
-                                      className="block"
-                                      href={recordHref(r.id)}
-                                    >
-                                      <span className="block max-w-[24rem] truncate">
-                                        {dateValue ? <IcTimestamp value={dateValue} /> : display}
-                                      </span>
-                                    </Link>
-                                  </td>
-                                );
-                              })}
-                              {hasReverseChildEdges && (
-                                <td className={`${TD} whitespace-nowrap align-top`}>
-                                  <ReverseChildLinks links={reverseLinks} />
-                                </td>
-                              )}
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </details>
-                </li>
-              );
-            })}
+                            );
+                          })}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -775,30 +595,6 @@ function exactFilterEvidenceLabel(filters: Record<string, string>): string {
     .join(" · ");
 }
 
-// Per-row reverse parent → filtered-child-list links. Each link points at a
-// child stream's record-list page filtered by this row's record key — never an
-// inline child load and never a child record-detail URL. Renders nothing when a
-// row has no reverse child edges (it always has at least one when the page-level
-// `hasReverseChildEdges` gate is true, but guard anyway for the mobile caller).
-function ReverseChildLinks({ links }: { links: ReverseChildListLink[] }) {
-  if (links.length === 0) {
-    return null;
-  }
-  return (
-    <div className="flex flex-wrap gap-x-3 gap-y-1">
-      {links.map((link) => (
-        <Link
-          className="pdpp-caption font-mono text-foreground underline underline-offset-2 hover:no-underline"
-          href={link.href}
-          key={`reverse:${link.childStream}:${link.foreignKey}`}
-        >
-          {humanizeFieldLabel(link.childStream)} →
-        </Link>
-      ))}
-    </div>
-  );
-}
-
 type ListStreamMetadata = { consent_time_field?: string | null; cursor_field?: string | null } | null;
 
 /**
@@ -815,67 +611,18 @@ function listStreamMetadataFrom(metadata: StreamMetadata | null | undefined): Li
   };
 }
 
-/**
- * The record's semantic/authored date (from the manifest-declared
- * consent_time_field / cursor_field), labeled with its field name. Falls back
- * to emitted_at labeled "ingested" when the stream declares no semantic field.
- * Inline (no secondary) variant for the dense desktop table row.
- */
-function RecordDateLabel({
-  emittedAt,
-  recordData,
-  streamMetadata,
-}: {
-  emittedAt: string;
-  recordData: Record<string, unknown> | null | undefined;
-  streamMetadata: ListStreamMetadata;
-}) {
-  const ts = primaryTimestamp(pickSemanticTimestamp(streamMetadata, recordData), emittedAt);
-  return (
-    <>
-      <span className="pdpp-eyebrow text-muted-foreground">{ts.label}</span> <IcTimestamp value={ts.value} />
-    </>
-  );
-}
-
 function RecordCard({
   record,
   columns,
   declaredFieldTypes,
-  hasImage,
-  preview,
-  streamMetadata,
 }: {
   record: StreamRecord;
   columns: string[];
   declaredFieldTypes: DeclaredFieldTypes;
-  /** Surface-supplied reliable image signal (declared blob field with a usable fetch_url). */
-  hasImage: boolean;
-  /** Canonical record model — the SAME one the feed/table/detail build. */
-  preview: RecordPreview | null;
-  streamMetadata: ListStreamMetadata;
 }) {
-  const cardTs = primaryTimestamp(pickSemanticTimestamp(streamMetadata, record.data), record.emitted_at);
   return (
-    <div className="pb-3">
-      {/* The card HEADER is the SHARED RecordIdentity cell — the same kind glyph +
-          declared-or-honest-generic title the feed row a phone shows in Explore leads
-          with, NOT the old field-name `<dl>`. The record key rides as the cell's quiet
-          mono token (showKey default for `card`), so the redundant `id` <dl> row is gone. */}
-      <RecordIdentity hasImage={hasImage} preview={preview} recordKey={record.id} variant="card" />
-      <dl className="pdpp-caption mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <dt className="text-muted-foreground">{cardTs.label}</dt>
-        <dd className="break-all text-muted-foreground">
-          <IcTimestamp value={cardTs.value} />
-        </dd>
-        {cardTs.secondary ? (
-          <>
-            <dt className="text-muted-foreground">{cardTs.secondary.label}</dt>
-            <dd className="break-all text-muted-foreground">
-              <IcTimestamp value={cardTs.secondary.value} />
-            </dd>
-          </>
-        ) : null}
+    <div>
+      <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         {columns.map((c) => {
           const raw = record.data?.[c];
           const amount = formatDeclaredAmount(raw, declaredFieldTypes[c]);

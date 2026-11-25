@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import { buildRecordPreview, classifyRecordKind, type RecordPreview } from "@pdpp/display";
 import { exploreRecordRow } from "../../../explore/explore-presentation.ts";
 import type { CanonicalReadWarning } from "../../../lib/read-envelope.ts";
-import { partialReadSentence } from "./record-list-presentation.ts";
+import { partialReadSentence, sourceDisplayName } from "./record-list-presentation.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
@@ -58,23 +58,18 @@ const HUMAN_PAGE_TITLE_RE = /title=\{humanizeFieldLabel\(streamName\)\}/;
 const SOURCE_LABEL_BREADCRUMB_RE = /label: sourceLabel/;
 const DETAILS_WRAP_EVIDENCE_RE = /<details[\s\S]*?<StreamEvidenceSection[\s\S]*?<\/details>/;
 const REMOVED_DUPLICATE_SOURCE_LINK_RE = /value="Open source"/;
-const SECONDARY_TIMESTAMP_FORMATTED_RE = /<IcTimestamp value=\{cardTs\.secondary\.value\} \/>/;
-const SECONDARY_TIMESTAMP_RAW_RE = /<dd[^>]*>\s*\{cardTs\.secondary\.value\}\s*<\/dd>/;
-const CARD_DATE_FIELD_FORMATTED_RE = /const dateValue = isDateValue\(raw\)[\s\S]*?<IcTimestamp value=\{dateValue\} \/>/;
-const TABLE_DATE_FIELD_FORMATTED_RE = /const rawValue = r\.data\?\.\[c\][\s\S]*?<IcTimestamp value=\{dateValue\} \/>/;
 const KIND_MAIN_COPY_RE = /<PageHeader\n {8}actions=[\s\S]*?(?=<details)/;
 const BANNED_VISIBLE_KIND_WORDS_RE = /\b(?:stream|run|connector|manifest|cursor|grant|trace|projection)\b|Raw JSON|Source-scoped Syncs/i;
 const BULLET_RE = /•/;
 const PARTIAL_WARNING_USE_RE = /partialReadSentence\(page\.warnings\)/;
 const WARNING_DETAILS_RE = /<WarningsBanner warnings=\{page\.warnings\} \/>/;
 const PARTIAL_WARNING_BEFORE_EMPTY_STATE_RE = /partialReadMessage[\s\S]*?page\.data\.length === 0/;
-const EXPLORE_STYLE_RECORD_LINK_RE = /<Link[\s\S]*?className="rr-x-row"[\s\S]*?href=\{recordHref\(r\.id\)\}/;
-const EXPLORE_PRESENTATION_USE_RE = /const row = exploreRecordRow\(\{[\s\S]*?preview: identity\.preview \?\? undefined,/;
+const EXPLORE_STYLE_RECORD_LINK_RE = /<Link[\s\S]*?className="rr-x-row[^"]*"[\s\S]*?href=\{recordHref\(r\.id\)\}/;
+const EXPLORE_PRESENTATION_USE_RE = /const row = exploreRecordRow\(\{[\s\S]*?preview: preview \?\? undefined,/;
 const RECORD_TITLE_LINK_RE = /<Link\n\s+aria-label=\{`Open \$\{row\.title\}[\s\S]*?<\/Link>/;
 const IDENTITY_IN_RECORD_LINK_RE = /RecordIdentity/;
-const RECORD_DETAILS_KEY_RE = /<details className="px-3 pb-2">[\s\S]*?recordKey=\{r\.id\}[\s\S]*?showKey/;
 const EXPLORE_ROW_TITLE_RE = /<span className="rr-x-row__title text-\[15px\]">\{row\.title\}<\/span>/;
-const EXPLORE_ROW_SUMMARY_RE = /<span className="rr-x-row__meta truncate text-\[13px\] text-muted-foreground">\s*\{row\.kind\} · \{row\.source\}\s*<\/span>/;
+const EXPLORE_ROW_SOURCE_RE = /<span className="rr-x-row__meta truncate text-\[13px\] text-muted-foreground">\s*\{row\.source\}\s*<\/span>/;
 const EXPLORE_ROW_TIME_RE = /<span className="rr-x-row__time text-\[13px\]">\{row\.time\}<\/span>/;
 
 test("stream page imports the typed ResourceServerHttpError so it can branch on status", async () => {
@@ -109,13 +104,12 @@ test("the kind page uses a human name in its title and breadcrumb and keeps tech
   assert.doesNotMatch(src, REMOVED_DUPLICATE_SOURCE_LINK_RE);
 });
 
-test("the kind page formats the secondary card timestamp instead of showing raw ISO text", async () => {
+test("the kind page shows its title, display name and time once in the row", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // DIRECTION.md, "What must stay true": no raw dates on these pages.
-  assert.match(src, SECONDARY_TIMESTAMP_FORMATTED_RE);
-  assert.doesNotMatch(src, SECONDARY_TIMESTAMP_RAW_RE);
-  assert.match(src, CARD_DATE_FIELD_FORMATTED_RE);
-  assert.match(src, TABLE_DATE_FIELD_FORMATTED_RE);
+  assert.match(src, EXPLORE_ROW_TITLE_RE);
+  assert.match(src, EXPLORE_ROW_SOURCE_RE);
+  assert.match(src, EXPLORE_ROW_TIME_RE);
+  assert.doesNotMatch(src, /\{row\.kind\} · \{row\.source\}/);
 });
 
 test("the kind page keeps technical words out of the visible header and controls", async () => {
@@ -197,13 +191,33 @@ test("the page keeps warning details folded and renders Explore-style links as t
   assert.match(src, EXPLORE_PRESENTATION_USE_RE);
   // Data-repair brief, P1: do not put the record identity glyph in the visible title row.
   assert.doesNotMatch(src.match(RECORD_TITLE_LINK_RE)?.[0] ?? "", IDENTITY_IN_RECORD_LINK_RE);
-  // Data-repair brief, P1: keep the raw record key under each record's Details disclosure.
-  assert.match(src, RECORD_DETAILS_KEY_RE);
+  // Round 2 sources brief P2: each row opens the record page, where its ID stays in the folded inspector.
+  assert.match(src, /href=\{recordHref\(r\.id\)\}/);
+  assert.doesNotMatch(src, /RecordIdentity|recordKey=\{r\.id\}/);
   // DIRECTION.md, “Values”: row title 15px weight 500, second line and time 13px, second text colour.
   // DIRECTION.md, “The look is for” 5: the title comes from the row presentation.
   assert.match(src, EXPLORE_ROW_TITLE_RE);
-  // DIRECTION.md, “The look is for” 5: the row carries its summary context.
-  assert.match(src, EXPLORE_ROW_SUMMARY_RE);
+  // Round 2 sources brief P2: source display name is shown, without repeating the kind.
+  assert.match(src, EXPLORE_ROW_SOURCE_RE);
+  assert.doesNotMatch(src, /\{row\.kind\} · \{row\.source\}/);
   // DIRECTION.md, “The look is for” 5: the row carries its relative time.
   assert.match(src, EXPLORE_ROW_TIME_RE);
+});
+
+test("the kind page keeps Columns at list level and relationships on the record page", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.equal(src.match(/<ColumnsMenu/g)?.length, 1);
+  const controls = src.slice(src.indexOf('<div className="mb-5'), src.indexOf('<details className="mb-6'));
+  assert.match(controls, /<ColumnsMenu/);
+  assert.doesNotMatch(src, /<details className="px-3 pb-2">/);
+  assert.doesNotMatch(src, /parentLinkForCell|ReverseChildLinks/);
+});
+
+test("the kind page names its data source as Explore does, never by the lowercase key", async () => {
+  // Round 2 sources brief 5d: the header, breadcrumb and rows use the display name.
+  assert.equal(sourceDisplayName({ connector_display_name: "Spotify", connector_id: "spotify", display_name: "spotify" }), "Spotify source");
+  assert.equal(sourceDisplayName({ connector_id: "spotify", display_name: "Family Spotify" }), "Family Spotify");
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /sourceLabel = sourceDisplayName\(connection\);/);
+  assert.doesNotMatch(src, /sourceLabelForConnection/);
 });

@@ -39,7 +39,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type DeclaredFieldTypes, formatDeclaredAmount, formatStructuredCell } from "@pdpp/display";
+import {
+  buildRecordPreview,
+  classifyRecordKind,
+  type DeclaredFieldRoles,
+  type DeclaredFieldTypes,
+  formatDeclaredAmount,
+  formatStructuredCell,
+} from "@pdpp/display";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const LIST_PAGE = `${HERE}page.tsx`;
@@ -56,6 +63,7 @@ const LIST_FORMATS_CELL_AMOUNT = /formatDeclaredAmount\(value, declaredFieldType
 const LIST_CELL_FALLS_BACK = /structured\.text : stringifyCell\(value\)/;
 const LIST_CARD_FORMATS_AMOUNT = /formatDeclaredAmount\(raw, declaredFieldTypes\[c\]\)/;
 const LIST_CARD_FALLS_BACK = /v = stringifyCell\(raw\)/;
+const ROW_AMOUNT_AT_END = /<span className="ml-auto flex shrink-0 items-center gap-4">[\s\S]*?preview\?\.amount[\s\S]*?tabular-nums/;
 const JSON_SYNTAX_RE = /[{}[\]"]/;
 
 // Local mirror of `rs-client.ts`'s `stringifyCell` empty/plain contract. The real
@@ -139,4 +147,17 @@ test("WIRING mobile RecordCard applies declared-currency formatting with a strin
   const src = await readFile(LIST_PAGE, "utf8");
   assert.match(src, LIST_CARD_FORMATS_AMOUNT, "RecordCard must format each column value against its declared type");
   assert.match(src, LIST_CARD_FALLS_BACK, "RecordCard must use the formatted amount, falling back to stringifyCell");
+});
+
+test("BEHAVIOR a money record shows its declared amount at the end of the visible row", async () => {
+  // Round 2 sources brief 5c: a declared money preview stays visible at row end.
+  const data = { amount: 3000, merchant: "Acme" };
+  const fieldTypes: DeclaredFieldTypes = { amount: "currency" };
+  const roles: DeclaredFieldRoles = { amount: "amount", merchant: "primary-title" };
+  const { kind } = classifyRecordKind("transactions", data, fieldTypes, undefined, roles);
+  const preview = buildRecordPreview(kind, data, fieldTypes, roles);
+  assert.equal(preview?.amount, "$30.00");
+
+  const src = await readFile(LIST_PAGE, "utf8");
+  assert.match(src, ROW_AMOUNT_AT_END, "the preview amount is visible and aligned at the row end");
 });

@@ -247,9 +247,11 @@ test("each status row renders the shared sentence and only the controls for that
     }
     if (row === 11) assert.match(visibleText, /Active sync/);
     if (row === 19 || row === 20) {
-      // DIRECTION.md, one data source: no per-source sync list is available; link to Sync history.
+      // Round 2 sources brief P2: an empty Latest syncs keeps one quiet line and the history link.
+      // DIRECTION.md, one data source: a synced source never says No syncs yet.
       assert.match(visibleText, /All sync history/);
-      assert.doesNotMatch(visibleText, /No syncs yet|No syncs are listed/);
+      assert.match(visibleText, /Recent syncs are not listed here\./);
+      assert.doesNotMatch(visibleText, /No syncs yet/);
     }
     if (row === 22) {
       // DIRECTION.md, one data source: say No syncs yet only when no sync has ever happened.
@@ -301,7 +303,7 @@ test("record kinds use the same humanised names as their pages", async (t) => {
   assert.doesNotMatch(text, /\bmessages\b|\bsessions\b/);
 });
 
-test("row 5 falls back to Sync now and row 7 has no action without a server action", async (t) => {
+test("row 5 falls back to Retry first sync and row 7 has no action without a server action", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   for (const [row, label] of [[5, "Review setup"], [7, "Review result"]] as const) {
     const withAction = await renderDemo(`status-${row}`);
@@ -317,11 +319,11 @@ test("row 5 falls back to Sync now and row 7 has no action without a server acti
     const document = withoutAction.window.document;
     // DIRECTION.md, What must stay true: a page control cannot point back to the same page.
     if (row === 5) {
-      // DIRECTION.md, one status table row 5: a needs-you status always has a next action.
+      // Round 2 sources brief P3: row 5's retry uses row 6's label and still starts a sync.
       assert.equal(
-        [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === "Sync now").length,
+        [...document.querySelectorAll("button, a")].filter((element) => element.textContent?.trim() === "Retry first sync").length,
         1,
-        "row 5 can start a sync when the server supplies no review action"
+        "row 5 can retry its first sync when the server supplies no review action"
       );
     } else {
       assert.equal(
@@ -334,7 +336,7 @@ test("row 5 falls back to Sync now and row 7 has no action without a server acti
   }
 });
 
-test("paused historical archives resume when they have no sign-in repair address", async (t) => {
+test("paused historical archives use Continue when sign-in repair is unknown", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const dom = await renderDemo("status-10-historical-archive");
   const document = dom.window.document;
@@ -342,9 +344,12 @@ test("paused historical archives resume when they have no sign-in repair address
   // DIRECTION.md, one status table row 10: Resume is the fallback when no repair address exists.
   assert.equal(document.querySelector("[data-status-row]")?.getAttribute("data-status-row"), "10");
   assert.equal(controls.some((element) => element.textContent?.trim() === "Resume"), false);
-  // DIRECTION.md, one status table row 10: without a repair address, Resume is the next step.
-  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume syncing"), true);
+  // Round 2 sources brief P2: the detail page chooses resume or repair behind one shared label.
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Continue"), true);
+  assert.equal(controls.some((element) => element.textContent?.trim() === "Resume syncing"), false);
   assert.equal(controls.some((element) => element.textContent?.trim() === "Reconnect"), false);
+  assert.match(visibleOutsideDetails(dom), /Paused\. Your records are kept\./);
+  assert.doesNotMatch(visibleOutsideDetails(dom), /Paused\. Your records and sign-in are kept\./);
   assert.equal(document.querySelector('a[href="/sources/cin_demo_claude_code_workstation"]'), null);
 });
 
@@ -352,10 +357,11 @@ test("a failed sync without a per-source row still links to Sync history", async
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const dom = await renderDemo("status-22-failed-last-run");
   const text = visibleOutsideDetails(dom);
-  // DIRECTION.md, one data source: show the history link when any sync exists but the list has no rows.
+  // Round 2 sources brief P2: an empty Latest syncs keeps one quiet line, true for a source that has synced.
   // DIRECTION.md, one data source: use the section action as the sole history link.
   assert.match(text, /All sync history/);
-  assert.doesNotMatch(text, /No syncs yet\./);
+  assert.match(text, /Recent syncs are not listed here\./);
+  assert.doesNotMatch(text, /No syncs yet/);
 });
 
 test("needs-you variants render the matching shared sentence and server action", async (t) => {

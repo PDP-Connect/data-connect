@@ -52,8 +52,8 @@ export interface SourceStatusOptions {
   /**
    * Whether the data source's own page has an address where the person can
    * update its sign-in. Only that page knows (it reads the connector's setup
-   * needs). Left out elsewhere, so a paused archive keeps "Reconnect" and links
-   * to the page, which then decides.
+   * needs). Elsewhere, a paused archive uses the shared "Continue" label and
+   * links to the page, which then decides.
    */
   signInRepairAvailable?: boolean;
 }
@@ -129,13 +129,16 @@ function lifecycleRow(
         : source.status === "paused"
           ? action("resume", "Resume syncing", false)
           : syncAction(source);
+      const firstSyncAction = fallbackAction?.kind === "sync_now"
+        ? { ...fallbackAction, label: "Retry first sync" }
+        : fallbackAction;
       return {
         row: 5,
         words: "First sync needs a look",
         tone: "attention",
         action: renderableServerAction
           ? action("review_setup", "Review setup", true)
-          : fallbackAction ? { ...fallbackAction, filled: true } : null,
+          : firstSyncAction ? { ...firstSyncAction, filled: true } : null,
       };
     }
     case "unverified_zero":
@@ -154,8 +157,8 @@ function lifecycleRow(
       ? action("view_device", "View this device", false)
       : source.source_binding_kind === "historical_archive"
         ? signInRepairAvailable === false
-          ? action("resume", "Resume syncing", false)
-          : action("repair_credential", "Reconnect", false)
+          ? action("resume", "Continue", false)
+          : action("repair_credential", "Continue", false)
         : action("resume", "Resume", false);
     return { row: 10, words: "Paused", tone: "faint", action: pausedAction };
   }
@@ -351,7 +354,13 @@ function matchStateSentence(
     case 9: return { text: "Setup is in progress." };
     case 10:
       return source.status === "paused"
-        ? { text: withLastSync("Paused. Your records and sign-in are kept.") }
+        ? {
+            text: withLastSync(
+              options.signInRepairAvailable
+                ? "Paused. Your records and sign-in are kept."
+                : "Paused. Your records are kept."
+            ),
+          }
         : { text: when ? `Automatic sync is off. Last synced ${when}.` : "Automatic sync is off." };
     case 11: {
       const started = source.last_run && ["pending", "started", "in_progress", "running"].includes(source.last_run.status)

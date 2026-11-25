@@ -1664,7 +1664,9 @@ function RecentRunsSection({
       title="Latest syncs"
     >
       {recentRuns.length === 0 ? (
-        hasSyncHistory ? null : <p className="pdpp-caption text-muted-foreground">No syncs yet.</p>
+        <p className="pdpp-caption text-muted-foreground">
+          {hasSyncHistory ? "Recent syncs are not listed here." : "No syncs yet."}
+        </p>
       ) : (
         <DataList>
           {autoPausedBanner ? (

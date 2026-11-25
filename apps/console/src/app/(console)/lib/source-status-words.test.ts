@@ -130,7 +130,7 @@ test("row 4 words a source whose collector is not installed", () => assertRow(4,
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
-  assert.deepEqual(status.action, { kind: "sync_now", label: "Sync now", filled: true });
+  assert.deepEqual(status.action, { kind: "sync_now", label: "Retry first sync", filled: true });
 
   const serverAction = sourceStatusWords(source({
     ...fixture(5),
@@ -142,7 +142,7 @@ test("row 5 uses the server action or starts a sync when no server action exists
     ...fixture(5),
     rendered_verdict: verdict("Can't collect", [requiredAction({ satisfied_when: { kind: "none" } })]),
   }), { now: NOW });
-  assert.deepEqual(unavailableServerAction.action, { kind: "sync_now", label: "Sync now", filled: true });
+  assert.deepEqual(unavailableServerAction.action, { kind: "sync_now", label: "Retry first sync", filled: true });
 
   const pausedDevice = sourceStatusWords(source({
     ...fixture(5),
@@ -150,6 +150,13 @@ test("row 5 uses the server action or starts a sync when no server action exists
     status: "paused",
   }), { now: NOW });
   assert.deepEqual(pausedDevice.action, { kind: "view_device", label: "View this device", filled: true });
+});
+// Round 2 sources brief P3: first-sync retries use one action label.
+test("first-sync retry actions use one label for both unverified first-sync rows", () => {
+  const rowFive = sourceStatusWords(fixture(5), { now: NOW }).action;
+  const rowSix = sourceStatusWords(fixture(6), { now: NOW }).action;
+  assert.equal(rowFive?.label, "Retry first sync");
+  assert.equal(rowSix?.label, "Retry first sync");
 });
 test("row 6 words an unverified empty first sync", () => assertRow(6, "First sync found no records", "attention", { kind: "retry_first_sync", label: "Retry first sync", filled: true }));
 test("row 7 words a verified empty first sync", () => assertRow(7, "No records found", "plain", { kind: "review_result", label: "Review result", filled: false }));
@@ -192,6 +199,18 @@ test("an automatic schedule paused by its owner uses the server action, not life
 });
 test("row 9 words setup in progress", () => assertRow(9, "Setup in progress", "attention", { kind: "continue_setup", label: "Continue setup", filled: true }));
 test("row 10 words a paused source", () => assertRow(10, "Paused", "faint", { kind: "resume", label: "Resume", filled: false }));
+test("a paused archive sentence mentions sign-in only when repair is available", () => {
+  // Round 2 sources brief P2: claim that sign-in is kept only when one exists.
+  const archive = source({ ...fixture(10), source_binding_kind: "historical_archive" });
+  assert.match(
+    sourceStateSentence(archive, { now: NOW, name: "Example source", signInRepairAvailable: false }).text,
+    /^Paused\. Your records are kept\./,
+  );
+  assert.match(
+    sourceStateSentence(archive, { now: NOW, name: "Example source", signInRepairAvailable: true }).text,
+    /^Paused\. Your records and sign-in are kept\./,
+  );
+});
 test("row 11 words an active sync", () => assertRow(11, "Syncing now", "accent"));
 test("a pending rendered status does not outrank the maintainer row when owner state exists", () => {
   const lastRun = fixture(11).last_run;
@@ -293,20 +312,20 @@ test("a local-device source offers neither sync now nor resume", () => {
   assert.equal(deviceUnmeasured.action?.kind, "view_device");
 });
 
-test("a paused historical archive resumes only when it has no sign-in to update", () => {
+// Round 2 sources brief P2: Home and the list cannot know the detail page's repair capability.
+test("a paused historical archive uses one Continue label on every surface", () => {
   const archive = source({ ...fixture(10), source_binding_kind: "historical_archive" });
-  // DIRECTION.md, one status table row 10: resume alone would fail the next sync while a sign-in can be updated;
-  // updating it resumes the archive.
+  // The detail page decides whether to resume or update sign-in; the list cannot know that fact.
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: false }).action,
-    { kind: "resume", label: "Resume syncing", filled: false }
+    { kind: "resume", label: "Continue", filled: false }
   );
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action,
-    { kind: "repair_credential", label: "Reconnect", filled: false }
+    { kind: "repair_credential", label: "Continue", filled: false }
   );
-  // Home and the list do not know; they keep Reconnect, which links to the source's page.
-  assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Reconnect", filled: false });
+  // Home and the list do not know; Continue links to the source page, which chooses the next step.
+  assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Continue", filled: false });
   // No server sign-in action does not mean no sign-in is needed.
   assert.equal(sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action?.kind, "repair_credential");
 });
