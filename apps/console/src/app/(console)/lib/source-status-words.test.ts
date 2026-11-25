@@ -194,8 +194,10 @@ test("row 9 words setup in progress", () => assertRow(9, "Setup in progress", "a
 test("row 10 words a paused source", () => assertRow(10, "Paused", "faint", { kind: "resume", label: "Resume", filled: false }));
 test("row 11 words an active sync", () => assertRow(11, "Syncing now", "accent"));
 test("a pending rendered status does not outrank the maintainer row when owner state exists", () => {
+  const lastRun = fixture(11).last_run;
+  assert.ok(lastRun);
   const result = sourceStatusWords(source({
-    last_run: { ...fixture(11).last_run!, status: "pending" },
+    last_run: { ...lastRun, status: "pending" },
     owner_state: { ...healthyState, resolver: "blocked_maintainer" },
   }), { now: NOW });
   assert.equal(result.row, 13);
@@ -319,6 +321,8 @@ test("rows 17 and 22 offer sync only when this server can start it", () => {
 test("first matching row wins for overlapping evidence", () => {
   const scheduleOf = fixture(12).schedule;
   assert.ok(scheduleOf);
+  const schedulerBackoff = scheduleOf.scheduler_backoff;
+  assert.ok(schedulerBackoff);
   const pairs: Array<[RefConnectorSummary, SourceStatusRow]> = [
     [source({ source_visibility: "archived", status: "paused", owner_state: { ...healthyState, resolver: "owner_paused" } }), 1],
     [source({ source_visibility: "setup_failed", status: "revoked", revoked_at: SUCCESS }), 2],
@@ -330,7 +334,7 @@ test("first matching row wins for overlapping evidence", () => {
     [source({ last_run: fixture(11).last_run, schedule: fixture(12).schedule, owner_state: { ...healthyState, resolver: "collecting" } }), 11],
     [source({ schedule: fixture(12).schedule, owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), 12],
     [source({ ...fixture(12), owner_state: { ...healthyState, resolver: "blocked_maintainer" } }), 13],
-    [source({ ...fixture(12), schedule: { ...scheduleOf, scheduler_backoff: { ...scheduleOf.scheduler_backoff!, recommended_health_state: "blocked" } }, rendered_verdict: verdict("Missing optional data") }), 14],
+    [source({ ...fixture(12), schedule: { ...scheduleOf, scheduler_backoff: { ...schedulerBackoff, recommended_health_state: "blocked" } }, rendered_verdict: verdict("Missing optional data") }), 14],
     [source({ ...fixture(13), schedule: scheduleOf }), 13],
   ];
   for (const [candidate, expected] of pairs) assert.equal(sourceStatusWords(candidate, { now: NOW }).row, expected);
@@ -356,16 +360,18 @@ test("source page sentences use the same row and named slots for page-owned fact
 
 test("started time comes only from an active last run", () => {
   const collecting = { ...healthyState, resolver: "collecting" as const };
+  const lastRun = fixture(11).last_run;
+  assert.ok(lastRun);
   const notActive = source({
     owner_state: { ...collecting, evidence_as_of: "2026-11-21T12:00:00.000Z" },
-    last_run: { ...fixture(11).last_run!, started_at: "2026-11-21T12:00:00.000Z", status: "succeeded" },
+    last_run: { ...lastRun, started_at: "2026-11-21T12:00:00.000Z", status: "succeeded" },
   });
   assert.equal(sourceStateSentence(notActive, { now: NOW, name: "Example source" }).text, "Syncing now.");
 
   for (const status of ["pending", "started", "in_progress", "running"]) {
     const active = source({
       owner_state: { ...collecting, evidence_as_of: "2026-11-21T12:00:00.000Z" },
-      last_run: { ...fixture(11).last_run!, started_at: "2026-11-24T11:55:00.000Z", status },
+      last_run: { ...lastRun, started_at: "2026-11-24T11:55:00.000Z", status },
     });
     assert.equal(sourceStateSentence(active, { now: NOW, name: "Example source" }).text, "Syncing now. Started 5 minutes ago.", status);
   }
@@ -375,6 +381,8 @@ test("coming times are relative, and a late schedule is said plainly", () => {
   const sentence = (candidate: RefConnectorSummary) => sourceStateSentence(candidate, { now: NOW, name: "Example source" }).text;
   const scheduleOf = fixture(12).schedule;
   assert.ok(scheduleOf);
+  const schedulerBackoff = scheduleOf.scheduler_backoff;
+  assert.ok(schedulerBackoff);
   const inFourHours = new Date(NOW.getTime() + 4 * 60 * 60 * 1000).toISOString();
   assert.equal(sentence(source({ ...fixture(19), schedule: { ...scheduleOf, scheduler_backoff: null, next_due_at: inFourHours } })), "Up to date. Synced 2 hours ago; next in 4 hours.");
   assert.equal(sentence(fixture(19)), "Up to date. Synced 2 hours ago.");
@@ -383,14 +391,14 @@ test("coming times are relative, and a late schedule is said plainly", () => {
   const successfulRun = fixture(21).last_successful_run;
   assert.ok(successfulRun);
   assert.equal(
-    sentence(source({ ...fixture(12), schedule: { ...scheduleOf, scheduler_backoff: { ...scheduleOf.scheduler_backoff!, next_run_at: inTwentyMinutes } } })),
+    sentence(source({ ...fixture(12), schedule: { ...scheduleOf, scheduler_backoff: { ...schedulerBackoff, next_run_at: inTwentyMinutes } } })),
     "The last sync did not finish. DataConnect will try again on its own in 20 minutes."
   );
   assert.equal(
     sentence(source({
       ...fixture(12),
       last_successful_run: successfulRun,
-      schedule: { ...scheduleOf, scheduler_backoff: { ...scheduleOf.scheduler_backoff!, consecutive_failures: 0, reason_class: "source_pressure", next_run_at: inTwentyMinutes } },
+      schedule: { ...scheduleOf, scheduler_backoff: { ...schedulerBackoff, consecutive_failures: 0, reason_class: "source_pressure", next_run_at: inTwentyMinutes } },
     })),
     "Example source asked DataConnect to slow down. It will try again on its own in 20 minutes."
   );
@@ -398,7 +406,7 @@ test("coming times are relative, and a late schedule is said plainly", () => {
     sentence(source({
       ...fixture(12),
       last_successful_run: successfulRun,
-      schedule: { ...scheduleOf, scheduler_backoff: { ...scheduleOf.scheduler_backoff!, consecutive_failures: 0, reason_class: "retry", next_run_at: inTwentyMinutes } },
+      schedule: { ...scheduleOf, scheduler_backoff: { ...schedulerBackoff, consecutive_failures: 0, reason_class: "retry", next_run_at: inTwentyMinutes } },
     })),
     "Example source asked DataConnect to slow down. It will try again on its own in 20 minutes."
   );

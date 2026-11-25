@@ -17,10 +17,9 @@
  * selectable row, not the default Enter redirect.
  */
 
-// biome-ignore lint/performance/noBarrelFile: thin re-export of the ONE unified palette in @pdpp/operator-ui; preserves the console's historical import path (`./command-palette.tsx`) so the layout, bridge, legacy shell, and tests import the single implementation by name.
+// biome-ignore lint/performance/noBarrelFile: thin re-export of the ONE unified palette in @pdpp/operator-ui; preserves the console's historical import path (`./command-palette.tsx`) so the layout, bridge, and tests import the single implementation by name.
 export {
   CommandPalette,
   CommandPaletteProvider,
-  CommandPaletteTrigger,
   useCommandPalette,
 } from "@pdpp/operator-ui/components/command-palette";

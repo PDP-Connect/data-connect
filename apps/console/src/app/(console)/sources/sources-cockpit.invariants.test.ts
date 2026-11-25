@@ -29,7 +29,8 @@ test("desktop rows use the data, status, records, schedule, action, and menu col
   const css = await readFile(CSS_FILE, "utf8");
   assert.match(css, /\.rr-s\s*\{[^}]*max-width:\s*1040px/);
   // Lead decision (list-pictures 2): header and rows share fixed tracks; the row link is a subgrid of them.
-  assert.match(css, /--rr-s-tracks:\s*minmax\(0,\s*1fr\)\s+260px\s+90px\s+120px\s+120px\s+40px/);
+  // DIRECTION.md, “Data sources /sources”: the desktop row has data, status, records, schedule, action, and menu tracks.
+  assert.match(css, /--rr-s-tracks:\s*minmax\(0,\s*1fr\)\s+minmax\(240px,\s*1\.2fr\)\s+90px\s+120px\s+120px\s+40px/);
   assert.match(css, /\.rr-s-columns,\s*\.rr-s-row\s*\{[^}]*grid-template-columns:\s*var\(--rr-s-tracks\)/);
   assert.match(css, /\.rr-s-row__link\s*\{[^}]*grid-column:\s*1 \/ 5;[^}]*grid-template-columns:\s*subgrid/);
   assert.match(css, /\.rr-s-row__records\s*\{[^}]*text-align:\s*right/);
@@ -40,11 +41,13 @@ test("phone rows keep identity, status, and action while hiding records and sche
   const css = await readFile(CSS_FILE, "utf8");
   // Lead decision (list-pictures 7): the narrow layout follows the list's own width; the menu sits on the
   // name line and the action goes beneath the status, aligned with the text.
-  assert.match(css, /@container rr-s-list \(max-width:\s*720px\)[\s\S]*?\.rr-s-row__link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  // DIRECTION.md, “Data sources /sources”: phone rows show the status below identity and hide other columns.
+  assert.match(css, /@container rr-s-list \(max-width:\s*880px\)[\s\S]*?\.rr-s-row__link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   assert.match(css, /\.rr-s-menu-trigger\s*\{\s*grid-column:\s*2;\s*grid-row:\s*1;/);
   assert.match(css, /\.rr-s-row__action,\s*\.rr-s-row__action-form\s*\{\s*grid-column:\s*1;\s*grid-row:\s*2;[^}]*margin-left:\s*46px/);
   assert.match(css, /\.rr-s-row__records,\s*\.rr-s-row__schedule\s*\{\s*display:\s*none/);
-  assert.match(css, /\.rr-s-row__status\s*\{\s*padding-left:\s*46px/);
+  // DIRECTION.md, “Data sources /sources”: status aligns beneath the data source name.
+  assert.match(css, /\.rr-s-row__status\s*\{\s*margin-left:\s*46px/);
 });
 
 // DIRECTION.md, “Data sources /sources”: row state changes the words, not the row geometry.

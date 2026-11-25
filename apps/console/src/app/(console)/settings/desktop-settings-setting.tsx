@@ -108,6 +108,7 @@ export function DesktopSettingsSetting({
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown
+  const autostartStateKnown = stateIsKnown && autostart.data?.known !== false
   const autostartEnabled = asAutostartEnabled(autostart.data)
   const startMinimized = asStartMinimized(appConfig.data)
   const closeToTray = asCloseToTray(appConfig.data)
@@ -165,8 +166,8 @@ export function DesktopSettingsSetting({
       >
         <label className="flex min-h-11 items-start gap-3" htmlFor="autostart-enabled">
           <input
-            checked={stateIsKnown && autostartEnabled}
-            disabled={autostartMutation.isPending || desktopUnavailable}
+            checked={autostartStateKnown && autostartEnabled}
+            disabled={autostartMutation.isPending || !autostartStateKnown}
             id="autostart-enabled"
             onChange={event => toggleAutostart(event.currentTarget.checked)}
             type="checkbox"
@@ -174,7 +175,12 @@ export function DesktopSettingsSetting({
           <span className="grid gap-1">
             <span className="pdpp-caption font-medium text-foreground">
               Launch at login
-              {stateIsKnown && autostartApplying ? (
+              {stateIsKnown && !autostartStateKnown ? (
+                <span className="ml-2 font-normal text-muted-foreground" data-testid="autostart-unknown">
+                  Not known yet
+                </span>
+              ) : null}
+              {autostartStateKnown && autostartApplying ? (
                 <span
                   className="ml-2 font-normal text-muted-foreground"
                   data-testid="autostart-applying"
@@ -184,8 +190,8 @@ export function DesktopSettingsSetting({
               ) : null}
             </span>
             <span className="pdpp-caption text-muted-foreground">
-              Start DataConnect automatically when you sign in to this
-              computer. Off by default.
+              Start DataConnect automatically when you sign in to this computer.
+              {autostartStateKnown ? " Off by default." : null}
             </span>
           </span>
         </label>

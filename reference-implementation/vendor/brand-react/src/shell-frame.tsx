@@ -219,12 +219,12 @@ function BrandMark() {
 
 function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: string }) {
   const section = navSectionForPathname(pathname);
-  const renderItem = (item: NavItem, nested = false) => {
+  const renderItem = (item: NavItem, nested = false, previousSibling?: NavItem) => {
     const active = isNavItemActive(item.href, pathname);
     const Icon = item.icon;
     return (
       <div className={nested ? "rr-nav-child" : undefined} key={item.href}>
-        {"labelBefore" in item && item.labelBefore ? (
+        {"labelBefore" in item && item.labelBefore && item.labelBefore !== previousSibling?.labelBefore ? (
           <div className="rr-side__group rr-side__group--nested">{item.labelBefore}</div>
         ) : null}
         <Link
@@ -237,7 +237,9 @@ function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: 
           <span>{item.label}</span>
         </Link>
         {!nested && item.children && item.section === section ? (
-          <div className="rr-nav-children">{item.children.map((child) => renderItem(child, true))}</div>
+          <div className="rr-nav-children">
+            {item.children.map((child, index) => renderItem(child, true, item.children?.[index - 1]))}
+          </div>
         ) : null}
       </div>
     );

@@ -20,6 +20,8 @@ import { verifyDashboardSession } from "./verify-session.ts"
 export interface AutostartState {
   enabled: boolean
   error: string | null
+  /** False until the desktop app has reported its setting. Older servers omit this field. */
+  known?: boolean
   /** A requested change the desktop app has not applied yet. Absent from older servers. */
   pending?: boolean
 }
@@ -60,8 +62,20 @@ function unwrapData(payload: unknown): unknown {
 }
 
 export async function getAutostart(): Promise<AutostartState> {
-  const payload = await autostartFetch("/v1/owner/autostart")
-  return unwrapData(payload) as AutostartState
+  try {
+    const payload = await autostartFetch("/v1/owner/autostart")
+    return unwrapData(payload) as AutostartState
+  } catch (err) {
+    if (
+      err instanceof ResourceServerHttpError &&
+      err.path === "/v1/owner/autostart" &&
+      err.status === 500 &&
+      err.body.startsWith("Autostart state is not available yet")
+    ) {
+      return { enabled: false, error: null, known: false }
+    }
+    throw err
+  }
 }
 
 export async function setAutostart(enabled: boolean): Promise<AutostartState> {
