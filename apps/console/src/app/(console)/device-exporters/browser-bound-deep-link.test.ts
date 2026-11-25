@@ -31,7 +31,9 @@ function read(relPath: string): Promise<string> {
 
 const PAGE_PATH = "apps/console/src/app/(console)/device-exporters/page.tsx";
 
-const USES_BINDING_SUPPORT = /\(await loadBrowserConnectSupport\(requestedConnector\)\)\.browserBound/;
+const USES_BINDING_SUPPORT = /loadBrowserBoundVerdict\(requestedConnector\)/;
+const NOTICE_ONLY_ON_SERVER_VERDICT =
+  /const browserBoundRequest = requestIsBrowserBound === true \? requestedConnector : undefined;/;
 const IMPORTS_BINDING_SUPPORT = /from "\.\.\/lib\/load-browser-connect-support\.ts"/;
 const DEFAULT_ONLY_LOCAL_COLLECTOR =
   /const defaultConnectorId = resolveLocalCollectorEnrollmentKey\(collectorTemplates, requestedConnector\)/;
@@ -48,7 +50,7 @@ test("page classifies a browser-bound deep-link from the connector's own binding
   const src = await read(PAGE_PATH);
   // Browser-bound detection reads the connector's binding through the shared
   // loader, but the normal enrollment form only admits packaged local collectors.
-  assert.match(src, USES_BINDING_SUPPORT, "page must read the browser-bound fact from loadBrowserConnectSupport");
+  assert.match(src, USES_BINDING_SUPPORT, "page must read the browser-bound fact from loadBrowserBoundVerdict");
   assert.match(src, IMPORTS_BINDING_SUPPORT, "the binding loader must be the shared one");
   assert.doesNotMatch(src, KEY_LIST_CLASSIFIERS, "page must not gate on a connector key list");
   assert.doesNotMatch(
@@ -56,6 +58,14 @@ test("page classifies a browser-bound deep-link from the connector's own binding
     DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER,
     "page must not treat proof-run browser collectors as owner-packaged enrollment paths"
   );
+});
+
+test("the verdict is read inside the page's error handling and only a server verdict shows the notice", async () => {
+  const src = await read(PAGE_PATH);
+  const tryAt = src.indexOf("  try {");
+  const lookupAt = src.search(USES_BINDING_SUPPORT);
+  assert.ok(tryAt !== -1 && lookupAt > tryAt, "a failed verdict read must not reject the page before its try block");
+  assert.match(src, NOTICE_ONLY_ON_SERVER_VERDICT, "no verdict must mean no notice");
 });
 
 test("browser-bound deep-links stay out of the packaged local collector form", async () => {
