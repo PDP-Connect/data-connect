@@ -11,6 +11,7 @@ const BODIES_FILE = fileURLToPath(new URL("../sources/add/connect-bodies.tsx", i
 const PAGE_FILE = fileURLToPath(new URL("./static-secret/[connectorId]/page.tsx", import.meta.url));
 const ACTION_FILE = fileURLToPath(new URL("./static-secret/[connectorId]/actions.ts", import.meta.url));
 const STATUS_PAGE_FILE = fileURLToPath(new URL("./status/[connectionId]/page.tsx", import.meta.url));
+const STATUS_OUTCOME_FILE = fileURLToPath(new URL("./status/[connectionId]/first-sync-outcome.ts", import.meta.url));
 const STATUS_LINKS_FILE = fileURLToPath(new URL("./status/[connectionId]/connect-status-links.ts", import.meta.url));
 const LEGACY_STATUS_PAGE_FILE = fileURLToPath(
   new URL("./static-secret/[connectorId]/status/[connectionId]/page.tsx", import.meta.url)
@@ -77,17 +78,13 @@ const NO_BEARER = /Authorization:\s*`Bearer/;
 
 const STATUS_FETCH = /getConnectionSetupStatus\(/;
 const STATUS_SETUP_STATE = /setup_state/;
-const STATUS_SETUP_MATERIAL = /setup_material/;
 const STATUS_FAILED_STATE = /first_sync_failed/;
 const STATUS_ZERO_YIELD_STATE = /first_sync_zero_yield/;
 const STATUS_LAST_ERROR = /last_error/;
-const STATUS_CONNECTION_ID = /connection_id/;
 const STATUS_NOT_FOUND = /notFound\(\)/;
 const STATUS_LIVE_POLLER = /<LivePoller enabled=\{status\.pending\} \/>/;
 const STATUS_NO_PASSWORD_INPUT = /type="password"/;
 const STATUS_NO_SECRET_INPUT = /name="secret"/;
-const ROTATED_AT = /rotated_at/;
-const CREDENTIAL_VERIFICATION_COPY = /A sync is running now to verify the updated credential/;
 const NO_UNPROVEN_FIRST_SYNC_COPY = /The first sync accepted records/;
 const LEGACY_REDIRECT = /\/connect\/status\/\$\{encodeURIComponent/;
 
@@ -95,25 +92,16 @@ const LEGACY_REDIRECT = /\/connect\/status\/\$\{encodeURIComponent/;
 // binding-first classification must reach both the copy and the CTA, never
 // the generic static-secret "Setup material needed" / "Re-enter credential"
 // path (see reference-implementation's setupKindForConnection).
-const BROWSER_SESSION_KIND_CHECK = /setup_kind\s*===\s*"browser_session"/;
-const AWAITING_BROWSER_LOGIN_STATE = /"awaiting_browser_login"/;
-const BROWSER_SIGN_IN_HEADLINE = /Sign-in needed/;
 const BROWSER_LAUNCH_HREF_PATH = /\/connect\/browser-session\/\$\{encoded\}\/launch/;
 const BROWSER_LAUNCH_CONNECTION_ID_PARAM = /connection_id:\s*status\.connection_id/;
 const BROWSER_LAUNCH_DRAFT_PARAM = /draft:\s*status\.status\s*===\s*"draft"\s*\?\s*"1"\s*:\s*"0"/;
-const BROWSER_RETRY_LABEL_COPY = /Start browser setup again/;
 const NO_GENERIC_BROWSER_COPY = /Setup material needed|Re-enter credential and retry|provider credential/i;
 const NO_BROWSER_STATIC_SECRET_ROUTE = /\/connect\/static-secret\//;
-const BROWSER_STATUS_START = "function describeBrowserSessionState";
-const BROWSER_STATUS_END = "function describeState";
 const SETUP_HREF_START = "export function setupHref";
 const SETUP_HREF_END = "export function sourceDetailHref";
 const BROWSER_HREF_START = 'if (status.setup_kind === "browser_session")';
 const BROWSER_HREF_END =
   "const params = new URLSearchParams({ connection_id: status.connection_id });\n  return `/connect/static-secret/";
-const RETRY_LABEL_START = "function retryLabel";
-const RETRY_LABEL_END = "function displayValue";
-// The static-secret branch (the default fallthrough of setupHref) MUST carry
 // connection_id, or retry lands on createStaticSecretConnectionAction and
 // mints an orphaned second draft instead of repairing the stuck one — the
 // draft-deadlock regression this file exists to prevent.
@@ -196,20 +184,21 @@ test("static-secret action redirects to the durable setup-status surface, not a 
   assert.doesNotMatch(src, NO_BEARER);
 });
 
+// Design Page 3: the page keeps the lifecycle but says it as one outcome; the setup-state names and ids are gone.
 test("durable setup-status page reads the connection-scoped status route and surfaces lifecycle + failure", async () => {
-  const src = await readFile(STATUS_PAGE_FILE, "utf8");
+  const page = await readFile(STATUS_PAGE_FILE, "utf8");
+  const outcome = await readFile(STATUS_OUTCOME_FILE, "utf8");
+  const src = page + outcome;
   // Reads the durable, connection-scoped setup-status route.
   assert.match(src, STATUS_FETCH);
   // Surfaces the projected lifecycle (running/pending/failed/active) and the
   // identifiers the owner needs, with no provider-specific branches.
   assert.match(src, STATUS_SETUP_STATE);
-  assert.match(src, STATUS_SETUP_MATERIAL);
   assert.match(src, STATUS_FAILED_STATE);
   assert.match(src, STATUS_ZERO_YIELD_STATE);
   assert.match(src, STATUS_LAST_ERROR);
-  assert.match(src, STATUS_CONNECTION_ID);
-  assert.match(src, ROTATED_AT);
-  assert.match(src, CREDENTIAL_VERIFICATION_COPY);
+  // Design Page 3: setup-state names and raw ids never print.
+  assert.doesNotMatch(src, /Setup state|Awaiting browser login|Awaiting credential/);
   assert.doesNotMatch(src, NO_UNPROVEN_FIRST_SYNC_COPY);
   // 404s a missing connection rather than fabricating a status.
   assert.match(src, STATUS_NOT_FOUND);
@@ -222,26 +211,19 @@ test("durable setup-status page reads the connection-scoped status route and sur
   assert.doesNotMatch(src, STATUS_NO_SECRET_INPUT);
 });
 
-test("durable setup-status page carries a browser-session branch with secure-browser copy and a launch-path retry CTA", async () => {
-  const src = await readFile(STATUS_PAGE_FILE, "utf8");
+// Design Page 3 ("Needs you" and the kind-specific retry): browser sessions return to the launch route.
+test("durable setup-status page carries a browser-session branch with a launch-path retry CTA", async () => {
+  const outcome = await readFile(STATUS_OUTCOME_FILE, "utf8");
   const linksSrc = await readFile(STATUS_LINKS_FILE, "utf8");
-  const browserStatus = sourceBlock(src, BROWSER_STATUS_START, BROWSER_STATUS_END);
   const setupHref = sourceBlock(linksSrc, SETUP_HREF_START, SETUP_HREF_END);
   const browserHref = sourceBlock(setupHref, BROWSER_HREF_START, BROWSER_HREF_END);
-  const retryLabel = sourceBlock(src, RETRY_LABEL_START, RETRY_LABEL_END);
-  assert.match(src, BROWSER_SESSION_KIND_CHECK);
-  assert.match(src, AWAITING_BROWSER_LOGIN_STATE);
-  assert.match(browserStatus, BROWSER_SIGN_IN_HEADLINE);
-  // The retry CTA returns to the existing browser-session launch route with
-  // connection_id + draft query, not the static-secret credential form.
+  assert.match(outcome, /awaiting_browser_login/);
+  assert.match(outcome, /needsYouHeadline/);
   assert.match(browserHref, BROWSER_LAUNCH_HREF_PATH);
   assert.match(browserHref, BROWSER_LAUNCH_CONNECTION_ID_PARAM);
   assert.match(browserHref, BROWSER_LAUNCH_DRAFT_PARAM);
-  assert.match(retryLabel, BROWSER_RETRY_LABEL_COPY);
-  // The browser-specific blocks must never fall through to generic
-  // credential-shaped copy or a static-secret route.
-  assert.doesNotMatch(browserStatus, NO_GENERIC_BROWSER_COPY);
   assert.doesNotMatch(browserHref, NO_BROWSER_STATIC_SECRET_ROUTE);
+  assert.doesNotMatch(outcome, NO_GENERIC_BROWSER_COPY);
   assert.match(setupHref, STATIC_SECRET_HREF_CONNECTION_ID_PARAM);
   assert.match(setupHref, STATIC_SECRET_HREF_RETURN);
 });

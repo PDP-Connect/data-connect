@@ -1,0 +1,137 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from "node:assert/strict";
+import test, { mock } from "node:test";
+import * as navigation from "next/navigation";
+import * as React from "react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { bannedCopyProblems, visibleText } from "../../../sources/add/banned-copy.ts";
+import type { ConnectionSetupStatus } from "../../../lib/ref-client.ts";
+import { type FirstSyncFacts, firstSyncOutcome, scheduleSentence } from "./first-sync-outcome.ts";
+
+Object.assign(globalThis, { React });
+mock.module("server-only", { namedExports: {} });
+mock.module("next/navigation", { namedExports: { ...navigation } });
+
+const bodyModule = import("./first-sync-body.tsx");
+
+function status(overrides: Partial<ConnectionSetupStatus> = {}): ConnectionSetupStatus {
+  return {
+    account_identity: null,
+    connection_id: "conn_1",
+    connector_id: "amazon",
+    created_at: null,
+    credential: { captured_at: null, credential_kind: null, present: false, rotated_at: null },
+    display_name: null,
+    health_state: "healthy",
+    import_receipt: null,
+    last_error: null,
+    object: "connection_setup_status",
+    pending: false,
+    run: { finished_at: null, records_emitted: null, reported_records_emitted: null, run_id: "run_1", started_at: null, status: "completed" },
+    running: false,
+    setup_kind: "browser_session",
+    setup_material: { captured_at: null, kind: "browser_session", label: "Sign-in", present: false },
+    setup_state: "active",
+    status: "active",
+    terminal_setup_disposition: null,
+    updated_at: null,
+    ...overrides,
+  } as ConnectionSetupStatus;
+}
+
+const hourly: FirstSyncFacts["schedule"] = { effective_mode: "automatic", interval_seconds: 3600 };
+const withOrders: FirstSyncFacts = { kinds: [{ count: 1204, kind: "orders" }, { count: 0, kind: "returns" }], schedule: hourly };
+
+const STATES: { label: string; facts: FirstSyncFacts; status: ConnectionSetupStatus }[] = [
+  { facts: withOrders, label: "worked", status: status() },
+  { facts: { kinds: [], schedule: hourly }, label: "empty (active, run reported zero)", status: status() },
+  { facts: withOrders, label: "empty (zero yield)", status: status({ setup_state: "first_sync_zero_yield" }) },
+  { facts: withOrders, label: "running", status: status({ running: true, setup_state: "first_sync_running" }) },
+  { facts: withOrders, label: "needs you", status: status({ setup_state: "awaiting_browser_login" }) },
+  {
+    facts: withOrders,
+    label: "failed",
+    status: status({
+      last_error: { reason: "HTTP 429 from provider", remediation: "Wait a few minutes and try again." },
+      setup_state: "first_sync_failed",
+    }),
+  },
+  { facts: withOrders, label: "paused", status: status({ setup_state: "paused" }) },
+  { facts: withOrders, label: "revoked", status: status({ setup_state: "revoked" }) },
+];
+
+// Design Page 3, "Worked": each kind with its count, the schedule sentence, two buttons.
+test("worked: kinds with counts, the schedule sentence, and the two buttons", () => {
+  const outcome = firstSyncOutcome(status(), "Amazon", withOrders);
+  assert.equal(outcome.kind, "worked");
+  if (outcome.kind !== "worked") return;
+  assert.deepEqual(outcome.collected, [{ count: 1204, label: "Orders" }]);
+  assert.equal(outcome.schedule, "DataConnect checks Amazon every hour.");
+  assert.equal(outcome.primary.label, "See your Amazon data");
+  assert.equal(outcome.secondary.label, "Add another data source");
+});
+
+test("schedule sentence: manual says only when you ask; unknown says nothing", () => {
+  assert.equal(scheduleSentence("Amazon", { effective_mode: "manual", interval_seconds: 3600 }), "DataConnect checks Amazon only when you ask.");
+  assert.equal(scheduleSentence("Amazon", null), null);
+  assert.equal(scheduleSentence("Amazon", { effective_mode: "paused", interval_seconds: 3600 }), null);
+});
+
+// Design Page 3, "Worked, nothing came": never say "connected" with counts of zero as success.
+test("a finished sync that reported zero records is the empty outcome, with Try again", () => {
+  assert.equal(firstSyncOutcome(status(), "Amazon", { kinds: [{ count: 0, kind: "orders" }], schedule: hourly }).kind, "empty");
+  assert.equal(firstSyncOutcome(status({ setup_state: "first_sync_zero_yield" }), "Amazon", withOrders).kind, "empty");
+});
+
+// Honest states: unknown counts are not "nothing came".
+test("a finished sync with no count facts is worked, not empty", () => {
+  assert.equal(firstSyncOutcome(status(), "Amazon", { kinds: null, schedule: null }).kind, "worked");
+});
+
+// Design Page 3, "Failed": the right retry for the kind of service.
+test("failed: the retry button matches the kind of service", () => {
+  const failed = { last_error: { reason: "x", remediation: "y" }, setup_state: "first_sync_failed" as const };
+  const label = (kind: ConnectionSetupStatus["setup_kind"]) => {
+    const outcome = firstSyncOutcome(status({ ...failed, setup_kind: kind }), "Amazon", withOrders);
+    return outcome.kind === "failed" ? outcome.retry : null;
+  };
+  assert.equal(label("manual_upload")?.label, "Choose another file");
+  assert.match(label("manual_upload")?.href ?? "", /^\/connect\/manual-upload\/amazon\?connection_id=conn_1/);
+  assert.equal(label("static_secret")?.label, "Enter the key again");
+  assert.match(label("static_secret")?.href ?? "", /^\/connect\/static-secret\/amazon\?connection_id=conn_1/);
+  assert.equal(label("browser_session")?.label, "Try again");
+  assert.match(label("browser_session")?.href ?? "", /^\/connect\/browser-session\/amazon\/launch/);
+});
+
+test("running links to the live view and needs-you continues sign-in", () => {
+  const running = firstSyncOutcome(status({ running: true, setup_state: "first_sync_running" }), "Amazon", withOrders);
+  assert.equal(running.kind === "running" && running.watch.href, "/syncs/run_1/stream");
+  const needs = firstSyncOutcome(status({ setup_state: "awaiting_browser_login" }), "Amazon", withOrders);
+  assert.equal(needs.kind === "needs-you" && needs.next.label, "Continue");
+});
+
+// Design Page 3 + banned list: every outcome, rendered, is free of banned words, badges, folds, ids.
+test("every outcome renders with none of the banned words, badges or folds", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  for (const state of STATES) {
+    const outcome = firstSyncOutcome(state.status, "Amazon", state.facts);
+    const html = renderToStaticMarkup(createElement(FirstSyncBody, { connectorId: "amazon", name: "Amazon", outcome }));
+    assert.deepEqual(bannedCopyProblems(html, { allowedFold: "What went wrong" }), [], `banned copy on "${state.label}"`);
+    assert.doesNotMatch(visibleText(html), /conn_1|run_1/, state.label);
+  }
+});
+
+test("failed shows its reason under the headline and the server message only in the fold", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const failedState = STATES.find((state) => state.label === "failed");
+  assert.ok(failedState);
+  const outcome = firstSyncOutcome(failedState.status, "Amazon", withOrders);
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, { connectorId: "amazon", name: "Amazon", outcome }));
+  assert.match(html, /Amazon didn&#x27;t connect\./);
+  assert.match(html, /Wait a few minutes and try again\./);
+  assert.match(html, /<details/);
+  assert.match(html, /What went wrong/);
+});

@@ -32,6 +32,8 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const MANUAL_UPLOAD_FILE = `${HERE}../../connect/manual-upload/[connectorId]/page.tsx`;
 const MANUAL_UPLOAD_FORM_FILE = `${HERE}../../connect/manual-upload/[connectorId]/manual-upload-form.tsx`;
 const STATUS_FILE = `${HERE}../../connect/status/[connectionId]/page.tsx`;
+const STATUS_OUTCOME_FILE = `${HERE}../../connect/status/[connectionId]/first-sync-outcome.ts`;
+const STATUS_BODY_FILE = `${HERE}../../connect/status/[connectionId]/first-sync-body.tsx`;
 const STATUS_LINKS_FILE = `${HERE}../../connect/status/[connectionId]/connect-status-links.ts`;
 
 // The status page's own sourceRecordsHref/sourceDetailHref now live in
@@ -41,39 +43,12 @@ const STATUS_LINKS_FILE = `${HERE}../../connect/status/[connectionId]/connect-st
 const STATUS_SOURCE_RECORDS_HELPER = /export function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
 const STATUS_SOURCE_DETAIL_HELPER = /export function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
 // RAISE-RULES.md 2 / setup-pages brief 4: the filled action after success is "Open <Source>".
-const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open \{displayName\}/;
-// RAISE-RULES.md 4: "source" alone becomes "data source".
-const STATUS_SOURCE_DETAILS_LINK = /href=\{sourceDetailHref\(status\)\}[\s\S]*Data source details/;
 const CONNECTOR_LEVEL_STATUS_RECORDS_LINK = /href=\{`\/sources\/\$\{encodeURIComponent\(status\.connector_id\)\}`\}/;
 // RAISE-RULES.md 4 bans "coverage" on screen; the receipt stays revisitable through the status page link.
 const COVERAGE_RECEIPT_COPY = /\/connect\/status\/\$\{encodeURIComponent\(connectionId\)\}/;
 const OLD_FIRST_SYNC_CTA = /Upload and start first sync/;
 const PROVIDER_CREDENTIAL_COPY = /provider account sign-in is required|provider credential/;
 const DEPLOYMENT_SEMANTICS_COPY = /pnpm --dir|packages\/[a-z]|connector_instance_id|source_instance_id/;
-const IMPORT_COMPLETE_COPY = /Import complete/;
-const VALIDATED_AND_COMMITTED_COPY = /validated and committed/;
-const COVERAGE_PREVIEW_COPY = /Coverage preview/;
-const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
-const PARSED_RECORDS_COPY = /Parsed records/;
-const ACCEPTED_COUNT_COPY = /Accepted/;
-const DUPLICATE_COUNT_COPY = /Duplicates/;
-const SKIPPED_COUNT_COPY = /Skipped/;
-const FAILED_COUNT_COPY = /Failed/;
-const ESTIMATED_POINTS_COPY = /Estimated points/;
-const ESTIMATED_SEGMENTS_COPY = /Estimated segments/;
-const COVERAGE_WINDOW_COPY = /Coverage window/;
-const DURABLE_RECEIPT_COPY = /durable coverage receipt|committed acquisition-batch counts/i;
-const IDEMPOTENT_REPEAT_COPY = /Repeating the same file[\s\S]*returns[\s\S]*this receipt/i;
-const IMPORT_RECEIPT_REFERENCE = /status\.import_receipt/;
-const MANUAL_UPLOAD_BRANCH = /status\.setup_kind === "manual_upload"/;
-const IMPORT_STATE_FUNCTION = /function describeImportState/;
-const IMPORT_COMPLETE_HEADLINE = /headline: "Import complete"/;
-const IMPORT_FILE_COPY = /import file is captured/;
-const IMPORT_PROGRESS_TEST_ID = /data-testid="import-progress"/;
-const IMPORT_PHASES = [/Received/, /Parsed/, /Deduplicated/, /Committed/, /Indexed/, /Health projected/];
-const NO_PARALLEL_PROGRESS_ENUM = /type ImportPhaseState = "current" \| "done" \| "failed" \| "waiting"/;
-const SETUP_STATE_REFERENCE = /status\.setup_state/;
-const IMPORT_RECEIPT_STATE_REFERENCE = /status\.import_receipt/;
 
 // ── 2. Manual/upload page is a coverage-assistant start ─────────────────────
 
@@ -111,57 +86,27 @@ test("manual upload page does not imply provider credential or deployment semant
   assert.doesNotMatch(`${pageSrc}\n${formSrc}`, DEPLOYMENT_SEMANTICS_COPY);
 });
 
-// ── 3. Setup status page uses import/receipt language for manual_upload ──────
+// ── 3. Setup status page: one outcome sentence per design "Page 3" ───────────
+// Design "Page 3" and "Every item": the receipt table, the import-progress card and the
+// "Details" fold are removed; the page says the outcome in one sentence and offers the next button.
 
-test("status page uses import/receipt language for manual_upload", async () => {
+test("status page says the outcome and offers the data (design Page 3: worked)", async () => {
   const src = await readFile(STATUS_FILE, "utf8");
-  assert.match(src, IMPORT_COMPLETE_COPY);
-  assert.match(src, VALIDATED_AND_COMMITTED_COPY);
-  assert.match(src, COVERAGE_PREVIEW_COPY);
-  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
-  assert.match(src, PARSED_RECORDS_COPY);
-  assert.match(src, ACCEPTED_COUNT_COPY);
-  assert.match(src, DUPLICATE_COUNT_COPY);
-  assert.match(src, SKIPPED_COUNT_COPY);
-  assert.match(src, FAILED_COUNT_COPY);
-  assert.match(src, ESTIMATED_POINTS_COPY);
-  assert.match(src, ESTIMATED_SEGMENTS_COPY);
-  assert.match(src, COVERAGE_WINDOW_COPY);
-  assert.match(src, DURABLE_RECEIPT_COPY);
-  assert.match(src, IDEMPOTENT_REPEAT_COPY);
-  assert.match(src, IMPORT_RECEIPT_REFERENCE);
-  // Branch is keyed on the import setup_kind, not source-specific React.
-  assert.match(src, MANUAL_UPLOAD_BRANCH);
-});
-
-test("status page projects generic import progress phases from setup status", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
-  assert.match(src, IMPORT_PROGRESS_TEST_ID);
-  for (const phase of IMPORT_PHASES) {
-    assert.match(src, phase);
-  }
-  // This is a display projection from setup_state + receipt facts, not a second
-  // onboarding lifecycle enum with source-specific states.
-  assert.match(src, NO_PARALLEL_PROGRESS_ENUM);
-  assert.match(src, SETUP_STATE_REFERENCE);
-  assert.match(src, IMPORT_RECEIPT_STATE_REFERENCE);
-});
-
-test("status page never implies provider credential semantics for an import", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
-  // The active-import headline is a receipt, not "Connection active".
-  assert.match(src, IMPORT_STATE_FUNCTION);
-  assert.match(src, IMPORT_COMPLETE_HEADLINE);
-  // The manual material noun stays an import file, never a credential.
-  assert.match(src, IMPORT_FILE_COPY);
-});
-
-test("status page sends completed setup to the exact source and Explore scope", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
+  const outcomeSrc = await readFile(STATUS_OUTCOME_FILE, "utf8");
+  const bodySrc = await readFile(STATUS_BODY_FILE, "utf8");
   const linksSrc = await readFile(STATUS_LINKS_FILE, "utf8");
   assert.match(linksSrc, STATUS_SOURCE_RECORDS_HELPER);
   assert.match(linksSrc, STATUS_SOURCE_DETAIL_HELPER);
-  assert.match(src, STATUS_EXPLORE_LINK);
-  assert.match(src, STATUS_SOURCE_DETAILS_LINK);
-  assert.doesNotMatch(src, CONNECTOR_LEVEL_STATUS_RECORDS_LINK);
+  assert.match(outcomeSrc, /sourceRecordsHref\(status\)/);
+  assert.match(outcomeSrc, /See your \$\{name\} data/);
+  assert.match(bodySrc, /<LinkButton link=\{outcome\.primary\} primary \/>/);
+  assert.doesNotMatch(src + outcomeSrc + bodySrc, CONNECTOR_LEVEL_STATUS_RECORDS_LINK);
+});
+
+test("status page no longer prints receipts, progress phases or a fold (design Page 3, banned list 1 and 9)", async () => {
+  const all = (await readFile(STATUS_FILE, "utf8")) +
+    (await readFile(STATUS_OUTCOME_FILE, "utf8")) +
+    (await readFile(STATUS_BODY_FILE, "utf8"));
+  assert.doesNotMatch(all, /<details|Coverage preview|Import progress|Health projected|Setup state/);
+  assert.doesNotMatch(all, /status\.connection_id\}<\/dd>/);
 });

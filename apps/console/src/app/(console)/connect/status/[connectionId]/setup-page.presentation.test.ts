@@ -7,29 +7,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const PAGE_FILE = fileURLToPath(new URL("./page.tsx", import.meta.url));
+const BODY_FILE = fileURLToPath(new URL("./first-sync-body.tsx", import.meta.url));
 
-test("setup status keeps its source title, one sentence, and one primary action", async () => {
+// Design "Page 3": one sentence for the outcome, the right next button, no fold except "What went wrong".
+test("setup status shows one headline with one logo and no Details fold (design Page 3, banned list 1 and 4)", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
-  assert.match(page, /description=\{`\$\{described\.headline\}\.`\}/);
-  assert.match(page, /\{displayName\}/);
-  assert.match(page, /Open \{displayName\}/);
+  const body = await readFile(BODY_FILE, "utf8");
+  assert.match(page, /<FirstSyncBody/);
+  assert.match(body, /headlineFor\(outcome, name\)/);
+  assert.equal((body.match(/<ConnectorMark/g) ?? []).length, 1);
+  assert.doesNotMatch(page + body, /<details/);
   assert.match(page, /Back to Data sources/);
-  assert.equal((page.match(/variant: "default"/g) ?? []).length, 2);
-  assert.match(page, /<details className="mt-5 max-w-2xl">/);
-  assert.match(page, /Health projected/);
-  assert.match(page, /Reason: \{status\.last_error\.reason\.replaceAll/);
-  assert.match(page, /status\.connection_id/);
-  assert.match(page, /sourceRecordsHref\(status\)/);
-});
-
-test("status copy samples avoid banned words outside Details", () => {
-  const samples = [
-    "Gmail. Connection active. Open Gmail.",
-    "Gmail. First sync running.",
-    "Gmail. First sync failed. Re-enter credential and retry.",
-    "Gmail. Import complete. Open Gmail.",
-    "Gmail. No records collected.",
-  ];
-  const banned = /\b(?:PDPP|verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
-  for (const sample of samples) assert.doesNotMatch(sample, banned);
+  assert.match(page, /sources\/add|getConnectorSchedule/);
 });

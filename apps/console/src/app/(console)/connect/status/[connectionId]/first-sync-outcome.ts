@@ -1,0 +1,161 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * "After the first sync ends" (design "Page 3"): one outcome, one sentence, the
+ * right next button. Pure, so every state can be tested without a server.
+ */
+
+import { humanizeFieldLabel } from "@pdpp/display";
+import type { ConnectionSetupStatus, RefSchedule } from "../../../lib/ref-client.ts";
+import { setupHref, sourceRecordsHref } from "./connect-status-links.ts";
+
+export interface CollectedKind {
+  readonly count: number;
+  /** The kind in the service's own words. */
+  readonly label: string;
+}
+
+export type ScheduleFacts = Pick<RefSchedule, "effective_mode" | "interval_seconds">;
+
+export interface FirstSyncFacts {
+  /** Kinds with counts from the finished run, or null when the run did not report them. */
+  readonly kinds: readonly { count: number; kind: string }[] | null;
+  readonly schedule: ScheduleFacts | null;
+}
+
+export interface OutcomeLink {
+  readonly href: string;
+  readonly label: string;
+}
+
+export type FirstSyncOutcome =
+  | {
+      readonly kind: "worked";
+      readonly collected: readonly CollectedKind[];
+      readonly schedule: string | null;
+      readonly primary: OutcomeLink;
+      readonly secondary: OutcomeLink;
+    }
+  | { readonly kind: "empty"; readonly retry: OutcomeLink }
+  | { readonly kind: "running"; readonly watch: OutcomeLink }
+  | { readonly kind: "needs-you"; readonly next: OutcomeLink }
+  | {
+      readonly kind: "failed";
+      readonly reason: string;
+      readonly retry: OutcomeLink;
+      readonly wentWrong: string | null;
+    }
+  | { readonly kind: "paused"; readonly open: OutcomeLink }
+  | { readonly kind: "revoked"; readonly addAnother: OutcomeLink };
+
+const ADD_ANOTHER: OutcomeLink = { href: "/sources/add", label: "Add another data source" };
+
+export const outcomeCopy = {
+  connected: (name: string) => `${name} is connected.`,
+  emptyHeadline: (name: string) => `${name} is connected, but nothing came back.`,
+  runningHeadline: (name: string) => `${name} is still syncing.`,
+  watch: "Watch it",
+  needsYouHeadline: (name: string) => `${name} needs you to finish signing in.`,
+  continue: "Continue",
+  failedHeadline: (name: string) => `${name} didn't connect.`,
+  failedFallback: "Something went wrong while copying your data.",
+  pausedHeadline: (name: string) => `${name} is paused.`,
+  revokedHeadline: (name: string) => `${name} was disconnected.`,
+  seeData: (name: string) => `See your ${name} data`,
+  retry: "Try again",
+} as const;
+
+/** "DataConnect checks <Name> every hour." / "... only when you ask." Null when the schedule is not known. */
+export function scheduleSentence(name: string, schedule: ScheduleFacts | null): string | null {
+  if (!schedule) return null;
+  if (schedule.effective_mode === "manual") return `DataConnect checks ${name} only when you ask.`;
+  if (schedule.effective_mode === "paused" || !schedule.interval_seconds) return null;
+  return `DataConnect checks ${name} ${everyPhrase(schedule.interval_seconds)}.`;
+}
+
+function everyPhrase(seconds: number): string {
+  if (seconds === 3600) return "every hour";
+  if (seconds === 86_400) return "every day";
+  if (seconds % 86_400 === 0) return `every ${seconds / 86_400} days`;
+  if (seconds % 3600 === 0) return `every ${seconds / 3600} hours`;
+  return `every ${Math.max(1, Math.round(seconds / 60))} minutes`;
+}
+
+function retryLabel(status: ConnectionSetupStatus): string {
+  if (status.setup_kind === "manual_upload") return "Choose another file";
+  if (status.setup_kind === "static_secret") return "Enter the key again";
+  return outcomeCopy.retry;
+}
+
+function collectedKinds(facts: FirstSyncFacts): CollectedKind[] {
+  return (facts.kinds ?? [])
+    .filter(({ count }) => count > 0)
+    .map(({ count, kind }) => ({ count, label: humanizeFieldLabel(kind) }));
+}
+
+const ZERO_STATES = new Set([
+  "first_sync_zero_yield",
+  "first_sync_verified_empty",
+  "first_sync_unverified_zero",
+  "first_sync_unverified_missing_counts",
+]);
+
+const NEEDS_YOU_STATES = new Set(["awaiting_browser_login", "awaiting_credential"]);
+
+export function firstSyncOutcome(status: ConnectionSetupStatus, name: string, facts: FirstSyncFacts): FirstSyncOutcome {
+  const retryHref = setupHref(status);
+  if (status.setup_state === "revoked") return { addAnother: { ...ADD_ANOTHER }, kind: "revoked" };
+  if (status.setup_state === "paused") {
+    return { kind: "paused", open: { href: sourceRecordsHref(status), label: outcomeCopy.seeData(name) } };
+  }
+  if (status.setup_state === "first_sync_failed") {
+    return {
+      kind: "failed",
+      reason: status.last_error?.remediation?.trim() || outcomeCopy.failedFallback,
+      retry: { href: retryHref, label: retryLabel(status) },
+      wentWrong: status.last_error?.reason?.trim() || null,
+    };
+  }
+  if (NEEDS_YOU_STATES.has(status.setup_state)) {
+    return { kind: "needs-you", next: { href: retryHref, label: outcomeCopy.continue } };
+  }
+  if (status.setup_state === "first_sync_pending" || status.setup_state === "first_sync_running" || status.running) {
+    const runId = status.run?.run_id;
+    const watchHref = runId
+      ? `/syncs/${encodeURIComponent(runId)}${status.setup_kind === "browser_session" ? "/stream" : ""}`
+      : "/syncs";
+    return { kind: "running", watch: { href: watchHref, label: outcomeCopy.watch } };
+  }
+  const collected = collectedKinds(facts);
+  const knownEmpty = facts.kinds !== null && collected.length === 0;
+  if (ZERO_STATES.has(status.setup_state) || (status.setup_state === "active" && knownEmpty)) {
+    return { kind: "empty", retry: { href: retryHref, label: outcomeCopy.retry } };
+  }
+  return {
+    collected,
+    kind: "worked",
+    primary: { href: sourceRecordsHref(status), label: outcomeCopy.seeData(name) },
+    schedule: scheduleSentence(name, facts.schedule),
+    secondary: { ...ADD_ANOTHER },
+  };
+}
+
+export function headlineFor(outcome: FirstSyncOutcome, name: string): string {
+  switch (outcome.kind) {
+    case "worked":
+      return outcomeCopy.connected(name);
+    case "empty":
+      return outcomeCopy.emptyHeadline(name);
+    case "running":
+      return outcomeCopy.runningHeadline(name);
+    case "needs-you":
+      return outcomeCopy.needsYouHeadline(name);
+    case "failed":
+      return outcomeCopy.failedHeadline(name);
+    case "paused":
+      return outcomeCopy.pausedHeadline(name);
+    case "revoked":
+      return outcomeCopy.revokedHeadline(name);
+  }
+}
