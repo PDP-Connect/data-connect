@@ -3139,7 +3139,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.reason, "connector_reported_failed");
         assert.equal(failedEvent.data.connector_error_message, "Remote provider rate limit");
         assert.equal(failedEvent.data.connector_error_retryable, true);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
+        assert.equal(failedEvent.data.records_flushed, 1);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
       } finally {
         rmSync(tmpDir, { force: true, recursive: true });
