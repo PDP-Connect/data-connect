@@ -123,9 +123,9 @@ export function FirstSyncBody({
   resumeAction: (formData: FormData) => void | Promise<void>;
 }) {
   return (
-    <div data-testid={`first-sync-${outcome.kind}`}>
+    <div className="[&>header]:mb-0" data-testid={`first-sync-${outcome.kind}`}>
       <ConnectHeader connectorKey={connectorId} icon={icon} name={name} title={headlineFor(outcome, name)} />
-      <div className="grid max-w-xl gap-4 py-4">
+      <div className="grid max-w-xl gap-4 pb-4">
         <Body connectionId={connectionId} outcome={outcome} resumeAction={resumeAction} />
       </div>
     </div>

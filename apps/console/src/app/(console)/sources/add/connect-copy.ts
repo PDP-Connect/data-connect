@@ -30,7 +30,7 @@ export const keyCopy = {
   whereToFind: "Where to find it",
   storage: (name: string) =>
     `Your key is stored encrypted on the computer that runs DataConnect. It is sent only to ${name}.`,
-  storageNotReady: "This server is not set up to store keys yet.",
+  storageNotReady: (name: string) => `This server can't store keys yet, so ${name} can't be connected.`,
   button: connectHeading,
 } as const;
 

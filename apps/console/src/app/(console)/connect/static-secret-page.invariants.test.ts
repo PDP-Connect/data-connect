@@ -143,7 +143,8 @@ test("static-secret page is an owner-session capture form, not an agent secret p
   );
   assert.match(src, OPEN_HELP_COPY);
   assert.doesNotMatch(src, NO_CONNECTOR_BRANCH);
-  assert.doesNotMatch(src, NO_PROVIDER_COPY);
+  // Repair brief 2 links to the repository's install guide; a URL is not provider-specific page copy.
+  assert.doesNotMatch(src.replace(/href="[^"]*"/g, ""), NO_PROVIDER_COPY);
   assert.match(src, SECRET_BOUNDARY_COPY);
   assert.match(src, STORAGE_NOT_READY_COPY);
   assert.match(src, RECONNECT_REPAIR_TITLE);

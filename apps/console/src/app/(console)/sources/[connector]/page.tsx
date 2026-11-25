@@ -19,6 +19,7 @@ import { formatTotalRecordsLabel } from "../../lib/total-records-label.ts";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
 import Link from "next/link";
 import { Suspense } from "react";
+import type { ReactNode } from "react";
 import { notFound, redirect } from "next/navigation";
 import {
   canonicalConnectorKey,
@@ -94,6 +95,7 @@ import { ConnectionConfirmation } from "./connection-confirmation.tsx";
 import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
 import { ConnectionDiagnostics, ConnectionRecoverySummary } from "./connection-diagnostics.tsx";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
+import { AddAnotherAccount } from "./add-another-account.tsx";
 import { RenameConnection } from "./rename-connection.tsx";
 import { SourceStateSentenceText } from "./source-state-sentence.tsx";
 import { StreamCollectionFactsLine } from "./stream-collection-facts.tsx";
@@ -436,6 +438,7 @@ export default async function ConnectorPage({
   const sp = await searchParams;
 
   let model: ConnectorPageModel;
+  let addAnotherAccountAction: ReactNode;
   const demoRow = demoStatusRow(sp.demo);
   const updateDemo = process.env.NODE_ENV !== "production" && (sp.demo === "update-ready" || sp.demo === "update-ready-shared")
     ? buildDemoSourceUpdate(sp.demo === "update-ready-shared")
@@ -452,6 +455,7 @@ export default async function ConnectorPage({
   } else {
     try {
       model = await loadConnectorPageModel(routeId, sp.connection_id ?? null);
+      addAnotherAccountAction = <Suspense fallback={null}><AddAnotherAccount connectorKey={model.connectorId} /></Suspense>;
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
@@ -478,6 +482,7 @@ export default async function ConnectorPage({
       );
   return (
     <ConnectorPageView
+      addAnotherAccountAction={addAnotherAccountAction}
       dangerActiveRunId={sp.active_run_id}
       dangerError={sp.error}
       dangerMessage={sp.message}
@@ -736,6 +741,7 @@ function StreamDisplayName({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this server view intentionally composes the detail evidence panels and their binding-aware actions in one owner-visible route.
 function ConnectorPageView({
+  addAnotherAccountAction,
   model,
   dangerActiveRunId,
   dangerMessage,
@@ -744,6 +750,7 @@ function ConnectorPageView({
   updateDemo,
   updates,
 }: {
+  addAnotherAccountAction?: ReactNode;
   model: ConnectorPageModel;
   /** The run that blocked a delete, forwarded from the delete action redirect. */
   dangerActiveRunId?: string;
@@ -867,6 +874,7 @@ function ConnectorPageView({
       <PageHeader
         actions={
           <ConnectorHeaderActions
+            addAnotherAccountAction={addAnotherAccountAction}
             browserSessionRepairHref={browserSessionRepairHref}
             canStartSync={canStartSyncFromSummary(source)}
             connectionId={connectorInstanceId}
@@ -1120,6 +1128,7 @@ function ConnectorPageView({
 }
 
 function ConnectorHeaderActions({
+  addAnotherAccountAction,
   browserSessionRepairHref,
   canStartSync,
   connectionId,
@@ -1136,6 +1145,7 @@ function ConnectorHeaderActions({
   sourceInstances,
   statusAction,
 }: {
+  addAnotherAccountAction?: ReactNode;
   browserSessionRepairHref: string | null;
   canStartSync: boolean;
   connectionId: string | null;
@@ -1171,6 +1181,7 @@ function ConnectorHeaderActions({
         sourceInstances={sourceInstances}
         statusAction={statusAction}
       />
+      {addAnotherAccountAction}
     </div>
   );
 }

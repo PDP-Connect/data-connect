@@ -17,11 +17,12 @@ test("static-secret setup preserves the fields and uses matching connect and rec
   assert.match(page, /reconnecting \? `Reconnect \$\{name\}` : keyCopy\.button\(name\)/);
   assert.match(copy, /\$\{name\} gives you a key that lets DataConnect read your data\./);
   assert.match(copy, /whereToFind: "Where to find it"/);
-  assert.match(copy, /storageNotReady: "This server is not set up to store keys yet\."/);
+  assert.match(copy, /This server can't store keys yet, so \$\{name\} can't be connected\./);
   assert.match(route, /setup\.credential_capture\.fields\.map/);
   // RAISE-RULES.md 7: provider help links must work as labelled and have touch-sized targets.
-  assert.match(page, /className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"[\s\S]{0,200}target="_blank"/);
-  assert.match(page, /Set <code>\{blocker\.key\}<\/code>/);
+  // Repair brief 2: keep this link inline so it cannot enlarge wrapped lead lines.
+  assert.match(page, /className="underline decoration-dotted underline-offset-4"[\s\S]{0,200}target="_blank"/);
+  assert.match(page, /<code>\{blocker\.key\}<\/code>/);
   // Removed by design: the folds, the second back link and the explainer callouts.
   assert.doesNotMatch(page, /<details|Details|Back to Data sources|Callout|Credential storage/);
 });

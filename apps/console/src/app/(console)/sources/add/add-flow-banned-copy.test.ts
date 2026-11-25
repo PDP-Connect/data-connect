@@ -168,9 +168,18 @@ test("the key page, in every state, uses none of the banned words, badges or fol
     ["save failed", { ...base, error: "token rejected by the connector" }],
     ["storage not ready", { ...base, storageReady: false }],
   ];
-  for (const [label, props] of cases) assertClean(renderToStaticMarkup(createElement(KeyConnectBody, props)), `key: ${label}`);
-  const notReady = visibleText(renderToStaticMarkup(createElement(KeyConnectBody, { ...base, storageReady: false }))).replace(/\s+/g, " ");
-  assert.match(notReady, /This server is not set up to store keys yet\./);
+  for (const [label, props] of cases) {
+    const html = renderToStaticMarkup(createElement(KeyConnectBody, props));
+    // Repair brief 2 permits "install guide" only in the blocked storage guidance.
+    assert.deepEqual(bannedCopyProblems(html, { allowWords: props.storageReady ? [] : ["install"] }), [], `key: ${label}`);
+  }
+  const notReadyHtml = renderToStaticMarkup(createElement(KeyConnectBody, { ...base, storageReady: false }));
+  const notReady = visibleText(notReadyHtml).replace(/\s+/g, " ");
+  // Repair brief 2: explain the block and link to the instructions that resolve it.
+  assert.match(notReady, /This server can't store keys yet, so YNAB can't be connected\./);
+  assert.match(notReady, /Whoever set up this server needs to turn on key storage\. The install guide shows how\./);
+  assert.match(notReadyHtml, /href="https:\/\/github.com\/PDP-Connect\/data-connect\/blob\/main\/deploy\/docker\/README.md"[^>]*>install guide<\/a>/);
+  assert.match(notReady, /The settings are/);
   assert.doesNotMatch(notReady, /YNAB personal access token/);
   // Design "Key services": storage not ready shows the heading and the blocked text, no lead or help link.
   assert.doesNotMatch(notReady, /gives you a key|Where to find it/);

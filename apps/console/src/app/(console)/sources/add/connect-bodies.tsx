@@ -149,7 +149,7 @@ export function KeyConnectBody({
               <>
                 {" "}
                 <OpenExternalLink
-                  className="inline-flex min-h-11 items-center underline decoration-dotted underline-offset-4"
+                  className="underline decoration-dotted underline-offset-4"
                   href={helpUrl}
                   rel="noopener noreferrer"
                   target="_blank"
@@ -189,11 +189,21 @@ export function KeyConnectBody({
           </>
         ) : (
           <div className="grid gap-2" data-testid="key-storage-not-ready">
-            <p className="text-foreground">{keyCopy.storageNotReady}</p>
+            <p className="text-foreground">{keyCopy.storageNotReady(name)}</p>
+            <p className="text-muted-foreground">
+              Whoever set up this server needs to turn on key storage. The{" "}
+              <OpenExternalLink
+                className="underline underline-offset-4"
+                href="https://github.com/PDP-Connect/data-connect/blob/main/deploy/docker/README.md"
+                rel="noopener noreferrer"
+                target="_blank"
+              >install guide</OpenExternalLink> shows how.
+            </p>
+            <p className="pdpp-caption text-muted-foreground">The settings are</p>
             <ul className="grid gap-1 pdpp-caption text-muted-foreground">
               {blockers.map((blocker) => (
                 <li key={blocker.key}>
-                  Set <code>{blocker.key}</code>
+                  <code>{blocker.key}</code>
                 </li>
               ))}
             </ul>
@@ -228,7 +238,7 @@ export function FileConnectBody({
       />
       <div className="grid max-w-2xl gap-6 py-4">
         <section aria-labelledby="export-step" className="grid gap-2">
-          <h2 className="pdpp-section-title" id="export-step">1. {fileCopy.exportStep}</h2>
+          <h2 className="pdpp-title text-foreground" id="export-step">1. {fileCopy.exportStep}</h2>
           {instructions.steps.length > 0 ? (
             <ol className="grid list-decimal gap-1 pl-5 pdpp-body text-muted-foreground" data-testid="export-steps">
               {instructions.steps.flatMap(oneSentencePerLine).map((sentence, index) => (
@@ -255,7 +265,7 @@ export function FileConnectBody({
           ) : null}
         </section>
         <section aria-labelledby="choose-step" className="grid gap-2">
-          <h2 className="pdpp-section-title" id="choose-step">2. {fileCopy.chooseStep}</h2>
+          <h2 className="pdpp-title text-foreground" id="choose-step">2. {fileCopy.chooseStep}</h2>
           {form}
         </section>
       </div>
