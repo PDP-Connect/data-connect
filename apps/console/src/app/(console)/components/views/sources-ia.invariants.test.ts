@@ -123,8 +123,9 @@ const SOURCE_PROVIDER_SPECIFIC_COPY_RE =
   /\b(Amazon|Gmail|GitHub|Slack|ChatGPT|Chase|Notion|Spotify)\b|app password|personal access token/i;
 const FORBIDDEN_DEV_STRINGS_RE =
   /pnpm --dir|packages\/[a-z]|PDPP monorepo checkout|env var per account|pdpp owner-agent connectors|connector_instance_id|source_instance_id|device_token/;
-const NAV_SOURCES_RE = /\{ label: "Sources", href: "\/sources" \}/;
-const NAV_CONNECT_APPS_RE = /\{ label: "Connect apps", href: "\/connect" \}/;
+const NAV_SOURCES_RE = /label: "Data sources",\s*href: "\/sources"/;
+const NAV_APPS_RE = /label: "Apps",\s*href: "\/grants"/;
+const NAV_CONNECT_APP_CHILD_RE = /label: "Connect an app", href: "\/connect"/;
 const CONNECT_PAGE_TITLE_RE = /title="Connect apps"/;
 const CONNECT_PAGE_DESCRIPTION_RE = /grant-scoped read access[\s\S]*?go to Sources/;
 
@@ -263,12 +264,13 @@ test("source setup presentation has no connector-specific copy or examples", asy
 
 // ── 4. "Connect apps" is a separate read-access surface ─────────────────────
 
-test("the nav names the inbound client surface 'Connect apps', distinct from Sources", async () => {
+test("the nav separates Apps access from source collection", async () => {
   const src = await readFile(SHELL_FILE, "utf8");
-  // The data on-ramp nav item is "Sources" (→ records).
+  // DIRECTION.md "The frame and the menu": the primary collection destination is Data sources.
   assert.match(src, NAV_SOURCES_RE);
-  // The inbound-client nav item is unambiguously named, never bare "Connect".
-  assert.match(src, NAV_CONNECT_APPS_RE);
+  // DIRECTION.md "The frame and the menu": Apps opens access and Connect an app is its child.
+  assert.match(src, NAV_APPS_RE);
+  assert.match(src, NAV_CONNECT_APP_CHILD_RE);
 });
 
 test("the Connect page is identified as app read access, pointing data setup at Sources", async () => {

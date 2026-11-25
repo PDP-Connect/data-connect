@@ -28,8 +28,8 @@
      --carbon-outline / --carbon-fill / --carbon-offset
      --border-strong
      --primary-tint
-     --radius-control (2px — the ONLY non-zero radius in the system)
-     --radius (0px — sheets/paper are square)
+     --radius-control (6px on controls)
+     --radius (8px on boxes)
      --duration-state (console's faster state transition intent)
      --spacing-sidebar
 
@@ -67,21 +67,26 @@
   --text-heading--font-weight: 700;
   --text-heading--letter-spacing: -0.012em;
   --text-lede--line-height: 1.6;
-  --text-eyebrow: 0.67rem;
+  --text-eyebrow: 13px;
   --text-eyebrow--font-weight: 500;
+  --text-eyebrow--letter-spacing: 0;
+  --text-title: 26px;
+  --text-title--letter-spacing: -0.022em;
+  --text-title--font-weight: 600;
 
   /* ─── Paper + ink ────────────────────────────────────────────── */
-  --background: oklch(0.985 0.004 90);
-  --foreground: oklch(0.18 0.005 270);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.18 0.005 270);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.18 0.005 270);
+  --background: oklch(0.995 0.001 90);
+  --foreground: oklch(0.21 0.006 60);
+  --card: oklch(0.995 0.001 90);
+  --card-foreground: oklch(0.21 0.006 60);
+  --popover: oklch(0.974 0.003 85);
+  --popover-foreground: oklch(0.21 0.006 60);
+  --sidebar: oklch(0.974 0.003 85);
 
   /* ─── Protocol ink (primary) — what the machine writes ──────── */
-  --primary: oklch(0.46 0.11 255);
-  --primary-foreground: oklch(0.99 0.002 90);
-  --primary-tint: oklch(0.46 0.11 255 / 0.08);
+  --primary: oklch(0.50 0.13 245);
+  --primary-foreground: oklch(0.995 0.001 90);
+  --primary-tint: oklch(0.50 0.13 245 / 0.08);
 
   /* ─── Human warmth — where the owner acts ────────────────────── */
   --human: oklch(0.55 0.11 45);
@@ -94,32 +99,34 @@
   --carbon-offset: 9px;
 
   /* ─── Neutrals ──────────────────────────────────────────────── */
-  --secondary: oklch(0.955 0.004 270);
-  --secondary-foreground: oklch(0.22 0.005 270);
-  --muted: oklch(0.955 0.004 270);
-  --muted-foreground: oklch(0.47 0.008 270);
-  --accent: oklch(0.955 0.004 270);
-  --accent-foreground: oklch(0.22 0.005 270);
-  --border: oklch(0.905 0.005 270);
-  --border-strong: oklch(0.79 0.006 270);
-  --input: oklch(0.79 0.006 270);
-  --ring: oklch(0.46 0.11 255);
+  --secondary: oklch(0.962 0.003 80);
+  --secondary-foreground: oklch(0.21 0.006 60);
+  --muted: oklch(0.962 0.003 80);
+  --muted-foreground: oklch(0.46 0.008 60);
+  --foreground-faint: oklch(0.60 0.008 60);
+  --accent: oklch(0.962 0.003 80);
+  --accent-foreground: oklch(0.21 0.006 60);
+  --border: oklch(0.93 0.004 75);
+  --border-strong: oklch(0.87 0.005 75);
+  --input: oklch(0.87 0.005 75);
+  --ring: oklch(0.50 0.13 245);
+  --attention: oklch(0.54 0.15 48);
 
   /* ─── State (spent, never sprayed) ──────────────────────────── */
   --success: oklch(0.5 0.11 158); /* recorded / active */
   --success-tint: oklch(0.5 0.11 158 / 0.1);
   --warning: oklch(0.52 0.13 70); /* expiring; L 0.52 keeps text >= 4.5:1 on page, card and tint */
   --warning-tint: oklch(0.58 0.13 70 / 0.1);
-  --destructive: oklch(0.52 0.16 27); /* destructive acts only */
-  --destructive-foreground: oklch(0.99 0.002 90);
-  --destructive-tint: oklch(0.52 0.16 27 / 0.08);
+  --destructive: oklch(0.52 0.17 27); /* destructive acts only */
+  --destructive-foreground: oklch(0.995 0.001 90);
+  --destructive-tint: oklch(0.52 0.17 27 / 0.08);
 
-  /* ─── Geometry — square paper ────────────────────────────────── */
-  --radius: 0px; /* sheets, cards, panels = no rounding */
-  --radius-control: 2px; /* the ONLY rounding: inputs, buttons */
+  /* ─── Geometry — shared control and panel corners ───────────── */
+  --radius: 8px;
+  --radius-control: 6px;
 
   /* ─── Layout ─────────────────────────────────────────────────── */
-  --spacing-sidebar: 220px;
+  --spacing-sidebar: 232px;
 
   /* ─── Legacy aliases (explorer/labs compatibility) ──────────── */
   --primary-wash: var(--primary-tint);
@@ -132,13 +139,13 @@
   /* ─── Surface tier (bridge to existing Tailwind utilities) ───── */
   --surface-page: var(--background);
   --surface-card: var(--card);
-  --surface-raised: var(--card);
+  --surface-raised: var(--secondary);
   --surface-overlay: var(--popover);
 }
 
 @media (min-width: 64rem) {
   :root {
-    --spacing-sidebar: 240px;
+  --spacing-sidebar: 232px;
   }
 }
 
@@ -156,16 +163,17 @@
    it must out-rank the light :root block (specificity 0,0,1), otherwise the
    light values would win on <html> and dark mode would never apply. */
 [data-theme="dark"] {
-  --background: oklch(0.17 0.006 262);
-  --foreground: oklch(0.95 0.005 262);
-  --card: oklch(0.21 0.007 262);
-  --card-foreground: oklch(0.95 0.005 262);
-  --popover: oklch(0.24 0.007 262);
-  --popover-foreground: oklch(0.95 0.005 262);
+  --background: oklch(0.178 0.003 80);
+  --foreground: oklch(0.93 0.004 80);
+  --card: oklch(0.178 0.003 80);
+  --card-foreground: oklch(0.93 0.004 80);
+  --popover: oklch(0.155 0.003 80);
+  --popover-foreground: oklch(0.93 0.004 80);
+  --sidebar: oklch(0.155 0.003 80);
 
-  --primary: oklch(0.74 0.13 255);
-  --primary-foreground: oklch(0.15 0.01 262);
-  --primary-tint: oklch(0.74 0.13 255 / 0.13);
+  --primary: oklch(0.76 0.11 238);
+  --primary-foreground: oklch(0.178 0.003 80);
+  --primary-tint: oklch(0.76 0.11 238 / 0.13);
 
   --human: oklch(0.76 0.12 45);
   --human-foreground: oklch(0.16 0.01 45);
@@ -174,24 +182,31 @@
   --carbon-outline: oklch(0.74 0.13 255 / 0.62);
   --carbon-fill: oklch(0.74 0.13 255 / 0.22);
 
-  --secondary: oklch(0.26 0.007 262);
-  --secondary-foreground: oklch(0.95 0.005 262);
-  --muted: oklch(0.24 0.007 262);
-  --muted-foreground: oklch(0.72 0.01 262);
-  --accent: oklch(0.26 0.007 262);
-  --accent-foreground: oklch(0.95 0.005 262);
-  --border: oklch(0.29 0.008 262);
-  --border-strong: oklch(0.4 0.008 262);
-  --input: oklch(0.34 0.008 262);
-  --ring: oklch(0.74 0.13 255);
+  --secondary: oklch(0.225 0.004 80);
+  --secondary-foreground: oklch(0.93 0.004 80);
+  --muted: oklch(0.225 0.004 80);
+  --muted-foreground: oklch(0.70 0.006 80);
+  --foreground-faint: oklch(0.55 0.006 80);
+  --accent: oklch(0.225 0.004 80);
+  --accent-foreground: oklch(0.93 0.004 80);
+  --border: oklch(0.255 0.004 80);
+  --border-strong: oklch(0.33 0.005 80);
+  --input: oklch(0.33 0.005 80);
+  --ring: oklch(0.76 0.11 238);
+  --attention: oklch(0.79 0.13 62);
 
   --success: oklch(0.76 0.13 158);
   --success-tint: oklch(0.76 0.13 158 / 0.14);
   --warning: oklch(0.8 0.14 75);
   --warning-tint: oklch(0.8 0.14 75 / 0.13);
-  --destructive: oklch(0.7 0.16 27);
-  --destructive-foreground: oklch(0.15 0.01 262);
-  --destructive-tint: oklch(0.7 0.16 27 / 0.12);
+  --destructive: oklch(0.72 0.16 27);
+  --destructive-foreground: oklch(0.178 0.003 80);
+  --destructive-tint: oklch(0.72 0.16 27 / 0.12);
+
+  --surface-page: var(--background);
+  --surface-card: var(--card);
+  --surface-raised: var(--secondary);
+  --surface-overlay: var(--popover);
 
   --primary-wash: var(--primary-tint);
   --human-wash: var(--human-tint);
@@ -199,4 +214,15 @@
   --success-wash-strong: oklch(0.76 0.13 158 / 0.2);
   --warning-wash: var(--warning-tint);
   --edu-fg: oklch(0.78 0.06 210);
+}
+
+@theme inline {
+  --color-attention: var(--attention);
+}
+
+@media (max-width: 860px) {
+  :root {
+    --text-title: 23px;
+    --text-body: 16px;
+  }
 }

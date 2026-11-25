@@ -7,8 +7,8 @@
    INK CARBON — Shell frame
    packages/pdpp-brand-react/src/shell.css
 
-   The owner-console frame: left sidebar (the rack), main column (the paper),
-   sticky header, and the mobile drawer. Token-driven; no hard-coded colors.
+   The owner-console frame: left menu, page content, and the mobile drawer.
+   Token-driven; no hard-coded colors.
    Adapted from the Recordroom design's console.css + mobile.css.
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -67,7 +67,7 @@ html:has(.rr-app) {
   /* No top padding: the brand block owns the masthead band so its rule lands
      at exactly --rr-masthead-height, level with .rr-head's rule. */
   padding: 0 0 14px;
-  background: color-mix(in oklab, var(--background) 88%, oklch(0 0 0));
+  background: var(--sidebar);
   border-right: 1px solid var(--border);
 }
 .rr-side__brand {
@@ -79,32 +79,17 @@ html:has(.rr-app) {
   padding: 0 18px;
   border-bottom: 1px solid var(--border);
 }
-/* the mark is the PDPP split-P: warm human/holder half + cool protocol/issuer
-   half, seamed on the optical vertical. Hues track the active surface via the
-   --pdpp-mark-* tokens below (matching operator-ui's PdppLogo). */
+/* The inline DataConnect mark follows the foreground of its current surface. */
 .rr-side__mark {
   display: block;
   flex-shrink: 0;
   width: 18px;
   height: 18px;
-}
-/* Light surface — standard hues. */
-.rr-app,
-.pdpp-dialog.rr-drawer {
-  --pdpp-mark-warm: oklch(0.52 0.11 45);
-  --pdpp-mark-cool: oklch(0.58 0.18 253);
-  --pdpp-mark-counter: oklch(0.985 0.005 85);
-}
-/* Dark surface — the elevated "night" pair. */
-[data-theme="dark"] .rr-app,
-[data-theme="dark"] .pdpp-dialog.rr-drawer {
-  --pdpp-mark-warm: oklch(0.72 0.12 45);
-  --pdpp-mark-cool: oklch(0.74 0.16 253);
-  --pdpp-mark-counter: oklch(0.16 0.01 60);
+  color: var(--foreground);
 }
 .rr-side__name {
   font-size: 15px;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 .rr-side__nav {
@@ -112,37 +97,48 @@ html:has(.rr-app) {
   flex-direction: column;
   gap: 2px;
   min-height: 0;
-  padding: 12px 10px;
+  padding: 10px 12px;
   overflow-y: auto;
 }
 .rr-nav-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .rr-side__group {
-  padding: 14px 10px 4px;
+  padding: 10px 12px 4px;
   font-family: var(--font-sans);
-  font-size: 9.5px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0;
+}
+.rr-side__group--nested {
+  padding: 12px 10px 3px;
+  font-size: 11px;
+  color: var(--foreground-faint);
+}
+.rr-nav-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 14px;
+}
+.rr-nav-child {
+  display: flex;
+  flex-direction: column;
 }
 .rr-nav-item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
-  /* The primary navigation, present on every route — a real touch target,
-     not a decorative chrome control. min-height (not more padding) hits the
-     44px bar without changing the row's visual density. */
+  /* The primary navigation remains a real touch target, not a decorative control. */
   min-height: 44px;
-  /* Left padding leaves room for the 2px active accent bar so text never
-     shifts between resting/hover/active states (the bar paints in the gutter). */
-  padding: 9px 10px 9px 12px;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--muted-foreground);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
   text-align: left;
   text-decoration: none;
   background: transparent;
@@ -153,25 +149,31 @@ html:has(.rr-app) {
     background var(--duration-state) var(--ease-standard),
     box-shadow var(--duration-state) var(--ease-standard);
 }
-/* Hover is a QUIET neutral lift — distinct from the protocol-blue active state. */
+/* Hover and selection use the shared quiet neutral fill. */
 .rr-nav-item:hover {
   color: var(--foreground);
   background: var(--muted);
 }
-/* Active = the current location, in the protocol-blue temperature: a 2px
-   left accent bar (radius 0, painted as an inset box-shadow so it hugs the
-   square edge), a subtle --primary tint fill, and lifted text weight +
-   foreground. Reads clearly as "you are here" in both dark and light. */
+/* Active state stays clear through the neutral fill and stronger text weight. */
 .rr-nav-item.is-active {
-  font-weight: 700;
+  font-weight: 600;
   color: var(--foreground);
-  background: var(--primary-tint);
-  box-shadow: inset 2px 0 0 0 var(--primary);
+  background: var(--muted);
+  box-shadow: none;
 }
-/* Keep the active item legible (not pulled to the quieter neutral) on hover,
-   while still nudging the tint a touch warmer so it stays interactive. */
+/* Keep the selected item fill steady on hover. */
 .rr-nav-item.is-active:hover {
-  background: color-mix(in oklab, var(--primary-tint) 70%, var(--muted));
+  background: var(--muted);
+}
+.rr-nav-item__icon {
+  color: var(--muted-foreground);
+}
+.rr-nav-item--child {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 34px;
+  padding: 7px 10px;
+  color: var(--muted-foreground);
+  font-weight: 400;
 }
 .rr-side__spacer {
   flex: 1;
@@ -183,20 +185,35 @@ html:has(.rr-app) {
   padding: 12px 18px 0;
   border-top: 1px solid var(--border);
 }
-.rr-side__host {
+.rr-side__version {
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-sans);
-  font-size: 9.5px;
-  color: var(--muted-foreground);
+  font-size: 11px;
+  color: var(--foreground-faint);
   white-space: nowrap;
 }
-.rr-side__motto {
-  padding-top: 3px;
+
+.rr-search-button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 10px;
+  margin: 12px 12px 4px;
   font-family: var(--font-sans);
-  font-size: 9.5px;
-  color: var(--primary);
-  letter-spacing: 0.06em;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.rr-search-button:hover {
+  color: var(--foreground);
+  background: var(--muted);
+  border-color: var(--border-strong);
 }
 
 /* ─── Main column ─────────────────────────────────────────────────── */
@@ -207,8 +224,8 @@ html:has(.rr-app) {
   min-height: 0;
 }
 .rr-head {
+  display: none;
   box-sizing: border-box;
-  display: flex;
   flex-shrink: 0;
   gap: 16px;
   align-items: center;
@@ -224,15 +241,12 @@ html:has(.rr-app) {
   display: none; /* mobile-only; shown ≤860px */
   gap: 10px;
   align-items: center;
-  font-size: 14px;
-  font-weight: 800;
+  font-size: 15px;
+  font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
-/* The `{host} · {build}` crumb no longer renders in the header (it lives once in
-   the sidebar/drawer footer). `.rr-head__actions` keeps a `margin-left: auto` so
-   the header actions stay right-aligned whether or not the mobile-only brand
-   shows on the left. */
+/* `.rr-head__actions` keeps a `margin-left: auto` so the menu stays at the right. */
 .rr-head__actions {
   display: flex;
   flex-shrink: 0;
@@ -244,10 +258,11 @@ html:has(.rr-app) {
   display: inline-flex;
   gap: 7px;
   align-items: center;
-  padding: 6px 12px;
+  min-height: 30px;
+  padding: 5px 10px;
   font-family: var(--font-sans);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--muted-foreground);
   white-space: nowrap;
   cursor: pointer;
@@ -266,11 +281,16 @@ html:has(.rr-app) {
 }
 .rr-kbd {
   padding: 1px 4px;
-  font-family: var(--font-mono);
-  font-size: 10px;
   color: var(--muted-foreground);
   border: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: 10px;
   border-radius: var(--radius-control);
+}
+.rr-side__theme {
+  justify-content: center;
+  width: 32px;
+  padding: 6px;
 }
 .rr-menu-btn {
   display: none; /* mobile-only */
@@ -297,14 +317,14 @@ html:has(.rr-app) {
   width: 100vw;
   height: 100dvh;
   overflow: hidden;
-  background: oklch(0 0 0 / 0.5);
+  background: color-mix(in oklab, var(--foreground) 50%, transparent);
 }
 @media (prefers-reduced-motion: no-preference) {
   .pdpp-dialog-backdrop.rr-drawer-overlay {
     animation: rr-fade-in var(--duration-fast) ease both;
   }
 }
-/* biome-ignore lint/style/noDescendingSpecificity: The earlier dark-theme selector sets only mark color tokens; these drawer layout declarations do not override them. */
+/* biome-ignore lint/style/noDescendingSpecificity: The portaled dialog needs a more specific selector to own the drawer geometry. */
 .pdpp-dialog.rr-drawer {
   position: fixed;
   top: 0;
@@ -321,10 +341,10 @@ html:has(.rr-app) {
   margin: 0;
   overflow-y: auto;
   color: var(--foreground);
-  background: color-mix(in oklab, var(--background) 88%, oklch(0 0 0));
+  background: var(--sidebar);
   border: 0;
   border-right: 1px solid var(--border-strong);
-  border-radius: 0;
+  border-radius: var(--radius);
   box-shadow: none;
   transform: none;
 }
@@ -346,14 +366,21 @@ html:has(.rr-app) {
   flex: 1;
   flex-direction: column;
   gap: 2px;
-  padding: 10px;
+  padding: 10px 12px;
 }
 .pdpp-dialog.rr-drawer .rr-nav-item {
-  padding: 12px;
-  font-size: 15px;
+  padding: 9px 10px;
+  font-size: 14px;
 }
 .pdpp-dialog.rr-drawer .rr-side__group {
-  padding: 16px 12px 5px;
+  padding: 10px 12px 4px;
+}
+.pdpp-dialog.rr-drawer .rr-nav-item--child {
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.pdpp-dialog.rr-drawer .rr-search-button {
+  margin: 12px 12px 4px;
 }
 .pdpp-dialog.rr-drawer .rr-side__foot {
   margin-top: auto;
@@ -391,6 +418,8 @@ html:has(.rr-app) {
     overflow-x: hidden;
   }
   .rr-head {
+    display: flex;
+    align-items: center;
     padding: 10px 16px;
   }
   .rr-head__brand {
@@ -398,8 +427,10 @@ html:has(.rr-app) {
   }
   .rr-menu-btn {
     display: inline-flex;
-  }
-  .rr-kbd {
-    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    min-height: 36px;
+    padding: 0;
   }
 }

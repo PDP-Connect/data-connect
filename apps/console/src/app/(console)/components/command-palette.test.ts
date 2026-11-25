@@ -60,7 +60,6 @@ const SHELL_BRIDGE_WIRES_JUMP = /<RecordroomShell build=\{build\} host=\{host\} 
 const PALETTE_USES_REGISTRY = /import \{[^}]*\bmatchDashboardCommands\b[^}]*\} from "\.\/command-registry\.ts"/;
 const CONSOLE_REEXPORTS_UNIFIED_RE =
   /export \{[\s\S]*CommandPalette[\s\S]*\} from "@pdpp\/operator-ui\/components\/command-palette"/;
-const CRUMB_IN_FOOTBLOCK_RE = /className="rr-side__foot"[\s\S]*\{host\} · \{build\}/;
 const PROVIDER_SHORTCUT_RE = /\(e\.metaKey \|\| e\.ctrlKey\) && e\.key\.toLowerCase\(\) === "k"/;
 const SHELL_HAS_SHORTCUT_RE = /metaKey[\s\S]{0,40}ctrlKey[\s\S]{0,80}"k"/;
 const PALETTE_IMPORTS_DIALOG_RE = /import \{[^}]*\bDialog\b[^}]*\} from "\.\.\/ui\/dialog\.tsx"/;
@@ -79,18 +78,29 @@ const NAV_LABEL_TRACES_RE = /label:\s*["']Traces["']/;
 const IDENTITY_WORDMARK_RE = /<span className="rr-side__name">\{identity\.name\}<\/span>/g;
 const DATACONNECT_MARK_RE = /<BrandMark \/>/g;
 const RECORDROOM_AS_COPY_RE = />\s*Recordroom\s*</;
-const CRUMB_LITERAL_RE = /\{host\} · \{build\}/g;
+const VERSION_IN_FOOTBLOCK_RE = /className="rr-side__foot"[\s\S]*<span className="rr-side__version">\{version\}<\/span>/;
 const HEAD_CRUMB_CLASS_RE = /rr-head__crumb/;
 const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
 const LINE_COMMENT_RE = /^\s*\/\/.*$/gm;
 const PALETTE_IMPL_FILE_RE = /command-palette.*\.tsx$/;
 const CLEAN_SANDBOX_SEGMENT_LEAK_RE = /\/(sources|syncs|audit)(\b|\/|\?|#)/;
-const NAV_ITEM_RE = (label: string, href: string) =>
-  new RegExp(`\\{\\s*label:\\s*["']${label}["'],\\s*href:\\s*["']${href.replaceAll("/", "\\/")}["']\\s*\\}`);
-const NAV_GROUP_RE = (heading: string, labels: string[]) =>
-  new RegExp(
-    `heading:\\s*["']${heading}["'][\\s\\S]*${labels.map((label) => `label:\\s*["']${label}["']`).join("[\\s\\S]*")}`
-  );
+const NAV_HREF_RE = (href: string) => new RegExp(`href:\\s*["']${href.replaceAll("/", "\\/")}["']`);
+
+const TODAY_MENU_HREFS = [
+  "/",
+  "/explore",
+  "/sources",
+  "/syncs",
+  "/schedules",
+  "/connect",
+  "/grants",
+  "/audit",
+  "/notifications",
+  "/deployment",
+  "/device-exporters",
+  "/event-subscriptions",
+  "/settings",
+];
 
 // ── Provider owns the ONE ⌘K listener; the shell has none ──────────────────
 
@@ -198,19 +208,49 @@ test("empty query returns the full mode-scoped command list (sensible default se
   assert.equal(empty.length, all.length);
 });
 
-// ── Owner-noun labels: Runs → Syncs, Traces → Audit ────────────────────────
+// ── The shared menu uses the current owner vocabulary ──────────────────────
 
-test("live Recordroom shell navigation uses the owner nouns (Sources, Syncs, Audit)", async () => {
+test("live shell menu uses the requested five destinations and section children", async () => {
   const src = await readFile(RECORDROOM_SHELL_FILE, "utf8");
-  assert.match(src, NAV_ITEM_RE("Overview", "/"));
-  assert.match(src, NAV_ITEM_RE("Explore", "/explore"));
-  assert.match(src, NAV_GROUP_RE("Collection", ["Sources", "Syncs", "Schedules"]));
-  assert.match(src, NAV_GROUP_RE("Sharing", ["Connect apps", "Grants", "Audit"]));
-  assert.match(src, NAV_GROUP_RE("Server", ["Notifications", "Deployment", "Device exporters", "Event subscriptions"]));
+  const menu = src.slice(src.indexOf("export const NAV_GROUPS"), src.indexOf("export const NAV_ITEMS"));
+  // DIRECTION.md "The frame and the menu": five primary destinations with named children.
+  for (const label of ["Home", "Data sources", "Explore", "Apps", "Settings"]) {
+    assert.match(src, new RegExp(`label:\\s*["']${label}["']`));
+  }
+  // DIRECTION.md "The frame and the menu": each of the five primary items has a line icon.
+  assert.equal((menu.match(/icon:\s*(?:Home|Database|Compass|AppWindow|Settings2)/g) ?? []).length, 5);
+  for (const label of [
+    "Sync history",
+    "Schedules",
+    "Connect an app",
+    "Activity",
+    "Notifications",
+    "Server",
+    "Collectors on your devices",
+    "Webhooks",
+    "Experimental",
+  ]) {
+    assert.match(src, new RegExp(`label(?::|Before:)\\s*["']${label}["']`));
+  }
+  assert.match(src, /label:\s*["']Apps["'],\s*href:\s*["']\/grants["']/);
+  assert.match(src, /<span>Search or jump to…<\/span>/);
+  assert.match(src, /<span className="rr-kbd">\{label\}<\/span>/);
+  assert.match(src, /item\.children && item\.section === section/);
   assert.doesNotMatch(src, NAV_LABEL_STANDING_RE, "Standing must not ship as owner-facing nav");
   assert.doesNotMatch(src, NAV_LABEL_JUMP_RE, "Jump is command-palette chrome, not primary nav");
   assert.doesNotMatch(src, NAV_LABEL_RUNS_RE, "Runs must be renamed to Syncs in the live nav");
   assert.doesNotMatch(src, NAV_LABEL_TRACES_RE, "Traces must be renamed to Audit in the live nav");
+});
+
+test("every current shell address stays in the menu and the jump dialog", async () => {
+  const src = await readFile(RECORDROOM_SHELL_FILE, "utf8");
+  const menu = src.slice(src.indexOf("export const NAV_GROUPS"), src.indexOf("export const NAV_ITEMS"));
+  const commands = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS });
+  for (const href of TODAY_MENU_HREFS) {
+    // DIRECTION.md "The frame and the menu": keep every current address reachable.
+    assert.match(menu, NAV_HREF_RE(href), `${href} remains in the menu data`);
+    assert.ok(commands.some((command) => command.href === href), `${href} remains in the jump dialog`);
+  }
 });
 
 // ── Generated hrefs are clean top-level owner routes ─────────────────────────
@@ -243,20 +283,15 @@ test("the owner-visible wordmark and mark are DataConnect", async () => {
   assert.doesNotMatch(src, RECORDROOM_AS_COPY_RE, "Recordroom must not appear as owner-visible copy");
 });
 
-test("the {host} · {build} crumb renders in exactly one owner-facing place", async () => {
+test("the sidebar footer shows the version without a host crumb", async () => {
   const raw = await readFile(RECORDROOM_SHELL_FILE, "utf8");
-  // Strip block + line comments so documentation that *mentions* the crumb does
-  // not count as a render site.
+  // Strip comments so documentation that mentions removed copy does not count.
   const src = raw.replace(BLOCK_COMMENT_RE, "").replace(LINE_COMMENT_RE, "");
-  const crumbSites = src.match(CRUMB_LITERAL_RE) ?? [];
-  assert.equal(
-    crumbSites.length,
-    1,
-    `the {host} · {build} crumb must render from exactly one component (found ${crumbSites.length})`
-  );
-  // That one component is the sidebar/drawer FootBlock. The header crumb is gone.
+  // DIRECTION.md "The frame and the menu": show the version at the bottom.
+  assert.match(src, VERSION_IN_FOOTBLOCK_RE);
+  // DIRECTION.md "The frame and the menu": the footer contains the version, not a host address.
+  assert.doesNotMatch(src, /\{host\}\s*·\s*\{build\}/);
   assert.doesNotMatch(src, HEAD_CRUMB_CLASS_RE, "the header crumb must be removed");
-  assert.match(src, CRUMB_IN_FOOTBLOCK_RE, "the crumb lives in the sidebar FootBlock");
 });
 
 // live mode
@@ -304,11 +339,12 @@ test("Schedules nav command is present in live mode", () => {
   assert.equal(schedules.href, "/schedules");
 });
 
-test("runs route is labeled Syncs in the command palette to match the page and sidebar", () => {
+// DIRECTION.md "The frame and the menu": the jump dialog uses the menu's words.
+test("runs route is labeled Sync history in the command palette to match the menu", () => {
   const all = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS });
   const syncs = all.find((c) => c.id === "nav-runs");
   assert.ok(syncs, "nav-runs command must exist");
-  assert.equal(syncs.title, "Syncs");
+  assert.equal(syncs.title, "Sync history");
   assert.equal(syncs.href, "/syncs");
   assert.equal(
     all.some((c) => c.title === "Runs"),
@@ -317,11 +353,12 @@ test("runs route is labeled Syncs in the command palette to match the page and s
   );
 });
 
-test("traces route is labeled Audit in the command palette to match the sidebar and page", () => {
+// DIRECTION.md "The frame and the menu": the jump dialog uses the menu's words.
+test("traces route is labeled Activity in the command palette to match the menu", () => {
   const all = listDashboardCommands({ basePath: "", mode: "live", segments: CONSOLE_SEGMENTS });
   const audit = all.find((c) => c.id === "nav-traces");
   assert.ok(audit, "nav-traces command must exist");
-  assert.equal(audit.title, "Audit");
+  assert.equal(audit.title, "Activity");
   assert.equal(audit.href, "/audit");
   assert.equal(
     all.some((c) => c.title === "Traces"),

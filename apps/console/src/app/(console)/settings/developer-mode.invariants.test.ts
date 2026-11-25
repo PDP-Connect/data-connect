@@ -58,5 +58,6 @@ test("developer-only connector surfaces share one settings gate", async () => {
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
   assert.match(page, /<DeveloperModeSetting \/>/)
-  assert.match(shell, /\{ label: "Settings", href: "\/settings" \}/)
+  // DIRECTION.md "The frame and the menu": Settings is a menu item with an icon and children.
+  assert.match(shell, /label: "Settings",\s+href: "\/settings"/)
 })
