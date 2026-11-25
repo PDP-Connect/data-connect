@@ -275,6 +275,23 @@ test("watcher stop waits for an in-flight write and prevents subsequent ticks", 
   assert.equal(writes, 1, "no write may start after awaited stop")
 })
 
+test("watcher stop surfaces the original asynchronous tick error without retrying it", async () => {
+  const error = new Error("fixture write failed")
+  let attempts = 0
+  const stop = startWatcher(async () => {
+    attempts++
+    throw error
+  }, 1)
+  await assert.rejects(stop(), err => err === error)
+  await assert.rejects(stop(), err => err === error)
+  assert.equal(attempts, 1)
+})
+
+test("watcher stop also preserves a synchronous tick failure", async () => {
+  const stop = startWatcher(() => { throw new TypeError("fixture invalid state") }, 1)
+  await assert.rejects(stop(), { name: "TypeError", message: "fixture invalid state" })
+})
+
 test("child environment excludes ambient backend, credential, and loader configuration", () => {
   assert.deepEqual(
     cleanEnvironment({
