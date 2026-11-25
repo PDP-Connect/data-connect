@@ -21,7 +21,8 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
-import { ConsentScreen } from "@/components/consent-screen/consent-screen-client.tsx";
+import { ConsentScreen, ConsentUnavailable } from "@/components/consent-screen/consent-screen-client.tsx";
+import { resolveConsentDemoState } from "@/components/consent-screen/consent-screen-demo.ts";
 import type { ConsentDecision, ConsentScreenModel } from "@/components/consent-screen/consent-screen-model.ts";
 import { acceptConsentChallenge, rejectConsentChallenge } from "./actions.ts";
 
@@ -60,6 +61,33 @@ export default async function ConsentPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
+  const demo = resolveConsentDemoState(params.demo, process.env.NODE_ENV);
+  if (demo === "expired") {
+    return <ConsentUnavailable kind="expired" />;
+  }
+  if (demo === "error") {
+    return <ConsentUnavailable kind="error" />;
+  }
+  if (demo) {
+    const { buildConsentDemoModel } = await import("@/components/consent-screen/consent-screen-demo.ts");
+    const demoModel = buildConsentDemoModel(demo);
+    async function acceptDemoAction(_decision: ConsentDecision): Promise<string> {
+      "use server";
+      return "";
+    }
+    async function rejectDemoAction(): Promise<string> {
+      "use server";
+      return "";
+    }
+    return (
+      <ConsentScreen
+        acceptAction={acceptDemoAction}
+        demoOnly
+        model={demoModel}
+        rejectAction={rejectDemoAction}
+      />
+    );
+  }
   const challenge = typeof params.challenge === "string" ? params.challenge : "";
 
   // Authoritative session check BEFORE the challenge is read, with a returnTo

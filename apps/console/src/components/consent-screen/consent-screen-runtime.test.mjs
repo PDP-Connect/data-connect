@@ -46,7 +46,8 @@ const React = await import("react");
 globalThis.React = React;
 const { act, createElement } = React;
 const { render, fireEvent, within, cleanup } = await import("@testing-library/react");
-const { ConsentScreen } = await import("./consent-screen-client.tsx");
+const { ConsentScreen, ConsentUnavailable } = await import("./consent-screen-client.tsx");
+const { buildConsentDemoModel, resolveConsentDemoState } = await import("./consent-screen-demo.ts");
 const { buildHostedMcpConsentChallengeModel } = await import(
   "../../../../../reference-implementation/server/routes/as-consent-ui-helpers.ts"
 );
@@ -79,11 +80,136 @@ const model = await buildHostedMcpConsentChallengeModel(
 afterEach(cleanup);
 after(() => dom.window.close());
 
-test("the screen renders Spotify's declared playlist label and scope details", async () => {
+function assertPlainCopy(root) {
+  const copy = [root.textContent ?? ""];
+  for (const element of root.querySelectorAll("[aria-label], [placeholder], [title]")) {
+    copy.push(element.getAttribute("aria-label") ?? "");
+    copy.push(element.getAttribute("placeholder") ?? "");
+    copy.push(element.getAttribute("title") ?? "");
+  }
+  const renderedCopy = copy.join(" ");
+  assert.doesNotMatch(renderedCopy, /\b(?:grant|client|scope|stream|token|oauth|pkce|challenge)\b/i);
+  assert.doesNotMatch(renderedCopy, /\b[a-z]+_[a-z]+\b/i, "raw field names must stay off the screen");
+  // Lead review: the product is DataConnect; no protocol name on this screen.
+  assert.doesNotMatch(renderedCopy, /\bPDPP\b/i);
+}
+
+test("verified state uses one trust line and plain consumer actions", () => {
+  const verifiedModel = structuredClone(model);
+  verifiedModel.client.trust = "verified";
+  verifiedModel.client.domain = "spotify.example";
+  const view = render(createElement(ConsentScreen, { acceptAction: async () => "", model: verifiedModel, rejectAction: async () => "" }));
+  assert.ok(view.getByRole("heading", { name: `${verifiedModel.client.name} wants to read your data` }));
+  assert.ok(view.getByText("Anything you leave unchecked stays private."));
+  assert.ok(view.getByText("Verified"));
+  assert.ok(view.getByText("spotify.example ·"));
+  assert.ok(view.getByRole("button", { name: "What does this mean?" }));
+  assert.ok(view.getByRole("button", { name: "Allow" }));
+  assert.ok(view.getByRole("button", { name: "Don't allow" }));
+  assertPlainCopy(view.container);
+});
+
+test("not verified state names the website without a trust chip", () => {
+  const unverifiedModel = structuredClone(model);
+  unverifiedModel.client.trust = "unverified";
+  unverifiedModel.client.domain = "spotify.example";
+  const view = render(createElement(ConsentScreen, { acceptAction: async () => "", model: unverifiedModel, rejectAction: async () => "" }));
+  assert.ok(view.getByText("spotify.example (not verified)"));
+  assertPlainCopy(view.container);
+});
+
+test("many-source state keeps search and filters the source rows", () => {
+  const template = model.sources[0];
+  const manyModel = structuredClone(model);
+  manyModel.sources = Array.from({ length: 12 }, (_, index) => ({
+    ...template,
+    id: `spotify:account-${index + 1}`,
+    name: `Source ${index + 1}`,
+    account: `Source ${index + 1} - person${index + 1}@example.com`,
+    streams: template.streams.map((stream) => ({
+      ...stream,
+      id: `spotify:account-${index + 1}:${stream.name}`,
+      selected: false,
+    })),
+  }));
+  const view = render(createElement(ConsentScreen, { acceptAction: async () => "", model: manyModel, rejectAction: async () => "" }));
+  fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 1" }));
+  fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 2" }));
+  // Consent brief: the count names every selected data source before the decisions.
+  assert.ok(view.getByText("It will read 8 kinds of records from Source 1 and Source 2."));
+  const search = view.getByRole("searchbox", { name: "Search data sources" });
+  fireEvent.change(search, { target: { value: "Source 12" } });
+  assert.ok(view.getByText("1 of 12 data sources match"));
+  assert.ok(view.getByRole("checkbox", { name: "Share data from Source 12" }));
+  assertPlainCopy(view.container);
+});
+
+test("the demo model provides stable normal, trust, and many-source render states", () => {
+  const normal = buildConsentDemoModel("normal");
+  const verified = buildConsentDemoModel("verified");
+  const unverified = buildConsentDemoModel("not-verified");
+  const many = buildConsentDemoModel("many");
+  assert.equal(normal.client.trust, "domain");
+  assert.equal(verified.client.trust, "verified");
+  assert.equal(unverified.client.trust, "unverified");
+  assert.equal(many.sources.length, 12);
+  for (const demoModel of [normal, verified, unverified, many]) {
+    const view = render(createElement(ConsentScreen, {
+      acceptAction: async () => "",
+      demoOnly: true,
+      model: demoModel,
+      rejectAction: async () => "",
+    }));
+    assertPlainCopy(view.container);
+  }
+});
+
+test("production ignores every consent demo query", () => {
+  assert.equal(resolveConsentDemoState("many", "production"), null);
+  assert.equal(resolveConsentDemoState("expired", "production"), null);
+  assert.equal(resolveConsentDemoState("many", "development"), "many");
+  assert.equal(resolveConsentDemoState("unknown", "development"), null);
+});
+
+test("demo decisions never call a server action", () => {
+  let accepted = false;
+  let rejected = false;
+  const view = render(createElement(ConsentScreen, {
+    acceptAction: async () => { accepted = true; return ""; },
+    demoOnly: true,
+    model: buildConsentDemoModel("normal"),
+    rejectAction: async () => { rejected = true; return ""; },
+  }));
+  fireEvent.click(view.getByRole("checkbox", { name: "Share data from Spotify" }));
+  fireEvent.click(view.getByRole("button", { name: "Allow" }));
+  fireEvent.click(view.getByRole("button", { name: "Don't allow" }));
+  assert.equal(accepted, false);
+  assert.equal(rejected, false);
+});
+
+test("expired state gives one plain next step", () => {
+  const view = render(createElement(ConsentUnavailable, { kind: "expired" }));
+  assert.ok(view.getByRole("heading", { name: "This request is no longer available. Go back to ChatGPT and try again." }));
+  assertPlainCopy(view.container);
+});
+
+test("load-error state offers a retry and plain next step", () => {
+  let retried = false;
+  const view = render(createElement(ConsentUnavailable, { kind: "error", onRetry: () => { retried = true; } }));
+  assert.ok(view.getByRole("heading", { name: "This request could not be loaded. Go back to ChatGPT and try again." }));
+  fireEvent.click(view.getByRole("button", { name: "Try again" }));
+  assert.equal(retried, true);
+  assertPlainCopy(view.container);
+});
+
+test("normal state renders Spotify's declared record label and description", async () => {
   const { view } = await journey();
   assert.ok(view.getByRole("checkbox", { name: "Share Your playlists from Spotify" }));
   const playlists = manifest.streams.find((stream) => stream.name === "playlists");
   assert.ok(view.getByText(playlists.display.detail));
+  // Consent brief: show the selected record count before the two decisions.
+  assert.ok(view.getByText("It will read 4 kinds of records from Spotify."));
+  assertPlainCopy(view.container);
 });
 
 test("the screen marks itself hydrated only once effects run", async () => {
@@ -94,7 +220,7 @@ test("the screen marks itself hydrated only once effects run", async () => {
   assert.equal(view.container.querySelector("[data-hydrated]")?.getAttribute("data-hydrated"), "true");
 });
 
-test("field titles label the controls while descriptions appear once and raw names remain available", async () => {
+test("field titles label controls without exposing raw names", async () => {
   const titledModel = structuredClone(model);
   titledModel.sources[0].streams[0].fields = [
     { name: "owner_id", label: "Playlist owner", description: "Who owns this playlist.", required: false },
@@ -121,9 +247,10 @@ test("field titles label the controls while descriptions appear once and raw nam
     panel.open = true;
   });
   assert.ok(within(panel).getByRole("checkbox", { name: /Playlist owner/ }));
-  assert.ok(within(panel).getByText("owner_id"));
+  assert.ok(within(panel).getByText("Playlist owner"));
+  assert.equal(within(panel).queryByText("owner_id"), null);
   assert.equal(within(panel).getAllByText("Who owns this playlist.").length, 1);
-  assert.ok(within(panel).getByRole("checkbox", { name: "snapshot_id" }));
+  assert.ok(within(panel).getByRole("checkbox", { name: "Snapshot Identifier" }));
 });
 
 async function journey() {
@@ -160,7 +287,7 @@ async function journey() {
     },
     async submit() {
       await act(async () => {
-        fireEvent.click(view.getByRole("button", { name: "Allow access" }));
+        fireEvent.click(view.getByRole("button", { name: "Allow" }));
       });
       assert.ok(decision);
       return decision;
@@ -172,7 +299,7 @@ test("bulk dates apply only to selected time-capable streams and resolve against
   const { view, panel, submit } = await journey();
   fireEvent.change(within(panel).getByLabelText("added since"), { target: { value: "2026-03-01" } });
   fireEvent.change(within(panel).getByLabelText("added until"), { target: { value: "2026-03-31" } });
-  fireEvent.click(within(panel).getByRole("button", { name: "Apply to all selected streams" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Apply to all selected kinds of records" }));
   const decision = await submit();
   assert.deepEqual(decision.streamRanges["spotify:account:saved_tracks"], { since: "2026-03-01", until: "2026-03-31" });
   for (const stream of model.sources[0].streams) {
@@ -330,4 +457,38 @@ test("a brand background without a manifest glyph is not applied to the resolved
   const tile = renderModel(noGlyphModel).container.querySelector(".pdpp-connector-icon");
   assert.ok(tile?.querySelector("svg"), "the resolved identity mark still renders");
   assert.notEqual(tile.style.backgroundColor, "rgb(29, 185, 84)", "the mark keeps its own background, not the manifest's");
+});
+
+test("the screen signs as DataConnect and shows the end date as plain text with Change", () => {
+  // Lead review of the consent pictures: DataConnect mark instead of "Secured by
+  // PDPP"; the access end date reads as second text, its controls behind "Change".
+  const view = render(createElement(ConsentScreen, { acceptAction: async () => "", model, rejectAction: async () => "" }));
+  assert.ok(view.getByText("DataConnect"));
+  assert.ok(view.container.querySelector('img[src="/icon"]'));
+  assert.equal(view.container.querySelector('a[href="https://pdpp.dev"]'), null);
+  const summary = view.container.querySelector("aside summary");
+  assert.match(summary?.textContent ?? "", /^(Access ends .+|No end date) Change$/);
+  assertPlainCopy(view.container);
+});
+
+test("a failed decision names the requesting app, not a fixed one", async () => {
+  const view = render(createElement(ConsentScreen, {
+    acceptAction: async () => { throw new Error("raw server text"); },
+    model,
+    rejectAction: async () => { throw new Error("raw server text"); },
+  }));
+  await act(async () => {
+    fireEvent.click(view.getByRole("button", { name: "Don't allow" }));
+  });
+  const alert = view.getByRole("alert");
+  assert.equal(alert.textContent, `This request could not be completed. Go back to ${model.client.name} and try again.`);
+  assertPlainCopy(view.container);
+});
+
+test("no connected data sources says to connect one, then return to the app", () => {
+  const empty = structuredClone(model);
+  empty.sources = [];
+  const view = render(createElement(ConsentScreen, { acceptAction: async () => "", model: empty, rejectAction: async () => "" }));
+  assert.ok(view.getByText(`No data sources are connected yet. Connect one, then go back to ${model.client.name} and try again.`));
+  assert.equal(view.getByRole("button", { name: "Allow" }).disabled, true);
 });
