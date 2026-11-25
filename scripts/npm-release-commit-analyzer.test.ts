@@ -7,8 +7,8 @@ import { analyzeCommits } from "@semantic-release/commit-analyzer"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
-// This repo's .releaserc.yaml gates npm releases to commits scoped to
-// @pdpp/connector-protocol or @pdpp/collector-runtime, because (unlike
+// This repo's .releaserc.yaml gates npm releases to commits scoped to one of
+// the lockstep packages it publishes, because (unlike
 // PDP-Connect/pdpp, whose config this repo's is based on) this repo also has
 // an entirely separate desktop-app commit history that must never trigger an
 // npm publish. @semantic-release/commit-analyzer has no built-in "require
@@ -61,6 +61,13 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
     ["fix(local-collector): resolve packaged import", "patch"],
     ["feat(local-collector): add connector", "minor"],
     ["perf(local-collector): faster scan", "patch"],
+    // @pdpp/cli, @pdpp/read-core and @pdpp/mcp-server joined when their
+    // publishing moved here from PDP-Connect/pdpp.
+    ["fix(cli): exit 3 on a revoked token", "patch"],
+    ["feat(read-core): add field window", "minor"],
+    ["perf(mcp-server): cache schema", "patch"],
+    ["fix(auth,cli): answer revoked tokens with 401", "patch"],
+    ["feat(mcp-server)!: require grant_id", "major"],
   ])("releases %s as a %s bump", async (subject, expected) => {
     expect(await releaseTypeFor([subject])).toBe(expected)
   })
@@ -74,6 +81,11 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
     ["feat: add heb and whole foods connectors", "unscoped feat — real prior commit shape in this repo's history"],
     ["fix: harden packaged connector runtime", "unscoped fix — real prior commit shape in this repo's history"],
     ["revert: revert something", "unscoped revert"],
+    // A scope that only starts or ends like a package name is another scope.
+    ["fix(client): retry", "scoped, but `client` is not `cli`"],
+    ["fix(cli-docs): typo", "scoped, but `cli-docs` is not `cli`"],
+    ["feat(mcp): add tool", "scoped, but `mcp` is not `mcp-server`"],
+    ["fix(read-core-tests): flake", "scoped, but not a published package"],
   ])("does not release on %s (%s)", async (subject) => {
     expect(await releaseTypeFor([subject])).toBeNull()
   })

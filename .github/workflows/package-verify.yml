@@ -154,9 +154,53 @@ jobs:
             echo "::endgroup::"
           done
 
+  # cli and read-core declare `engines.node >=22.14.0` and publish from this
+  # repository. `verify` above runs on Node 24, which proves nothing about the
+  # floor, so their dedicated gates pack, install and run the artifact on the
+  # exact Node 22.14.0 runtime. Dependencies install with Node 24 first,
+  # because the workspace root requires it.
+  node-floor:
+    name: Node 22.14 floor for cli and read-core
+    needs: classify
+    if: contains(needs.classify.outputs.packages, 'vendor/cli') || contains(needs.classify.outputs.packages, 'vendor/read-core')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Node.js 22.14.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Run the floor gates
+        env:
+          PACKAGES: ${{ needs.classify.outputs.packages }}
+        run: |
+          set -euo pipefail
+          node --version
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/read-core "* ]]; then
+            npm run --workspace reference-implementation/vendor/read-core verify:node-22.14
+          fi
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/cli "* ]]; then
+            npm run --workspace reference-implementation/vendor/cli pack-install-run:node-22.14
+          fi
+
   gate:
     name: package-verify gate
-    needs: [classify, verify]
+    needs: [classify, verify, node-floor]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -166,6 +210,7 @@ jobs:
           CLASSIFY_RESULT: ${{ needs.classify.result }}
           PACKAGES: ${{ needs.classify.outputs.packages }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          NODE_FLOOR_RESULT: ${{ needs.node-floor.result }}
         run: |
           set -euo pipefail
           if [[ "${CLASSIFY_RESULT}" != "success" ]]; then
@@ -183,5 +228,11 @@ jobs:
           if [[ "${VERIFY_RESULT}" != "success" ]]; then
             echo "::error::verify for [${PACKAGES}] reported ${VERIFY_RESULT}"
             exit 1
+          fi
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/cli "* || " ${PACKAGES} " == *" reference-implementation/vendor/read-core "* ]]; then
+            if [[ "${NODE_FLOOR_RESULT}" != "success" ]]; then
+              echo "::error::the Node 22.14 floor gate reported ${NODE_FLOOR_RESULT}"
+              exit 1
+            fi
           fi
           echo "verify passed for: ${PACKAGES}"

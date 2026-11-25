@@ -20,7 +20,7 @@
 // So the incomplete version stays incomplete, and recovery is forward only:
 // the next in-scope commit on main — or any commit plus a forced dispatch —
 // produces the next version, which supersedes it. The lockstep
-// invariant — the three packages share whatever version a run publishes — is
+// invariant — the packages share whatever version a run publishes — is
 // satisfied by the new version. The old one keeps whatever partial set it
 // got, and the pipeline says so out loud instead of blocking.
 //
@@ -43,7 +43,8 @@
 import { execFile } from "node:child_process"
 import { appendFileSync } from "node:fs"
 import { promisify } from "node:util"
-import { lockstepRegistryState, LOCKSTEP_PACKAGES } from "./release-registry-state.js"
+import { lockstepPackagesAtRef } from "./lockstep-packages.js"
+import { lockstepRegistryState } from "./release-registry-state.js"
 
 const run = promisify(execFile)
 
@@ -81,7 +82,7 @@ export async function newestReleaseTag(cwd: string): Promise<string | null> {
 export interface Decision {
   mode: "release"
   reason: string
-  superseded?: { tag: string; version: string; missing: readonly string[] }
+  superseded?: { tag: string; version: string; published: readonly string[]; missing: readonly string[] }
 }
 
 export async function decide(cwd: string): Promise<Decision> {
@@ -99,16 +100,19 @@ export async function decide(cwd: string): Promise<Decision> {
 
   // Throws RegistryUnknownError if any read is unanswerable — see the SAFETY
   // note in this file's header.
-  const state = await lockstepRegistryState(version)
+  // The tag is judged by the packages its own commit released, so a version
+  // cut before a package joined the stream is not reported as missing it.
+  const packages = (await lockstepPackagesAtRef(cwd, tag)).map((pkg) => pkg.name)
+  const state = await lockstepRegistryState(version, packages)
 
   if (state.missing.length === 0) {
     return {
       mode: "release",
-      reason: `newest tag ${tag} is fully published (${LOCKSTEP_PACKAGES.length}/${LOCKSTEP_PACKAGES.length} packages live at ${version})`,
+      reason: `newest tag ${tag} is fully published (${packages.length}/${packages.length} packages live at ${version})`,
     }
   }
 
-  // A tag whose version has NONE of the three packages published is not a
+  // A tag whose version has NONE of its packages published is not a
   // partially-completed release — it is a tag that was pushed and then
   // everything failed, or a tag from before these packages were published
   // from this repo at all. There is no partial set to report as superseded.
@@ -129,7 +133,7 @@ export async function decide(cwd: string): Promise<Decision> {
       `newest tag ${tag} is incomplete on npm: ` +
       `${state.published.join(", ")} live at ${version}, missing ${state.missing.join(", ")}. ` +
       `The next successful release will supersede it.`,
-    superseded: { tag, version, missing: state.missing },
+    superseded: { tag, version, published: state.published, missing: state.missing },
   }
 }
 
@@ -140,9 +144,7 @@ export function supersededMessage(
   newVersion: string
 ): string {
   const short = superseded.missing.map(name => name.replace(/^@pdpp\//, ""))
-  const live = LOCKSTEP_PACKAGES.filter(name => !superseded.missing.includes(name)).map(name =>
-    name.replace(/^@pdpp\//, "")
-  )
+  const live = superseded.published.map(name => name.replace(/^@pdpp\//, ""))
   return (
     `${superseded.tag} is incomplete on npm (${live.join(", ")} only; missing ${short.join(", ")}) ` +
     `and is superseded by ${newVersion}`
@@ -172,6 +174,7 @@ async function main(): Promise<void> {
     "superseded-tag": decision.superseded?.tag ?? "",
     "superseded-version": decision.superseded?.version ?? "",
     "superseded-missing": decision.superseded?.missing.join(",") ?? "",
+    "superseded-published": decision.superseded?.published.join(",") ?? "",
   })
 }
 
