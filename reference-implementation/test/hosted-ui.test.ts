@@ -140,7 +140,7 @@ async function seedSpotifyInstance(): Promise<void> {
  */
 function assertHostedShell(html: string): void {
   assert.match(html, /^<!DOCTYPE html>/, "starts with DOCTYPE");
-  assert.match(html, /<main class="hosted-ui-page"/, "uses hosted-ui page shell");
+  assert.match(html, /<main class="hosted-ui-page(?: hosted-ui-console-page)?"/, "uses hosted-ui page shell");
   assert.match(html, /data-pdpp-hosted-ui/, "carries PDPP hosted-UI brand marker");
   assert.match(
     html,
@@ -154,8 +154,14 @@ function assertHostedShell(html: string): void {
   // it keeps a quiet footer attribution instead, which is where Plaid puts
   // its own wordmark on a bank-branded screen.
   assert.doesNotMatch(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "no protocol wordmark in the header");
-  assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">/, "header carries the instance name");
-  assert.match(html, /hosted-ui-footer-attribution">Secured by PDPP</, "PDPP attribution moves to the footer");
+  if (html.includes('data-console-style="true"')) {
+    assert.match(html, /<span class="hosted-ui-provider" aria-label="DataConnect">DataConnect<\/span>/);
+    assert.match(html, /<svg class="hosted-ui-mark" viewBox="0 0 832 832"/);
+    assert.doesNotMatch(html, /hosted-ui-footer-attribution/);
+  } else {
+    assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">/, "header carries the instance name");
+    assert.match(html, /hosted-ui-footer-attribution">Secured by PDPP</, "PDPP attribution moves to the footer");
+  }
   assert.doesNotMatch(html, /<style>[\s\S]*body\s*{\s*font-family:\s*system-ui/, "no route-local inline style block");
 }
 
@@ -193,8 +199,12 @@ test("hosted-ui: /device empty state uses the shared hosted-UI layer", async () 
     assert.equal(resp.status, 200);
     const html = await resp.text();
     assertHostedShell(html);
-    assert.match(html, /Enter verification code/, "shows empty-state prompt");
+    assert.match(html, /<h1[^>]*>Connect a device<\/h1>/, "shows the device page title");
+    assert.match(html, /Enter the code shown on your device\./, "explains what code to enter");
+    assert.match(html, /data-console-style="true"/, "uses the shared DataConnect server-page styles");
+    assert.match(html, /<form[^>]+method="GET" action="\/device"/);
     assert.match(html, /<label[^>]*for="hosted-ui-user_code"/, "has labelled input");
+    assert.match(html, /name="user_code" value="" type="text" autofocus autocomplete="one-time-code"/);
   });
 });
 
@@ -207,10 +217,33 @@ test("hosted-ui: /device approval page uses the shared hosted-UI layer", async (
     assert.equal(resp.status, 200);
     const html = await resp.text();
     assertHostedShell(html);
-    assert.match(html, /Approve owner access/, "shows approval heading");
+    assert.match(html, /Connect a device/, "shows approval heading");
     assert.match(html, /data-surface="human"/, "frames approval as a human surface");
     assert.match(html, new RegExp(userCode), "shows user code");
     assert.match(html, /action="\/device\/approve"/, "keeps approve action");
+    assert.match(html, /name="user_code" value="[A-Z0-9-]+"/);
+    assert.doesNotMatch(html, /expires_at|\d{4}-\d{2}-\d{2}T\d{2}:/);
+    assert.match(html, /name="_csrf"/);
+    assert.match(html, /formaction="\/device\/deny"/);
+    assert.match(html, />Approve<\/button>/);
+  });
+});
+
+test("hosted-ui: /device approval errors use plain words for browser forms", async () => {
+  await withServer({}, async ({ asUrl }) => {
+    const resp = await fetch(`${asUrl}/device/approve`, {
+      body: new URLSearchParams({ subject_id: "owner_local", user_code: "missing-code" }).toString(),
+      headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.ok(resp.status >= 400, "failed approval keeps a failure status");
+    assert.match(resp.headers.get("content-type") || "", /text\/html/);
+    const html = await resp.text();
+    assert.match(html, /We could not approve this request\. Please try again\.|This request is no longer available\./);
+    assert.doesNotMatch(html, /error_description|invalid_grant|device code not found/i);
+    // RAISE-RULES 6: a failed state offers "Try again".
+    assert.match(html, /<a class="hosted-ui-button" href="\/device">Try again<\/a>/);
+    assert.match(html, /data-console-style="true"/);
   });
 });
 
@@ -272,7 +305,7 @@ test("hosted-ui: /device/approve and /device/deny result pages use the shared ho
     assert.equal(approveResp.status, 200);
     const html = await approveResp.text();
     assertHostedShell(html);
-    assert.match(html, /CLI access approved/, "shows device approval result");
+    assert.match(html, /Your device can finish signing in\./, "shows device approval result");
   });
 
   // Deny path
@@ -288,7 +321,7 @@ test("hosted-ui: /device/approve and /device/deny result pages use the shared ho
     assert.equal(denyResp.status, 200);
     const html = await denyResp.text();
     assertHostedShell(html);
-    assert.match(html, /CLI access denied/, "shows device deny result");
+    assert.match(html, /The request was denied\./, "shows device deny result");
   });
 });
 
@@ -299,6 +332,10 @@ test("hosted-ui: /owner/login reuses the shared hosted-UI layer", async () => {
     const html = await resp.text();
     assertHostedShell(html);
     assert.match(html, /Sign in to/, "shows sign-in heading");
+    assert.match(html, /data-console-style="true"/);
+    // No return_to query falls back to DEFAULT_RETURN_TO (owner-auth.ts), unchanged by the raise.
+    assert.match(html, /name="return_to" value="\/owner\/login"/);
+    assert.match(html, /name="_csrf"/);
     assert.match(html, /<label[^>]*for="hosted-ui-password"/, "has labelled password input");
     assert.match(html, /data-surface="human"/, "owner login is framed as a human surface");
   });
@@ -310,8 +347,8 @@ test("hosted-ui: /owner/login disabled state still uses the shared hosted-UI lay
     assert.equal(resp.status, 200);
     const html = await resp.text();
     assertHostedShell(html);
-    assert.match(html, /owner access/i, "shows owner-access heading");
-    assert.match(html, /No owner password is set/, "explains that owner sign-in is off");
+    assert.match(html, /<h1[^>]*>DataConnect<\/h1>/, "shows product heading");
+    assert.match(html, /A password is not set\./, "explains that sign-in is off");
     assert.doesNotMatch(html, /hosted-ui-password/, "does not render password field");
   });
 });

@@ -101,10 +101,11 @@ const REGEXP_45 = /malformed or no longer valid/;
 const REGEXP_46 = /denied the request/;
 const REGEXP_47 = /malformed or no longer valid/;
 const REGEXP_48 = /malformed or no longer valid/;
-const REGEXP_49 = /Approve owner access/i;
+// The approval form (not the empty code form) is the one that posts to /device/approve.
+const REGEXP_49 = /action="\/device\/approve"/;
 const REGEXP_50 = /Unknown client_id/;
 const REGEXP_51 = /Unknown client_id/;
-const REGEXP_52 = /Approve owner access/i;
+const REGEXP_52 = /action="\/device\/approve"/;
 const REGEXP_53 = /malformed or no longer valid/;
 const REGEXP_54 = /malformed or no longer valid/;
 const REGEXP_55 = /Invalid initial access token/;

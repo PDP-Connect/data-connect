@@ -28,6 +28,7 @@ import type { RouteArg } from "./_route-contract.ts";
 
 interface RouteRequest {
   readonly body?: Record<string, unknown> | null;
+  readonly headers?: { readonly accept?: string };
   readonly query?: Readonly<Record<string, unknown>>;
 }
 
@@ -44,6 +45,77 @@ type RouteHandler = (req: RouteRequest, res: RouteResponse) => Promise<void>;
 interface AppLike {
   get: (path: string, ...args: RouteArg<RouteHandler | MiddlewareFn>[]) => AppLike;
   post: (path: string, ...args: RouteArg<RouteHandler | MiddlewareFn>[]) => AppLike;
+}
+
+function deviceErrorSentence(action: "approve" | "deny", code: string): string {
+  if (code === "owner_session_required") {
+    return "Sign in again to continue.";
+  }
+  if (code === "invalid_grant" || code === "not_found" || code === "expired_token") {
+    return "This request is no longer available.";
+  }
+  return `We could not ${action} this request. Please try again.`;
+}
+
+function replyDeviceError(
+  req: RouteRequest,
+  res: RouteResponse,
+  ctx: MountAsDeviceUiContext,
+  status: number,
+  code: string,
+  message: string,
+  action: "approve" | "deny"
+): void {
+  if (!req.headers?.accept?.includes("text/html")) {
+    ctx.oauthError(res, status, code, message);
+    return;
+  }
+
+  const safeMessage = ctx.ui.escapeHtml(deviceErrorSentence(action, code));
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.status(status).send(
+    ctx.ui.renderHostedDocument({
+      body: [
+        ctx.ui.renderPageIntro({ title: "Connect a device" }),
+        `<p class="hosted-ui-error" role="alert">${safeMessage}</p>`,
+        // RAISE-RULES 6: a failed state offers "Try again".
+        '<div class="hosted-ui-actions"><a class="hosted-ui-button" href="/device">Try again</a></div>',
+      ].join("\n"),
+      consoleStyle: true,
+      providerName: ctx.providerName,
+      title: "Connect a device",
+    })
+  );
+}
+
+function formatDeviceExpiry(value: unknown): string {
+  let expiresAt: number;
+  if (typeof value === "number") {
+    expiresAt = value < 10_000_000_000 ? value * 1000 : value;
+  } else {
+    expiresAt = Date.parse(String(value ?? ""));
+  }
+  if (!Number.isFinite(expiresAt)) {
+    return "Time unavailable";
+  }
+
+  const seconds = Math.ceil((expiresAt - Date.now()) / 1000);
+  if (seconds <= 0) {
+    return "Expired";
+  }
+  if (seconds < 60) {
+    return "in less than a minute";
+  }
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) {
+    return `in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 24) {
+    return `in ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  const days = Math.ceil(hours / 24);
+  return `in ${days} ${days === 1 ? "day" : "days"}`;
 }
 
 // ─── Hosted-UI rendering surface (injected to avoid importing .js directly) ──
@@ -64,9 +136,9 @@ export interface HostedUiRenderer {
       }>;
     };
   }) => string;
-  renderHostedDocument: (opts: { title: string; providerName: string; body: string }) => string;
+  renderHostedDocument: (opts: { title: string; providerName: string; body: string; consoleStyle?: boolean }) => string;
   renderKeyValueList: (items: Array<{ label: string; value?: unknown; html?: string }>) => string;
-  renderPageIntro: (opts: { eyebrow: string; title: string; lede?: string }) => string;
+  renderPageIntro: (opts: { eyebrow?: string; title: string; lede?: string }) => string;
   renderResultState: (opts: { tone: string; title: string; body: string }) => string;
   renderSurface: (opts: { surface?: string; children: string }) => string;
 }
@@ -125,9 +197,8 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
     if (!(userCode && pending)) {
       const emptyBody = [
         ui.renderPageIntro({
-          eyebrow: "Device verification",
-          lede: "Paste the code shown by the CLI to continue the owner sign-in flow.",
-          title: "Enter verification code",
+          lede: "Enter the code shown on your device.",
+          title: "Connect a device",
         }),
         ui.renderEmptyState({
           form: {
@@ -136,7 +207,7 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
               {
                 autocomplete: "one-time-code",
                 autofocus: true,
-                label: "User code",
+                label: "Code",
                 name: "user_code",
                 value: userCode || "",
               },
@@ -149,49 +220,48 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
       res.send(
         ui.renderHostedDocument({
           body: emptyBody,
+          consoleStyle: true,
           providerName: ctx.providerName,
-          title: `${ctx.providerName} — Device verification`,
+          title: "Connect a device",
         })
       );
       return;
     }
 
     const facts = ui.renderKeyValueList([
-      { label: "Client", value: pending.client_id },
-      { html: `<span class="hosted-ui-code">${ui.escapeHtml(pending.user_code)}</span>`, label: "User code" },
-      { label: "Expires", value: pending.expires_at },
+      { label: "App", value: pending.client_id },
+      { html: `<span class="hosted-ui-code">${ui.escapeHtml(pending.user_code)}</span>`, label: "Code" },
+      { label: "Expires", value: formatDeviceExpiry(pending.expires_at) },
     ]);
 
     const ownerBlock = ctx.ownerAuthEnabled
-      ? ui.renderKeyValueList([
-          {
-            html: `<code>${ui.escapeHtml(ctx.ownerSubjectId)}</code> <span class="pdpp-caption">signed-in owner</span>`,
-            label: "Owner subject",
-          },
-        ])
+      ? // RAISE-RULES 1: the signed-in account ID stays reachable in a folded "Details".
+        `<details class="hosted-ui-details"><summary>Details</summary>
+${ui.renderKeyValueList([{ html: `<code>${ui.escapeHtml(ctx.ownerSubjectId)}</code>`, label: "Account ID" }])}
+</details>`
       : `<div class="hosted-ui-field">
-  <label for="hosted-ui-subject_id">Subject ID</label>
+  <label for="hosted-ui-subject_id">Account name</label>
   <input id="hosted-ui-subject_id" name="subject_id" value="owner_local" type="text" />
 </div>`;
 
     const csrfToken = ctx.ensureCsrfToken(req, res);
     const csrfField = ctx.renderCsrfField(csrfToken);
-    const formOpen = `<form class="hosted-ui-surface" method="POST" action="/device/approve" data-surface="human" aria-label="Approve CLI access">
+    const formOpen = `<form class="hosted-ui-surface" method="POST" action="/device/approve"
+  data-surface="human" aria-label="Connect a device">
   ${csrfField}
   <input type="hidden" name="user_code" value="${ui.escapeHtml(pending.user_code)}" />
   ${facts}
   ${ownerBlock}
   <div class="hosted-ui-actions">
-    <button type="submit" class="hosted-ui-button" data-variant="primary">Approve and issue owner token</button>
-    <button type="submit" class="hosted-ui-button" data-variant="danger" formaction="/device/deny">Deny</button>
+    <button type="submit" class="hosted-ui-button" data-variant="primary">Approve</button>
+    <button type="submit" class="hosted-ui-button" formaction="/device/deny">Deny</button>
   </div>
 </form>`;
 
     const body = [
       ui.renderPageIntro({
-        eyebrow: "Device verification",
-        lede: "A CLI is asking to sign in on your behalf. Approve only if you started this on a device you trust.",
-        title: `Approve owner access to ${ctx.providerName}`,
+        lede: "Approve only if you started this on a device you trust.",
+        title: "Connect a device",
       }),
       formOpen,
     ].join("\n");
@@ -199,8 +269,9 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
     res.send(
       ui.renderHostedDocument({
         body,
+        consoleStyle: true,
         providerName: ctx.providerName,
-        title: `${ctx.providerName} — Approve CLI access`,
+        title: "Connect a device",
       })
     );
   };
@@ -218,7 +289,15 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
       : (req.body?.subject_id as string) || ctx.ownerAuthDefaultSubjectId;
     const authorizationFence = ctx.ownerAuthEnabled ? await ctx.readOwnerAuthorizationFence(req) : null;
     if (ctx.ownerAuthEnabled && !authorizationFence) {
-      ctx.oauthError(res, 401, "owner_session_required", "Sign in again to approve device access.");
+      replyDeviceError(
+        req,
+        res,
+        ctx,
+        401,
+        "owner_session_required",
+        "Sign in again to approve device access.",
+        "approve"
+      );
       return;
     }
     await ctx.beforeOwnerDeviceApproval?.();
@@ -236,18 +315,19 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
       res.send(
         ui.renderHostedDocument({
           body: [
-            ui.renderPageIntro({ eyebrow: "Device verification", title: "Approved" }),
+            ui.renderPageIntro({ title: "Connect a device" }),
             ui.renderSurface({
               children: ui.renderResultState({
-                body: "The CLI can return to polling and complete sign-in now.",
-                title: "CLI access approved",
-                tone: "success",
+                body: "Your device can finish signing in.",
+                title: "Approved",
+                tone: "neutral",
               }),
               surface: "human",
             }),
           ].join("\n"),
+          consoleStyle: true,
           providerName: ctx.providerName,
-          title: `${ctx.providerName} — Device access approved`,
+          title: "Connect a device",
         })
       );
       return;
@@ -258,7 +338,7 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
     if (outcome.traceId) {
       ctx.setReferenceTraceId(res, outcome.traceId);
     }
-    ctx.oauthError(res, outcome.status, outcome.errorCode, outcome.errorMessage);
+    replyDeviceError(req, res, ctx, outcome.status, outcome.errorCode, outcome.errorMessage, "approve");
   };
 
   const denyHandler: RouteHandler = async (req, res): Promise<void> => {
@@ -279,17 +359,18 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
       res.send(
         ui.renderHostedDocument({
           body: [
-            ui.renderPageIntro({ eyebrow: "Device verification", title: "Denied" }),
+            ui.renderPageIntro({ title: "Connect a device" }),
             ui.renderSurface({
               children: ui.renderResultState({
-                body: "The CLI will stop polling and report that access was denied.",
-                title: "CLI access denied",
-                tone: "danger",
+                body: "The request was denied. You can return to your device.",
+                title: "Denied",
+                tone: "neutral",
               }),
             }),
           ].join("\n"),
+          consoleStyle: true,
           providerName: ctx.providerName,
-          title: `${ctx.providerName} — Device access denied`,
+          title: "Connect a device",
         })
       );
       return;
@@ -300,7 +381,7 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
     if (outcome.traceId) {
       ctx.setReferenceTraceId(res, outcome.traceId);
     }
-    ctx.oauthError(res, outcome.status, outcome.errorCode, outcome.errorMessage);
+    replyDeviceError(req, res, ctx, outcome.status, outcome.errorCode, outcome.errorMessage, "deny");
   };
 
   app.get("/device", ctx.requireOwnerSession as RouteArg<RouteHandler | MiddlewareFn>, getHandler);

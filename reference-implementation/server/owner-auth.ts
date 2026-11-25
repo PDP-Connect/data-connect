@@ -279,16 +279,18 @@ function wantsHtml(req: AuthRequest): boolean {
   return accept.includes("text/html");
 }
 
-function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice }: LoginPageOptions): string {
+function renderLoginPage({ error, returnTo, csrfToken, themeChoice }: LoginPageOptions): string {
   const safeReturnTo = typeof returnTo === "string" ? returnTo : "";
-  const errorBlock = error ? `<div class="hosted-ui-error" role="alert">${hostedEscape(error)}</div>` : "";
-  const form = `<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Owner sign-in">
+  const errorBlock = error
+    ? `<div class="hosted-ui-error" role="alert">${hostedEscape(loginErrorCopy(error))}</div>`
+    : "";
+  const form = `<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Sign in to DataConnect">
   ${renderCsrfHiddenField(csrfToken)}
   <input type="hidden" name="return_to" value="${hostedEscape(safeReturnTo)}" />
-  ${errorBlock}
   <div class="hosted-ui-field">
-    <label for="hosted-ui-password">Owner password</label>
+    <label for="hosted-ui-password">Password</label>
     <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
+    ${errorBlock}
   </div>
   <div class="hosted-ui-actions">
     <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
@@ -297,113 +299,116 @@ function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice
 
   const body = [
     renderPageIntro({
-      eyebrow: "Owner sign-in",
-      lede: "This password keeps other people from seeing your data or changing which apps can use it.",
-      title: `Sign in to ${providerName}`,
+      lede: "Use your password to continue.",
+      title: "Sign in to DataConnect",
     }),
     form,
   ].join("\n");
 
   return renderHostedDocument({
     body,
-    providerName,
+    consoleStyle: true,
+    providerName: DATACONNECT_PRODUCT_IDENTITY.name,
     themeChoice,
-    title: `${providerName} — Owner sign-in`,
+    title: "DataConnect — Sign in",
   });
 }
 
-function renderOwnerAuthDisabledPage({ providerName, themeChoice }: DisabledPageOptions): string {
+function loginErrorCopy(error: string): string {
+  if (error.startsWith("Too many attempts. Try again in about ")) {
+    return error;
+  }
+  switch (error) {
+    case "Incorrect password.":
+      return "That password did not work.";
+    case "Session expired or form replay detected. Please try again.":
+      return "This sign-in form has expired. Please try again.";
+    case "The password changed during sign-in. Try again with the current password.":
+      return "Your password changed. Try again with the current one.";
+    default:
+      return "Sign-in did not work. Please try again.";
+  }
+}
+
+function renderOwnerAuthDisabledPage({ themeChoice }: DisabledPageOptions): string {
   const body = [
     renderPageIntro({
-      eyebrow: "Owner approval UI",
-      lede: "No owner password is set, so approval pages open without sign-in.",
-      title: `${providerName} owner access`,
+      lede: "A password is not set. You can continue without signing in.",
+      title: "DataConnect",
     }),
     renderSurface({
-      ariaLabel: "Owner auth status",
+      ariaLabel: "Sign-in status",
       children: renderResultState({
-        body: "Device approvals are open locally. Consent approvals still arrive through pending request links.",
-        footnote: "Set PDPP_OWNER_PASSWORD to require sign-in.",
-        title: "Sign-in is not required right now",
+        body: "You can connect a device here. Access requests from apps arrive as links.",
+        title: "You can continue",
         tone: "neutral",
       }),
       surface: "human",
     }),
-    renderSurface({
-      ariaLabel: "Owner auth configuration details",
-      children: renderKeyValueList([
-        { label: "Current mode", value: "Open local-dev approval UI" },
-        {
-          html: "<code>PDPP_OWNER_PASSWORD=&lt;password&gt;</code>",
-          label: "Enable sign-in",
-        },
-        {
-          label: "Protected when enabled",
-          value: "/consent*, /device*, /owner/login",
-        },
-        {
-          label: "Consent pages",
-          value: "Reached from a pending request authorization_url / request_uri flow",
-        },
-      ]),
-      surface: "protocol",
-    }),
-    renderActionRow([{ href: "/device", label: "Open device approval UI", variant: "primary" }]),
+    renderActionRow([{ href: "/device", label: "Connect a device", variant: "primary" }]),
+    // RAISE-RULES 1: technical facts move into a folded "Details"; they are not deleted.
+    `<details class="hosted-ui-details"><summary>Details</summary>
+${renderKeyValueList([
+  { label: "Current mode", value: "Open local-dev approval UI" },
+  { html: "<code>PDPP_OWNER_PASSWORD=&lt;password&gt;</code>", label: "Enable sign-in" },
+  { label: "Protected when enabled", value: "/consent*, /device*, /owner/login" },
+  { label: "Consent pages", value: "Reached from a pending request authorization_url / request_uri flow" },
+])}
+</details>`,
   ].join("\n");
 
   return renderHostedDocument({
     body,
-    providerName,
+    consoleStyle: true,
+    providerName: DATACONNECT_PRODUCT_IDENTITY.name,
     themeChoice,
-    title: `${providerName} — Owner access`,
+    title: "DataConnect",
   });
 }
 
-function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoice }: SignedInPageOptions): string {
+function renderSignedInOwnerPage({ csrfToken, subjectId, themeChoice }: SignedInPageOptions): string {
   const body = [
     renderPageIntro({
-      eyebrow: "Owner approval UI",
-      lede: `You are signed in to ${providerName}.`,
-      title: `${providerName} owner access`,
+      lede: "You are signed in.",
+      title: "DataConnect",
     }),
     renderSurface({
-      ariaLabel: "Signed-in owner state",
+      ariaLabel: "Sign-in status",
       children: [
         renderResultState({
-          body: "You can approve device flows directly here, or open a pending consent URL from a staged provider-connect request.",
+          body: "You can connect a device here or open an access request from an app.",
           footnote: "Sign out when you finish on a shared computer.",
           title: "Signed in",
-          tone: "success",
+          tone: "neutral",
         }),
-        renderKeyValueList([
-          {
-            html: `<code>${hostedEscape(subjectId)}</code>`,
-            label: "Owner subject",
-          },
-        ]),
       ].join("\n"),
       surface: "human",
     }),
     renderActionRow([
       {
         href: "/",
-        label: `Open ${DATACONNECT_PRODUCT_IDENTITY.name}`,
+        label: "Open DataConnect",
         variant: "primary",
       },
-      { href: "/device", label: "Open device approval UI" },
+      { href: "/device", label: "Connect a device" },
       {
         action: "/owner/logout",
         hidden: [{ name: OWNER_CSRF_FIELD_NAME, value: csrfToken }],
         label: "Sign out",
       },
     ]),
+    // RAISE-RULES 1: the account ID stays reachable in a folded "Details".
+    `<details class="hosted-ui-details"><summary>Details</summary>
+${renderKeyValueList([{ html: `<code>${hostedEscape(subjectId)}</code>`, label: "Account ID" }])}
+</details>`,
   ].join("\n");
 
   return renderHostedDocument({
     body,
-    providerName,
+    consoleStyle: true,
+    providerName: DATACONNECT_PRODUCT_IDENTITY.name,
     themeChoice,
-    title: `${providerName} — Owner access`,
+    title: "DataConnect",
   });
 }
 
@@ -709,6 +714,21 @@ function appendCsrfTokenToRequest(req: AuthRequest, token: string): void {
 
 function replyCsrfFailure(req: AuthRequest, res: AuthResponse, providerName: string): void {
   if (wantsHtml(req)) {
+    if ((req.originalUrl || req.url || "").startsWith("/device")) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.status(403).send(
+        renderHostedDocument({
+          body: [
+            renderPageIntro({ title: "Connect a device" }),
+            '<p class="hosted-ui-error" role="alert">This form has expired; try again.</p>',
+          ].join("\n"),
+          consoleStyle: true,
+          providerName: DATACONNECT_PRODUCT_IDENTITY.name,
+          title: "Connect a device",
+        })
+      );
+      return;
+    }
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(403).send(
       renderHostedDocument({
@@ -741,13 +761,27 @@ function replyLoginRateLimited(
   req: AuthRequest,
   res: AuthResponse,
   providerName: string,
-  retryAfterSeconds: number
+  retryAfterSeconds: number,
+  loginForm?: { csrfToken: string; returnTo: string; themeChoice?: string }
 ): void {
   res.setHeader("Retry-After", String(retryAfterSeconds));
   if (wantsHtml(req)) {
+    if (loginForm) {
+      sendOwnerLoginPage(
+        res,
+        providerName,
+        loginForm.csrfToken,
+        loginForm.returnTo,
+        429,
+        `Too many attempts. Try again in about ${retryAfterSeconds} seconds.`,
+        loginForm.themeChoice
+      );
+      return;
+    }
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(429).send(
       renderHostedDocument({
+        consoleStyle: false,
         body: [
           renderPageIntro({
             eyebrow: "Owner sign-in",
@@ -932,7 +966,15 @@ async function handleOwnerLoginPost(
   // (so every guess, right or wrong, counts toward the window).
   const retryAfterSeconds = context.loginRateLimiter.check(req);
   if (retryAfterSeconds !== null) {
-    replyLoginRateLimited(req, res, context.providerName, retryAfterSeconds);
+    // Only a browser gets the form back, so only a browser gets a CSRF cookie.
+    const loginForm = wantsHtml(req)
+      ? {
+          csrfToken: context.ensureCsrfToken(req, res),
+          returnTo,
+          themeChoice: readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
+        }
+      : undefined;
+    replyLoginRateLimited(req, res, context.providerName, retryAfterSeconds, loginForm);
     return;
   }
 

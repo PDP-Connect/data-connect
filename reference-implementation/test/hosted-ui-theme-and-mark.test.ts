@@ -27,7 +27,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeHostedThemeChoice, renderBrandFooter, renderPdppMark } from "../server/hosted-ui.ts";
+import {
+  HOSTED_UI_CSS,
+  normalizeHostedThemeChoice,
+  renderBrandFooter,
+  renderHostedDocument,
+  renderPdppMark,
+} from "../server/hosted-ui.ts";
 
 // --- normalizeHostedThemeChoice ---------------------------------------------
 
@@ -103,4 +109,25 @@ test("renderBrandFooter: links Secured by PDPP to https://pdpp.dev", () => {
   const html = renderBrandFooter();
   assert.match(html, /<a class="hosted-ui-footer-attribution-link" href="https:\/\/pdpp\.dev">/);
   assert.ok(html.includes("Secured by PDPP"));
+});
+
+test("renderHostedDocument applies the shared DataConnect style only when asked", () => {
+  const page = renderHostedDocument({
+    body: '<h1 id="hosted-ui-page-title">Set up DataConnect</h1>',
+    consoleStyle: true,
+    providerName: "ignored for product pages",
+    title: "Set up DataConnect",
+  });
+
+  assert.match(page, /data-theme="system" data-console-style="true"/);
+  assert.match(page, /class="hosted-ui-page hosted-ui-console-page"/);
+  assert.match(page, /<svg class="hosted-ui-mark" viewBox="0 0 832 832"/);
+  assert.match(page, /aria-label="DataConnect">DataConnect<\/span>/);
+  assert.doesNotMatch(page, /hosted-ui-footer-attribution/);
+  assert.match(HOSTED_UI_CSS, /--background: oklch\(0\.995 0\.001 90\)/);
+  assert.match(HOSTED_UI_CSS, /html\[data-theme="dark"\]\[data-console-style="true"\]/);
+
+  const consentPage = renderHostedDocument({ body: "Consent", providerName: "DataConnect", title: "Consent" });
+  assert.doesNotMatch(consentPage, /data-console-style="true"/);
+  assert.match(consentPage, /hosted-ui-footer-attribution/);
 });

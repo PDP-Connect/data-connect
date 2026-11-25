@@ -19,6 +19,26 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
+// Regexes for the server-page copy assertions (hoisted for lint/performance/useTopLevelRegex).
+const SERVER_PAGES_RE_1 = /Choose a less common password\./u;
+const SERVER_PAGES_RE_2 = /Set up DataConnect/;
+const SERVER_PAGES_RE_3 = /name="token" required autocomplete="off"/;
+const SERVER_PAGES_RE_4 = /type="password" name="password" required minlength="15"\s+autocomplete="new-password"/;
+const SERVER_PAGES_RE_5 = /<form class="hosted-ui-surface" method="post"/;
+const SERVER_PAGES_RE_6 = /<form[^>]+action=/;
+const SERVER_PAGES_RE_7 = /Your password is set\. You can sign in now\./;
+const SERVER_PAGES_RE_8 = /<a class="hosted-ui-button" data-variant="primary" href="\/owner\/login">Sign in<\/a>/;
+const SERVER_PAGES_RE_9 = /That setup code did not work\./;
+const SERVER_PAGES_RE_10 = /Too many attempts\./;
+const SERVER_PAGES_RE_11 = /<title>DataConnect — Sign in<\/title>/;
+const SERVER_PAGES_RE_12 = /<span class="hosted-ui-provider" aria-label="DataConnect">DataConnect<\/span>/;
+const SERVER_PAGES_RE_13 = /hosted-ui-console-page/;
+const SERVER_PAGES_RE_14 = /<div class="hosted-ui-error" role="alert">That password did not work\.<\/div>/;
+const SERVER_PAGES_RE_15 = /Too many attempts\. Try again in about \d+ seconds\./;
+const SERVER_PAGES_RE_16 = /name="return_to" value="\/consent"/;
+const SERVER_PAGES_RE_17 = /Too many sign-in attempts\. Retry after the indicated delay\./;
+const SERVER_PAGES_RE_18 = /<details class="hosted-ui-details">[\s\S]*<code>owner_local<\/code>[\s\S]*<\/details>/;
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const SPOTIFY_MANIFEST = JSON.parse(
@@ -368,10 +388,10 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     });
     assert.equal(loginPage.status, 200, "/owner/login should stay discoverable even when auth is disabled");
     const loginHtml = await loginPage.text();
-    assert.ok(loginHtml.includes("owner access"), "renders owner-access landing copy");
-    assert.ok(loginHtml.includes("No owner password is set"), "explains that owner sign-in is off");
+    assert.ok(loginHtml.includes("DataConnect"), "shows the product name");
+    assert.ok(loginHtml.includes("A password is not set"), "explains that sign-in is off");
     assert.ok(loginHtml.includes("/device"), "offers a stable device-approval entry point");
-    assert.ok(!loginHtml.includes("Owner password"), "does not render a password form when disabled");
+    assert.ok(!loginHtml.includes('name="password"'), "does not render a password form when disabled");
 
     const requestUri = await startPendingConsent(asUrl);
 
@@ -393,7 +413,7 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     });
     assert.equal(devicePage.status, 200);
     const deviceText = await devicePage.text();
-    assert.ok(deviceText.includes("Subject ID"), "unauth mode shows freeform subject id field");
+    assert.ok(deviceText.includes("Account name"), "unauth mode shows the existing account field");
   });
 });
 
@@ -450,7 +470,8 @@ test("owner-auth: /setup rejects a common password and accepts a long unlisted o
         });
       const blocked = await claim("passwordpassword");
       assert.equal(blocked.status, 400);
-      assert.match(await blocked.text(), /too common/u);
+      // RAISE-RULES 4: the blocklist refusal is one plain sentence under the field.
+      assert.match(await blocked.text(), SERVER_PAGES_RE_1);
       // A rejected password does not spend the one-time token.
       const longPassword = "maple orbit canyon velvet ".repeat(3);
       assert.ok(Array.from(longPassword).length >= 64);
@@ -527,7 +548,12 @@ test("public console /setup proxies the first-run form claim to the loopback AS"
       const publicUrl = "https://setup.example.test/setup";
       const setupPage = await publicRoute.GET(new Request(publicUrl, { headers: { Accept: "text/html" } }));
       assert.equal(setupPage.status, 200);
-      assert.match(await setupPage.text(), /Claim this install/);
+      const setupHtml = await setupPage.text();
+      assert.match(setupHtml, SERVER_PAGES_RE_2);
+      assert.match(setupHtml, SERVER_PAGES_RE_3);
+      assert.match(setupHtml, SERVER_PAGES_RE_4);
+      assert.match(setupHtml, SERVER_PAGES_RE_5);
+      assert.doesNotMatch(setupHtml, SERVER_PAGES_RE_6, "keeps the browser's same-page setup post");
 
       const formRequest = () =>
         new Request(publicUrl, {
@@ -536,7 +562,10 @@ test("public console /setup proxies the first-run form claim to the loopback AS"
           method: "POST",
         });
       const claimed = await publicRoute.POST(formRequest());
-      assert.equal(claimed.status, 201, await claimed.text());
+      const claimedHtml = await claimed.text();
+      assert.equal(claimed.status, 201, claimedHtml);
+      assert.match(claimedHtml, SERVER_PAGES_RE_7);
+      assert.match(claimedHtml, SERVER_PAGES_RE_8);
       assert.equal((await publicRoute.POST(formRequest())).status, 403, "setup token is consumed once");
       assert.equal((await login(asUrl, password)).status, 302, "the claim enables owner login immediately");
     }
@@ -561,8 +590,16 @@ test("setup throttles wrong tokens and does not override an environment password
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           method: "POST",
         });
-      assert.equal((await submit()).status, 403);
-      assert.equal((await submit()).status, 429);
+      const invalidToken = await submit();
+      assert.equal(invalidToken.status, 403);
+      const invalidHtml = await invalidToken.text();
+      assert.match(invalidHtml, SERVER_PAGES_RE_9);
+      assert.ok(invalidHtml.indexOf("That setup code did not work.") > invalidHtml.indexOf('name="token"'));
+
+      const throttled = await submit();
+      assert.equal(throttled.status, 429);
+      assert.ok(throttled.headers.get("retry-after"));
+      assert.match(await throttled.text(), SERVER_PAGES_RE_10);
     }
   );
 
@@ -716,7 +753,7 @@ test("owner-auth placeholder: wrong password with valid CSRF returns 401 and iss
     const setCookies = getRawSetCookieList(resp);
     assert.ok(!findSetCookiePair(setCookies, "pdpp_owner_session"), "no session cookie on wrong password");
     const text = await resp.text();
-    assert.ok(text.includes("Incorrect password"), "login page shows error");
+    assert.ok(text.includes("That password did not work"), "login page shows the password error");
   });
 });
 
@@ -805,13 +842,11 @@ const SIGN_IN_FORBIDDEN_COPY = [
 ];
 
 function assertOwnerSignInCopy(html: string): void {
-  assert.match(html, /<title>DataConnect — Owner sign-in<\/title>/);
-  assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">DataConnect<\/span>/);
+  assert.match(html, SERVER_PAGES_RE_11);
+  assert.match(html, SERVER_PAGES_RE_12);
+  assert.match(html, SERVER_PAGES_RE_13);
   assert.match(html, /<h1 id="hosted-ui-page-title" class="pdpp-display">Sign in to DataConnect<\/h1>/);
-  assert.ok(
-    html.includes("This password keeps other people from seeing your data or changing which apps can use it."),
-    "says what the password protects"
-  );
+  assert.ok(html.includes("Use your password to continue."), "uses one plain sentence under the title");
   assert.ok(!html.includes("hosted-ui-instance-monogram"), "an unnamed instance shows no instance monogram");
   for (const phrase of SIGN_IN_FORBIDDEN_COPY) {
     assert.ok(!html.includes(phrase), `sign-in page must not say ${JSON.stringify(phrase)}`);
@@ -843,7 +878,8 @@ test("owner-auth: sign-in page names DataConnect and prints no operator detail",
     });
     assert.equal(wrong.status, 401);
     const html = await wrong.text();
-    assert.match(html, /<div class="hosted-ui-error" role="alert">Incorrect password\.<\/div>/);
+    assert.match(html, SERVER_PAGES_RE_14);
+    assert.ok(html.indexOf("That password did not work.") > html.indexOf('id="hosted-ui-password"'));
     assertOwnerSignInCopy(html);
   });
 });
@@ -868,6 +904,35 @@ test("owner-auth placeholder: repeated failed logins are throttled with a Retry-
 
       const stillThrottled = await login(asUrl, "wrong-4");
       assert.equal(stillThrottled.status, 429, "throttling persists across further attempts within the window");
+
+      // A browser gets the sign-in form back with a plain sentence under the field.
+      const csrf = await fetchCsrf(asUrl, "/owner/login");
+      const htmlThrottled = await fetch(`${asUrl}/owner/login`, {
+        body: new URLSearchParams({ _csrf: csrf.csrfField || "", password: "wrong-5", return_to: "/consent" }).toString(),
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: csrf.csrfCookie || "",
+        },
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(htmlThrottled.status, 429);
+      assert.ok(htmlThrottled.headers.get("retry-after"));
+      const throttledHtml = await htmlThrottled.text();
+      assert.match(throttledHtml, SERVER_PAGES_RE_15);
+      assert.match(throttledHtml, SERVER_PAGES_RE_16);
+
+      // A JSON client keeps the JSON error and is not handed a CSRF cookie.
+      const jsonThrottled = await fetch(`${asUrl}/owner/login`, {
+        body: JSON.stringify({ password: "wrong-6" }),
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(jsonThrottled.status, 429);
+      assert.ok(!findSetCookiePair(getRawSetCookieList(jsonThrottled), "pdpp_owner_csrf"));
+      assert.match(await jsonThrottled.text(), SERVER_PAGES_RE_17);
     }
   );
 });
@@ -941,7 +1006,8 @@ test("owner-auth placeholder: authenticated GET /owner/login becomes a signed-in
     assert.ok(text.includes("Signed in"), "shows signed-in state");
     assert.ok(text.includes('href="/"'), "offers a path back to the owner console");
     assert.ok(text.includes("/device"), "offers a stable device approval entry point");
-    assert.ok(text.includes("owner_local"), "shows the current owner subject");
+    // RAISE-RULES 1: the owner subject moved into a folded "Details", not deleted.
+    assert.match(text, SERVER_PAGES_RE_18, "shows the current owner subject");
   });
 });
 

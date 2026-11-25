@@ -29,6 +29,7 @@ type HostedThemeChoice = "light" | "dark" | "system";
 
 interface HostedDocumentArgs {
   body: string;
+  consoleStyle?: boolean;
   providerName: unknown;
   themeChoice?: unknown;
   title: unknown;
@@ -1002,6 +1003,187 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
     margin-top: 0.625rem;
   }
 }
+
+/* ─── DataConnect server pages ────────────────────────────────────────
+   Shared by setup, sign-in, and device connection pages. Values follow
+   apps/console/src/styles/ink-carbon.css and stay scoped away from consent. */
+html[data-console-style="true"] {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --background: oklch(0.995 0.001 90);
+  --foreground: oklch(0.21 0.006 60);
+  --card: oklch(0.995 0.001 90);
+  --primary: oklch(0.50 0.13 245);
+  --primary-foreground: oklch(0.995 0.001 90);
+  --muted: oklch(0.962 0.003 80);
+  --muted-foreground: oklch(0.46 0.008 60);
+  --destructive: oklch(0.52 0.17 27);
+  --border: oklch(0.93 0.004 75);
+  --input: oklch(0.87 0.005 75);
+  --radius: 8px;
+  --radius-control: 6px;
+  color-scheme: light;
+}
+
+html[data-theme="dark"][data-console-style="true"] {
+  --background: oklch(0.178 0.003 80);
+  --foreground: oklch(0.93 0.004 80);
+  --card: oklch(0.178 0.003 80);
+  --primary: oklch(0.76 0.11 238);
+  --primary-foreground: oklch(0.178 0.003 80);
+  --muted: oklch(0.225 0.004 80);
+  --muted-foreground: oklch(0.70 0.006 80);
+  --destructive: oklch(0.72 0.16 27);
+  --border: oklch(0.255 0.004 80);
+  --input: oklch(0.33 0.005 80);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"][data-console-style="true"] {
+    --background: oklch(0.178 0.003 80);
+    --foreground: oklch(0.93 0.004 80);
+    --card: oklch(0.178 0.003 80);
+    --primary: oklch(0.76 0.11 238);
+    --primary-foreground: oklch(0.178 0.003 80);
+    --muted: oklch(0.225 0.004 80);
+    --muted-foreground: oklch(0.70 0.006 80);
+    --destructive: oklch(0.72 0.16 27);
+    --border: oklch(0.255 0.004 80);
+    --input: oklch(0.33 0.005 80);
+    color-scheme: dark;
+  }
+}
+
+.hosted-ui-page.hosted-ui-console-page {
+  max-width: 400px;
+  min-height: 100vh;
+  padding: 2.5rem 1.25rem 3rem;
+  gap: 2rem;
+}
+.hosted-ui-console-page .hosted-ui-header {
+  justify-content: center;
+  gap: 0.625rem;
+  padding: 0;
+}
+.hosted-ui-console-page .hosted-ui-provider {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.hosted-ui-console-page .hosted-ui-mark {
+  width: 28px;
+  height: 28px;
+}
+.hosted-ui-console-page .hosted-ui-footer,
+.hosted-ui-console-page .pdpp-eyebrow {
+  display: none;
+}
+.hosted-ui-console-page .hosted-ui-intro {
+  gap: 0.625rem;
+}
+.hosted-ui-console-page .pdpp-display {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
+}
+.hosted-ui-console-page .pdpp-body-lg {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+.hosted-ui-console-page .hosted-ui-surface {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.hosted-ui-console-page .hosted-ui-field {
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.hosted-ui-console-page .hosted-ui-field label {
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+.hosted-ui-console-page .hosted-ui-field input {
+  width: 100%;
+  min-height: 42px;
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+.hosted-ui-console-page .hosted-ui-button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 0.875rem;
+  border-radius: var(--radius-control);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 28px;
+}
+.hosted-ui-console-page .hosted-ui-button[data-variant="primary"] {
+  background: var(--foreground);
+  color: var(--background);
+  border-color: var(--foreground);
+}
+.hosted-ui-console-page .hosted-ui-button:focus-visible,
+.hosted-ui-console-page .hosted-ui-field input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.hosted-ui-console-page .hosted-ui-actions {
+  margin-top: 1.25rem;
+}
+.hosted-ui-console-page .hosted-ui-error {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--destructive);
+  font-size: 0.8125rem;
+}
+.hosted-ui-console-page .hosted-ui-kv {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.hosted-ui-console-page a.hosted-ui-button {
+  text-decoration: none;
+}
+.hosted-ui-console-page .hosted-ui-result-mark {
+  display: none;
+}
+.hosted-ui-console-page .hosted-ui-details {
+  margin-top: 0.5rem;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+.hosted-ui-console-page .hosted-ui-details > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.hosted-ui-console-page .hosted-ui-details dd {
+  overflow-wrap: anywhere;
+}
+.hosted-ui-console-page .hosted-ui-code {
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 600px) {
+  .hosted-ui-page.hosted-ui-console-page {
+    padding: 1.5rem 1rem 3rem;
+    gap: 1.75rem;
+  }
+  .hosted-ui-console-page .pdpp-display {
+    font-size: 23px;
+  }
+}
 `;
 
 // ─── Render helpers ──────────────────────────────────────────────────────────
@@ -1042,6 +1224,7 @@ export function renderHostedDocument({
   providerName,
   body,
   themeChoice = "system",
+  consoleStyle = false,
 }: HostedDocumentArgs): string {
   const safeTitle = escapeHtml(title);
   const safeThemeChoice = normalizeHostedThemeChoice(themeChoice);
@@ -1051,7 +1234,7 @@ export function renderHostedDocument({
   // `light` both render the light mark (matches the pre-existing default).
   const markSurface = safeThemeChoice === "dark" ? "dark" : "light";
   return `<!DOCTYPE html>
-<html lang="en" data-theme="${safeThemeChoice}">
+<html lang="en" data-theme="${safeThemeChoice}"${consoleStyle ? ' data-console-style="true"' : ""}>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -1060,10 +1243,10 @@ export function renderHostedDocument({
 <link rel="stylesheet" href="${HOSTED_UI_CSS_PATH}" />
 </head>
 <body ${HOSTED_UI_BRAND_MARKER}>
-<main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
-${renderBrandHeader({ providerName })}
+<main class="hosted-ui-page${consoleStyle ? " hosted-ui-console-page" : ""}" aria-labelledby="hosted-ui-page-title">
+${renderBrandHeader({ providerName, productBrand: consoleStyle })}
 ${body}
-${renderBrandFooter({ surface: markSurface })}
+${consoleStyle ? "" : renderBrandFooter({ surface: markSurface })}
 </main>
 </body>
 </html>`;
@@ -1091,8 +1274,17 @@ ${renderBrandFooter({ surface: markSurface })}
  * PDPP survives as a quiet footer attribution (`renderBrandFooter`) — where
  * Plaid puts its own wordmark on a bank-branded screen.
  */
-export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
+export function renderBrandHeader({ providerName, productBrand = false }: {
+  providerName: unknown;
+  productBrand?: boolean;
+}): string {
   const safeProvider = escapeHtml(String(providerName ?? ""));
+  if (productBrand) {
+    return `<header class="hosted-ui-header">
+  ${renderDataConnectMark({ size: 28 })}
+  <span class="hosted-ui-provider" aria-label="DataConnect">DataConnect</span>
+</header>`;
+  }
   return `<header class="hosted-ui-header">
   <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
 </header>`;
