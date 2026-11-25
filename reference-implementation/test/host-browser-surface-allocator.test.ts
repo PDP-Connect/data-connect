@@ -456,6 +456,51 @@ function createGatedHost(): {
 /** Let queued promise callbacks run, so a fake fetch reaches its gate. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+function createDeleteGatedHost() {
+	let started!: () => void;
+	let complete!: () => void;
+	const deleteStarted = new Promise<void>((resolve) => { started = resolve; });
+	const deleteCompleted = new Promise<void>((resolve) => { complete = resolve; });
+	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+		if (init?.method === "DELETE") {
+			started();
+			await deleteCompleted;
+			return new Response(null, { status: 204 });
+		}
+		const { run_id } = JSON.parse(String(init?.body));
+		return Response.json({ cdp_url: `http://127.0.0.1:9222/${run_id}`, surface_id: `host-${run_id}` });
+	}) as typeof fetch;
+	return { deleteStarted, complete, fetchImpl };
+}
+
+test("a late run release does not erase the next run's pending binding", async () => {
+	const host = createDeleteGatedHost();
+	const allocator = hostAllocator(host.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-old", surfaceId: "surface_1" });
+	const release = allocator.releaseRun("run-old");
+	await host.deleteStarted;
+	allocator.bindRunToSurface({ runId: "run-next", surfaceId: "surface_1" });
+	host.complete();
+	await release;
+	assert.equal((await allocator.ensureSurface(CHASE_SURFACE_REQUEST)).cdp_url, "http://127.0.0.1:9222/run-next");
+	assert.equal((await allocator.getSurfaceStatus("surface_1"))?.cdp_url, "http://127.0.0.1:9222/run-next");
+});
+
+test("a late surface stop does not erase the next run's ready lease", async () => {
+	const host = createDeleteGatedHost();
+	const allocator = hostAllocator(host.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-old", surfaceId: "surface_1" });
+	await allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	const stopping = allocator.stopSurface({ reason: "surface_failed", surfaceId: "surface_1" });
+	await host.deleteStarted;
+	allocator.bindRunToSurface({ runId: "run-next", surfaceId: "surface_1" });
+	const next = await allocator.ensureSurface(CHASE_SURFACE_REQUEST);
+	host.complete();
+	await stopping;
+	assert.equal(next.cdp_url, "http://127.0.0.1:9222/run-next");
+	assert.equal((await allocator.getSurfaceStatus("surface_1"))?.cdp_url, next.cdp_url);
+});
+
 test("a surface rebound to the next run starts for that run, and the older run's late answer is not recorded", async () => {
 	const host = createGatedHost();
 	const allocator = hostAllocator(host.fetchImpl);

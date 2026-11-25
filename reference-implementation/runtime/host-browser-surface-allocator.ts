@@ -333,15 +333,18 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 
 	async releaseRun(runId: string): Promise<void> {
 		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		const record = surfaceId ? this.#leasesBySurfaceId.get(surfaceId) : undefined;
 		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
 			([, pendingRunId]) => pendingRunId === runId,
 		)?.[0];
 		await this.#requestNoContent("DELETE", this.#runUrl(runId));
-		if (surfaceId) {
+		if (surfaceId && record?.runId === runId && this.#leasesBySurfaceId.get(surfaceId) === record) {
 			this.#leasesBySurfaceId.delete(surfaceId);
+		}
+		if (surfaceId && this.#surfaceIdsByRunId.get(runId) === surfaceId && this.#leasesBySurfaceId.get(surfaceId)?.runId !== runId) {
 			this.#surfaceIdsByRunId.delete(runId);
 		}
-		if (pendingSurfaceId) {
+		if (pendingSurfaceId && this.#isBound(pendingSurfaceId, runId)) {
 			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
 			this.#migrateProfileBySurfaceId.delete(pendingSurfaceId);
 		}
@@ -364,10 +367,16 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				? this.#runUrl(record.runId)
 				: this.#leaseUrl(record.hostSurfaceId),
 		);
-		this.#leasesBySurfaceId.delete(request.surfaceId);
-		this.#surfaceIdsByRunId.delete(record.runId);
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		if (this.#leasesBySurfaceId.get(request.surfaceId) === record) {
+			this.#leasesBySurfaceId.delete(request.surfaceId);
+		}
+		if (this.#surfaceIdsByRunId.get(record.runId) === request.surfaceId && this.#leasesBySurfaceId.get(request.surfaceId)?.runId !== record.runId) {
+			this.#surfaceIdsByRunId.delete(record.runId);
+		}
+		if (this.#isBound(request.surfaceId, record.runId)) {
+			this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+			this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		}
 		return { ...record.surface, health: "stopping" };
 	}
 
