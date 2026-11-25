@@ -153,7 +153,8 @@ test("Ink Carbon assigns each direction value in light and dark", async () => {
     "--sidebar": ["oklch(0.974 0.003 85)", "oklch(0.155 0.003 80)"],
     "--foreground": ["oklch(0.21 0.006 60)", "oklch(0.93 0.004 80)"],
     "--muted-foreground": ["oklch(0.46 0.008 60)", "oklch(0.70 0.006 80)"],
-    "--foreground-faint": ["oklch(0.55 0.008 60)", "oklch(0.62 0.006 80)"],
+    // Light third text darkened from 0.55: rendered 11-13px text measured under 4.5:1.
+    "--foreground-faint": ["oklch(0.53 0.008 60)", "oklch(0.62 0.006 80)"],
     "--border": ["oklch(0.93 0.004 75)", "oklch(0.255 0.004 80)"],
     "--border-strong": ["oklch(0.87 0.005 75)", "oklch(0.33 0.005 80)"],
     "--muted": ["oklch(0.962 0.003 80)", "oklch(0.225 0.004 80)"],
@@ -224,7 +225,8 @@ test("second and third text meet 4.5:1 contrast on page and menu surfaces", asyn
 
   for (const [theme, tokens] of [["light", light], ["dark", dark]] as const) {
     for (const textToken of ["--muted-foreground", "--foreground-faint"]) {
-      for (const backgroundToken of ["--background", "--sidebar"]) {
+      // --muted is the hover and selected fill that menu rows and table rows sit on.
+      for (const backgroundToken of ["--background", "--sidebar", "--muted"]) {
         const text = declaration(tokens, textToken);
         const background = declaration(tokens, backgroundToken);
         assert.ok(text && background, `${theme} ${textToken} and ${backgroundToken} tokens exist`);
