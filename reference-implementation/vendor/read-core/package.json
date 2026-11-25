@@ -5,8 +5,8 @@
   "description": "Pure, adapter-agnostic primitives for shaping PDPP read results into bounded previews, continuation descriptors, handle metadata, and escalation paths.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PDP-Connect/pdpp.git",
-    "directory": "packages/read-core"
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
+    "directory": "reference-implementation/vendor/read-core"
   },
   "engines": {
     "node": ">=22.14.0"
@@ -22,11 +22,11 @@
     "build": "node --experimental-strip-types scripts/build.ts",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node --experimental-strip-types scripts/run-tests.ts",
-    "validate-package": "pnpm build && node --experimental-strip-types scripts/validate-package.ts",
-    "pack-install-test": "pnpm build && node --experimental-strip-types scripts/pack-install-test.ts",
-    "verify:node-22.14": "pnpm build && node --experimental-strip-types scripts/verify-node-22.14.ts",
-    "verify": "pnpm test && pnpm validate-package && pnpm pack-install-test"
+    "test": "node --import tsx ../../../scripts/test-scratch/run-command.ts -- node --experimental-strip-types scripts/run-tests.ts",
+    "validate-package": "npm run build && node --experimental-strip-types scripts/validate-package.ts",
+    "pack-install-test": "npm run build && node --experimental-strip-types scripts/pack-install-test.ts",
+    "verify:node-22.14": "npm run build && node --experimental-strip-types scripts/verify-node-22.14.ts",
+    "verify": "npm test && npm run validate-package && npm run pack-install-test"
   },
   "keywords": [
     "pdpp",
@@ -46,7 +46,7 @@
   },
   "author": "",
   "bugs": {
-    "url": "https://github.com/PDP-Connect/pdpp/issues"
+    "url": "https://github.com/PDP-Connect/data-connect/issues"
   },
-  "homepage": "https://github.com/PDP-Connect/pdpp#readme"
+  "homepage": "https://github.com/PDP-Connect/data-connect/tree/main/reference-implementation/vendor/read-core#readme"
 }

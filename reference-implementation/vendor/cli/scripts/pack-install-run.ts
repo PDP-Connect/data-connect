@@ -17,8 +17,8 @@ import { promisify } from "node:util";
 // script runs via tsx inside the monorepo, never from the packed tarball
 // itself. Only the CLI command under test executes from the installed
 // tarball via npx.
-import { startServer } from "../../../reference-implementation/server/index.ts";
-import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../../../reference-implementation/server/stores/credential-encryption.ts";
+import { startServer } from "../../../server/index.ts";
+import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../../../server/stores/credential-encryption.ts";
 import {
   addNodeProbeToEnvironment,
   assertArtifactReceipt,
@@ -368,7 +368,7 @@ try {
         identity: context?.setupFields?.account_email ?? "owner@example.com",
         ok: true,
       }),
-    trustedMetadataHosts: ["127.0.0.1"],
+    trustedMetadataHosts: "127.0.0.1",
   })) as unknown as FixtureServer;
   try {
     const sessionCookie = await loginAsFixtureOwner(asUrl);

@@ -38,9 +38,9 @@ const headSha = gitHeadSha(packageRoot);
 const contentSha256 = packageContentSha256(packageRoot);
 
 try {
-  execFileSync("pnpm", ["build"], {
+  execFileSync("npm", ["run", "build"], {
     cwd: packageRoot,
-    env: labelChildEnvironment(env, "pnpm build"),
+    env: labelChildEnvironment(env, "npm run build"),
     stdio: "inherit",
   });
   const output = execFileSync(
@@ -74,11 +74,11 @@ try {
     packageContentSha256: contentSha256,
   });
   assert.ok(
-    receipt.subprocesses.some(({ label }: { label: string }) => label === "pnpm build"),
+    receipt.subprocesses.some(({ label }: { label: string }) => label === "npm run build"),
     "receipt missed the build subprocess"
   );
   assert.ok(
-    receipt.subprocesses.some(({ label }: { label: string }) => label.startsWith("npm ")),
+    receipt.subprocesses.some(({ label }: { label: string }) => label.startsWith("npm ") && label !== "npm run build"),
     "receipt missed npm subprocesses"
   );
   assert.ok(

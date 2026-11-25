@@ -24,12 +24,12 @@
     "build": "npm --prefix ../cli run build && node --import tsx scripts/build.ts",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node ../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
-    "test:read-surface": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node ../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
-    "validate:package": "pnpm build && node --import tsx scripts/package-contract.ts",
-    "verify:artifact": "pnpm build && node --import tsx scripts/pack-install-run.ts",
-    "verify": "pnpm test && pnpm validate:package && pnpm verify:artifact",
-    "pack:dry-run": "pnpm build && npm pack --dry-run --ignore-scripts"
+    "test": "npm run build && node --import tsx ../../../scripts/test-scratch/run-command.ts -- node ../../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
+    "test:read-surface": "node --import tsx ../../../scripts/test-scratch/run-command.ts -- node ../../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
+    "validate:package": "npm run build && node --import tsx scripts/package-contract.ts",
+    "verify:artifact": "npm run build && node --import tsx scripts/pack-install-run.ts",
+    "verify": "npm test && npm run validate:package && npm run verify:artifact",
+    "pack:dry-run": "npm run build && npm pack --dry-run --ignore-scripts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
@@ -49,13 +49,13 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PDP-Connect/pdpp.git",
-    "directory": "packages/mcp-server"
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
+    "directory": "reference-implementation/vendor/mcp-server"
   },
   "bugs": {
-    "url": "https://github.com/PDP-Connect/pdpp/issues"
+    "url": "https://github.com/PDP-Connect/data-connect/issues"
   },
-  "homepage": "https://github.com/PDP-Connect/pdpp#readme",
+  "homepage": "https://github.com/PDP-Connect/data-connect/tree/main/reference-implementation/vendor/mcp-server#readme",
   "engines": {
     "node": ">=22.14.0"
   },

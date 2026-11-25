@@ -77,16 +77,16 @@ supports four command namespaces:
 npx -y @pdpp/cli --help
 ```
 
-When working from this monorepo without installing or linking the binary, use
-the workspace executable:
+From a checkout of this repository, after `npm install` at the root, the npm
+workspace links the binary into the root `node_modules/.bin`:
 
 ```bash
 # @pdpp/cli package, workspace-launched pdpp binary
-pnpm exec pdpp ref run timeline <run-id>
+npx --no-install pdpp ref run timeline <run-id>
 ```
 
-The public command surface is still the `pdpp` binary; `pnpm exec` is only the
-local workspace launcher.
+The public command surface is still the `pdpp` binary; `npx --no-install` is
+only the local workspace launcher.
 
 The local collector runtime is a separate public package:
 
