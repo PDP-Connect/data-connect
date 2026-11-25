@@ -115,5 +115,5 @@ test("settings keeps the required section order and links to access tokens", asy
   assert.ok(positions.every((position) => position >= 0))
   assert.deepEqual(positions, [...positions].sort((left, right) => left - right))
   // Brief settings-pages, decision 3: the Access tokens row opens the unchanged address.
-  assert.match(html, /href="\/deployment\/tokens"[\s\S]*?Access tokens/)
+  assert.match(html, /href="\/deployment\/tokens"[\s\S]*?Tokens for scripts and tools/)
 })

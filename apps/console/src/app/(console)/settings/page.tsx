@@ -71,7 +71,7 @@ export default async function SettingsPage() {
             className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             href="/deployment/tokens"
           >
-            <span>Access tokens</span>
+            <span>Tokens for scripts and tools</span>
             <span aria-hidden="true" className="text-muted-foreground">→</span>
           </Text>
           {ownerSessions.enabled ? (
