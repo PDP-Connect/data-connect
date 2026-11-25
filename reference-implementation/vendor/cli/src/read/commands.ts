@@ -20,6 +20,19 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   search: ["connector-instance-id", "cursor", "limit", "streams", "mode"],
   aggregate: ["connector-id", "connector-instance-id", "field", "granularity", "limit", "metric", "time-zone", "group-by", "group-by-time"],
 };
+// How many arguments each command takes after <provider-url>. A surplus one
+// is refused, not ignored: it is usually a value typed after a switch
+// (`--allow-partial false`) or an unquoted search query, and dropping it
+// would run a different read than the one asked for.
+const COMMAND_ARGUMENTS: Record<string, number> = {
+  schema: 0,
+  streams: 0,
+  "query-records": 1,
+  fetch: 2,
+  "field-window": 2,
+  search: 1,
+  aggregate: 1,
+};
 const SEARCH_MODE_PATHS: Record<string, string> = {
   semantic: "/v1/search/semantic",
   hybrid: "/v1/search/hybrid",
@@ -60,7 +73,7 @@ export async function runRead(
     }
 
     const { positionals } = parsedArgs;
-    validateFlags(command, flags);
+    validateInvocation(command, positionals.slice(1), flags);
     const format = resolveFormat(flags, "json", "json");
     if (!["json", "jsonl", "table"].includes(format)) {
       throw new PdppUsageError(`Unsupported format: ${format}`, { param: "format" });
@@ -123,16 +136,23 @@ export async function runRead(
   }
 }
 
-function validateFlags(command: string, flags: ParsedFlags): void {
+/** `args` are the positional arguments after <provider-url>. */
+function validateInvocation(command: string, args: string[], flags: ParsedFlags): void {
   const valid = [...COMMON_FLAGS, ...(COMMAND_FLAGS[command] ?? [])];
-  for (const flag of Object.keys(flags)) {
+  for (const [flag, value] of Object.entries(flags)) {
     if (!valid.includes(flag)) {
       throw new PdppUsageError(`Unknown flag: --${flag}. Valid flags: ${valid.map((name) => `--${name}`).join(", ")}`,
         { param: flag });
     }
-    if (flags[flag] === true && !BOOLEAN_FLAGS.includes(flag)) {
+    // An empty value (`--connection-id=`) would be dropped from the request
+    // and read with the server's default instead of the selection asked for.
+    if ((value === true && !BOOLEAN_FLAGS.includes(flag)) || (typeof value === "string" && value.trim() === "")) {
       throw new PdppUsageError(`Missing value for --${flag}`, { param: flag });
     }
+  }
+  const surplus = args[COMMAND_ARGUMENTS[command] ?? 0];
+  if (surplus !== undefined) {
+    throw new PdppUsageError(`Unexpected argument: ${surplus}`);
   }
 }
 
@@ -151,7 +171,7 @@ export function buildReadRequest(
   flags: ParsedFlags,
   providerUrl: string
 ): ReadRequest {
-  validateFlags(command, flags);
+  validateInvocation(command, positionals, flags);
   const origin = normalizeProviderUrl(providerUrl);
   if (!origin) {
     throw new PdppUsageError(`Invalid provider URL: ${providerUrl}`);

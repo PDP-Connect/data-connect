@@ -499,6 +499,38 @@ for (const [command, args, flags] of [
     }
     assert.throws(() => buildReadRequest(command, args, { ...flags, typo: "ignored" }, PROVIDER),
       (error) => error.details.param === "typo" && error.message.includes("Valid flags:"));
+    assert.throws(() => buildReadRequest(command, args, { ...flags, "connection-id": " " }, PROVIDER),
+      (error) => error.details.param === "connection-id" && error.message.includes("Missing value"));
+    assert.throws(() => buildReadRequest(command, [...args, "surplus"], flags, PROVIDER),
+      (error) => error.message === "Unexpected argument: surplus");
+  });
+}
+
+for (const [argv, message] of [
+  [["query-records", PROVIDER, "messages", "--connection-id="], "Missing value for --connection-id"],
+  [["query-records", PROVIDER, "messages", "--connector-id="], "Missing value for --connector-id"],
+  [["query-records", PROVIDER, "messages", "--allow-partial", "false"], "Unexpected argument: false"],
+  [["search", PROVIDER, "two", "words"], "Unexpected argument: words"],
+]) {
+  test(`read refuses ${argv.slice(3).join(" ")} without sending a request`, async () => {
+    const cacheRoot = await makeCredentialCache("fixture-token");
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = () => {
+      requests += 1;
+      return Promise.resolve(jsonResponse(200, { data: [] }));
+    };
+    try {
+      const captured = captureIo();
+      assert.equal(await runCli(["read", ...argv, "--cache-root", cacheRoot], captured.io), 2);
+      const error = JSON.parse(captured.stderr());
+      assert.equal(error.code, "invalid_argument");
+      assert.equal(error.message, message);
+      assert.equal(requests, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
   });
 }
 
