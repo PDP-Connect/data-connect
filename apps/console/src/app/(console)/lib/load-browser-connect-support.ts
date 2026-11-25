@@ -3,7 +3,7 @@
 
 import { type BrowserConnectSupport, browserConnectSupportFromReadiness } from "./browser-connect-readiness.ts";
 import { getConnectorReadiness } from "./connector-install-client.ts";
-import { ResourceServerHttpError } from "./owner-token.ts";
+import { ReferenceServerUnreachableError, ResourceServerHttpError } from "./owner-token.ts";
 
 /**
  * Browser-session support for the routes under `/connect/browser-session`.
@@ -23,4 +23,24 @@ export async function loadBrowserConnectSupport(connectorId: string): Promise<Br
     throw error;
   });
   return browserConnectSupportFromReadiness(connectorId, readiness, serverPredatesReadiness);
+}
+
+/**
+ * Whether the server's verdict says `connectorId` uses the browser-session
+ * flow, for a page that only describes a connector. `null` means there is no
+ * verdict: the server predates the endpoint, refused the read, or could not be
+ * reached. Unlike `loadBrowserConnectSupport`, nothing is deferred to an older
+ * server, because a description must not state a fact the server did not give
+ * (a mistyped key is not browser-bound). Other errors, such as a sign-in
+ * redirect, propagate.
+ */
+export async function loadBrowserBoundVerdict(connectorId: string): Promise<boolean | null> {
+  try {
+    return (await getConnectorReadiness(connectorId))?.browserBound ?? null;
+  } catch (error) {
+    if (error instanceof ResourceServerHttpError || error instanceof ReferenceServerUnreachableError) {
+      return null;
+    }
+    throw error;
+  }
 }

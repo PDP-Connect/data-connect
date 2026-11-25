@@ -704,15 +704,18 @@ export function listSqliteRecordRejections(args: {
   maxOwnerReceipts?: number;
   ownerSubjectId: string;
   quotaBytes?: number;
+  runId?: string | null;
 }): RecordRejectionPage {
   const limit = pageSize(args.limit);
   const cursor = decodeCursor(args.cursor);
+  const runId = args.runId ?? null;
   const query = cursor
     ? referenceQueries.recordRejectionsListAfterCursor
     : referenceQueries.recordRejectionsListFirstPage;
+  const scope = [args.ownerSubjectId, args.connectorInstanceId];
   const params = cursor
-    ? [args.ownerSubjectId, args.connectorInstanceId, cursor.createdAt, cursor.receiptId]
-    : [args.ownerSubjectId, args.connectorInstanceId];
+    ? [...scope, cursor.createdAt, cursor.receiptId, runId, runId, runId]
+    : [...scope, runId, runId, runId];
   const page = getMany<RecordRejectionRow>(query, params, { limit });
   const policy = {
     connectionReceiptCount: normalizeCountLimit(
@@ -1089,6 +1092,7 @@ export async function listPostgresRecordRejections(args: {
   maxOwnerReceipts?: number;
   ownerSubjectId: string;
   quotaBytes?: number;
+  runId?: string | null;
 }): Promise<RecordRejectionPage> {
   const limit = pageSize(args.limit);
   const cursor = decodeCursor(args.cursor);
@@ -1097,6 +1101,11 @@ export async function listPostgresRecordRejections(args: {
   if (cursor) {
     cursorClause = "AND (created_at, receipt_id) > ($3, $4)";
     params.push(cursor.createdAt, cursor.receiptId);
+  }
+  let runClause = "";
+  if (args.runId) {
+    params.push(args.runId);
+    runClause = `AND (first_run_id = $${params.length} OR latest_run_id = $${params.length})`;
   }
   params.push(limit + 1);
   const limitIndex = params.length;
@@ -1115,6 +1124,7 @@ export async function listPostgresRecordRejections(args: {
        JOIN record_rejection_quota USING (owner_subject_id)
       WHERE owner_subject_id = $1 AND connector_instance_id = $2
         ${cursorClause}
+        ${runClause}
       ORDER BY created_at ASC, receipt_id ASC
       LIMIT $${limitIndex}`,
     params

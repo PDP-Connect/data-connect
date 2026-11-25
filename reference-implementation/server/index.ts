@@ -37,6 +37,7 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
+  getRunRecordOutcomes,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
@@ -1820,13 +1821,13 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError, statusOverride?: number) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {
@@ -2149,6 +2150,7 @@ async function requireTokenWithIntrospection(
     }
   }
   if (!info.active) {
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
@@ -2165,25 +2167,25 @@ async function requireTokenWithIntrospection(
     await emitAuthGateQueryRejection(req, res, info, {
       code: info.inactive_reason || "authentication_error",
       message: gateErrMsg,
+      // The token is rejected, so the recorded status is the 401 sent below
+      // even where the internal code (grant_invalid) maps to 403.
+      status: 401,
     });
     if (info.inactive_reason === "grant_revoked") {
-      return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
+      return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
     if (info.inactive_reason === "grant_expired") {
-      return pdppError(res, 403, "grant_expired", "Grant has expired");
+      return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "authentication_error", "Invalid or expired token");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;
@@ -2222,7 +2224,7 @@ async function emitAuthGateQueryRejection(
   req: ReqLike,
   res: ResLike,
   info: TokenInfo,
-  rejection: { code: string; message: string; sourceDescriptor?: unknown }
+  rejection: { code: string; message: string; sourceDescriptor?: unknown; status?: number }
 ) {
   const authGateQuery = inferAuthGateQueryContext(req, info);
   if (!(authGateQuery && info.trace_id)) {
@@ -2252,7 +2254,7 @@ async function emitAuthGateQueryRejection(
   };
   await emitQueryReceived(authGateContext, req);
   const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
-  await emitQueryRejected(authGateContext, req, gateErr);
+  await emitQueryRejected(authGateContext, req, gateErr, rejection.status);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -5959,6 +5961,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ? R
         : never;
     },
+    getRunRecordOutcomes: (runId: string) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
     handleError,
