@@ -390,14 +390,18 @@ function resolveSqliteBusyTimeoutMs(
  * failure — backoff gives the sibling process time to finish closing.
  */
 const TRANSIENT_LOCK_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_BUSY_SNAPSHOT"]);
+const DEFAULT_MAX_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 10;
 
 export function isTransientSqliteLockError(err: unknown): boolean {
   if (!err) {
     return false;
   }
   const sqliteError = typeof err === "object" ? (err as SqliteErrorLike) : null;
-  if (sqliteError?.code && TRANSIENT_LOCK_CODES.has(sqliteError.code)) {
-    return true;
+  // An explicit error code is authoritative: only known transient codes retry.
+  // The message is consulted only when the error carries no code at all.
+  if (sqliteError && "code" in sqliteError) {
+    return typeof sqliteError.code === "string" && TRANSIENT_LOCK_CODES.has(sqliteError.code);
   }
   const message = typeof sqliteError?.message === "string" ? sqliteError.message : "";
   return message.includes("database is locked") || message.includes("database table is locked");
@@ -425,9 +429,16 @@ export function isTransientSqliteLockError(err: unknown): boolean {
 // attempts, 100ms initial backoff doubling to a 1.5s ceiling. Clamps keep the
 // invariants the loop relies on (attempts >= 1, delays non-negative, ceiling
 // never below the floor).
+function resolveMaxAttempts(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_ATTEMPTS;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ATTEMPTS) {
+    throw new RangeError(`maxAttempts must be a safe integer from 1 to ${MAX_ATTEMPTS}`);
+  }
+  return value;
+}
+
 function normalizeBusyRetryOptions(opts: BusyRetryOptions): NormalizedBusyRetryOptions {
-  const maxAttempts =
-    typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts) ? Math.max(1, opts.maxAttempts) : 5;
+  const maxAttempts = resolveMaxAttempts(opts.maxAttempts);
   const initialDelayMs =
     typeof opts.initialDelayMs === "number" && Number.isFinite(opts.initialDelayMs)
       ? Math.max(0, opts.initialDelayMs)
