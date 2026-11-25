@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
-import { formatSourceForDisplay } from "@pdpp/display";
 import Link from "next/link";
+import { appSourceName } from "../../app-access.ts";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type {
   ApprovalReview as ApprovalReviewData,
@@ -275,8 +275,8 @@ export function ApprovalReview({
   const appName = detail.kind === "consent" ? detail.approval_review.client.client_display?.name?.trim() || "This app" : "This app";
   const sourceNames = artifact
     ? artifact.version === "reference.batch-approval-review.v1"
-      ? artifact.sources.map((source) => formatSourceForDisplay(source.source))
-      : [formatSourceForDisplay(artifact.source)]
+      ? artifact.sources.flatMap((source) => appSourceName(source.source) ?? [])
+      : [appSourceName(artifact.source) ?? ""].filter(Boolean)
     : [];
   const what = sourceNames.length ? sourceNames.join(", ") : "your data";
   let decisionControl = (

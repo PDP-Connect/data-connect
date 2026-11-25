@@ -8,6 +8,7 @@ export function needsRemoteAccess(origin: string): boolean {
   return (
     host === "localhost" || host.endsWith(".local") || host === "::1" || host.startsWith("127.") ||
     host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.") ||
-    PRIVATE_172_ADDRESS.test(host) || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")
+    PRIVATE_172_ADDRESS.test(host) ||
+    (host.includes(":") && (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")))
   );
 }

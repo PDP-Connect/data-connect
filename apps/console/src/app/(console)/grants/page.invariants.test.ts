@@ -88,3 +88,12 @@ test("empty demo state renders without server reads", async () => {
   assert.match(src, /connectorManifests = demoMode \? \[\]/);
   assert.match(src, /params\.demo === "empty" \? demo\.buildEmptyGrantsDemoData\(\)/);
 });
+
+test("app removal is offered only on the full list, and Details opens when its own controls are in use", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES 3 / logic: a partial list cannot remove "the app", it would leave the rest of its access.
+  assert.match(src, /const listNarrowed = Boolean\(params\.cursor \|\| params\.q \|\| params\.status \|\| params\.source_kind \|\| params\.source_id\)/);
+  assert.match(src, /canRemove=\{!\(result\.has_more \|\| listNarrowed\)\}/);
+  // A peek, next page, search or state filter lives in Details; it must not reload folded.
+  assert.match(src, /open=\{Boolean\(params\.peek \|\| params\.cursor \|\| params\.q \|\| params\.status\)\}/);
+});

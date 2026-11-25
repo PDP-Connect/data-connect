@@ -5,10 +5,13 @@ import { formatSourceForDisplay, formatRelative, grantRowLabel } from "@pdpp/dis
 import type { GrantSummary } from "../lib/ref-client.ts";
 
 export interface AppAccess {
+  /** Active access outside any package; removed one by one. */
   grantIds: string[];
   hrefId: string;
   lastRead: string | null;
   name: string;
+  /** Packages holding active access; removed whole, so the package and its tokens end too. */
+  packageIds: string[];
   sources: string[];
   status: string | null;
 }
@@ -24,7 +27,7 @@ function statusWord(status: string): string | null {
   return "Status not available";
 }
 
-export function appSourceName(source: GrantSummary["source"]): string | null {
+export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[0] | null | undefined): string | null {
   if (!source) return null;
   const label = formatSourceForDisplay(source).replace(/^provider_native:/, "");
   return label ? `${label[0]?.toUpperCase()}${label.slice(1)}` : label;
@@ -42,6 +45,7 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
           hrefId: grant.grant_id,
           lastRead: null,
           name: grant.client?.client_name?.trim() || "App",
+          packageIds: [],
           sources: [],
           status: null,
         },
@@ -50,7 +54,12 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
       groups.set(key, group);
     }
     if (ACTIVE_STATUSES.has(grant.status)) {
-      group.app.grantIds.push(grant.grant_id);
+      const packageId = grant.grant_package_id;
+      if (packageId) {
+        if (!group.app.packageIds.includes(packageId)) group.app.packageIds.push(packageId);
+      } else {
+        group.app.grantIds.push(grant.grant_id);
+      }
       group.app.hrefId = grant.grant_id;
     }
     if (grant.last_at && (!group.app.lastRead || grant.last_at > group.app.lastRead)) {

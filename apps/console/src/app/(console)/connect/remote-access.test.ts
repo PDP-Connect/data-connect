@@ -17,3 +17,10 @@ test("private and local addresses need remote access, including bracketed IPv6 h
   }
   assert.equal(needsRemoteAccess("https://data.example.com"), false);
 });
+
+test("public names that start like private IPv6 prefixes do not need remote access", () => {
+  // Only an IPv6 literal (it holds a colon) can be in fc00::/7 or fe80::/10.
+  for (const origin of ["https://fcbarcelona.example", "https://fd.example", "https://fe80.example"]) {
+    assert.equal(needsRemoteAccess(origin), false, origin);
+  }
+});

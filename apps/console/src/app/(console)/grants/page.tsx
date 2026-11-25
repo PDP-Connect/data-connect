@@ -104,6 +104,11 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
   const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, grant.client?.client_name?.trim() || "App"] as const] : [])).entries()];
   const filterSources = [...new Map(result.data.flatMap((grant) => grant.source ? [[grant.source.id, formatSourceForDisplay(grant.source)] as const] : [])).entries()];
 
+  // A later page, or a list narrowed by data source, search or state, holds only
+  // part of an app's access, so removing "the app" from it would leave the rest.
+  // The app filter keeps all of that app's access, so removal stays offered there.
+  const listNarrowed = Boolean(params.cursor || params.q || params.status || params.source_kind || params.source_id);
+
   return (
     <RecordroomShellWithPalette>
       <PageHeader title="Apps" />
@@ -128,31 +133,31 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
           {params.q ? <input name="q" type="hidden" value={params.q} /> : null}
           {params.status ? <input name="status" type="hidden" value={params.status} /> : null}
           {params.demo ? <input name="demo" type="hidden" value={params.demo} /> : null}
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-app">
             App
-            <IcSelect defaultValue={params.client_id ?? ""} name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.client_id ?? ""} id="apps-filter-app" name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
           </label>
-          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-kind">
             Kind
-            <IcSelect defaultValue={params.source_kind ?? ""} name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in source", value: "provider_native" }]} />
+            <IcSelect defaultValue={params.source_kind ?? ""} id="apps-filter-kind" name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in source", value: "provider_native" }]} />
           </label>
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-source">
             Data source
-            <IcSelect defaultValue={params.source_id ?? ""} name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.source_id ?? ""} id="apps-filter-source" name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
           </label>
           <IcButton size="sm" type="submit" variant="ghost">Filter</IcButton>
           {params.client_id || params.source_kind || params.source_id ? <Link className="min-h-11 rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants">Clear filters</Link> : null}
         </form>
         <AppAccessList
           apps={groupGrantAccessByApp(result.data)}
-          canRemove={!result.has_more}
+          canRemove={!(result.has_more || listNarrowed)}
           removeAction={revokeGrantAccessAction}
           returnTo="/grants"
         />
         {result.has_more && result.next_cursor ? <p className="mt-3 text-[13px] text-muted-foreground">More apps are available in Details.</p> : null}
       </Section>
 
-      <details className="mt-5 border-t border-border pt-3">
+      <details className="mt-5 border-t border-border pt-3" open={Boolean(params.peek || params.cursor || params.q || params.status)}>
         <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
         <div className="flex flex-wrap items-center gap-4 border-b border-border py-2">
           <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/grants/packages">Packages</Link>
@@ -165,21 +170,21 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
             Search access
             <input className="h-10 rounded-[6px] border border-border bg-background px-3 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" defaultValue={params.q ?? ""} name="q" placeholder="ID contains…" type="search" />
           </label>
-          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-state">
             State
-            <IcSelect defaultValue={params.status ?? ""} name="status" options={[{ label: "Any state", value: "" }, { label: "Active", value: "issued" }, { label: "Removed", value: "revoked" }, { label: "Not allowed", value: "denied" }, { label: "Failed", value: "failed" }, { label: "Waiting", value: "pending" }]} />
+            <IcSelect defaultValue={params.status ?? ""} id="access-filter-state" name="status" options={[{ label: "Any state", value: "" }, { label: "Active", value: "issued" }, { label: "Removed", value: "revoked" }, { label: "Not allowed", value: "denied" }, { label: "Failed", value: "failed" }, { label: "Waiting", value: "pending" }]} />
           </label>
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-app">
             App
-            <IcSelect defaultValue={params.client_id ?? ""} name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.client_id ?? ""} id="access-filter-app" name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
           </label>
-          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-kind">
             Data source kind
-            <IcSelect defaultValue={params.source_kind ?? ""} name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in data source", value: "provider_native" }]} />
+            <IcSelect defaultValue={params.source_kind ?? ""} id="access-filter-kind" name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in data source", value: "provider_native" }]} />
           </label>
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
+          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-source">
             Data source
-            <IcSelect defaultValue={params.source_id ?? ""} name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.source_id ?? ""} id="access-filter-source" name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
           </label>
           <IcButton size="sm" type="submit" variant="ghost">Filter</IcButton>
           {params.q || params.status || params.client_id || params.source_kind || params.source_id ? <Link className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants">Clear filters</Link> : null}

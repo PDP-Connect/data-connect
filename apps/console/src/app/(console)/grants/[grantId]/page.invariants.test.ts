@@ -49,8 +49,10 @@ test("access detail confirms the effect before removing one access", async () =>
   const src = await readFile(PAGE_FILE, "utf8");
   const action = await readFile(`${HERE}revoke-action.ts`, "utf8");
   // RAISE-RULES 5: destructive actions name what is removed and require server-checked confirmation.
-  assert.match(src, /will no longer read your data\. It keeps what it already read\./);
-  assert.match(src, /name="confirm_revoke"[^>]*value="yes"/);
+  // RAISE-RULES 5: one access names the data it covers, not all of the app's data.
+  assert.match(src, /will no longer read \$\{grant\?\.source \? what : "this data"\}\. It keeps what it already read\./);
+  assert.match(src, /<RemoveThisAccess[\s\S]*?action=\{revokeGrantAccessAction\}/);
+  assert.match(src, /grantId=\{grantId\}/);
   assert.match(action, /confirm_revoke"\)\) !== "yes"/);
   assert.match(action, /\/grants\/\$\{encodeURIComponent\(grantId\)\}\/revoke/);
 });

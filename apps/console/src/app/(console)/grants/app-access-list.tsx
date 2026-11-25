@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Menu } from "@base-ui/react/menu";
-import { IcButton } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useState } from "react";
 import { formatAppLastRead, type AppAccess } from "./app-access.ts";
+import { RemoveAccessConfirmation } from "./remove-access-confirmation.tsx";
 
 export function AppAccessList({
   apps,
@@ -81,20 +81,18 @@ function AppAccessRow({
         </Menu.Root>
       ) : null}
       {confirming ? (
-        <div aria-labelledby={`remove-title-${app.hrefId}`} aria-modal="true" className="col-span-full rounded-[6px] border border-border-strong p-3" role="alertdialog">
-          <p className="text-[13px] text-foreground" id={`remove-title-${app.hrefId}`}>
-            {app.name} will no longer read your data. It keeps what it already read.
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <form action={removeAction}>
-              {app.grantIds.map((grantId) => <input key={grantId} name="grant_id" type="hidden" value={grantId} />)}
-              <input name="confirm_revoke" type="hidden" value="yes" />
-              <input name="return_to" type="hidden" value={returnTo} />
-              <IcButton size="sm" type="submit" variant="destructive">Remove access</IcButton>
-            </form>
-            <IcButton onClick={() => setConfirming(false)} size="sm" type="button" variant="ghost">Cancel</IcButton>
-          </div>
-        </div>
+        <RemoveAccessConfirmation
+          action={removeAction}
+          fields={[
+            ...app.packageIds.map((packageId) => ["package_id", packageId] as const),
+            ...app.grantIds.map((grantId) => ["grant_id", grantId] as const),
+            ["return_to", returnTo] as const,
+          ]}
+          id={`remove-title-${app.hrefId}`}
+          onCancel={() => setConfirming(false)}
+          sentence={`${app.name} will no longer read your data. It keeps what it already read.`}
+          submitLabel="Remove access"
+        />
       ) : null}
     </li>
   );

@@ -12,7 +12,7 @@ import { DeveloperModeGate } from "./developer-mode-gate.tsx";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 
 test("developer tool is hidden until Developer mode is on and links to its setting", () => {
-  const html = renderToStaticMarkup(React.createElement(DeveloperModeGate, { children: React.createElement("span", null, "Developer controls") }));
+  const html = renderToStaticMarkup(React.createElement(DeveloperModeGate, null, React.createElement("span", null, "Developer controls")));
   // RAISE-RULES 1: the request tool is available only behind Developer mode.
   assert.match(html, /This page is for developers/);
   assert.match(html, /href="\/settings#developer-mode"/);

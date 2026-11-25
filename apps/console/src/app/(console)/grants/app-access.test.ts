@@ -43,6 +43,17 @@ test("access rows group by app and keep source names and the latest read", () =>
   assert.equal(rows[0]?.status, null);
 });
 
+test("access inside a package is removed as the package, loose access one by one", () => {
+  const rows = groupGrantAccessByApp([
+    grant({ grant_id: "access-1", grant_package_id: "pkg-1" }),
+    grant({ grant_id: "access-2", grant_package_id: "pkg-1" }),
+    grant({ grant_id: "access-3" }),
+    grant({ grant_id: "access-4", grant_package_id: "pkg-2", status: "revoked" }),
+  ]);
+  assert.deepEqual(rows[0]?.packageIds, ["pkg-1"]);
+  assert.deepEqual(rows[0]?.grantIds, ["access-3"]);
+});
+
 test("only inactive access gets a plain status word", () => {
   assert.equal(groupGrantAccessByApp([grant({ status: "revoked" })])[0]?.status, "Removed");
   assert.equal(groupGrantAccessByApp([grant({ status: "denied" })])[0]?.status, "Not allowed");

@@ -26,6 +26,7 @@ test("app rows name the data they can read and offer a separate actions menu", (
     hrefId: "access-1",
     lastRead: "2026-11-25T12:00:00.000Z",
     name: "ChatGPT",
+    packageIds: [],
     sources: ["Gmail", "Spotify"],
     status: null,
   }]);
@@ -47,6 +48,8 @@ test("app removal names what happens and requires opening a confirmation step", 
   // RAISE-RULES 5: destructive actions name the effect and wait for confirmation.
   assert.match(src, /setConfirming\(true\)/);
   assert.match(src, /will no longer read your data\. It keeps what it already read\./);
-  assert.match(src, /name="confirm_revoke" type="hidden" value="yes"/);
-  assert.match(src, /Cancel/);
+  // The confirmation step, its confirm_revoke field and its Cancel are proven in remove-access-confirmation.test.ts.
+  assert.match(src, /<RemoveAccessConfirmation/);
+  // A whole app is removed through the package revoke for its packages (RAISE-RULES 1: same server action as today).
+  assert.match(src, /\["package_id", packageId\]/);
 });

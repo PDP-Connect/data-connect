@@ -1,7 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { IcButton } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { formatRelative, formatSourceForDisplay } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
@@ -12,6 +11,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getGrantTimeline, listGrants } from "../../lib/ref-client.ts";
+import { RemoveThisAccess } from "../remove-access-confirmation.tsx";
 import { revokeGrantAccessAction } from "./revoke-action.ts";
 
 export const dynamic = "force-dynamic";
@@ -93,16 +93,12 @@ export default async function GrantDetailPage({
       </Section>
       {canRemove ? (
         <Section title="Remove access">
-          <details className="rounded-md border border-border-strong p-3">
-            <summary className="flex min-h-11 cursor-pointer items-center text-[13px] font-medium text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Remove access</summary>
-            <p className="my-2 text-[13px] text-foreground">{appName} will no longer read your data. It keeps what it already read.</p>
-            <form action={revokeGrantAccessAction}>
-              <input name="grant_id" type="hidden" value={grantId} />
-              <input name="confirm_revoke" type="hidden" value="yes" />
-              <input name="return_to" type="hidden" value={`/grants/${encodeURIComponent(grantId)}`} />
-              <IcButton size="sm" type="submit" variant="destructive">Remove access</IcButton>
-            </form>
-          </details>
+          <RemoveThisAccess
+            action={revokeGrantAccessAction}
+            grantId={grantId}
+            returnTo={`/grants/${encodeURIComponent(grantId)}`}
+            sentence={`${appName} will no longer read ${grant?.source ? what : "this data"}. It keeps what it already read.`}
+          />
         </Section>
       ) : null}
       <details className="mt-5 border-t border-border pt-2">
