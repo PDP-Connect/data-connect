@@ -1395,6 +1395,12 @@ export interface RefConnectionHealthSnapshot {
    */
   forward_disposition?: RefForwardDisposition;
   last_success_at: string | null;
+  /**
+   * Whether the expected sync happened, sized against this source's own
+   * interval. The server sets it on every snapshot (`runtime/connection-health.ts`,
+   * `ConnectionHealthSnapshot.lateness`); absent on older servers.
+   */
+  lateness?: { state: "late" | "on_time" | "overdue" | "unknown" } | null;
   /** Non-secret owner CTA, or null when no attention is required. */
   next_action: RefNextAction | null;
   next_attempt_at: string | null;
