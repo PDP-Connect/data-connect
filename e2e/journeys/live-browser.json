@@ -1,0 +1,13 @@
+{
+  "id": "live-browser",
+  "name": "Opening the browser companion route for a seeded run",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "browser-companion",
+      "open": "/syncs/[seed-run:spotify]/stream",
+      "readyText": "spotify is back on it",
+      "assertText": "spotify is back on it"
+    }
+  ]
+}

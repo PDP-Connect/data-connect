@@ -1,0 +1,15 @@
+{
+  "id": "settings",
+  "name": "Owner and deployment settings",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/settings",
+      "readyText": "Settings",
+      "desktopReadyHeading": "Settings",
+      "phoneReadyHeading": "Settings",
+      "assertText": "Settings"
+    }
+  ]
+}

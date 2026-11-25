@@ -1,0 +1,13 @@
+{
+  "id": "counts-and-totals",
+  "name": "Owner overview counts",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/",
+      "readyText": "One or more sources are not healthy.",
+      "assertText": "One or more sources are not healthy."
+    }
+  ]
+}

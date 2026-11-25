@@ -1,0 +1,13 @@
+{
+  "id": "navigation",
+  "name": "Owner navigation home entry",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/",
+      "readyText": "One or more sources are not healthy.",
+      "assertText": "One or more sources are not healthy."
+    }
+  ]
+}

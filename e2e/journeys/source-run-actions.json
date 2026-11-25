@@ -1,0 +1,23 @@
+{
+  "id": "source-run-actions",
+  "name": "Source run actions",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/sources/[seed-source:spotify]",
+      "readyText": "Spotify",
+      "assertText": "Spotify"
+    },
+    {
+      "id": "start-run",
+      "desktopAction": {
+        "type": "click",
+        "role": "button",
+        "name": "Sync now for Spotify"
+      },
+      "readyText": "Sync started.",
+      "assertText": "Sync started."
+    }
+  ]
+}

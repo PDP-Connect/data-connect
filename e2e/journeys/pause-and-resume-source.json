@@ -1,0 +1,28 @@
+{
+  "id": "pause-and-resume-source",
+  "name": "Pause a source and resume it from its detail page",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "pause-source",
+      "open": "/sources/[seed-source:spotify]",
+      "desktopAction": {
+        "type": "click",
+        "role": "button",
+        "name": "Pause collecting"
+      },
+      "readyText": "This source is paused",
+      "assertText": "This source is paused"
+    },
+    {
+      "id": "resume-source",
+      "desktopAction": {
+        "type": "click",
+        "role": "button",
+        "name": "Resume collecting"
+      },
+      "readyText": "Collection resumed",
+      "assertText": "Collection resumed"
+    }
+  ]
+}

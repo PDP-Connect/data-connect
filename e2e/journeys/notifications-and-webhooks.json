@@ -1,0 +1,15 @@
+{
+  "id": "notifications-and-webhooks",
+  "name": "Browser notifications page",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/notifications",
+      "readyText": "Notifications",
+      "desktopReadyHeading": "Notifications",
+      "phoneReadyHeading": "Notifications",
+      "assertText": "Notifications"
+    }
+  ]
+}

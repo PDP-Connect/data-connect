@@ -1,0 +1,15 @@
+{
+  "id": "search",
+  "name": "Record and artifact search entry",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/search",
+      "readyText": "Jump to artifact",
+      "desktopReadyHeading": "Jump to artifact",
+      "phoneReadyHeading": "Jump to artifact",
+      "assertText": "Jump to artifact"
+    }
+  ]
+}

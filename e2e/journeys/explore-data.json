@@ -1,0 +1,15 @@
+{
+  "id": "explore-data",
+  "name": "Looking at collected data in Explore",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "explore-records",
+      "open": "/explore",
+      "readyText": "Explore",
+      "desktopReadyHeading": "Explore",
+      "phoneReadyHeading": "Explore",
+      "assertText": "Radiohead"
+    }
+  ]
+}
