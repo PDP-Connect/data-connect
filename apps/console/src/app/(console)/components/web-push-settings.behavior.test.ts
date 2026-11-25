@@ -17,7 +17,7 @@ import { test } from "node:test";
 import { JSDOM } from "jsdom";
 import React, { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import type { WebPushConfig } from "../lib/ref-client.ts";
+import type { WebPushConfig, WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
 const SUBSCRIPTION_ERROR = "Subscription store unavailable.";
 const LAST_CHECK_FAILURE = /Last check: Subscription failed: Subscription store unavailable\./;
@@ -45,10 +45,14 @@ function acceptedSubscription(): Response {
 
 // Per-test answers. Each test sets these before mounting.
 const scenario: {
+  existing: PushSubscription | null;
   permissionAnswer: NotificationPermission;
+  subscribe: () => Promise<unknown>;
   subscriptionResponse: () => Response;
 } = {
+  existing: null,
   permissionAnswer: "granted",
+  subscribe: () => Promise.resolve(pushSubscription),
   subscriptionResponse: refusedSubscription,
 };
 
@@ -62,8 +66,8 @@ const pushSubscription = {
 
 const registration = {
   pushManager: {
-    getSubscription: () => Promise.resolve(null),
-    subscribe: () => Promise.resolve(pushSubscription),
+    getSubscription: () => Promise.resolve(scenario.existing),
+    subscribe: () => scenario.subscribe(),
   },
   update: () => Promise.resolve(undefined),
 };
@@ -122,14 +126,17 @@ function pause() {
   return new Promise<void>((resolve) => setTimeout(resolve, 25));
 }
 
-async function mounted(run: (container: HTMLElement) => void | Promise<void>) {
+async function mounted(
+  run: (container: HTMLElement) => void | Promise<void>,
+  subscriptions: WebPushSubscriptionSummary[] = []
+) {
   const { WebPushSettings, window } = await harness;
   const container = window.document.createElement("div");
   window.document.body.append(container);
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(createElement(WebPushSettings, { config: CONFIG, subscriptions: [] }));
+      root.render(createElement(WebPushSettings, { config: CONFIG, subscriptions }));
       await pause();
     });
     await run(container);
@@ -214,4 +221,50 @@ test("the summary buttons share a row that wraps instead of overflowing the card
     assert.ok(row.classList.contains("flex-wrap"), "the row wraps on a narrow card");
     assert.ok(!row.classList.contains("shrink-0"), "the row can shrink to the card instead of keeping full width");
   });
+});
+
+// A browser subscription made under an earlier server key (bytes 9, 9, 9; the
+// config key "AQID" is bytes 1, 2, 3). Unsubscribing it removes it from the browser.
+const OLD_ENDPOINT = "https://push.example.test/old-key";
+
+function subscriptionUnderOldKey(): PushSubscription {
+  return {
+    endpoint: OLD_ENDPOINT,
+    options: { applicationServerKey: Uint8Array.from([9, 9, 9]).buffer },
+    unsubscribe: () => {
+      scenario.existing = null;
+      return Promise.resolve(true);
+    },
+  } as unknown as PushSubscription;
+}
+
+const LISTED_OLD_ENDPOINT = [{ endpoint: OLD_ENDPOINT, revoked_at: null }] as WebPushSubscriptionSummary[];
+const SUBSCRIBED = /This device is subscribed\./;
+const EARLIER_KEY = /earlier server key/;
+const NOT_SUBSCRIBED = /Notifications are allowed, but this device is not subscribed\./;
+
+test("a subscription the server lists but that was made under an earlier key is not shown as subscribed", async () => {
+  scenario.existing = subscriptionUnderOldKey();
+  await mounted((container) => {
+    const text = container.textContent ?? "";
+    assert.doesNotMatch(text, SUBSCRIBED);
+    assert.match(text, EARLIER_KEY);
+    buttonNamed(container, "Enable this device");
+  }, LISTED_OLD_ENDPOINT);
+  scenario.existing = null;
+});
+
+test("after a replacement that removed the old subscription fails, the device shows as not subscribed", async () => {
+  scenario.permissionAnswer = "granted";
+  scenario.existing = subscriptionUnderOldKey();
+  scenario.subscribe = () => Promise.reject(new Error("Push service unavailable."));
+  await mounted(async (container) => {
+    await press(container, "Enable this device");
+    assert.equal(scenario.existing, null, "the replacement removed the old subscription first");
+    assert.equal(alertText(container), "Push service unavailable.");
+    const text = container.textContent ?? "";
+    assert.match(text, NOT_SUBSCRIBED);
+    assert.doesNotMatch(text, EARLIER_KEY);
+  }, LISTED_OLD_ENDPOINT);
+  scenario.subscribe = () => Promise.resolve(pushSubscription);
 });

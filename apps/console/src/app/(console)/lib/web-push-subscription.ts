@@ -25,18 +25,22 @@ interface PushManagerLike {
   subscribe: (options: { applicationServerKey: Uint8Array; userVisibleOnly: boolean }) => Promise<PushSubscription>;
 }
 
+/** Whether `subscription` was created under `serverPublicKey`, so a send signed with it can reach the browser. */
+export function isUnderServerKey(subscription: Pick<PushSubscription, "options">, serverPublicKey: string): boolean {
+  return sameBytes(subscription.options.applicationServerKey, urlBase64ToUint8Array(serverPublicKey));
+}
+
 /** The browser's subscription under `serverPublicKey`, replacing one created under a different key. */
 export async function subscribeWithServerKey(
   pushManager: PushManagerLike,
   serverPublicKey: string
 ): Promise<PushSubscription> {
-  const applicationServerKey = urlBase64ToUint8Array(serverPublicKey);
   const existing = await pushManager.getSubscription();
   if (existing) {
-    if (sameBytes(existing.options.applicationServerKey, applicationServerKey)) {
+    if (isUnderServerKey(existing, serverPublicKey)) {
       return existing;
     }
     await existing.unsubscribe();
   }
-  return pushManager.subscribe({ applicationServerKey, userVisibleOnly: true });
+  return pushManager.subscribe({ applicationServerKey: urlBase64ToUint8Array(serverPublicKey), userVisibleOnly: true });
 }

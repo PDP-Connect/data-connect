@@ -13,7 +13,7 @@ import {
   type WebPushUnavailableCause,
   webPushUnavailableCause,
 } from "../lib/web-push-availability.ts";
-import { subscribeWithServerKey } from "../lib/web-push-subscription.ts";
+import { isUnderServerKey, subscribeWithServerKey } from "../lib/web-push-subscription.ts";
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
 
@@ -24,6 +24,8 @@ type SwState = "registered" | "absent" | "unknown" | "unsupported";
 // so they live in one reducer (atomic transitions, no cascading re-renders).
 interface DeviceState {
   endpoint: string | null;
+  /** The browser's subscription was created under a server key other than the current one. */
+  staleKey: boolean;
   permission: NotificationPermission | "unknown";
   status: string;
   swState: SwState;
@@ -40,7 +42,7 @@ type DeviceAction =
   | { type: "swState"; swState: SwState; status?: string }
   | { type: "subscribed"; endpoint: string; status: string }
   | { type: "disabled"; status: string }
-  | { type: "endpoint"; endpoint: string | null }
+  | { type: "endpoint"; endpoint: string | null; staleKey: boolean; status?: string }
   | { type: "permission"; permission: NotificationPermission | "unknown" }
   | { type: "status"; status: string };
 
@@ -53,11 +55,16 @@ function deviceReducer(state: DeviceState, action: DeviceAction): DeviceState {
         ? { ...state, swState: action.swState }
         : { ...state, status: action.status, swState: action.swState };
     case "subscribed":
-      return { ...state, endpoint: action.endpoint, status: action.status };
+      return { ...state, endpoint: action.endpoint, staleKey: false, status: action.status };
     case "disabled":
-      return { ...state, endpoint: null, status: action.status };
+      return { ...state, endpoint: null, staleKey: false, status: action.status };
     case "endpoint":
-      return { ...state, endpoint: action.endpoint };
+      return {
+        ...state,
+        endpoint: action.endpoint,
+        staleKey: action.staleKey,
+        status: action.status ?? state.status,
+      };
     case "permission":
       return { ...state, permission: action.permission };
     case "status":
@@ -70,6 +77,7 @@ function deviceReducer(state: DeviceState, action: DeviceAction): DeviceState {
 const INITIAL_DEVICE_STATE: DeviceState = {
   endpoint: null,
   permission: "unknown",
+  staleKey: false,
   status: "Checking this browser…",
   swState: "unknown",
   unavailable: null,
@@ -95,6 +103,25 @@ interface SetupStep {
   state: DiagnosticState;
 }
 
+// This browser's push subscription as seen from both sides. The server listing
+// an endpoint is not enough: a push service rejects a send signed with a key
+// other than the one the subscription was created under, so a subscription made
+// under an earlier server key cannot receive notifications even while listed.
+type BrowserSubscription = "none" | "stale-key" | "unlisted" | "registered";
+
+function browserSubscription(
+  device: Pick<DeviceState, "endpoint" | "staleKey">,
+  subscriptions: WebPushSubscriptionSummary[]
+): BrowserSubscription {
+  if (!device.endpoint) {
+    return "none";
+  }
+  if (device.staleKey) {
+    return "stale-key";
+  }
+  return subscriptions.some((s) => s.endpoint === device.endpoint && !s.revoked_at) ? "registered" : "unlisted";
+}
+
 function observeWebPushCapabilities(config: WebPushConfig): WebPushCapabilities {
   return {
     hasNotificationApi: "Notification" in window,
@@ -112,7 +139,11 @@ function observeWebPushCapabilities(config: WebPushConfig): WebPushCapabilities 
  * `isCancelled` is checked after every await so a fast unmount (config
  * change, navigation) never dispatches into a stale effect.
  */
-async function detectExistingSubscription(dispatch: (action: DeviceAction) => void, isCancelled: () => boolean) {
+async function detectExistingSubscription(
+  dispatch: (action: DeviceAction) => void,
+  serverPublicKey: string,
+  isCancelled: () => boolean
+) {
   try {
     const registration = await navigator.serviceWorker.getRegistration("/");
     if (isCancelled()) {
@@ -128,8 +159,15 @@ async function detectExistingSubscription(dispatch: (action: DeviceAction) => vo
     if (isCancelled()) {
       return;
     }
-    if (existing) {
+    if (existing && isUnderServerKey(existing, serverPublicKey)) {
       dispatch({ endpoint: existing.endpoint, status: "Web Push is enabled for this browser.", type: "subscribed" });
+    } else if (existing) {
+      dispatch({
+        endpoint: existing.endpoint,
+        staleKey: true,
+        status: "This browser was subscribed under an earlier server key. Enable this device again.",
+        type: "endpoint",
+      });
     }
   } catch {
     if (!isCancelled()) {
@@ -269,9 +307,9 @@ function permissionRow(permission: NotificationPermission | "unknown"): Diagnost
   return { detail: "Notification API not available.", label, state: "unknown" };
 }
 
-function browserSubscriptionRow(endpoint: string | null, matchesThisBrowser: boolean): DiagnosticRow {
+function browserSubscriptionRow(subscription: BrowserSubscription): DiagnosticRow {
   const label = "Browser push subscription active";
-  if (!endpoint) {
+  if (subscription === "none") {
     return {
       detail:
         "No active subscription on this device - use Enable this device to create one (installing the PWA alone does not subscribe).",
@@ -279,8 +317,16 @@ function browserSubscriptionRow(endpoint: string | null, matchesThisBrowser: boo
       state: "warn",
     };
   }
-  if (matchesThisBrowser) {
+  if (subscription === "registered") {
     return { detail: "Browser endpoint is registered for this owner on the server.", label, state: "ok" };
+  }
+  if (subscription === "stale-key") {
+    return {
+      detail:
+        "Browser subscription was created under an earlier server key, so notifications cannot reach it - use Enable this device to replace it.",
+      label,
+      state: "warn",
+    };
   }
   return {
     detail:
@@ -308,14 +354,12 @@ function deliveryHealthRow(lastSubscription: WebPushSubscriptionSummary | undefi
 function deviceStatus({
   unavailable,
   permission,
-  endpoint,
-  matchesThisBrowser,
+  subscription,
   swState,
 }: {
   unavailable: WebPushUnavailableCause | null;
   permission: NotificationPermission | "unknown";
-  endpoint: string | null;
-  matchesThisBrowser: boolean;
+  subscription: BrowserSubscription;
   swState: "registered" | "absent" | "unknown" | "unsupported";
 }): DeviceStatus {
   if (unavailable) {
@@ -327,13 +371,19 @@ function deviceStatus({
       title: "Checking this device…",
     };
   }
-  if (matchesThisBrowser) {
+  if (subscription === "registered") {
     return {
       detail: "Pending connector interactions can send browser notifications to this browser or installed app.",
       title: "This device is subscribed.",
     };
   }
-  if (endpoint) {
+  if (subscription === "stale-key") {
+    return {
+      detail: "Enable this device again so notifications can reach it.",
+      title: "This device was subscribed under an earlier server key.",
+    };
+  }
+  if (subscription === "unlisted") {
     return {
       detail: "Enable this device again to repair the server-side subscription.",
       title: "This browser has a local subscription, but the server does not recognize it.",
@@ -354,14 +404,12 @@ function deviceStatus({
 function buildSetupSteps({
   unavailable,
   permission,
-  endpoint,
-  matchesThisBrowser,
+  subscription,
   testStatus,
 }: {
   unavailable: WebPushUnavailableCause | null;
   permission: NotificationPermission | "unknown";
-  endpoint: string | null;
-  matchesThisBrowser: boolean;
+  subscription: BrowserSubscription;
   testStatus: string | null;
 }): SetupStep[] {
   const testNotificationAccepted = isTestNotificationAccepted(testStatus);
@@ -378,16 +426,16 @@ function buildSetupSteps({
       state: setupPermissionState(permission, unavailable),
     },
     {
-      detail: setupSubscriptionDetail({ endpoint, matchesThisBrowser }),
+      detail: setupSubscriptionDetail(subscription),
       label: "Subscribe this device",
-      state: setupSubscriptionState({ matchesThisBrowser, unavailable }),
+      state: setupSubscriptionState({ subscription, unavailable }),
     },
     {
       detail: testNotificationAccepted
         ? "The push provider accepted the test. Only the device can confirm whether it displayed."
         : "Use Send test notification after this device is subscribed.",
       label: "Send a test",
-      state: setupTestState({ matchesThisBrowser, testNotificationAccepted }),
+      state: setupTestState({ subscription, testNotificationAccepted }),
     },
   ];
 }
@@ -416,13 +464,13 @@ function setupPermissionDetail(permission: NotificationPermission | "unknown"): 
 }
 
 function setupSubscriptionState({
-  matchesThisBrowser,
+  subscription,
   unavailable,
 }: {
-  matchesThisBrowser: boolean;
+  subscription: BrowserSubscription;
   unavailable: WebPushUnavailableCause | null;
 }): DiagnosticState {
-  if (matchesThisBrowser) {
+  if (subscription === "registered") {
     return "ok";
   }
   if (unavailable) {
@@ -431,30 +479,27 @@ function setupSubscriptionState({
   return "warn";
 }
 
-function setupSubscriptionDetail({
-  endpoint,
-  matchesThisBrowser,
-}: {
-  endpoint: string | null;
-  matchesThisBrowser: boolean;
-}): string {
-  if (matchesThisBrowser) {
+function setupSubscriptionDetail(subscription: BrowserSubscription): string {
+  if (subscription === "registered") {
     return "The server recognizes this browser's push subscription.";
   }
-  if (endpoint) {
+  if (subscription === "stale-key") {
+    return "The browser's subscription was created under an earlier server key; enabling replaces it.";
+  }
+  if (subscription === "unlisted") {
     return "The browser has a local subscription, but the server needs it re-registered.";
   }
   return "A PWA install is not enough; this step creates the push subscription.";
 }
 
 function setupTestState({
-  matchesThisBrowser,
+  subscription,
   testNotificationAccepted,
 }: {
-  matchesThisBrowser: boolean;
+  subscription: BrowserSubscription;
   testNotificationAccepted: boolean;
 }): DiagnosticState {
-  if (testNotificationAccepted || matchesThisBrowser) {
+  if (testNotificationAccepted || subscription === "registered") {
     return "unknown";
   }
   return "warn";
@@ -471,16 +516,14 @@ function buildDiagnostics({
   config,
   swState,
   permission,
-  endpoint,
-  matchesThisBrowser,
+  subscription,
   subscriptions,
   lastSubscription,
 }: {
   config: WebPushConfig;
   swState: "registered" | "absent" | "unknown" | "unsupported";
   permission: NotificationPermission | "unknown";
-  endpoint: string | null;
-  matchesThisBrowser: boolean;
+  subscription: BrowserSubscription;
   subscriptions: WebPushSubscriptionSummary[];
   lastSubscription: WebPushSubscriptionSummary | undefined;
 }): DiagnosticRow[] {
@@ -507,7 +550,7 @@ function buildDiagnostics({
     vapidRow(config),
     swRow(swState),
     permissionRow(permission),
-    browserSubscriptionRow(endpoint, matchesThisBrowser),
+    browserSubscriptionRow(subscription),
     {
       detail:
         subscriptions.length > 0
@@ -619,7 +662,11 @@ export function WebPushSettings({
       await registration?.update().catch(() => undefined);
       dispatch({ swState: registration ? "registered" : "absent", type: "swState" });
       const existing = await registration?.pushManager.getSubscription();
-      dispatch({ endpoint: existing?.endpoint ?? null, type: "endpoint" });
+      dispatch({
+        endpoint: existing?.endpoint ?? null,
+        staleKey: Boolean(existing && config.public_key && !isUnderServerKey(existing, config.public_key)),
+        type: "endpoint",
+      });
     } catch {
       dispatch({ swState: "unknown", type: "swState" });
     }
@@ -637,7 +684,7 @@ export function WebPushSettings({
       return;
     }
     let cancelled = false;
-    detectExistingSubscription(dispatch, () => cancelled);
+    detectExistingSubscription(dispatch, config.public_key ?? "", () => cancelled);
     return () => {
       cancelled = true;
     };
@@ -687,6 +734,9 @@ export function WebPushSettings({
       const message = err instanceof Error ? err.message : "Failed to enable Web Push.";
       dispatch({ status: message, type: "status" });
       setEnableError(message);
+      // A failed replacement may already have removed the old subscription, so
+      // read the browser again rather than keep showing the endpoint it had.
+      await refreshSubscriptionState();
     } finally {
       setBusy(false);
     }
@@ -761,16 +811,15 @@ export function WebPushSettings({
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
   const [lastSubscription] = subscriptions;
-  const matchesThisBrowser = endpoint ? subscriptions.some((s) => s.endpoint === endpoint && !s.revoked_at) : false;
-  const currentDeviceStatus = deviceStatus({ endpoint, matchesThisBrowser, permission, swState, unavailable });
-  const setupSteps = buildSetupSteps({ endpoint, matchesThisBrowser, permission, testStatus, unavailable });
+  const thisBrowser = browserSubscription(device, subscriptions);
+  const currentDeviceStatus = deviceStatus({ permission, subscription: thisBrowser, swState, unavailable });
+  const setupSteps = buildSetupSteps({ permission, subscription: thisBrowser, testStatus, unavailable });
 
   const diagnostics = buildDiagnostics({
     config,
-    endpoint,
     lastSubscription,
-    matchesThisBrowser,
     permission,
+    subscription: thisBrowser,
     subscriptions,
     swState,
   });
@@ -782,7 +831,7 @@ export function WebPushSettings({
 
   // Whether this browser is set up and healthy, so the demoted summary line can
   // wear a calm "enabled" tone and skip pushing a setup CTA.
-  const enabled = matchesThisBrowser && !unavailable;
+  const enabled = thisBrowser === "registered" && !unavailable;
   let setupToggleLabel = "Set up notifications";
   if (showSetup) {
     setupToggleLabel = "Hide setup";
