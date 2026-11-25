@@ -34,9 +34,9 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * Operator-shaped composite action: start → approve → exchange in one click,
- * landing the user on a flow page with the issued token visible. The inspector
- * shows the completed steps and keeps introspection available on demand.
+ * Operator-shaped composite action: start → approve → exchange → introspect in
+ * one click, landing the user on a flow page with the issued token visible
+ * once. The inspector shows the completed steps and the introspection result.
  */
 export async function issueOwnerTokenAction(formData: FormData) {
   await requireDashboardAccess("/deployment/tokens");
@@ -54,6 +54,9 @@ export async function issueOwnerTokenAction(formData: FormData) {
     try {
       await approveOwnerBootstrapFlow(flow.flowId, subjectId);
       await exchangeOwnerBootstrapToken(flow.flowId);
+      // The page shows the token once and then drops it from the flow store,
+      // so check it here, while the server still holds it.
+      await introspectOwnerBootstrapToken(flow.flowId);
     } catch (err) {
       setOwnerBootstrapFlowError(flow.flowId, errorMessage(err));
     }
@@ -62,17 +65,6 @@ export async function issueOwnerTokenAction(formData: FormData) {
     target = errorHref(errorMessage(err));
   }
   redirect(target);
-}
-
-export async function introspectOwnerTokenFlowAction(formData: FormData) {
-  const flowId = asString(formData.get("flow_id"));
-  await requireDashboardAccess(flowHref(flowId));
-  try {
-    await introspectOwnerBootstrapToken(flowId);
-  } catch (err) {
-    setOwnerBootstrapFlowError(flowId, errorMessage(err));
-  }
-  redirect(flowHref(flowId));
 }
 
 /**

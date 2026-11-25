@@ -28,3 +28,13 @@ test("signed-in device times use relative dates and technical fields stay in Det
   assert.match(src, /<details className="text-\[13px\] text-muted-foreground">[\s\S]*?IP address/)
   assert.doesNotMatch(src, /toISOString\(\)/)
 })
+
+test("the owner-bearer list is named for what it holds, not a second \"Access tokens\"", async () => {
+  const src = await readFile(SETTING_FILE, "utf8")
+  // Settings repair brief, decision 2: /owner/sessions `bearers` are every active owner bearer
+  // (reference-implementation/server/stores/owner-session-store.ts selectOwnerBearerSql), so
+  // the heading says who holds them instead of repeating the /deployment/tokens title.
+  assert.match(src, />Apps and scripts signed in as you<\/h3>/)
+  assert.match(src, /No apps or scripts are signed in as you\./)
+  assert.doesNotMatch(src, />Access tokens<\/h3>/)
+})

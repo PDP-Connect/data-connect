@@ -114,11 +114,17 @@ test("tokens page renders no raw bearer from the token drilldown (no-leak guard)
 test("access tokens page shows the promised list fields and copy-now secret sentence", async () => {
   const [page, list] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(TOKEN_LIST_FILE, "utf8")]);
   // Brief settings-pages, decision 3: the list names access, creation, use time and one-time secret behavior.
-  assert.match(page, /title="Access tokens"/);
+  // Settings repair brief, decision 2: this list is for scripts and tools, distinct from session tokens.
+  assert.match(page, /title="Tokens for scripts and tools"/);
+  assert.doesNotMatch(page, /title="Access tokens"/);
+  assert.match(page, /<PageHeader title="Tokens for scripts and tools" \/>/);
   assert.match(page, /For scripts and tools that read your data without signing in\./);
-  // The secret is not one-time (see the last test), so the page must not promise that.
-  assert.doesNotMatch(page, /You will not see it again/);
-  assert.match(page, /Copy it now\. This page shows it only until DataConnect restarts\./);
+  // Settings repair brief, decision 3: the store drops the secret after the page reads it
+  // (see the flow-store tests below), so the page may say it is shown once.
+  assert.match(page, /Copy it now\. You won't see it again\./);
+  assert.doesNotMatch(page, /until DataConnect restarts/);
+  assert.match(page, /takeOwnerBootstrapFlow\(params\.flow\)/);
+  assert.doesNotMatch(page, /getOwnerBootstrapFlow\(params\.flow\)/);
   assert.match(page, /Create access token/);
   assert.match(list, /What it can read/);
   assert.match(list, /Last used/);
@@ -144,20 +150,79 @@ test("unused token flow actions are removed", async () => {
   assert.doesNotMatch(actions, /export async function (start|approve|deny|exchange)OwnerTokenFlowAction/);
 })
 
-test("an issued secret can be read again from the same flow, so the page promises only 'until DataConnect restarts'", async () => {
-  // The flow store is process memory with no eviction: a reload of
-  // /deployment/tokens?flow=<id> renders the same secret again. If it ever
-  // becomes consume-once, the page may say "You will not see it again." instead.
-  mock.module("server-only", { exports: {} });
-  const { getOwnerBootstrapFlow } = await import("../../lib/operator-bootstrap.ts");
-  const fake = { flowId: "flow-test", token: "placeholder-not-a-real-secret" };
+async function withFlowStore(flows: Record<string, unknown>[], run: () => void | Promise<void>) {
   const state = globalThis as typeof globalThis & { __pdppOwnerBootstrapFlows?: Map<string, unknown> };
   const previous = state.__pdppOwnerBootstrapFlows;
-  state.__pdppOwnerBootstrapFlows = new Map([[fake.flowId, fake]]);
+  state.__pdppOwnerBootstrapFlows = new Map(flows.map((flow) => [flow.flowId as string, flow]));
   try {
-    assert.equal(getOwnerBootstrapFlow(fake.flowId)?.token, fake.token);
-    assert.equal(getOwnerBootstrapFlow(fake.flowId)?.token, fake.token);
+    await run();
   } finally {
     state.__pdppOwnerBootstrapFlows = previous;
   }
+}
+
+function fakeFlow(flowId: string, startedAt: Date, token: string | null) {
+  return {
+    flowId,
+    startedAt: startedAt.toISOString(),
+    status: token ? "token_issued" : "pending_approval",
+    token,
+    tokenResponse: token ? { access_token: token } : null,
+  };
+}
+
+mock.module("server-only", { exports: {} });
+
+test("an issued secret is shown once: the second read of the flow gets no token", async () => {
+  const { getOwnerBootstrapFlow, takeOwnerBootstrapFlow } = await import("../../lib/operator-bootstrap.ts");
+  const token = "placeholder-not-a-real-secret";
+  await withFlowStore([fakeFlow("flow-issued", new Date(), token)], () => {
+    const first = takeOwnerBootstrapFlow("flow-issued");
+    assert.equal(first?.token, token);
+    const second = takeOwnerBootstrapFlow("flow-issued");
+    assert.ok(second, "the flow itself stays so its transcript can still render");
+    assert.equal(second.token, null);
+    assert.equal(second.tokenResponse, null, "the raw token response also holds the secret");
+    assert.equal(getOwnerBootstrapFlow("flow-issued")?.token, null);
+  });
+});
+
+test("reading a flow before its token is issued does not change it", async () => {
+  const { takeOwnerBootstrapFlow } = await import("../../lib/operator-bootstrap.ts");
+  await withFlowStore([fakeFlow("flow-pending", new Date(), null)], () => {
+    const before = takeOwnerBootstrapFlow("flow-pending");
+    assert.equal(before?.status, "pending_approval");
+    assert.equal(takeOwnerBootstrapFlow("flow-pending"), before);
+  });
+});
+
+test("a flow older than 15 minutes is dropped whenever the store is touched", async () => {
+  const { getOwnerBootstrapFlow, OWNER_BOOTSTRAP_FLOW_TTL_MS } = await import("../../lib/operator-bootstrap.ts");
+  assert.equal(OWNER_BOOTSTRAP_FLOW_TTL_MS, 15 * 60 * 1000);
+  const start = new Date("2026-11-25T12:00:00.000Z");
+  mock.timers.enable({ apis: ["Date"], now: start });
+  try {
+    await withFlowStore(
+      [fakeFlow("flow-old", start, "old-placeholder"), fakeFlow("flow-new", new Date(start.getTime() + 60_000), null)],
+      () => {
+        mock.timers.tick(14 * 60 * 1000);
+        assert.equal(getOwnerBootstrapFlow("flow-old")?.token, "old-placeholder");
+        mock.timers.tick(60 * 1000 + 1);
+        // Reading the newer flow touches the store, which drops the older one.
+        assert.ok(getOwnerBootstrapFlow("flow-new"));
+        const state = globalThis as typeof globalThis & { __pdppOwnerBootstrapFlows?: Map<string, unknown> };
+        assert.equal(state.__pdppOwnerBootstrapFlows?.has("flow-old"), false);
+        assert.equal(getOwnerBootstrapFlow("flow-old"), null);
+      }
+    );
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("the token is checked at issuance, because it cannot be checked after the page shows it", async () => {
+  const actions = await readFile(ACTIONS_FILE, "utf8");
+  assert.match(actions, /await exchangeOwnerBootstrapToken\(flow\.flowId\);\s*\/\/[^\n]*\n[^\n]*\n\s*await introspectOwnerBootstrapToken\(flow\.flowId\);/);
+  // The on-demand button would always fail once the token is dropped, so it is gone.
+  assert.doesNotMatch(actions, /introspectOwnerTokenFlowAction/);
 });

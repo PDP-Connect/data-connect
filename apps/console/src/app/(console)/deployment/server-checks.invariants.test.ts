@@ -19,6 +19,14 @@ test("server checks render as plain rows with status words and folded detail", a
   assert.doesNotMatch(src, /StatusBadge|text-\[color:var\(--success\)\]/)
 })
 
+test("the headline and Server address row use the same readiness result", async () => {
+  const src = await readFile(CHECKS_FILE, "utf8")
+  // Settings repair brief, decision 1: one reference-origin result drives the headline and row.
+  assert.match(src, /const originRow = referenceOriginRow\(/)
+  assert.match(src, /serverAddressHeadline\(originRow\)/)
+  assert.match(src, /\[\s*ownerPasswordRow\(inputs\),\s*originRow,/)
+})
+
 test("the public-origin action and browser probe stay available", async () => {
   const src = await readFile(CHECKS_FILE, "utf8")
   // Control list DP5: keep the existing origin-copy action and browser metadata probe.

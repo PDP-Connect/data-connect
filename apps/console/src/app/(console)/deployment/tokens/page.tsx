@@ -8,7 +8,7 @@ import { Callout, PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
-import { buildOwnerBootstrapExamples, getOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts";
+import { buildOwnerBootstrapExamples, takeOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
   listOwnerClientTokens,
@@ -16,11 +16,7 @@ import {
   type OwnerClientToken,
   type OwnerIssuedClient,
 } from "../../lib/ref-client.ts";
-import {
-  introspectOwnerTokenFlowAction,
-  issueOwnerTokenAction,
-  renameOwnerTokenAction,
-} from "./actions.ts";
+import { issueOwnerTokenAction, renameOwnerTokenAction } from "./actions.ts";
 import { ConfirmTokenRevoke, TokenAccessList, type AccessTokenRow } from "./token-access-list.tsx";
 
 export const dynamic = "force-dynamic";
@@ -32,7 +28,7 @@ interface Params {
   reproduce?: string;
 }
 
-type FlowState = NonNullable<ReturnType<typeof getOwnerBootstrapFlow>>;
+type FlowState = NonNullable<ReturnType<typeof takeOwnerBootstrapFlow>>;
 type FlowExamples = NonNullable<Awaited<ReturnType<typeof buildOwnerBootstrapExamples>>>;
 type ReproduceFormat = "curl" | "cli";
 
@@ -133,12 +129,10 @@ function IssueCard({ flow }: { flow: FlowState | null }) {
             </div>
             <CopyButton ariaLabel="Copy access token" value={flow.token} />
           </div>
-          {/* The flow store (lib/operator-bootstrap.ts) keeps the issued token in
-              process memory with no eviction, so this address shows it again
-              until the console restarts; do not promise a one-time view. */}
-          <p className="mt-2 text-[13px] text-muted-foreground">
-            Copy it now. This page shows it only until DataConnect restarts.
-          </p>
+          {/* takeOwnerBootstrapFlow (lib/operator-bootstrap.ts) drops the token
+              from the flow store once this page has read it, so a reload of
+              this address does not show it again. */}
+          <p className="mt-2 text-[13px] text-muted-foreground">Copy it now. You won't see it again.</p>
         </div>
       ) : null}
     </section>
@@ -149,8 +143,8 @@ function IssueCard({ flow }: { flow: FlowState | null }) {
  * Flat transcript of the device flow that just ran. Numbered, no nested
  * cards, no re-execute buttons (the steps already ran). Operators inspecting
  * the wire don't need to drive each step again — they need to see what
- * happened. Introspect-on-demand stays as a single button because operators
- * do legitimately want to verify a token after issuance.
+ * happened. Introspection runs once at issuance (actions.ts), because the
+ * server drops the token after this page first shows it.
  */
 function TranscriptStep({ index, method, path, body }: { index: number; method: string; path: string; body?: string }) {
   return (
@@ -186,24 +180,17 @@ function Transcript({ flow }: { flow: FlowState }) {
   );
 }
 
-function IntrospectControl({ flow }: { flow: FlowState }) {
+function IntrospectResult({ flow }: { flow: FlowState }) {
+  if (!flow.introspection) {
+    return <p className="pdpp-caption text-muted-foreground">This token was not checked.</p>;
+  }
   return (
     <div>
-      <form action={introspectOwnerTokenFlowAction}>
-        <input name="flow_id" type="hidden" value={flow.flowId} />
-        <IcButton size="sm" type="submit" variant="ghost">
-          Introspect this token
-        </IcButton>
-      </form>
-      {flow.introspection ? (
-        <div className="mt-3">
-          <div className="pdpp-caption mb-1 text-muted-foreground">
-            POST /introspect · refreshed{" "}
-            {flow.introspectedAt ? <IcTimestamp value={flow.introspectedAt} /> : "just now"}
-          </div>
-          <CodeBlock>{JSON.stringify(flow.introspection, null, 2)}</CodeBlock>
-        </div>
-      ) : null}
+      <div className="pdpp-caption mb-1 text-muted-foreground">
+        POST /introspect · checked{" "}
+        {flow.introspectedAt ? <IcTimestamp value={flow.introspectedAt} /> : "just now"}
+      </div>
+      <CodeBlock>{JSON.stringify(flow.introspection, null, 2)}</CodeBlock>
     </div>
   );
 }
@@ -401,7 +388,7 @@ function FlowInspector({
 
         <section>
           <h3 className="pdpp-eyebrow mb-3">Verify</h3>
-          <IntrospectControl flow={flow} />
+          <IntrospectResult flow={flow} />
         </section>
 
         {examples ? (
@@ -420,7 +407,7 @@ function FlowInspector({
 
 export default async function DeploymentTokensPage({ searchParams }: { searchParams: Promise<Params> }) {
   const params = await searchParams;
-  const flow = params.flow ? getOwnerBootstrapFlow(params.flow) : null;
+  const flow = params.flow ? takeOwnerBootstrapFlow(params.flow) : null;
   const examples = flow ? await buildOwnerBootstrapExamples(flow) : null;
   const error = params.error ?? null;
   const notice = params.notice ?? null;
@@ -450,7 +437,7 @@ export default async function DeploymentTokensPage({ searchParams }: { searchPar
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Access tokens" />
+          <PageHeader title="Tokens for scripts and tools" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -462,9 +449,9 @@ export default async function DeploymentTokensPage({ searchParams }: { searchPar
     <RecordroomShellWithPalette>
       <PageHeader
         actions={<Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">Server</Link>}
-        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Access tokens" }]}
+        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Tokens for scripts and tools" }]}
         description="For scripts and tools that read your data without signing in."
-        title="Access tokens"
+        title="Tokens for scripts and tools"
       />
 
       {error ? (

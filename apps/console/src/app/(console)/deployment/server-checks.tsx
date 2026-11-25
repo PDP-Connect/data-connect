@@ -3,7 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
+import { buttonVariants, Text } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useEffect, useState } from "react";
 import {
@@ -34,33 +34,47 @@ export function ServerChecks({ inputs }: { inputs: ServerInputs }) {
       .catch(() => setOriginAction("failed"));
   };
 
+  const originRow = referenceOriginRow(
+    inputs,
+    browserOrigin,
+    browserOrigin
+      ? { label: originAction === "copied" ? "Origin copied" : "Use this origin", onClick: copyOrigin }
+      : undefined
+  );
   const rows: ReadinessRow[] = [
     ownerPasswordRow(inputs),
-    referenceOriginRow(
-      inputs,
-      browserOrigin,
-      browserOrigin
-        ? { label: originAction === "copied" ? "Origin copied" : "Use this origin", onClick: copyOrigin }
-        : undefined
-    ),
+    originRow,
     storageBackendRow(inputs),
     embeddingCacheRow(inputs),
     refreshTokenRow(refreshProbe),
   ];
 
   return (
-    <Section title="Checks">
-      <ul className="divide-y divide-border/70 border-y border-border/70">
-        {rows.map((row) => (
-          <ReadinessRowItem key={row.check} row={row} />
-        ))}
-      </ul>
-      <details className="mt-3">
-        <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
-        <p className="text-[13px] text-muted-foreground">{summaryWords(overallVerdict(rows))}</p>
-      </details>
-    </Section>
+    <>
+      <Text className="text-[16px] text-foreground">{serverAddressHeadline(originRow)}</Text>
+      <Section title="Checks">
+        <ul className="divide-y divide-border/70 border-y border-border/70">
+          {rows.map((row) => (
+            <ReadinessRowItem key={row.check} row={row} />
+          ))}
+        </ul>
+        <details className="mt-3">
+          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+          <p className="text-[13px] text-muted-foreground">{summaryWords(overallVerdict(rows))}</p>
+        </details>
+      </Section>
+    </>
   );
+}
+
+export function serverAddressHeadline(row: ReadinessRow): string {
+  switch (row.status) {
+    case "ok": return "The server is reachable.";
+    case "warn": return "The server address needs attention.";
+    case "error": return "The server address is blocked.";
+    case "info": return "The server address is not checked.";
+    case "unknown": return "The server address is unknown.";
+  }
 }
 
 function ReadinessRowItem({ row }: { row: ReadinessRow }) {

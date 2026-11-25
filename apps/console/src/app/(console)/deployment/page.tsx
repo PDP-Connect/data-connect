@@ -1,7 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { Text } from "@pdpp/brand-react";
 import {
   DeploymentDiagnosticsView,
   isDeploymentIndexing,
@@ -14,7 +13,7 @@ import { loadConnectorSummaryPage } from "../components/connector-summary-page.t
 import { extractReadinessInputs } from "../components/deployment-readiness-rows.ts";
 import { LivePoller } from "../components/live-poller.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
-import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
+import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import {
   type DatasetSummaryProjectionMetadata,
   type DeploymentDiagnostics,
@@ -46,7 +45,6 @@ interface DeploymentPageParams {
 //       specs/reference-implementation-architecture/spec.md
 export default async function DeploymentPage({ searchParams }: { searchParams: Promise<DeploymentPageParams> }) {
   const params = await searchParams;
-  const publicOrigin = await getReferencePublicOrigin().catch(() => null);
   let report: DeploymentDiagnostics | null = null;
   let unreachable = false;
   try {
@@ -136,18 +134,15 @@ export default async function DeploymentPage({ searchParams }: { searchParams: P
       <LivePoller enabled={isDeploymentIndexing(report)} />
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Server" />
-        <Text as="p" className="text-[16px] text-foreground">
-          {publicOrigin ? `The server is reachable at ${publicOrigin}.` : "The server is reachable."}
-        </Text>
+        <ServerChecks inputs={extractReadinessInputs(report)} />
         <nav aria-label="Server settings" className="grid border-y border-border/70 sm:grid-cols-2">
           <Link className="flex min-h-11 items-center border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:border-b-0 sm:border-r sm:pr-4" href="/deployment/provider-apps">
             Sign-in apps for data sources
           </Link>
           <Link className="flex min-h-11 items-center py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:pl-4" href="/deployment/tokens">
-            Access tokens
+            Tokens for scripts and tools
           </Link>
         </nav>
-        <ServerChecks inputs={extractReadinessInputs(report)} />
         {/* "Recompute now" lives in here and redirects back with ?notice= or
             ?error=; open the fold then, or its result is hidden. */}
         <details

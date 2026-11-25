@@ -142,8 +142,8 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
       </div>
 
       <div className="grid gap-1">
-        <h3 className="py-2 text-[13px] font-medium text-muted-foreground">Access tokens</h3>
-        {bearers.length === 0 ? <p className="py-2 text-[13px] text-muted-foreground">No access tokens are active.</p> : null}
+        <h3 className="py-2 text-[13px] font-medium text-muted-foreground">Apps and scripts signed in as you</h3>
+        {bearers.length === 0 ? <p className="py-2 text-[13px] text-muted-foreground">No apps or scripts are signed in as you.</p> : null}
         {bearers.map(bearer => (
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 border-b border-border/70 py-3" key={bearer.id}>
             <div className="grid min-w-0 gap-1">
