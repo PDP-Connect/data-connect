@@ -63,6 +63,7 @@ import {
   type SourcePrimaryVerdictAction,
   type SourceStatusFlag,
 } from "../lib/source-actionability.ts";
+import { type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
 import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../lib/total-records-label.ts";
 import { summarizeVersionChurn } from "../lib/version-churn-summary.ts";
 
@@ -144,6 +145,8 @@ export interface SourceInstanceView {
   archived: boolean;
   /** Stable connection selector for routing + revoke (connection_id). */
   connectionId: string | null;
+  /** Acquisition mode sent by the reference, used to guard server-started syncs. */
+  sourceKind: RefConnectorSummary["source_kind"];
   /** Connector type id (e.g. "gmail"), used for sync + add-source. */
   connectorId: string;
   /**
@@ -218,6 +221,12 @@ export interface SourceInstanceView {
   sourceScope: "active" | "draft" | "paused" | "rejected" | "revoked" | "unknown";
   /** Status flag (dot + Endorse) derived from rendered verdict, with legacy fallback. */
   status: SourceStatusFlag;
+  /** Status words shared with Home and the data source page. */
+  statusWords: SourceStatusWords;
+  /** The schedule label used by the compact list. */
+  scheduleLabel: string;
+  /** The record count as shown in the list's Records column. */
+  recordsLabel: string;
   /** Stream manifest rows for the passport table. */
   streams: SourceStreamManifestRow[];
   /** Total retained records across all streams. */
@@ -343,6 +352,32 @@ export function reactivateRecordCopy(totalRecords: number, totalRecordsState?: R
   return isTotalRecordsAuthoritative(totalRecordsState) && totalRecords > 0
     ? `${totalRecords.toLocaleString()} collected record${totalRecords === 1 ? "" : "s"} are`
     : "collected records are";
+}
+
+export function formatSourceRowRecords(totalRecords: number, state?: RefCountState): string {
+  if (state === "stale") {
+    return `${totalRecords.toLocaleString()} (not checked lately)`;
+  }
+  return isTotalRecordsAuthoritative(state) ? totalRecords.toLocaleString() : "—";
+}
+
+export function formatSourceRowSchedule(schedule: RefSchedule | null): string {
+  if (!schedule) return "Manual";
+  if (schedule.effective_mode === "paused" || !schedule.enabled) return "Paused";
+  if (schedule.ineligibility_reason) return "Paused";
+  if (schedule.effective_mode === "manual") return "Manual";
+
+  const seconds = schedule.interval_seconds;
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const units = [
+    { label: "day", seconds: SECONDS_PER_DAY },
+    { label: "hour", seconds: SECONDS_PER_HOUR },
+    { label: "minute", seconds: SECONDS_PER_MINUTE },
+  ];
+  const unit = units.find((candidate) => seconds % candidate.seconds === 0);
+  if (!unit) return "—";
+  const count = seconds / unit.seconds;
+  return `Every${count === 1 ? "" : ` ${count}`} ${unit.label}${count === 1 ? "" : "s"}`;
 }
 
 /**
@@ -598,6 +633,7 @@ export function toSourceInstanceView(
     connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
     fallbackDisambiguator?: string | null;
     manifests?: readonly SourceManifestLike[];
+    now?: Date;
   } = {}
 ): SourceInstanceView {
   const connectorId = summary.connector_id;
@@ -730,6 +766,7 @@ export function toSourceInstanceView(
   return {
     accountLine,
     connectionId,
+    sourceKind: summary.source_kind,
     connectorId,
     connectorInstanceId,
     connectorNotInstalled,
@@ -754,6 +791,9 @@ export function toSourceInstanceView(
     setupFailed,
     setupFailedForwardStatement: setupFailed ? (summary.rendered_verdict?.forward_statement ?? null) : null,
     status,
+    statusWords: sourceStatusWords(summary, { now: options.now ?? new Date() }),
+    scheduleLabel: formatSourceRowSchedule(summary.schedule),
+    recordsLabel: formatSourceRowRecords(summary.total_records, summary.total_records_state),
     streams,
     totalRecords: summary.total_records,
     totalRecordsState: summary.total_records_state,
@@ -885,8 +925,11 @@ export function toSourcesView(
   options: {
     connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
     manifests?: readonly SourceManifestLike[];
+    now?: Date;
   } = {}
 ): SourceInstanceView[] {
+  const now = options.now ?? new Date();
+  const viewOptions = { ...options, now };
   const visibleSummaries = summaries;
   const fallbackCountByConnector = new Map<string, number>();
   for (const summary of visibleSummaries) {
@@ -910,12 +953,28 @@ export function toSourcesView(
         name: summary.connector_display_name,
       });
     if (!isAmbiguousFallback) {
-      return toSourceInstanceView(summary, options);
+      return toSourceInstanceView(summary, viewOptions);
     }
     const ordinal = (fallbackOrdinalByConnector.get(summary.connector_id) ?? 0) + 1;
     fallbackOrdinalByConnector.set(summary.connector_id, ordinal);
-    return toSourceInstanceView(summary, { ...options, fallbackDisambiguator: `account ${ordinal}` });
+    return toSourceInstanceView(summary, { ...viewOptions, fallbackDisambiguator: `account ${ordinal}` });
   });
+}
+
+export function orderSourcesForList(instances: readonly SourceInstanceView[]): SourceInstanceView[] {
+  return [...instances].sort((a, b) => {
+    const priority = (instance: SourceInstanceView) =>
+      instance.statusWords.needsYou ? 0 : instance.statusWords.row === 11 ? 1 : 2;
+    return priority(a) - priority(b) || a.displayName.localeCompare(b.displayName);
+  });
+}
+
+export function filterSourcesForList(instances: readonly SourceInstanceView[], query: string): SourceInstanceView[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...instances];
+  return instances.filter((instance) =>
+    `${instance.displayName} ${instance.accountLine} ${instance.kind}`.toLocaleLowerCase().includes(needle)
+  );
 }
 
 /**

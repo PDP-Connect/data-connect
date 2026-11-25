@@ -27,8 +27,11 @@ import {
   collapseDuplicateFallbackSources,
   collapseSetupFailedSources,
   exploreHrefFor,
+  filterSourcesForList,
   formatSchedule,
+  formatSourceRowSchedule,
   manualUploadHrefForSource,
+  orderSourcesForList,
   sourceDetailHrefFor,
   toSourceInstanceView,
   toSourcesView,
@@ -70,6 +73,35 @@ function health(state: RefConnectionHealthSnapshot["state"]): RefConnectionHealt
     reason_code: null,
     state,
     unknown_reasons: [],
+  };
+}
+
+function scheduleFixture(overrides: Partial<RefSchedule> = {}): RefSchedule {
+  return {
+    active_run_id: null,
+    automation_mode: "unattended",
+    automation_summary: "",
+    connector_id: "sample",
+    created_at: "2026-11-24T10:00:00Z",
+    effective_mode: "automatic",
+    enabled: true,
+    human_attention_needed: false,
+    ineligibility_reason: null,
+    interval_seconds: 86_400,
+    jitter_seconds: 0,
+    last_error_code: null,
+    last_finished_at: null,
+    last_started_at: null,
+    last_successful_at: null,
+    minimum_interval_warning: null,
+    next_due_at: null,
+    notification_posture: "none",
+    object: "schedule",
+    recommended_policy: null,
+    scheduler_backoff: null,
+    trigger_kind: "scheduled",
+    updated_at: "2026-11-24T10:00:00Z",
+    ...overrides,
   };
 }
 
@@ -1763,6 +1795,45 @@ test("toSourceInstanceView: accountLine preserves owned name (no fallback)", () 
     })
   );
   assert.equal(view.accountLine, "100 records · 2 streams");
+});
+
+// DIRECTION.md, “Data sources /sources”: schedule words, local filtering, and row order follow the shared status result.
+test("list schedule words use the schedule mode and interval as plain language", () => {
+  assert.equal(formatSourceRowSchedule(null), "Manual");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 3600 })), "Every hour");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 21_600 })), "Every 6 hours");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 172_800 })), "Every 2 days");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ effective_mode: "paused" })), "Paused");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ ineligibility_reason: "policy" })), "Paused");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 0 })), "—");
+});
+
+// DIRECTION.md, “Data sources /sources”: needs-you rows come first, then syncing rows, then names; filter matches name/account.
+test("list rows use shared status priority and filter by source name or account", () => {
+  const named = toSourceInstanceView(summary({
+    connection_id: "conn_zebra",
+    connector_id: "gmail",
+    connector_display_name: "Gmail",
+    display_name: "Zebra",
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "owner", posture: "observed", resolver: "needs_owner" },
+  }));
+  const syncing = toSourceInstanceView(summary({
+    connection_id: "conn_bob",
+    connector_id: "sample",
+    connector_display_name: "Sample",
+    display_name: "Bob",
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "system", posture: "observed", resolver: "collecting" },
+  }));
+  const ordinary = toSourceInstanceView(summary({
+    connection_id: "conn_alice",
+    connector_id: "sample",
+    connector_display_name: "Sample",
+    display_name: "Alice",
+  }));
+
+  assert.deepEqual(orderSourcesForList([ordinary, syncing, named]).map((row) => row.displayName), ["Zebra", "Bob", "Alice"]);
+  assert.deepEqual(filterSourcesForList([named, syncing], "gmail").map((row) => row.displayName), ["Zebra"]);
+  assert.deepEqual(filterSourcesForList([named, syncing], "bob").map((row) => row.displayName), ["Bob"]);
 });
 
 test("toSourceInstanceView: Google Maps timeline_points displays human label, not protocol identifier", () => {

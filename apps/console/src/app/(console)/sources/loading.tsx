@@ -3,18 +3,18 @@
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import "./sources-view.css";
 
 /**
- * Route-level loading state for the connections (records) list.
+ * Route-level loading state for the data sources list.
  *
- * `/sources` fetches connector summaries, version-churn stats, and
- * device-exporter source instances on every load, so it can take a moment.
- * This gives the owner immediate, stable feedback instead of a blank frame.
+ * `/sources` loads a bounded page of summaries. This placeholder keeps the
+ * list shape while that read resolves.
  */
 export default function RecordsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="Sources" rows={6} />
+      <ListLoadingSkeleton label="data sources" rows={6} />
     </RecordroomShellWithPalette>
   );
 }

@@ -27,7 +27,8 @@
  * ceremony without a live server. The live path never imports the fixtures
  * when `demo` is absent.
  */
-import { IcButton } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, Text } from "@pdpp/brand-react";
+import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import {
   ConnectorSummaryPageError,
@@ -41,9 +42,16 @@ import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
-import { purgeBrowserProfileAction, reactivateConnectionAction, revokeConnectionAction } from "./[connector]/actions.ts";
+import {
+  purgeBrowserProfileAction,
+  reactivateConnectionAction,
+  resumeConnectionAction,
+  resumeConnectorScheduleAction,
+  resumeSetupConnectionAction,
+  revokeConnectionAction,
+} from "./[connector]/actions.ts";
+import { runConnectorNowAction } from "./actions.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
-import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
 import { SourcesView } from "./sources-view.tsx";
 import {
   buildSourcesChurnAdvisory,
@@ -112,7 +120,17 @@ export default async function RecordsIndexPage({
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
-        <SourcesView churnAdvisory={churnAdvisory} instances={instances} interactive={false} />
+        <SourcesView
+          churnAdvisory={churnAdvisory}
+          instances={instances}
+          interactive={false}
+          reactivateAction={reactivateConnectionAction}
+          resumeAction={resumeConnectionAction}
+          resumeScheduleAction={resumeConnectorScheduleAction}
+          resumeSetupAction={resumeSetupConnectionAction}
+          revokeAction={revokeConnectionAction}
+          runNowAction={runConnectorNowAction}
+        />
       </RecordroomShellWithPalette>
     );
   }
@@ -165,8 +183,13 @@ export default async function RecordsIndexPage({
       <SourcesView
         instances={instances}
         interactive={true}
+        pagingInPlay={isPagedRequest(pageState) || page.hasMore}
         reactivateAction={reactivateConnectionAction}
+        resumeAction={resumeConnectionAction}
+        resumeScheduleAction={resumeConnectorScheduleAction}
+        resumeSetupAction={resumeSetupConnectionAction}
         revokeAction={revokeConnectionAction}
+        runNowAction={runConnectorNowAction}
         runtimeAdvisory={runtimeAdvisory}
       />
       <ConnectorSummaryPager
@@ -193,34 +216,25 @@ function SourcesHeader({
   purgeRetryId?: string;
 }) {
   return (
-    <header data-pdpp-reference-revision={REFERENCE_REVISION} style={{ marginBottom: 24, maxWidth: 760 }}>
-      <h1 className="pdpp-heading text-foreground" style={{ margin: "0 0 4px" }}>
-        Sources
-      </h1>
-      <p
-        style={{
-          color: "var(--muted-foreground)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          margin: 0,
-        }}
-      >
-        {SOURCE_ACCESS_NOTE}
-      </p>
+    <header className="rr-s-header" data-pdpp-reference-revision={REFERENCE_REVISION}>
+      <div className="rr-s-header__title-row">
+        <Text as="h1" className="rr-s-header__title" size="title" weight="semi">Data sources</Text>
+        <Link className={buttonVariants({ size: "sm", variant: "default" })} href={`${SOURCES_PATH}/add`}>Add a data source</Link>
+      </div>
       {notice ? (
-        <div className="rr-s-toast" data-tone="ok" role="status" style={{ marginTop: 12 }}>
+        <div className="rr-s-toast rr-s-header__notice" data-tone="ok" role="status">
           {notice}
         </div>
       ) : null}
       {error ? (
-        <div className="rr-s-toast" data-tone="error" role="status" style={{ marginTop: 12 }}>
+        <div className="rr-s-toast rr-s-header__notice" data-tone="error" role="status">
           {error}
         </div>
       ) : null}
       {error && purgeRetryId ? (
         // The connection is already revoked or deleted; only its saved browser
         // session is left. The retry runs the same purge again.
-        <form action={purgeBrowserProfileAction} data-testid="sources-purge-retry" style={{ marginTop: 8 }}>
+        <form action={purgeBrowserProfileAction} className="rr-s-header__purge" data-testid="sources-purge-retry">
           <input name="connection_id" type="hidden" value={purgeRetryId} />
           <IcButton size="sm" type="submit" variant="destructive">
             Remove saved browser session
@@ -228,10 +242,16 @@ function SourcesHeader({
         </form>
       ) : null}
       {message && !error ? (
-        <div className="rr-s-toast" data-tone="ok" role="status" style={{ marginTop: 12 }}>
-          {message}
+        <div className="rr-s-toast rr-s-header__notice" data-tone="ok" role="status">
+          <SyncStartedNotice message={message} />
         </div>
       ) : null}
     </header>
   );
+}
+
+function SyncStartedNotice({ message }: { message: string }) {
+  const match = /^Run started(?: \(([^)]+)\))?$/.exec(message);
+  if (!match) return message;
+  return <>Sync started.{match[1] ? <> <Link href={`/syncs/${encodeURIComponent(match[1])}`}>See this sync</Link></> : null}</>;
 }

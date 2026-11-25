@@ -1,20 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Sources cockpit acceptance invariants for the owner-console stabilization plan.
- *
- * These pin the concrete complaints from the live walkthrough:
- * - the source list must not be a narrow rail on desktop;
- * - selected-row emphasis must not touch row text;
- * - severity/status must not change row geometry;
- * - stream rows must not be dash-only placeholders.
- *
- * This is deliberately source/CSS structural. Pixel proof is still required by
- * the OpenSpec task, but these checks stop the same implementation shape from
- * reappearing without a browser.
- */
-
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -23,127 +9,73 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const CSS_FILE = `${HERE}sources-view.css`;
 const VIEW_FILE = `${HERE}sources-view.tsx`;
-const MODEL_FILE = `${HERE}sources-view-model.ts`;
+const SOURCE_PAGE_FILE = `${HERE}[connector]/page.tsx`;
+const STREAM_FACTS_FILE = `${HERE}[connector]/stream-collection-facts.tsx`;
 
-const DESKTOP_GRID_RE = /grid-template-columns:\s*minmax\(320px,\s*0\.9fr\)\s+minmax\(0,\s*1\.7fr\)/;
-const OLD_NARROW_GRID_RE = /grid-template-columns:\s*minmax\(0,\s*280px\)/;
-const ROW_PADDING_RE = /\.rr-s-item\s*\{[\s\S]*?padding:\s*10px\s+12px\s+11px\s+14px;/;
-const SELECTED_ACCENT_RE = /\.rr-s-item\.is-on\s*\{[\s\S]*?inset\s+3px\s+0\s+0\s+var\(--primary\)/;
-const OLD_TOUCHING_PADDING_RE = /\.rr-s-item\s*\{[\s\S]*?padding:\s*10px\s+0\s+11px;/;
-const STATE_GEOMETRY_RE =
-  /\.rr-s-item(?:\.|[^\n{])*(?:degraded|attention|warning)[^{]*\{[\s\S]*?(?:margin|width|border-radius)\s*:/i;
-const COLLECTION_REPORT_INDEX_RE = /indexCollectionReportByStream\(summary\.collection_report\)/;
-// Collapse runs over the LIVE rows, not every row: an archived source must
-// not be pulled into a duplicate group, whose ordinal relabelling
-// ("account 2") would imply it belongs to a live sibling set it has left.
-const DUPLICATE_COLLAPSE_RE = /collapseDuplicateFallbackSources\(liveInstances\)/;
-const DUPLICATE_GROUP_TESTID_RE = /data-testid="sources-duplicate-group"/;
-const ARCHIVED_GROUP_TESTID_RE = /data-testid="sources-archived-group"/;
-// The group heading must say outright that these are not collecting, so a
-// collapsed group can never be mistaken for healthy live sources.
-const ARCHIVED_GROUP_LABEL_RE = /Archived — not collecting \(\{archivedInstances\.length\}\)/;
-const ARCHIVED_PARTITION_RE = /instances\.filter\(\(i\) => i\.archived\)/;
-const FACTS_UNAVAILABLE_COPY_RE = /Collection facts not available yet/;
-const RECORDS_HEADER_RE = /<TableHeader>records<\/TableHeader>/;
-const STREAM_RECORDS_RE = /summary\.stream_records/;
-const PRIMARY_VERDICT_ACTION_RE = /primaryVerdictAction=\{instance\.primaryVerdictAction\}/;
-const NON_OWNER_VERDICT_GUARD_RE =
-  /primaryVerdictAction !== null && !primaryVerdictAction\.ownerRunnable[\s\S]*data-testid="sources-verdict-status-action"[\s\S]*Sync now/;
-const OWNER_ACTION_CUE_TESTID_RE = /data-testid="sources-owner-action-cue"/;
-const OWNER_ACTION_CUE_ASCII_RE = /Review: \{instance\.ownerActionCue\.label\}/;
-const OWNER_ACTION_CUE_DETAIL_TITLE_RE = /Open the source detail to review this suggested action\./;
-const BUTTON_TAG_RE = /<button/;
-const MUTATING_ACTION_RE = /onClick|runConnectorNowAction/;
-const OLD_CURSOR_HEADER_RE = /<TableHeader>cursor<\/TableHeader>/;
-const OLD_SEARCH_HEADER_RE = /<TableHeader>search<\/TableHeader>/;
-const OLD_CURSOR_FALLBACK_RE = /\{stream\.cursor\s*\?\?\s*"—"\}/;
-const OLD_SEARCH_LABEL_RE = /function searchLabel/;
+// DIRECTION.md, “Data sources /sources”: every screen uses one list, and each row opens its data source page.
+test("the sources page renders one list and no selected-source panel", async () => {
+  const [view, css] = await Promise.all([
+    readFile(VIEW_FILE, "utf8"),
+    readFile(CSS_FILE, "utf8"),
+  ]);
+  assert.match(view, /aria-label="Data sources"[\s\S]*<ul className="rr-s-list">/);
+  assert.match(view, /className="rr-s-row__link" href=\{instance\.detailHref\}/);
+  assert.doesNotMatch(view, /SourcePassport|rr-s-passport|Streams on this source/);
+  assert.doesNotMatch(css, /\.rr-s-(?:item|passport|detail)\b/);
+});
 
-test("desktop source list has a useful width and stable gap", async () => {
+// DIRECTION.md, “Data sources /sources”: desktop uses the five specified columns and one menu column.
+test("desktop rows use the data, status, records, schedule, action, and menu columns", async () => {
   const css = await readFile(CSS_FILE, "utf8");
-  assert.match(css, DESKTOP_GRID_RE);
-  assert.doesNotMatch(css, OLD_NARROW_GRID_RE);
+  assert.match(css, /\.rr-s\s*\{[^}]*max-width:\s*1040px/);
+  assert.match(css, /\.rr-s-columns\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto\s+auto\s+auto\s+auto\s+32px/);
+  assert.match(css, /\.rr-s-row__link\s*\{[\s\S]*grid-template-columns:\s*minmax\(13rem,[\s\S]*minmax\(7rem,/);
 });
 
-test("selected row accent has padding between the accent and text", async () => {
+// DIRECTION.md, “Data sources /sources”: phone rows put status below identity and hide the other columns.
+test("phone rows keep identity, status, and action while hiding records and schedule", async () => {
   const css = await readFile(CSS_FILE, "utf8");
-  assert.match(css, ROW_PADDING_RE);
-  assert.match(css, SELECTED_ACCENT_RE);
-  assert.doesNotMatch(css, OLD_TOUCHING_PADDING_RE);
+  assert.match(css, /@media \(max-width:\s*860px\)[\s\S]*?\.rr-s-row__link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(css, /\.rr-s-row__records,\s*\.rr-s-row__schedule\s*\{\s*display:\s*none/);
+  assert.match(css, /\.rr-s-row__status\s*\{\s*padding-left:\s*46px/);
 });
 
-test("status state does not create separate row geometry", async () => {
+// DIRECTION.md, “Data sources /sources”: row state changes the words, not the row geometry.
+test("status tone does not add row-specific geometry or a selected-source rail", async () => {
   const css = await readFile(CSS_FILE, "utf8");
-  assert.doesNotMatch(css, STATE_GEOMETRY_RE);
+  assert.doesNotMatch(css, /\.rr-s-row(?:__status)?(?:\[data-[^\]]+\]|\.[a-z-]+)\s*\{[^}]*?(?:margin|width|border-radius)\s*:/i);
+  assert.doesNotMatch(css, /\.rr-s-row\.is-on|\.rr-s-row__link\.is-on/);
 });
 
-test("stream manifest uses collection facts or an explicit unavailable state, not dash-only columns", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  const model = await readFile(MODEL_FILE, "utf8");
-  assert.match(model, COLLECTION_REPORT_INDEX_RE);
-  assert.match(model, STREAM_RECORDS_RE);
-  assert.match(view, FACTS_UNAVAILABLE_COPY_RE);
-  assert.match(view, RECORDS_HEADER_RE);
-  assert.doesNotMatch(view, OLD_CURSOR_HEADER_RE);
-  assert.doesNotMatch(view, OLD_SEARCH_HEADER_RE);
-  assert.doesNotMatch(view, OLD_CURSOR_FALLBACK_RE);
-  assert.doesNotMatch(view, OLD_SEARCH_LABEL_RE);
+// DIRECTION.md, “One data source”: per-kind counts and collection facts stay on the source page.
+test("the source page keeps the moved per-kind list and its collection facts", async () => {
+  const [page, facts] = await Promise.all([
+    readFile(SOURCE_PAGE_FILE, "utf8"),
+    readFile(STREAM_FACTS_FILE, "utf8"),
+  ]);
+  assert.match(page, /title=\{`What is here/);
+  assert.match(page, /streamCountLabel\(s\)/);
+  assert.match(page, /StreamCollectionFactsLine facts=\{facts\}/);
+  assert.match(facts, /data-testid="stream-coverage-chip"/);
+  assert.match(facts, /data-testid="stream-collected-counts"/);
+  assert.match(facts, /data-testid="stream-forward-disposition"/);
 });
 
-test("repeated unnamed same-type sources are collapsed into a review group", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, DUPLICATE_COLLAPSE_RE);
-  assert.match(view, DUPLICATE_GROUP_TESTID_RE);
+// DIRECTION.md, “Data sources /sources”: duplicate sources keep an individual row under one shared review notice.
+test("duplicate sources are not collapsed out of the list", async () => {
+  const [view, model] = await Promise.all([
+    readFile(VIEW_FILE, "utf8"),
+    readFile(`${HERE}sources-view-model.ts`, "utf8"),
+  ]);
+  assert.match(view, /buildDuplicateSourceReview/);
+  assert.match(view, /filteredRows\.map\([\s\S]*?<SourceRow/);
+  assert.doesNotMatch(view, /collapseDuplicateFallbackSources/);
+  assert.match(model, /return visibleSummaries\.map\(/);
 });
 
-test("archived sources render in their own group, labelled as not collecting", async () => {
+// DIRECTION.md, “Data sources /sources”: the status action owns the row action; other labels open the safe detail address.
+test("server CTA row actions keep their label without inventing a run", async () => {
   const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, ARCHIVED_PARTITION_RE);
-  assert.match(view, ARCHIVED_GROUP_TESTID_RE);
-  assert.match(view, ARCHIVED_GROUP_LABEL_RE);
-});
-
-test("source passport suppresses generic sync for non-owner verdict actions", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, PRIMARY_VERDICT_ACTION_RE);
-  assert.match(view, NON_OWNER_VERDICT_GUARD_RE);
-});
-
-test("source list shows advisory owner-action cues as non-mutating review copy", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, OWNER_ACTION_CUE_TESTID_RE);
-  assert.match(view, OWNER_ACTION_CUE_ASCII_RE);
-  assert.match(view, OWNER_ACTION_CUE_DETAIL_TITLE_RE);
-  const cueBlock = view.slice(view.indexOf('data-testid="sources-owner-action-cue"') - 220);
-  const cueElement = cueBlock.slice(0, cueBlock.indexOf("</span>"));
-  assert.doesNotMatch(cueElement, BUTTON_TAG_RE);
-  assert.doesNotMatch(cueElement, MUTATING_ACTION_RE);
-});
-
-// The fused status line must actually reach the owner's eyes. Before it landed,
-// the row's only status signal was a colored glyph whose label was `sr-only`,
-// so a sighted owner could not tell fresh from stale, or syncing from stuck,
-// without opening the detail panel. See
-// design-notes/fused-source-status-2026-08-22.md.
-const FUSED_STATUS_TESTID_RE = /data-testid="sources-fused-status"/;
-const FUSED_STATUS_RENDERS_LINE_RE = /\{instance\.fusedStatus\.line\}/;
-const FUSED_STATUS_TONE_RE = /data-tone=\{instance\.fusedStatus\.tone\}/;
-// The old sr-only duplicate: with the status visible, keeping it would make
-// screen readers announce every row's status twice.
-const SR_ONLY_STATUS_DUPLICATE_RE = /<span className="sr-only">\{instance\.status\.label\}<\/span>/;
-
-test("the source row renders the fused status line visibly", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, FUSED_STATUS_TESTID_RE);
-  assert.match(view, FUSED_STATUS_RENDERS_LINE_RE);
-  assert.match(view, FUSED_STATUS_TONE_RE);
-});
-
-test("the visible fused status replaces the sr-only status rather than doubling it", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.doesNotMatch(
-    view,
-    SR_ONLY_STATUS_DUPLICATE_RE,
-    "the status is now visible text, so the sr-only copy would be announced twice"
-  );
+  assert.match(view, /primaryVerdictAction\.kind === "refresh_now" \|\| instance\.primaryVerdictAction\.kind === "retry_gap"/);
+  assert.match(view, /<Link className=\{`\$\{buttonVariants\([\s\S]*?href=\{instance\.detailHref\}/);
 });

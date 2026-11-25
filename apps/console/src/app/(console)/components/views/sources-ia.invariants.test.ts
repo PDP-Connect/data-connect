@@ -1,112 +1,31 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Source-IA acceptance invariants for the Sources / Connections first screen.
- *
- * These pin the owner's reported confusion so it cannot regress:
- *
- *   1. A blank/partial dashboard has an obvious Add-source path (not a grant
- *      CTA, not a dead end).
- *   2. The Sources first screen shows per-source health and surfaces Sync,
- *      Source details, and Revoke as separate, clearly-labeled affordances —
- *      with navigation named for its destination, never for a credential
- *      operation it does not perform.
- *   3. The normal Sources UI shows no developer-only strings (monorepo paths,
- *      unpublished CLI, per-account env-var jargon, internal id placeholders).
- *   4. "Connect apps" is a clearly separate read-access surface, not
- *      confused with adding a data source.
- *
- * Source-regex over the shipped components (sources-view.tsx + surrounding
- * pages/shell): these files are JSX/React components and cannot be imported
- * under node:test without a full resolver, so we assert their critical
- * structural copy from source.
- */
-
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-// VIEW_FILE is now the live Ink Carbon sources view (replaced records-list-view.tsx).
-const VIEW_FILE = fileURLToPath(new URL("../../sources/sources-view.tsx", import.meta.url));
-const RECORDS_PAGE_FILE = `${HERE}../../sources/page.tsx`;
-const RECORDS_ADD_PAGE_FILE = `${HERE}../../sources/add/page.tsx`;
-const ROUTES_FILE = fileURLToPath(
-  new URL(
-    "../../../../../../../reference-implementation/vendor/operator-ui/src/components/views/routes.ts",
-    import.meta.url
-  )
-);
-// The live sidebar shell — `components/shell.tsx` (DashboardShell) was dead
-// code (2026-08-07 IA audit finding 1.7/1.5: zero content-page importers,
-// verified by grep) and has been deleted. `RecordroomShell`'s NAV_GROUPS is
-// the real, rendered nav every page uses.
-const SHELL_FILE = fileURLToPath(
-  new URL(
-    "../../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx",
-    import.meta.url
-  )
-);
+const SOURCES = `${HERE}../../sources/`;
+const RECORDS_ADD_PAGE_FILE = `${SOURCES}add/page.tsx`;
+const ROUTES_FILE = fileURLToPath(new URL("../../../../../../../reference-implementation/vendor/operator-ui/src/components/views/routes.ts", import.meta.url));
+const SHELL_FILE = fileURLToPath(new URL("../../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url));
 const CONNECT_PAGE_FILE = `${HERE}../../connect/page.tsx`;
 const SOURCE_SETUP_CATALOG_FILE = `${HERE}../source-setup-catalog.tsx`;
 const ADD_SUPPORT_FILE = `${HERE}../../lib/source-add-support.ts`;
 const SOURCE_SETUP_PRESENTATION_FILE = `${HERE}../../lib/source-setup-presentation.ts`;
 const SOURCE_GROUPS_FILE = `${HERE}../../lib/source-groups.ts`;
-const HERO_FILE = fileURLToPath(
-  new URL(
-    "../../../../../../../reference-implementation/vendor/operator-ui/src/components/overview-hero.tsx",
-    import.meta.url
-  )
-);
-
-// routes.ts derives the Sources add route from the section segment (clean
-// `sources` in the console, legacy `records` in the sandbox mirror), §10.B.
+const HERO_FILE = fileURLToPath(new URL("../../../../../../../reference-implementation/vendor/operator-ui/src/components/overview-hero.tsx", import.meta.url));
 const ROUTES_ADD_SOURCE_RE = /addSource: `\$\{basePath\}\/\$\{seg\.records\}\/add`/;
-// sources-view.tsx add-source path (the empty-state and footer links both point here)
-const ADD_SOURCE_HREF_CONST_RE = /ADD_SOURCE_HREF = "\/sources\/add"/;
-const ADD_SOURCE_LINK_RE = /href=\{ADD_SOURCE_HREF\}/;
-const ADD_SOURCE_EMPTY_STATE_RE = /data-testid="sources-empty"/;
-// Health status is rendered as a status dot + sr-only label from the projection
-const SOURCE_STATUS_DOT_RE = /data-tone=\{instance\.status\.tone\}/;
-const SOURCE_STATUS_LABEL_SR_RE = /instance\.status\.label/;
 const SOURCE_ACTIONABILITY_PROJECTION_RE = /const actionability = projectSourceActionability\(summary\)/;
 const RENDERED_VERDICT_STATUS_RE = /const status = actionability\.renderedStatus/;
 const RENDERED_VERDICT_PRIMARY_ACTION_RE = /const \{ primaryVerdictAction \} = actionability/;
 const RENDERED_VERDICT_NEXT_ACTION_RE = /actionability\.nextAction/;
+const INSPECTION_LAYER_FIELDS_RE = /detail_gap_backlog|next_attempt_at|collection_rate|suppressed/;
 const RUNTIME_ADVISORY_MODEL_RE = /buildSourcesRuntimeAdvisory\(page\.runtime\)/;
 const RUNTIME_ADVISORY_PROP_RE = /runtimeAdvisory=\{runtimeAdvisory\}/;
 const RUNTIME_ADVISORY_RENDER_RE = /data-testid="sources-runtime-advisory"/;
-const INSPECTION_LAYER_FIELDS_RE = /detail_gap_backlog|next_attempt_at|collection_rate|suppressed/;
-// Sync, Source details, and Revoke are three separate affordances in the
-// passport foot. The middle one is a NAVIGATION to the connection detail page —
-// where reauthorization and credential controls actually live. It used to be
-// labeled "Reauthorize →" on a condition unrelated to reauthorization (manual-
-// upload support / a non-owner-runnable verdict) while pointing at the very same
-// href, so a healthy OAuth source with no pending reauth still read
-// "Reauthorize →". Pin the honest constant label and the fact that it is a
-// <Link> to detailHref, not a mutation.
-const SYNC_ACTION_RE = /Sync now/;
-const SOURCE_DETAILS_NAV_RE = /href=\{instance\.detailHref\}[\s\S]{0,120}Source details →/;
-// The label must NOT reintroduce a conditional swap on manual-upload/verdict state.
-const CONDITIONAL_DETAILS_LABEL_RE = /\?\s*"Source details →"\s*:|:\s*"Reauthorize →"/;
-const MANUAL_UPLOAD_ADD_EXPORT_RE = /Add another export/;
-const MANUAL_UPLOAD_REPROCESS_RE = /Reprocess all exports/;
-const MANUAL_UPLOAD_DETAILS_RE = /Source details/;
-const MANUAL_UPLOAD_CONNECTION_ID_PARAM_RE = /connection_id/;
-const REVOKE_ACTION_RE = /data-testid="sources-revoke-ceremony"/;
-// The view does not render the raw action_target spine field — it routes via detailHref
-const RAW_ACTION_TARGET_RE = /href=\{.*action_target/;
-// No inline source-catalog picker in the view — that belongs to /sources/add
-const CONNECTION_CATALOG_IMPORT_RE = /connection-catalog/;
-const ADD_CONNECTION_GUIDANCE_RE = /AddConnectionGuidance/;
-// The sources page must load toSourcesView, not a raw catalog
-const TO_SOURCES_VIEW_RE = /toSourcesView/;
-const SOURCES_VIEW_COMPONENT_RE = /<SourcesView/;
-const SOURCES_PAGE_STATUS_HELPER_IMPORT_RE =
-  /isActiveConnectorRunSummaryStatus[\s\S]*from "\.\.\/lib\/connector-run-summary-status\.ts"/;
-const SOURCES_PAGE_STATUS_HELPER_CALL_RE = /isActiveConnectorRunSummaryStatus\(\s*s\.last_run\.status\s*\)/;
 const LIST_CONNECTOR_MANIFESTS_RE = /listConnectorManifests\(\)/;
 const LIST_OWNER_CONNECTOR_TEMPLATES_RE = /listOwnerConnectorTemplates\(\)/;
 const BUILD_CONNECTOR_CATALOG_RE = /buildOwnerConnectorCatalog\(manifests, templates, installSnapshot\?\.catalog \?\? \[\]\)/;
@@ -119,41 +38,120 @@ const SOURCE_ACQUISITION_PATH_RE = /data-testid="source-acquisition-path"/;
 const OTHER_COVERAGE_PATHS_RE = /Other ways to add data/;
 const IMPORT_OPTIONS_DISCLOSURE_RE = /Show import options/;
 const GENERIC_WHY_THIS_RE = /Why this, and what to expect/;
-const SOURCE_PROVIDER_SPECIFIC_COPY_RE =
-  /\b(Amazon|Gmail|GitHub|Slack|ChatGPT|Chase|Notion|Spotify)\b|app password|personal access token/i;
-const FORBIDDEN_DEV_STRINGS_RE =
-  /pnpm --dir|packages\/[a-z]|PDPP monorepo checkout|env var per account|pdpp owner-agent connectors|connector_instance_id|source_instance_id|device_token/;
-const NAV_SOURCES_RE = /label: "Data sources",\s*href: "\/sources"/;
-const NAV_APPS_RE = /label: "Apps",\s*href: "\/grants"/;
-const NAV_CONNECT_APP_CHILD_RE = /label: "Connect an app", href: "\/connect"/;
+const SOURCE_PROVIDER_SPECIFIC_COPY_RE = /\b(Amazon|Gmail|GitHub|Slack|ChatGPT|Chase|Notion|Spotify)\b|app password|personal access token/i;
+const FORBIDDEN_DEV_STRINGS_RE = /pnpm --dir|packages\/[a-z]|PDPP monorepo checkout|env var per account|pdpp owner-agent connectors|connector_instance_id|source_instance_id|device_token/;
+const NAV_SOURCES_RE = /\{\s*label: "Data sources",\s*href: "\/sources"/;
+const NAV_APPS_RE = /\{\s*label: "Apps",\s*href: "\/grants"/;
+const NAV_CONNECT_APP_CHILD_RE = /\{ label: "Connect an app", href: "\/connect" \}/;
 const CONNECT_PAGE_TITLE_RE = /title="Connect apps"/;
 const CONNECT_PAGE_DESCRIPTION_RE = /grant-scoped read access[\s\S]*?go to Sources/;
 
-// ── 1. Blank/partial dashboard has an obvious Add-source path ───────────────
+async function sourceFile(name: string): Promise<string> {
+  return readFile(`${SOURCES}${name}`, "utf8");
+}
 
-test("blank overview offers an Add-source CTA, not a grant CTA", async () => {
-  const src = await readFile(HERO_FILE, "utf8");
-  const routes = await readFile(ROUTES_FILE, "utf8");
-  assert.ok(src.includes("addSourceHref"), "empty overview must accept an add-source target");
-  assert.ok(src.includes("Add a data source"), "empty overview must name source setup");
-  assert.ok(!src.includes("Start a grant to begin ingesting"), "a grant must not be the ingestion CTA");
+// DIRECTION.md, “Data sources /sources”: title, empty state, add action, and the named empty update slot.
+test("Sources header and empty state use the specified copy and route", async () => {
+  const [page, view] = await Promise.all([sourceFile("page.tsx"), sourceFile("sources-view.tsx")]);
+  assert.match(page, /Data sources/);
+  assert.match(page, /href=\{`\$\{SOURCES_PATH\}\/add`\}>Add a data source/);
+  assert.match(view, /No data sources yet\./);
+  // DIRECTION.md, “Data sources /sources”: only a truly empty first page uses the all-data-sources empty state.
+  assert.match(view, /instances\.length === 0 && !pagingInPlay/);
+  assert.match(view, /No data sources on this page\./);
+  assert.match(view, /function UpdatesReadySlot\(\)/);
+  assert.match(view, /<UpdatesReadySlot\s*\/>/);
+});
+
+// DIRECTION.md, “Data sources /sources”: controls L1–L21 stay on the list, menu, pager, or source page.
+test("each existing list control L1–L21 still has a visible destination", async () => {
+  const [view, page, sourcePage] = await Promise.all([
+    sourceFile("sources-view.tsx"),
+    sourceFile("page.tsx"),
+    readFile(`${SOURCES}[connector]/page.tsx`, "utf8"),
+  ]);
+  const evidence: Array<[string, RegExp]> = [
+    ["L1/L2 add source", /Add a data source/],
+    ["L3 duplicate review", /Review duplicate data source labels/],
+    ["L4 duplicate rows", /buildDuplicateSourceReview|instance\.needsOwnerLabel/],
+    ["L5 disconnected group", /label="Disconnected"/],
+    ["L6 archived group", /label="Archived"/],
+    ["L7 setup group", /label="Setup never completed"/],
+    ["L8 row navigation", /href=\{instance\.detailHref\}/],
+    ["L9 copyable id", /ariaLabel="Copy connection ID"/],
+    ["L10 source page link", /Open this data source/],
+    ["L11 next step", /instance\.nextAction\.label/],
+    ["L12 sync/reprocess", /runConnectorNowAction[\s\S]*Reprocess all exports/],
+    ["L13 add export", /Add another export/],
+    ["L14 details", /Open this data source/],
+    ["L15 revoke", /Confirm revoke/],
+    ["L16 reactivate", /Reactivate resumes collection/],
+    ["L17 sync link", /See this sync/],
+    // DIRECTION.md, “One data source”: stream rows keep their Explore destination on the data source page.
+    ["L18 explore records", /href=\{`\/sources\/\$\{encodeURIComponent\(connectionId\)\}\/\$\{encodeURIComponent\(s\.name\)\}`\}/],
+    ["L19/L20 paging", /<ConnectorSummaryPager/],
+    ["L21 saved-session retry", /Remove saved browser session/],
+  ];
+  const corpus = `${view}\n${page}\n${sourcePage}`;
+  for (const [control, pattern] of evidence) assert.match(corpus, pattern, `${control} is missing`);
+  assert.match(page, /purgeRetryId/);
+  assert.match(page, /SourcesHeader error=\{params\.error\} message=\{params\.message\} purgeRetryId=\{params\.purge_retry\}/);
+});
+
+// DIRECTION.md, “Data sources /sources”: the row action follows the shared table and the menu contains only remaining actions.
+test("status actions use their existing handlers and the remaining actions use a real menu", async () => {
+  const [view, page] = await Promise.all([sourceFile("sources-view.tsx"), sourceFile("page.tsx")]);
+  assert.match(view, /const action = instance\.statusWords\.action/);
+  assert.match(view, /action\.filled \? "default" : "ghost"/);
+  assert.match(view, /action\.kind === "resume" && instance\.connectionId[\s\S]*action=\{resumeAction\}/);
+  assert.match(view, /primaryVerdictAction\?\.kind === "reattach_schedule"[\s\S]*action=\{resumeScheduleAction\}/);
+  assert.match(view, /action\.kind === "continue_setup" && instance\.setupFailed[\s\S]*action=\{resumeSetupAction\}/);
+  assert.match(page, /resumeAction=\{resumeConnectionAction\}/);
+  assert.match(page, /resumeScheduleAction=\{resumeConnectorScheduleAction\}/);
+  assert.match(page, /resumeSetupAction=\{resumeSetupConnectionAction\}/);
+  assert.match(page, /runNowAction=\{runConnectorNowAction\}/);
+  // DIRECTION.md, status row 3: “Set up again” keeps the detail page's existing Add address.
+  assert.match(view, /action\.kind === "set_up_again"[\s\S]*source_q=\$\{encodeURIComponent\(instance\.connectorId\)\}/);
+  assert.match(view, /Menu\.Trigger[\s\S]*Menu\.Popup/);
+  assert.match(view, /canSyncFromServer && !rowStartsSync/);
+  assert.match(view, /instance\.manualUploadHref[\s\S]*Add another export[\s\S]*Reprocess all exports/);
+  assert.match(view, /setConfirmingRevoke\(true\)/);
+  assert.match(view, /setConfirmingReactivate\(true\)/);
+  assert.match(view, /data-testid="sources-revoke-ceremony"/);
+});
+
+// DIRECTION.md, “Data sources /sources”: the filter stays client-side and paging/error recovery remains below it.
+test("filter, notices, loading shape, and pager remain in their specified positions", async () => {
+  const [view, page, loading] = await Promise.all([
+    sourceFile("sources-view.tsx"),
+    sourceFile("page.tsx"),
+    sourceFile("loading.tsx"),
+  ]);
+  assert.match(view, /listRows\.length > 10/);
+  assert.match(view, /onChange=\{\(event\) => setQuery/);
+  // DIRECTION.md, “What must stay true” item 2: the note counts the rows the filter searches, not the folded ones.
+  assert.match(view, /Filtering the \{listRows\.length\.toLocaleString\(\)\} data sources on this page\./);
+  assert.match(page, /error && purgeRetryId/);
+  assert.match(view, /sources-runtime-advisory/);
+  assert.match(view, /sources-duplicate-review/);
+  assert.match(page, /ConnectorSummaryPager/);
+  // DIRECTION.md, “Data sources /sources”: loading uses the title-and-rows list shape.
+  assert.match(loading, /ListLoadingSkeleton label="data sources" rows=\{6\}/);
+});
+
+test("blank overview still offers the existing Add a data source route", async () => {
+  const [hero, routes] = await Promise.all([readFile(HERO_FILE, "utf8"), readFile(ROUTES_FILE, "utf8")]);
+  assert.ok(hero.includes("addSourceHref"));
+  assert.ok(hero.includes("Add a data source"));
+  assert.ok(!hero.includes("Start a grant to begin ingesting"));
   assert.match(routes, ROUTES_ADD_SOURCE_RE);
 });
 
-test("Sources view always links to the add-source route, including when empty", async () => {
-  const src = await readFile(VIEW_FILE, "utf8");
-  // The add-source href is a module-level constant — not baked into routes.section
-  // (sources-view is a client component that can't import server-side routes helpers).
-  assert.match(src, ADD_SOURCE_HREF_CONST_RE);
-  // Both the empty-state link and the footer link use it.
-  assert.match(src, ADD_SOURCE_LINK_RE);
-  // The empty state is clearly identified so tests + E2E can target it.
-  assert.match(src, ADD_SOURCE_EMPTY_STATE_RE);
-});
-
-test("Sources owns the add-source catalog route", async () => {
-  const page = await readFile(RECORDS_ADD_PAGE_FILE, "utf8");
-  const catalog = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
+test("the source setup catalog remains on the Add page", async () => {
+  const [page, catalog] = await Promise.all([
+    readFile(RECORDS_ADD_PAGE_FILE, "utf8"),
+    readFile(SOURCE_SETUP_CATALOG_FILE, "utf8"),
+  ]);
   assert.match(page, LIST_CONNECTOR_MANIFESTS_RE);
   assert.match(page, LIST_OWNER_CONNECTOR_TEMPLATES_RE);
   assert.match(page, BUILD_CONNECTOR_CATALOG_RE);
@@ -168,18 +166,11 @@ test("Sources owns the add-source catalog route", async () => {
   assert.doesNotMatch(catalog, GENERIC_WHY_THIS_RE);
 });
 
-// ── 2. Per-source health and actions are clearly separate ───────────────────
-
-test("each source row renders a health status dot and sr-only label from the projection", async () => {
-  const src = await readFile(VIEW_FILE, "utf8");
-  // Health comes from the projection (status.tone, status.label) — not hard-coded strings.
-  assert.match(src, SOURCE_STATUS_DOT_RE);
-  assert.match(src, SOURCE_STATUS_LABEL_SR_RE);
-});
-
-test("Sources projection reads rendered verdict status/action and keeps inspection fields off the dashboard", async () => {
-  const model = await readFile(`${HERE}../../sources/sources-view-model.ts`, "utf8");
-  const view = await readFile(VIEW_FILE, "utf8");
+test("Sources still projects summary actionability without putting diagnostics on the list", async () => {
+  const [model, view] = await Promise.all([
+    sourceFile("sources-view-model.ts"),
+    sourceFile("sources-view.tsx"),
+  ]);
   assert.match(model, SOURCE_ACTIONABILITY_PROJECTION_RE);
   assert.match(model, RENDERED_VERDICT_STATUS_RE);
   assert.match(model, RENDERED_VERDICT_PRIMARY_ACTION_RE);
@@ -187,98 +178,68 @@ test("Sources projection reads rendered verdict status/action and keeps inspecti
   assert.doesNotMatch(view, INSPECTION_LAYER_FIELDS_RE);
 });
 
-test("Sources renders one global runtime advisory instead of per-source runtime alarms", async () => {
-  const page = await readFile(RECORDS_PAGE_FILE, "utf8");
-  const view = await readFile(VIEW_FILE, "utf8");
+test("Sources still renders one global runtime notice from the bounded summary", async () => {
+  const [page, view] = await Promise.all([
+    sourceFile("page.tsx"),
+    sourceFile("sources-view.tsx"),
+  ]);
   assert.match(page, RUNTIME_ADVISORY_MODEL_RE);
   assert.match(page, RUNTIME_ADVISORY_PROP_RE);
   assert.match(view, RUNTIME_ADVISORY_RENDER_RE);
 });
 
-test("the sources passport foot has three distinct affordances: Sync, Source details, and Revoke", async () => {
-  const src = await readFile(VIEW_FILE, "utf8");
-  // (a) Sync — remotely trigger a collection run
-  assert.match(src, SYNC_ACTION_RE);
-  // (b) Source details — a NAVIGATION to the connection detail page, where
-  // reauthorization lives (never a stub mutation at the index level). One
-  // destination gets one name.
-  assert.match(
-    src,
-    SOURCE_DETAILS_NAV_RE,
-    "the detail affordance must be a Link to instance.detailHref labeled 'Source details →'"
-  );
-  assert.doesNotMatch(
-    src,
-    CONDITIONAL_DETAILS_LABEL_RE,
-    "the detail link's label must not swap on manual-upload/verdict state — the destination never changes"
-  );
-  // (c) Revoke — destructive, behind a confirm ceremony
-  assert.match(src, REVOKE_ACTION_RE);
-  // The next_action CTA never links to the raw action_target spine field —
-  // it always routes via the in-app detailHref.
-  assert.doesNotMatch(src, RAW_ACTION_TARGET_RE);
+test("manual upload rows keep their import actions and existing-source route", async () => {
+  const [view, model] = await Promise.all([
+    sourceFile("sources-view.tsx"),
+    sourceFile("sources-view-model.ts"),
+  ]);
+  assert.match(view, /Add another export/);
+  assert.match(view, /Reprocess all exports/);
+  assert.match(view, /instance\.manualUploadHref/);
+  assert.match(model, /connection_id/);
+  assert.match(view, /instance\.sourceKind !== "manual"/);
 });
 
-test("manual/upload sources present import actions, not generic sync or reauthorize copy", async () => {
-  const view = await readFile(VIEW_FILE, "utf8");
-  const model = await readFile(`${HERE}../../sources/sources-view-model.ts`, "utf8");
-  assert.match(view, MANUAL_UPLOAD_ADD_EXPORT_RE);
-  assert.match(view, MANUAL_UPLOAD_REPROCESS_RE);
-  assert.match(view, MANUAL_UPLOAD_DETAILS_RE);
-  assert.match(model, MANUAL_UPLOAD_CONNECTION_ID_PARAM_RE);
+test("Sources keeps the summary projection separate from the Add catalog", async () => {
+  const [page, view] = await Promise.all([
+    sourceFile("page.tsx"),
+    sourceFile("sources-view.tsx"),
+  ]);
+  assert.match(page, /toSourcesView/);
+  assert.match(page, /<SourcesView/);
+  assert.match(page, /isActiveConnectorRunSummaryStatus[\s\S]*connector-run-summary-status\.ts/);
+  assert.match(page, /isActiveConnectorRunSummaryStatus\(\s*s\.last_run\.status\s*\)/);
+  assert.doesNotMatch(view, /connection-catalog/);
+  assert.doesNotMatch(view, /AddConnectionGuidance/);
 });
 
-test("Sources page projects through toSourcesView, not the full catalog picker", async () => {
-  const records = await readFile(RECORDS_PAGE_FILE, "utf8");
-  // page.tsx drives the view through toSourcesView (pure projection, no catalog).
-  assert.match(records, TO_SOURCES_VIEW_RE);
-  assert.match(records, SOURCES_VIEW_COMPONENT_RE);
-  assert.match(records, SOURCES_PAGE_STATUS_HELPER_IMPORT_RE);
-  assert.match(records, SOURCES_PAGE_STATUS_HELPER_CALL_RE);
-  // The first screen must not import the full add-source catalog picker — that
-  // belongs to /sources/add so existing-source monitoring stays light.
-  const view = await readFile(VIEW_FILE, "utf8");
-  assert.doesNotMatch(view, CONNECTION_CATALOG_IMPORT_RE);
-  assert.doesNotMatch(view, ADD_CONNECTION_GUIDANCE_RE);
-});
-
-// ── 3. No developer-only strings in the normal Sources UI ───────────────────
-
-test("the Sources view contains no developer-only command or id strings", async () => {
-  const src = await readFile(VIEW_FILE, "utf8");
-  assert.doesNotMatch(src, FORBIDDEN_DEV_STRINGS_RE);
-});
-
-test("the add-account support projection contains no developer-only strings", async () => {
-  const helper = await readFile(ADD_SUPPORT_FILE, "utf8");
-  const groups = await readFile(SOURCE_GROUPS_FILE, "utf8");
-  assert.doesNotMatch(helper, FORBIDDEN_DEV_STRINGS_RE);
+test("Sources and source setup do not show developer-only strings", async () => {
+  const [view, support, groups, presentation] = await Promise.all([
+    sourceFile("sources-view.tsx"),
+    readFile(ADD_SUPPORT_FILE, "utf8"),
+    readFile(SOURCE_GROUPS_FILE, "utf8"),
+    readFile(SOURCE_SETUP_PRESENTATION_FILE, "utf8"),
+  ]);
+  assert.doesNotMatch(view, FORBIDDEN_DEV_STRINGS_RE);
+  assert.doesNotMatch(support, FORBIDDEN_DEV_STRINGS_RE);
   assert.doesNotMatch(groups, FORBIDDEN_DEV_STRINGS_RE);
+  assert.doesNotMatch(presentation, SOURCE_PROVIDER_SPECIFIC_COPY_RE);
+  assert.doesNotMatch(presentation, FORBIDDEN_DEV_STRINGS_RE);
 });
 
-test("source setup presentation has no connector-specific copy or examples", async () => {
-  const src = await readFile(SOURCE_SETUP_PRESENTATION_FILE, "utf8");
-  assert.doesNotMatch(src, SOURCE_PROVIDER_SPECIFIC_COPY_RE);
-  assert.doesNotMatch(src, FORBIDDEN_DEV_STRINGS_RE);
+// DIRECTION.md, shared shell and Connect pages: data-source setup and app read access remain separate destinations.
+test("shared navigation distinguishes Data sources from app access", async () => {
+  const shell = await readFile(SHELL_FILE, "utf8");
+  // DIRECTION.md, “The frame and the menu”: the collection surface is Data sources and app access is under Apps.
+  assert.match(shell, NAV_SOURCES_RE);
+  assert.match(shell, NAV_APPS_RE);
+  assert.match(shell, NAV_CONNECT_APP_CHILD_RE);
 });
 
-// ── 4. "Connect apps" is a separate read-access surface ─────────────────────
-
-test("the nav separates Apps access from source collection", async () => {
-  const src = await readFile(SHELL_FILE, "utf8");
-  // DIRECTION.md "The frame and the menu": the primary collection destination is Data sources.
-  assert.match(src, NAV_SOURCES_RE);
-  // DIRECTION.md "The frame and the menu": Apps opens access and Connect an app is its child.
-  assert.match(src, NAV_APPS_RE);
-  assert.match(src, NAV_CONNECT_APP_CHILD_RE);
-});
-
-test("the Connect page is identified as app read access, pointing data setup at Sources", async () => {
-  const src = await readFile(CONNECT_PAGE_FILE, "utf8");
-  assert.match(src, CONNECT_PAGE_TITLE_RE);
-  // Its description leads with read access and explicitly redirects source
-  // setup to Sources, so the two "connect" meanings never collide.
-  assert.match(src, CONNECT_PAGE_DESCRIPTION_RE);
-  assert.doesNotMatch(src, LIST_CONNECTOR_MANIFESTS_RE);
-  assert.doesNotMatch(src, SOURCE_SETUP_SECTION_RE);
+test("Connect apps stays a read-access page that points setup to Sources", async () => {
+  const connect = await readFile(CONNECT_PAGE_FILE, "utf8");
+  assert.match(connect, CONNECT_PAGE_TITLE_RE);
+  assert.match(connect, CONNECT_PAGE_DESCRIPTION_RE);
+  assert.doesNotMatch(connect, LIST_CONNECTOR_MANIFESTS_RE);
+  assert.doesNotMatch(connect, SOURCE_SETUP_SECTION_RE);
 });
