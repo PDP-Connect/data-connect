@@ -59,13 +59,11 @@ const SIMPLE_ICONS_PACKAGE = join("node_modules", "simple-icons")
 
 // The console bundles reference-implementation/server/polyfill-connectors-
 // runtime.ts, which requires optional @pdpp/polyfill-connectors subpaths at
-// run time. The bundle reads members of only these three: the conformance
-// roster (the production-ready list), static-
-// secret capture normalization, and the credential validation mode. All three
-// are leaf ESM files. The other subpaths stay unstaged and resolve to null,
-// which the runtime module treats as "package absent".
+// run time. The bundle reads members of only these two: static-secret capture
+// normalization and the credential probe. Both are leaf ESM files. The other
+// subpaths stay unstaged and resolve to null, which the runtime module treats
+// as "package absent".
 const CONSOLE_CONNECTOR_PACKAGE_MODULES = [
-  "src/connector-conformance-roster.js",
   "src/static-secret-credential-capture.js",
   "src/credential-probe.js",
 ]
@@ -502,8 +500,8 @@ export function stageConsoleStack({
       `staged connector manifests directory is empty: ${stagedManifestsDirectory}`
     )
   }
-  // The same class of failure for the connector package's code: without the
-  // conformance roster the production-ready list the console reads is empty.
+  // The same class of failure for the connector package's code: a module the
+  // bundle cannot resolve inside the stage silently turns credential checks off.
   try {
     assertStagedConsoleConnectors({
       stageRoot: targetDirectory,

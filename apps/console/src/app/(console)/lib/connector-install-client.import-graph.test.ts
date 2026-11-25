@@ -8,8 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 // The staged-console probe (scripts/check-staged-console-connectors.mjs)
-// evaluates every webpack module whose text names the conformance roster
-// package. Webpack concatenates a module into its importer, so any module the
+// evaluates every webpack module whose text names the connector package's
+// credential probe. Webpack concatenates a module into its importer, so any module the
 // owner-token client reaches that also reaches polyfill-connectors-runtime can
 // land in that set. The client imports owner-token (next/headers); the probe
 // loads only `.next/server/chunks`, where next/headers' externals are absent,

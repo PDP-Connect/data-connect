@@ -167,7 +167,6 @@ describe("ensure console stack", () => {
         "apps/console/node_modules/@pdpp/polyfill-connectors"
       )
       for (const modulePath of [
-        "src/connector-conformance-roster.js",
         "src/static-secret-credential-capture.js",
         "src/credential-probe.js",
       ]) {
@@ -213,7 +212,7 @@ describe("ensure console stack", () => {
       expect(() =>
         stageConsoleStack({ build: false, profile: "release", projectRoot: root })
       ).toThrow(
-        /connector-conformance-roster does not resolve inside the stage.*PRODUCTION_READY_CONNECTORS is empty/
+        /static-secret-credential-capture does not resolve inside the stage.*credential-probe does not resolve inside the stage/
       )
     } finally {
       rmSync(root, { force: true, recursive: true })
