@@ -112,6 +112,8 @@ function statusSource(row: number, name: string, overrides: Partial<RefConnector
   const base: RefConnectorSummary = {
     connection_health: health(),
     connection_id: sourceId,
+    // Summaries carry the connector's own name; Home names rows by the shared rule.
+    connector_display_name: name,
     connector_id: name.toLowerCase().replaceAll(" ", "-"),
     display_name: name,
     freshness: {},
@@ -956,4 +958,14 @@ test("the record total shows while the summary is refreshing, not while rebuildi
     buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "rebuilding" } } })).subtitle,
     "4 data sources",
   );
+});
+
+test("Home names a connection by the shared rule: a saved connector key is not a name", () => {
+  // Round 3 brief item 2: one connection-name rule for the whole console.
+  const keyNamed = statusSource(20, "Reddit", { connector_display_name: "Reddit", connector_id: "reddit", display_name: "reddit" });
+  const syncing = statusSource(11, "GitHub", { connector_display_name: "GitHub", connector_id: "github", display_name: "GITHUB" });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [keyNamed, syncing] } }));
+
+  assert.deepEqual(data.dataSources.map((row) => row.name), ["GitHub", "Reddit"]);
+  assert.equal(data.title, "Syncing GitHub");
 });

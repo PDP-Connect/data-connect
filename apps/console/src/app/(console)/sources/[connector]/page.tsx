@@ -100,6 +100,7 @@ import { StreamCollectionFactsLine } from "./stream-collection-facts.tsx";
 import { SyncNowButton } from "./sync-now-button.tsx";
 import { SourceUpdateSlot, type SourceUpdateModel } from "./source-update-section.tsx";
 import { buildSourceUpdateModel } from "./source-update-view-model.ts";
+import { connectionDisplayName } from "../../lib/connection-display-name.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -470,7 +471,11 @@ export default async function ConnectorPage({
   const now = new Date().toISOString();
   const updates = updateDemo
     ? undefined
-    : buildSourceUpdateModel(model.connectorId, model.source.display_name ?? model.displayName, readConnectorUpdates);
+    : buildSourceUpdateModel(
+        model.connectorId,
+        connectionDisplayName(model.source.display_name, model.source.connector_display_name, model.source.connector_id),
+        readConnectorUpdates
+      );
   return (
     <ConnectorPageView
       dangerActiveRunId={sp.active_run_id}

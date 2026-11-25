@@ -94,6 +94,8 @@ function source(row: number, name: string, overrides: Partial<RefConnectorSummar
   const base: RefConnectorSummary = {
     connection_health: health(),
     connection_id: `demo-${row}-${name.toLowerCase().replaceAll(" ", "-")}`,
+    // Summaries carry the connector's own name; Home names rows by the shared rule.
+    connector_display_name: name,
     connector_id: name.toLowerCase().replaceAll(" ", "-"),
     display_name: name,
     freshness: {},

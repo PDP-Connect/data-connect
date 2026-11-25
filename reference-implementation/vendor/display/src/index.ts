@@ -21,6 +21,7 @@ export {
 export type { ConnectorDisplayInput, SourceDisplayInput } from "./identity/connector-display.ts";
 export {
   deriveSourceDisplayNameFallback,
+  formatConnectionDisplayName,
   formatConnectorKeyForDisplay,
   formatConnectorNameForDisplay,
   formatSourceForDisplay,

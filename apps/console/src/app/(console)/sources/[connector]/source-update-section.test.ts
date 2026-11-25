@@ -149,3 +149,21 @@ test("an update read that never resolves leaves the version fallback visible", a
   assert.doesNotMatch(html, /newest/);
   assert.doesNotMatch(html, /Update 1\.5\.0/);
 });
+
+test("the page names this data source by the shared rule, so it is never listed among the others", async () => {
+  // Round 3 brief item 2: the shared reader names each existing source with `connectionDisplayName`.
+  // The page must compare with the same name, or a connection saved as its key ("reddit")
+  // fails to match "Reddit" and is listed as another data source.
+  const { readFile } = await import("node:fs/promises");
+  const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
+  assert.match(
+    page,
+    /buildSourceUpdateModel\(\s*model\.connectorId,\s*connectionDisplayName\(model\.source\.display_name, model\.source\.connector_display_name, model\.source\.connector_id\),/
+  );
+  const model = await buildSourceUpdateModel("claude_code", "Claude Code", async () =>
+    updateRead({
+      existingSources: { byConnector: { "claude-code": [{ displayName: "Claude Code" }, { displayName: "Work laptop" }] }, truncated: false },
+    })
+  );
+  assert.deepEqual(model?.otherSources, ["Work laptop"]);
+});

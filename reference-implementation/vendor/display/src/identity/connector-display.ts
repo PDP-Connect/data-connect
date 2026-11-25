@@ -66,6 +66,24 @@ export function formatConnectorNameForDisplay(input: ConnectorDisplayInput): str
 }
 
 /**
+ * The one name the product shows for a connection. The server saves the
+ * connector key as a new connection's name, so a saved name equal to the
+ * connector key (in any case) is not a name: use the connector's own display
+ * name, else "this data source".
+ */
+export function formatConnectionDisplayName(
+  connectionName: string | null | undefined,
+  connectorDisplayName: string | null | undefined,
+  connectorId: string | null | undefined
+): string {
+  const connectorKey = normalizeText(connectorId).toLowerCase();
+  const savedName = normalizeText(connectionName) || null;
+  const manifestName = normalizeText(connectorDisplayName) || null;
+  const savedNameIsConnectorKey = savedName !== null && savedName.toLowerCase() === connectorKey;
+  return (savedName && !savedNameIsConnectorKey ? savedName : null) ?? manifestName ?? "this data source";
+}
+
+/**
  * True when a connection has no owner-meaningful `display_name` — i.e. the
  * stored label degrades to the bare connector type, a registry URL, a
  * `local-device:` binding, or a `legacy` placeholder. Callers use this to

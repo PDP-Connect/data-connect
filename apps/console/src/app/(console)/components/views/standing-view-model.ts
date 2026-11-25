@@ -10,6 +10,7 @@ import type {
   RefConnectorSummary,
   TraceSummary,
 } from "../../lib/ref-client.ts";
+import { connectionDisplayName } from "../../lib/connection-display-name.ts";
 import { isUpToDateRow, type SourceStatusWords, sourceStatusWords } from "../../lib/source-status-words.ts";
 
 const SCOPE_HUMAN: Record<string, string> = {
@@ -321,7 +322,7 @@ function prepareSources(sources: readonly RefConnectorSummary[], now: Date, href
     actionSurface: sourceActionSurface(source),
     href: hrefs.source(source.connection_id),
     id: source.connection_id,
-    name: source.display_name,
+    name: connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id),
     sortAt: sourceSortTime(source),
     source,
     status: sourceStatusWords(source, { now }),

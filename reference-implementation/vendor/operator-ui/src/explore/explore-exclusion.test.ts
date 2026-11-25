@@ -503,3 +503,21 @@ test("since/until + xstream excludes the stream from TIME-RANGE (excluded stream
   );
   assert.deepEqual(result.excludeStreams, ["budget_months"]);
 });
+
+test("feed rows name a connection by the shared rule: a saved connector key is not a name", async () => {
+  // The server saves the connector key as a new connection's name. Explore uses the
+  // same rule as the console (`formatConnectionDisplayName`): manifest name, else
+  // "this data source"; never "{connector} source".
+  const ds: DashboardDataSource = {
+    ...twoConnectorDs(),
+    listConnectorSummaries: (async () =>
+      summaryListResponse([
+        { ...makeSummary({ connection_id: "cin_ynab", connector_id: "ynab" }), connector_display_name: "YNAB", display_name: "ynab" },
+        { ...makeSummary({ connection_id: "cin_chase", connector_id: "chase" }), connector_display_name: "", display_name: "CHASE" },
+      ])) as unknown as DashboardDataSource["listConnectorSummaries"],
+  };
+  const result = await assembleExplorerData({}, ds, "https://rs.test");
+  const names = new Map(result.feed.map((e) => [e.connectorId, e.connectionDisplayName]));
+  assert.equal(names.get("ynab"), "YNAB");
+  assert.equal(names.get("chase"), "this data source");
+});
