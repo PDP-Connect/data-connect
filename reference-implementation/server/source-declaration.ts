@@ -58,23 +58,61 @@ function validationMessage(): string {
   return structural.join("; ");
 }
 
-function assertLocalSchemaReferences(value: unknown, path: string): void {
-  if (Array.isArray(value)) {
-    for (const [index, child] of value.entries()) {
-      assertLocalSchemaReferences(child, `${path}/${index}`);
-    }
+function assertJsonPointerTarget(reference: string, resource: unknown, path: string): void {
+  let fragment: string;
+  try {
+    fragment = decodeURIComponent(reference.slice(1));
+  } catch {
+    throw new InvalidSourceDeclarationError(`${path} must be a valid local fragment reference`);
+  }
+  // Empty fragments and named anchors keep their existing behaviour.
+  if (!fragment.startsWith("/")) {
     return;
   }
-  if (!(value && typeof value === "object")) {
-    return;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    const childPath = `${path}/${key}`;
-    if ((key === "$ref" || key === "$dynamicRef") && (typeof child !== "string" || !child.startsWith("#"))) {
-      throw new InvalidSourceDeclarationError(`${childPath} must be a local fragment reference`);
+  let target = resource;
+  for (const token of fragment.slice(1).split("/")) {
+    const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (
+      /~(?![01])/u.test(token) ||
+      !target || typeof target !== "object" ||
+      (Array.isArray(target) && !/^(0|[1-9][0-9]*)$/u.test(key)) ||
+      !Object.hasOwn(target, key)
+    ) {
+      throw new InvalidSourceDeclarationError(`${path} must point to an existing local schema`);
     }
-    assertLocalSchemaReferences(child, childPath);
+    target = (target as JsonObject)[key];
   }
+  if (typeof target !== "boolean" && (!target || typeof target !== "object" || Array.isArray(target))) {
+    throw new InvalidSourceDeclarationError(`${path} must point to an existing local schema`);
+  }
+}
+
+/** Check the local JSON Pointer references of an embedded schema without resolving remote schemas. */
+export function assertLocalSchemaReferences(schema: unknown, path: string): void {
+  function visit(value: unknown, at: string, resource: unknown): void {
+    if (Array.isArray(value)) {
+      for (const [index, child] of value.entries()) {
+        visit(child, `${at}/${index}`, resource);
+      }
+      return;
+    }
+    if (!(value && typeof value === "object")) {
+      return;
+    }
+    const object = value as JsonObject;
+    const currentResource = typeof object.$id === "string" ? object : resource;
+    for (const [key, child] of Object.entries(object)) {
+      const childPath = `${at}/${key}`;
+      if (key === "$ref" || key === "$dynamicRef") {
+        if (typeof child !== "string" || !child.startsWith("#")) {
+          throw new InvalidSourceDeclarationError(`${childPath} must be a local fragment reference`);
+        }
+        assertJsonPointerTarget(child, currentResource, childPath);
+      }
+      visit(child, childPath, currentResource);
+    }
+  }
+  visit(schema, path, schema);
 }
 
 function requireEmbeddedStreamSchemas(declaration: SourceDeclaration): void {
