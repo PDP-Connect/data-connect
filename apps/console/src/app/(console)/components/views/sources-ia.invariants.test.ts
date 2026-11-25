@@ -105,7 +105,8 @@ test("each existing list control L1–L21 still has a visible destination", asyn
 test("status actions use their existing handlers and the remaining actions use a real menu", async () => {
   const [view, page, model] = await Promise.all([sourceFile("sources-view.tsx"), sourceFile("page.tsx"), sourceFile("sources-view-model.ts")]);
   assert.match(view, /const action = instance\.statusWords\.action/);
-  assert.match(view, /action\.filled \? "default" : "ghost"/);
+  // DIRECTION.md, Values (changed 2026-11-25): on list rows a row's button is outlined.
+  assert.match(view, /const variant = "ghost";/);
   assert.match(view, /action\.kind === "resume" && instance\.connectionId[\s\S]*action=\{resumeAction\}/);
   assert.match(view, /primaryVerdictAction\?\.kind === "reattach_schedule"[\s\S]*action=\{resumeScheduleAction\}/);
   assert.match(view, /action\.kind === "continue_setup" && instance\.setupFailed[\s\S]*action=\{resumeSetupAction\}/);

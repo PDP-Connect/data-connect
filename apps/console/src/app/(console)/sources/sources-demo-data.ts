@@ -18,7 +18,6 @@
 import type {
   RefConnectionHealthSnapshot,
   RefConnectorSummary,
-  RefRecordVersionStatsRow,
   RefRenderedVerdict,
   RefRequiredAction,
 } from "../lib/ref-client.ts";
@@ -101,26 +100,63 @@ function verdict(label: RefRenderedVerdict["pill"]["label"], actions: RefRequire
 
 const HEALTHY_VERDICT = verdict("Healthy");
 
+/**
+ * One real-looking data source per status row, using the names and bundled
+ * logos Home's samples use (lead decision list-pictures 8). Names never repeat
+ * a named sample in the same scenario, so no duplicate-label notice appears.
+ */
+const STATUS_SAMPLE_SOURCES: Readonly<Record<SourceStatusRow, { connectorId: string; name: string }>> = {
+  1: { connectorId: "linkedin", name: "LinkedIn" },
+  2: { connectorId: "discord-browser", name: "Discord" },
+  3: { connectorId: "steam", name: "Steam" },
+  4: { connectorId: "facebook", name: "Facebook" },
+  5: { connectorId: "notion", name: "Notion" },
+  6: { connectorId: "google-calendar", name: "Google Calendar" },
+  7: { connectorId: "jellyfin", name: "Jellyfin" },
+  8: { connectorId: "reddit", name: "Reddit" },
+  9: { connectorId: "pocket", name: "Pocket" },
+  10: { connectorId: "strava", name: "Strava" },
+  11: { connectorId: "slack", name: "Slack" },
+  12: { connectorId: "tiktok", name: "TikTok" },
+  13: { connectorId: "uber", name: "Uber" },
+  14: { connectorId: "venmo", name: "Venmo" },
+  15: { connectorId: "whatsapp", name: "WhatsApp" },
+  16: { connectorId: "youtube", name: "YouTube" },
+  17: { connectorId: "ynab", name: "YNAB" },
+  18: { connectorId: "apple-photos", name: "Apple Photos" },
+  19: { connectorId: "fitbit", name: "Fitbit" },
+  20: { connectorId: "oura", name: "Oura" },
+  21: { connectorId: "perplexity", name: "Perplexity" },
+  22: { connectorId: "netflix-export", name: "Netflix" },
+  23: { connectorId: "usaa", name: "USAA" },
+  24: { connectorId: "doordash", name: "DoorDash" },
+};
+
+export function statusSampleConnectionId(row: SourceStatusRow): string {
+  return `conn_demo_status_${row}`;
+}
+
 function statusSample(row: SourceStatusRow): RefConnectorSummary {
+  const { connectorId, name } = STATUS_SAMPLE_SOURCES[row];
   const base = summary({
-    connection_id: `conn_demo_status_${row}`,
-    connector_id: `sample-${row}`,
-    display_name: `Sample ${row}`,
+    connection_id: statusSampleConnectionId(row),
+    connector_id: connectorId,
+    display_name: name,
     owner_state: HEALTHY_OWNER_STATE,
     rendered_verdict: HEALTHY_VERDICT,
   });
   const result: Pick<RefConnectorSummary, "connector_id" | "connection_id" | "display_name"> & Partial<RefConnectorSummary> = {
-    connection_id: `conn_demo_status_${row}`,
-    connector_instance_id: `conn_demo_status_${row}`,
-    connector_id: `sample-${row}`,
-    connector_display_name: `Sample ${row}`,
-    display_name: `Sample ${row}`,
+    connection_id: statusSampleConnectionId(row),
+    connector_instance_id: statusSampleConnectionId(row),
+    connector_id: connectorId,
+    connector_display_name: name,
+    display_name: name,
   };
   switch (row) {
     case 1: Object.assign(result, { source_visibility: "archived", status: "paused" }); break;
     case 2: Object.assign(result, { source_visibility: "setup_failed", status: "revoked", revoked_at: DEMO_SUCCESS }); break;
     case 3: Object.assign(result, { status: "revoked", revoked_at: DEMO_SUCCESS }); break;
-    case 4: Object.assign(result, { connector_implementation: { connector_id: "sample-4", state: "not_installed" } }); break;
+    case 4: Object.assign(result, { connector_implementation: { connector_id: connectorId, state: "not_installed" } }); break;
     case 5: Object.assign(result, { terminal_setup_disposition: "unverified_missing_counts" }); break;
     case 6: Object.assign(result, { terminal_setup_disposition: "unverified_zero" }); break;
     case 7: Object.assign(result, { terminal_setup_disposition: "verified_empty" }); break;
@@ -335,41 +371,4 @@ export function buildSourcesDemoSummaries(scenario: SourcesDemoScenario): RefCon
     SPOTIFY_REVOKED,
     ...([1, 3, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24] as const).map(statusSample),
   ];
-}
-
-/** Build a seeded version-stats row so the demo can render a churn advisory. */
-function churnRow(overrides: Partial<RefRecordVersionStatsRow> = {}): RefRecordVersionStatsRow {
-  return {
-    connector_id: "ynab",
-    connector_instance_id: "cin_ynab_demo",
-    current_record_count: 4,
-    display_name: null,
-    last_current_at: "2026-06-12T08:00:00Z",
-    last_history_at: "2026-06-12T08:01:00Z",
-    projection_authority: "record_changes_ground_truth",
-    projection_dirty: false,
-    projection_missing: false,
-    record_history_count: 1095,
-    record_key_count: 4,
-    risk_level: "high",
-    risk_reasons: ["versions_per_record_high"],
-    stream: "budgets",
-    version_disposition: "lossless_compaction_candidate",
-    version_remediation: "none",
-    versions_per_record: 273.75,
-    ...overrides,
-  };
-}
-
-/**
- * Seeded version-churn rows for the Sources demo. The `healthy` scenario has no
- * churn (proves the advisory is absent when nothing crosses the threshold); the
- * other scenarios surface a single classified compaction candidate so the quiet
- * advisory renders for a screenshot. Fictional — demo only.
- */
-export function buildSourcesDemoChurnRows(scenario: SourcesDemoScenario): RefRecordVersionStatsRow[] {
-  if (scenario === "healthy") {
-    return [];
-  }
-  return [churnRow()];
 }

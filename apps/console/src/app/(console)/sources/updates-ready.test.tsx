@@ -66,6 +66,8 @@ test("a settled update read shows its line above the list", async () => {
   const markup = await prerenderList(Promise.resolve(buildUpdatesReadyDemo("update-two").model));
   assert.match(markup, /Updates are ready/);
   assert.ok(markup.indexOf("Updates are ready") < markup.indexOf('data-testid="sources-list"'));
+  // Lead decision (list-pictures 6): the update button is outlined; only "Add a data source" is filled.
+  assert.match(markup, /<button[^>]*class="[^"]*pdpp-btn--ghost[^"]*"[^>]*>Update both<\/button>/);
 });
 
 // DIRECTION.md, “Data sources /sources”: a rejected update read never replaces or blocks the list.

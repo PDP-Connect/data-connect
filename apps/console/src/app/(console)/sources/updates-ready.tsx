@@ -70,7 +70,8 @@ function UpdatesReady({
     <aside className="rr-s-updates-ready" data-testid="updates-ready" role="status">
       <Text as="p"><strong>Updates are ready</strong> for {model.namesText}. <Link href={model.seeChangesHref}>See what changes</Link></Text>
       <div className="rr-s-updates-ready__action">
-        <IcButton disabled={!interactive || pending} onClick={updateAll} size="sm" type="button">
+        {/* Lead decision (list-pictures 6): the page's only filled button is "Add a data source". */}
+        <IcButton disabled={!interactive || pending} onClick={updateAll} size="sm" type="button" variant="ghost">
           {pending ? "Updating…" : model.buttonLabel}
         </IcButton>
         {result ? (

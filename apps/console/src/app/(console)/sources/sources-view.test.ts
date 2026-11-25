@@ -9,10 +9,9 @@ import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { sourceStatusWords } from "../lib/source-status-words.ts";
 import { SourceRowStatus } from "./source-row-status.tsx";
-import { buildSourcesDemoChurnRows, buildSourcesDemoSummaries } from "./sources-demo-data.ts";
+import { buildSourcesDemoSummaries, statusSampleConnectionId } from "./sources-demo-data.ts";
 import { SourcesView } from "./sources-view.tsx";
 import {
-  buildSourcesChurnAdvisory,
   filterSourcesForList,
   orderSourcesForList,
   toSourcesView,
@@ -88,7 +87,7 @@ test("source filters match the current page by name or account without changing 
   const { instances } = seededViews("mixed");
   const rows = orderSourcesForList(instances);
   assert.deepEqual(filterSourcesForList(rows, "gmail").map((instance) => instance.displayName), ["Gmail (personal)"]);
-  assert.deepEqual(filterSourcesForList(rows, "sample 16").map((instance) => instance.displayName), ["Sample 16"]);
+  assert.deepEqual(filterSourcesForList(rows, "youtube").map((instance) => instance.displayName), ["YouTube"]);
   assert.equal(filterSourcesForList(rows, "not here").length, 0);
 });
 
@@ -149,7 +148,6 @@ test("status copy rendered for every seeded scenario avoids banned words", () =>
       AppRouterContext.Provider,
       { value: router as never },
       createElement(SourcesView, {
-        churnAdvisory: buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario)),
         instances,
         interactive: false,
         reactivateAction: noopFormAction,
@@ -211,14 +209,68 @@ test("the paging filter note counts only the rows the filter searches", () => {
   assert.match(html, new RegExp(`Filtering the ${listed.length.toLocaleString()} data sources on this page\\.`));
 });
 
-// Task extra check (d): one of a thing reads in the singular.
-test("a data source with one kind of record says 1 kind", () => {
-  const { instances } = seededViews("mixed");
-  const base = instances.find((instance) => !instance.archived && !instance.revoked && !instance.setupFailed && instance.streams.length > 0);
-  assert.ok(base);
-  const html = renderSourcesView([{ ...base, listKind: null, streams: base.streams.slice(0, 1) }]);
-  assert.match(html, />1 kind</);
-  assert.doesNotMatch(html, /1 kinds/);
+// Lead decision (list-pictures 3): under the name only an account line, which the list read does not
+// carry (RefConnectorSummary has no account field), so nothing; never "N kinds".
+test("rows show no kind count or kind line under the name", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const html = renderSourcesView(seededViews(scenario).instances);
+    assert.doesNotMatch(renderedCopy(html), /\b\d[\d,]* kinds?\b/, scenario);
+    assert.doesNotMatch(html, /rr-s-row__account/, scenario);
+  }
+});
+
+// Lead decision (list-pictures 1): the retained-history ("Version churn") notice is not on the list.
+test("the list shows no retained-history notice", async () => {
+  const [view, page] = await Promise.all([
+    readFile(new URL("./sources-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(view, /ChurnNotice|sources-version-churn|Retained history/);
+  assert.doesNotMatch(page, /churnAdvisory|buildSourcesChurnAdvisory/);
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const copy = renderedCopy(renderSourcesView(seededViews(scenario).instances));
+    assert.doesNotMatch(copy, /Version churn|retained|\bKB\b/i, scenario);
+  }
+});
+
+// DIRECTION.md, “Data sources /sources” and lead decision (list-pictures 4): the filter box appears only
+// above more than ten rows; its label is for screen readers and the placeholder labels it on screen.
+test("the filter appears only for more than ten rows, labelled by its placeholder", () => {
+  const listed = seededViews("mixed").instances.filter((instance) => !instance.archived && !instance.revoked && !instance.setupFailed);
+  assert.ok(listed.length > 10);
+  const long = renderSourcesView(listed);
+  assert.match(long, /<label class="sr-only" for="sources-filter">Filter data sources<\/label>/);
+  assert.match(long, /placeholder="Filter by name or account"/);
+  const short = renderSourcesView(listed.slice(0, 10));
+  assert.doesNotMatch(short, /sources-filter/);
+});
+
+// DIRECTION.md, Values (changed 2026-11-25) and lead decision (list-pictures 6): every row button is outlined.
+test("every row action is outlined, including filled status actions", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const { instances } = seededViews(scenario);
+    const html = renderSourcesView(instances);
+    const rowButtons = [...html.matchAll(/<(?:button|a)[^>]*class="([^"]*pdpp-btn[^"]*)"[^>]*>/g)].map((match) => match[1] ?? "");
+    if (instances.some((instance) => instance.statusWords.action)) assert.ok(rowButtons.length > 0, scenario);
+    for (const className of rowButtons) assert.match(className, /pdpp-btn--ghost/, `${scenario}: ${className}`);
+  }
+});
+
+// Lead decision (list-pictures 8): each status row has one real-looking sample, still pinned to its row.
+test("each status sample keeps its status row under a real-looking name", () => {
+  const byConnection = new Map(
+    (["mixed", "healthy", "attention"] as const).flatMap((scenario) => buildSourcesDemoSummaries(scenario)).map((summary) => [summary.connection_id, summary])
+  );
+  for (let row = 1; row <= 24; row++) {
+    const summary = byConnection.get(statusSampleConnectionId(row as Parameters<typeof statusSampleConnectionId>[0]));
+    assert.ok(summary, `row ${row} has a sample`);
+    assert.equal(sourceStatusWords(summary, { now: NOW }).row, row, summary.display_name);
+    assert.doesNotMatch(summary.display_name, /^Sample\b|\d/, `row ${row}`);
+  }
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const names = buildSourcesDemoSummaries(scenario).map((summary) => summary.display_name);
+    assert.equal(new Set(names).size, names.length, `${scenario} repeats a name`);
+  }
 });
 
 // The duplicate-label notice reviews live data sources only, as before the change: archived and

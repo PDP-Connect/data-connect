@@ -11,14 +11,13 @@ import { Suspense, useCallback, useState, useTransition } from "react";
 import { ConnectorMark } from "../components/connector-mark.tsx";
 import type { RunNowResult } from "./actions.ts";
 import { SourceRowStatus } from "./source-row-status.tsx";
-import type { DuplicateSourceReview, SourceInstanceView, SourcesChurnAdvisory, SourcesRuntimeAdvisory } from "./sources-view-model.ts";
+import type { DuplicateSourceReview, SourceInstanceView, SourcesRuntimeAdvisory } from "./sources-view-model.ts";
 import { buildDuplicateSourceReview, collapseSetupFailedSources, filterSourcesForList, orderSourcesForList, reactivateRecordCopy, sourceRowMenuItems } from "./sources-view-model.ts";
 import { UpdatesReadySlot } from "./updates-ready.tsx";
 import type { UpdatesReadyModel } from "./updates-ready-model.ts";
 import "./sources-view.css";
 
 interface SourcesViewProps {
-  churnAdvisory?: SourcesChurnAdvisory | null;
   instances: SourceInstanceView[];
   interactive: boolean;
   pagingInPlay?: boolean;
@@ -42,7 +41,6 @@ type FormAction = (formData: FormData) => void | Promise<void>;
 type RunNowAction = (connectorId: string, connectionId?: string | null) => Promise<RunNowResult>;
 
 export function SourcesView({
-  churnAdvisory,
   instances,
   interactive,
   pagingInPlay = false,
@@ -87,19 +85,18 @@ export function SourcesView({
         </Suspense>
       ) : null}
       {runtimeAdvisory ? <RuntimeNotice advisory={runtimeAdvisory} /> : null}
-      {churnAdvisory ? <ChurnNotice advisory={churnAdvisory} /> : null}
       {buildDuplicateNotice(buildDuplicateSourceReview(instances.filter((instance) => !(instance.archived || instance.setupFailed))))}
 
       <section aria-label="Data sources" className="rr-s" data-testid="sources-list">
         {showFilter ? (
           <div className="rr-s-filter">
-            <label className="rr-s-filter__label" htmlFor="sources-filter">Filter data sources</label>
+            <label className="sr-only" htmlFor="sources-filter">Filter data sources</label>
             <input
               autoComplete="off"
               className="rr-s-filter__input"
               id="sources-filter"
               onChange={(event) => setQuery(event.currentTarget.value)}
-              placeholder="Name or account"
+              placeholder="Filter by name or account"
               type="search"
               value={query}
             />
@@ -112,7 +109,7 @@ export function SourcesView({
         ) : null}
 
         <div className="rr-s-columns" aria-hidden="true">
-          <span>Data source</span><span>Status</span><span>Records</span><span>Schedule</span><span>Action</span><span />
+          <span>Data source</span><span>Status</span><span className="rr-s-columns__records">Records</span><span>Schedule</span><span /><span />
         </div>
         <ul className="rr-s-list">
           {filteredRows.map((instance) => (
@@ -198,9 +195,6 @@ function SourceRow({
           </span>
           <span className="rr-s-row__identity">
             <Text as="span" className="rr-s-row__name" size="small" weight="medium">{instance.displayName}</Text>
-            <Text as="span" className="rr-s-row__account" color="muted" size="small">
-              {instance.listKind ?? `${instance.streams.length.toLocaleString()} ${instance.streams.length === 1 ? "kind" : "kinds"}`}
-            </Text>
           </span>
         </span>
         <SourceRowStatus instance={instance} />
@@ -247,7 +241,8 @@ function RowAction({ instance, interactive, pending, onSync, resumeAction, resum
   const action = instance.statusWords.action;
 
   if (!action) return null;
-  const variant = action.filled ? "default" : "ghost";
+  // DIRECTION.md, Values: on list rows the row's button is outlined; the page's one filled button is "Add a data source".
+  const variant = "ghost";
   if (action.kind === "sync_now" || action.kind === "retry_first_sync") {
     return (
       <IcButton className="rr-s-row__action" disabled={!interactive || pending || instance.isRunning} onClick={onSync} size="sm" type="button" variant={variant}>
@@ -433,16 +428,6 @@ function FoldedGroup({ instances, interactive, reactivateAction, resumeAction, r
 
 function RuntimeNotice({ advisory }: { advisory: SourcesRuntimeAdvisory }) {
   return <aside className="rr-s-notice" data-testid="sources-runtime-advisory" role="status"><Text as="p">{advisory.headline}</Text><Text as="p" color="muted">{advisory.note}</Text></aside>;
-}
-
-function ChurnNotice({ advisory }: { advisory: SourcesChurnAdvisory }) {
-  return (
-    <aside className="rr-s-notice" data-testid="sources-version-churn" role="note">
-      <Text as="p" className="rr-s-notice__label" color="muted">Retained history · {advisory.needsReview ? "review" : "classified"}</Text>
-      <Text as="p">{advisory.headline}. {advisory.highestSignal}</Text>
-      <Text as="p" color="muted">This is kept change history, not current-data loss. Your latest records are intact. Open a data source to see what changed for each kind and what can be safely shortened.</Text>
-    </aside>
-  );
 }
 
 function buildDuplicateNotice(reviews: readonly DuplicateSourceReview[]) {

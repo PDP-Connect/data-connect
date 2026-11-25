@@ -30,6 +30,11 @@
 }
 
 .rr-s {
+  /* Lead decision (list-pictures 2): one set of column tracks for the header and
+     every row. Name takes the free space; status, records, schedule, action and
+     menu are fixed so a row with a button does not shift its cells. */
+  --rr-s-tracks: minmax(0, 1fr) 260px 90px 120px 120px 40px;
+  container: rr-s-list / inline-size;
   display: grid;
   gap: 20px;
   max-width: 1040px;
@@ -39,11 +44,6 @@
 .rr-s-filter {
   display: grid;
   gap: 6px;
-}
-
-.rr-s-filter__label {
-  color: var(--foreground-faint);
-  font-size: 13px;
 }
 
 .rr-s-filter__input {
@@ -73,18 +73,21 @@
 .rr-s-columns,
 .rr-s-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 14px;
+  grid-template-columns: var(--rr-s-tracks);
+  column-gap: 16px;
   min-width: 0;
 }
 
 .rr-s-columns {
   align-items: end;
-  grid-template-columns: minmax(0, 1fr) auto auto auto auto 32px;
-  padding: 0 8px 8px;
+  padding: 0 4px 8px;
   color: var(--foreground-faint);
   border-bottom: 1px solid var(--border);
   font-size: 13px;
+}
+
+.rr-s-columns__records {
+  text-align: right;
 }
 
 .rr-s-list {
@@ -101,7 +104,7 @@
 
 .rr-s-row {
   position: relative;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  row-gap: 8px;
   align-items: center;
   padding: 10px 4px;
   border-bottom: 1px solid var(--border);
@@ -109,8 +112,8 @@
 
 .rr-s-row__link {
   display: grid;
-  grid-template-columns: minmax(13rem, 1.45fr) minmax(11rem, 1fr) minmax(5rem, 0.55fr) minmax(7rem, 0.65fr);
-  gap: 8px 20px;
+  grid-column: 1 / 5;
+  grid-template-columns: subgrid;
   align-items: center;
   min-width: 0;
   color: inherit;
@@ -158,13 +161,6 @@
   white-space: nowrap;
 }
 
-.rr-s-row__account {
-  overflow: hidden;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .rr-s-row__status,
 .rr-s-row__records,
 .rr-s-row__schedule {
@@ -174,6 +170,7 @@
 
 .rr-s-row__records {
   font-variant-numeric: tabular-nums;
+  text-align: right;
   white-space: nowrap;
 }
 
@@ -183,11 +180,15 @@
 
 .rr-s-row__action,
 .rr-s-row__action-form {
-  max-width: 148px;
+  grid-column: 5;
+  justify-self: end;
+  max-width: 120px;
   min-width: 0;
 }
 
-.rr-s-row__action {
+/* Row scope outranks the shared button's nowrap, so a long label wraps inside
+   the action track instead of running into the menu. */
+.rr-s-row .rr-s-row__action {
   height: auto;
   min-height: 30px;
   white-space: normal;
@@ -204,6 +205,8 @@
 }
 
 .rr-s-menu-trigger {
+  grid-column: 6;
+  justify-self: end;
   display: grid;
   place-items: center;
   width: 32px;
@@ -395,19 +398,25 @@
   color: var(--muted-foreground);
 }
 
-@media (max-width: 860px) {
+/* Lead decision (list-pictures 7), narrow list: logo and name with the menu
+   at the right of the name line; status beneath; the action beneath the status,
+   aligned with the text. The breakpoint follows the list's own width, so a
+   narrow window with the side menu open also gets this layout. */
+@container rr-s-list (max-width: 720px) {
   .rr-s-columns {
     display: none;
   }
 
   .rr-s-row {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) 40px;
+    align-items: start;
   }
 
   .rr-s-row__link {
+    grid-column: 1;
+    grid-row: 1;
     grid-template-columns: minmax(0, 1fr);
-    gap: 5px;
+    row-gap: 4px;
   }
 
   .rr-s-row__status {
@@ -419,30 +428,17 @@
     display: none;
   }
 
-  .rr-s-row__action,
-  .rr-s-row__action-form {
-    max-width: 132px;
-  }
-}
-
-@media (max-width: 420px) {
-  .rr-s-row {
-    gap: 5px;
-    padding-inline: 0;
+  .rr-s-menu-trigger {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .rr-s-row__action,
   .rr-s-row__action-form {
-    max-width: 112px;
-  }
-
-  .rr-s-row__logo {
-    flex-basis: 32px;
-    width: 32px;
-    height: 32px;
-  }
-
-  .rr-s-row__status {
-    padding-left: 42px;
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: start;
+    max-width: calc(100% - 46px);
+    margin-left: 46px;
   }
 }

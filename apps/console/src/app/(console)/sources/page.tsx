@@ -54,7 +54,6 @@ import { readConnectorUpdates } from "./connector-updates-read.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
 import { SourcesView } from "./sources-view.tsx";
 import {
-  buildSourcesChurnAdvisory,
   buildSourcesRuntimeAdvisory,
   type SourcesRuntimeAdvisory,
   toSourcesView,
@@ -108,22 +107,18 @@ export default async function RecordsIndexPage({
   // DEV-ONLY seeded demo. Gated by NODE_ENV so production never reads fixtures.
   const demoParam = typeof params.demo === "string" ? params.demo : undefined;
   if (process.env.NODE_ENV !== "production" && demoParam) {
-    const { buildSourcesDemoSummaries, buildSourcesDemoChurnRows, isSourcesDemoScenario } = await import(
+    const { buildSourcesDemoSummaries, isSourcesDemoScenario } = await import(
       "./sources-demo-data.ts"
     );
     const scenario = isSourcesDemoScenario(demoParam) ? demoParam : "mixed";
     const instances = toSourcesView(buildSourcesDemoSummaries(scenario));
     const updatesReadyDemo = isUpdatesReadyDemoScenario(demoParam) ? buildUpdatesReadyDemo(demoParam) : undefined;
-    // Seed a churn advisory for the demo so the protocol-toned notice is
-    // screenshot-able without a live version-stats route.
-    const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
     return (
       <RecordroomShellWithPalette host={host}>
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
         <SourcesView
-          churnAdvisory={churnAdvisory}
           instances={instances}
           interactive={false}
           reactivateAction={reactivateConnectionAction}
@@ -227,9 +222,10 @@ function SourcesHeader({
         <Link className={buttonVariants({ size: "sm", variant: "default" })} href={`${SOURCES_PATH}/add`}>Add a data source</Link>
       </div>
       {notice ? (
-        <div className="rr-s-toast rr-s-header__notice" data-tone="ok" role="status">
+        // Lead decision (list-pictures 5): the demo line matches Home's, 13px in the second text colour.
+        <Text as="p" className="rr-s-header__demo text-[13px] text-muted-foreground">
           {notice}
-        </div>
+        </Text>
       ) : null}
       {error ? (
         <div className="rr-s-toast rr-s-header__notice" data-tone="error" role="status">
