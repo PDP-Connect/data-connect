@@ -91,7 +91,7 @@ jobs:
           mcp=false
           while IFS= read -r path; do
             case "$path" in
-              package.json|package-lock.json|.npmrc|.github/workflows/package-verify.yml|\
+              package.json|package-lock.json|.npmrc|.releaserc.yaml|.github/workflows/package-verify.yml|\
               packages/connector-protocol/*)
                 protocol=true; runtime=true; collector=true; readcore=true; cli=true; mcp=true ;;
               packages/collector-runtime/*)
