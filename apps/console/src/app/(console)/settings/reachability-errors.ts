@@ -50,7 +50,8 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   setup_action_unavailable: TRY_AGAIN,
   setup_configuration_inconsistent: TRY_AGAIN,
   clear_input_unavailable: TRY_AGAIN,
-  configuration_migration_required: TRY_AGAIN,
+  configuration_migration_required:
+    "Finish or discard your earlier remote access setup before starting a new one.",
   operation_recovery_unauthorized: TRY_AGAIN,
   draft_read_required: TRY_AGAIN,
   draft_read_unavailable: TRY_AGAIN,
