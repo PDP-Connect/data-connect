@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CONSOLE_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import { jsonObject, type AppAccess } from "./app-access.ts";
-import { historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
 export interface AppReadSource { source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
@@ -52,19 +52,20 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
   return { client, source, sourceKind, connection, shape, reason, records, values, where, from };
 }
 export async function readAppHistory(subjectId: string, input: AppHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<AppHistory> {
-  const paging = !input.day && input.days ? appHistorySql({...input,first:"1970-01-01",last:"9999-12-30",before:undefined},backend,subjectId) : null;
-  const page = paging ? await historyDates(input,backend,query,paging.from,"e.occurred_at",`${paging.where} AND e.event_type IN ('disclosure.served','query.rejected',${accessTypes})`,paging.values) : null;
-  if (page?.empty) return {mode:"days",data:[],changes:[],identities:[],has_more:false,next_cursor:null,...page.dates};
-  const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(page?.input ?? input, backend, subjectId);
+  const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
   if (input.day) {
     if (!input.client_ids?.length) throw new RangeError("A single day requires an app");
     const discoveryOnly = `${shape} IN (${DISCOVERY_SHAPES.map(value=>`'${value}'`).join(",")})`;
+    const discoverySource=`CASE WHEN ${shape}='stream_metadata' THEN ${source} END`;
+    const discoveryKind=`CASE WHEN ${shape}='stream_metadata' THEN ${sourceKind} END`;
+    const discoveryConnection=`CASE WHEN ${shape}='stream_metadata' THEN ${connection} END`;
+    const discoveryRecordKind=`CASE WHEN ${shape}='stream_metadata' THEN coalesce(e.stream_id, ${field("requested_stream",backend)}) END`;
     const discoveryRows = await historyRows<AppReadEntry & { occurrences: number | string }>(`SELECT ${shape} AS shape,
-      ${source} AS source_id, ${sourceKind} AS source_kind, ${connection} AS connection_id,
-      coalesce(e.stream_id, ${field("requested_stream",backend)}) AS record_kind,
+      ${discoverySource} AS source_id, ${discoveryKind} AS source_kind, ${discoveryConnection} AS connection_id,
+      ${discoveryRecordKind} AS record_kind,
       MAX(e.occurred_at) AS at, COUNT(*) AS occurrences ${from}
       WHERE ${where} AND e.event_type='disclosure.served' AND ${discoveryOnly}
-      GROUP BY ${shape}, ${source}, ${sourceKind}, ${connection}, coalesce(e.stream_id, ${field("requested_stream",backend)})
+      GROUP BY ${shape}, ${discoverySource}, ${discoveryKind}, ${discoveryConnection}, ${discoveryRecordKind}
       ORDER BY MAX(e.occurred_at) DESC`,values,backend,query);
     const discovery = discoveryRows.map((row,index)=>({...row,id:`discovery-${index}`,trace_id:"",client_id:input.client_ids?.[0] ?? "",records:null,metric:null,refused:false,reason:null,occurrences:Number(row.occurrences)}));
     const limit = historyLimit(input);
@@ -134,5 +135,12 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     try { if (Array.isArray(data.redirect_uris) && typeof data.redirect_uris[0] === "string") host = new URL(data.redirect_uris[0]).hostname; } catch { /* unknown address */ }
     return { client_id: id, client_name: typeof data.client_name === "string" ? data.client_name : "", return_host: host, returns_to_this_computer: host !== null && ["localhost","127.0.0.1","[::1]"].includes(host), domain_control_verified: false, sources: [], reads_last_7_days: 0 };
   });
-  return { mode: "days", identities, data: [...days.values()].sort((a,b) => b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id)), changes: decisions, has_more: Boolean(page?.dates.before_day), next_cursor: null, ...page?.dates };
+  const allData=[...days.values()].sort((a,b)=>b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id));
+  const dates=[...new Set([...allData.map(row=>row.day),...decisions.map(row=>row.day)])].sort().reverse();
+  const eligible=dates.filter(day=>!input.before || day<input.before);
+  if(input.days !== undefined && (!Number.isInteger(input.days) || input.days<1 || input.days>366)) throw new RangeError("Invalid day page size");
+  const selected=input.days ? eligible.slice(0,input.days) : eligible;
+  const hasMore=selected.length<eligible.length;
+  return { mode:"days", identities, data:allData.filter(row=>selected.includes(row.day)),changes:decisions.filter(row=>selected.includes(row.day)),has_more:hasMore,next_cursor:null,
+    ...(input.days ? {first_day:dates.at(-1) ?? null,before_day:hasMore ? selected.at(-1) ?? null : null} : {}) };
 }

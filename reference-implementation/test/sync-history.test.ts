@@ -49,6 +49,7 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(dates.first_day,"2026-11-24");
   assert.equal(dates.before_day,"2026-11-25");
   const earlier = await readSyncHistory({...input,first:"1970-01-01",days:1,before:dates.before_day ?? undefined},backend);
+  if(earlier.mode!=="days")throw Error("wrong mode");
   assert.equal(earlier.data[0]?.day,"2026-11-24");
   assert.equal(earlier.has_more,false);
   assert.equal((await readSyncHistory({...input,first:"1970-01-01",days:1,before:"2026-11-24"},backend)).data.length,0);

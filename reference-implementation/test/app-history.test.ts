@@ -31,6 +31,8 @@ async function fixture(write: Write) {
       [`event_${seq}`, seq, type, "2026-11-24T23:30:00.000Z", "2026-11-24T23:30:00.000Z", `trace_${seq}`, source,
       JSON.stringify({ query_shape: shape, ...(count !== null ? { record_count: count } : {}), ...(error ? { error: { code: error } } : {}) })]);
   }
+  await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,actor_type,actor_id,subject_id,object_type,object_id,status,client_id,source_kind,source_id,stream_id,data_json,version)
+    SELECT 'schema_second',98,event_type,occurred_at,recorded_at,scenario_id,'schema_second',actor_type,actor_id,subject_id,object_type,object_id,status,client_id,source_kind,'another_source','another_kind',data_json,version FROM spine_events WHERE event_id='event_4'`,[]);
   await write("UPDATE spine_events SET connector_instance_id='mail_account' WHERE event_id IN ('event_1','event_2')",[]);
   await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,actor_type,actor_id,subject_type,subject_id,object_type,object_id,status,request_id,grant_id,run_id,source_kind,source_id,client_id,stream_id,token_id,interaction_id,data_json,version,connector_instance_id) SELECT 'event_12',12,event_type,occurred_at,recorded_at,scenario_id,'trace_12',actor_type,actor_id,subject_type,subject_id,object_type,object_id,status,request_id,grant_id,run_id,source_kind,NULL,client_id,stream_id,token_id,interaction_id,?,version,connector_instance_id FROM spine_events WHERE event_id='event_1'`,[JSON.stringify({query_shape:"field_window",record_count:5})]);
   await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,
@@ -69,7 +71,8 @@ async function check(backend: "sqlite" | "postgres") {
   const next = await readAppHistory("owner", { ...input, day: input.first, client_ids: ["app"], limit: 5, ...(page.next_cursor ? { cursor: page.next_cursor } : {}) }, backend);
   assert.equal(next.data.length, 3);
   if(next.mode!=="reads")throw Error("mode");
-  assert.equal(next.discovery?.reduce((n,row)=>n+(row.occurrences ?? 0),0),2);
+  assert.equal(next.discovery?.reduce((n,row)=>n+(row.occurrences ?? 0),0),3);
+  assert.equal(next.discovery?.filter(row=>row.shape==="schema").length,1);
   assert.equal(next.has_more, false);
   assert.equal((await readAppHistory("owner", { ...input, client_ids: ["foreign"] }, backend)).data.length, 0);
   const scoped = await readAppHistory("owner", { ...input, connection_id: "mail_account" }, backend);
