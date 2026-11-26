@@ -368,6 +368,7 @@ test("findPolicy returns the registered policy for Slack channel_memberships wit
 const POINT_IN_TIME_REAL_FIELD_STREAMS = [
   { connector: "github", realField: "follower/repo/gist counts", stream: "user" },
   { connector: "slack", realField: "num_members", stream: "channels" },
+  { connector: "slack-browser", realField: "num_members", stream: "channels" },
   // ynab/accounts is the same class: the connector already split its balances
   // into the append-keyed `account_stats` observation stream
   // (split-ynab-account-balance-observation-stream), so the current entity
