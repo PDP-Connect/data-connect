@@ -198,7 +198,7 @@ export function groupGrantAccessByApp(
     if (sourceNames.size) {
       const expanded = app.sourceAccess.flatMap(row => {
         const ids = row.all_accounts ? (row.connection_ids ?? []).filter(id => sourceNames.has(id)) : [];
-        if (!ids.length) { return [row]; }
+        if (!ids.length) { return row.source.connection_id && sourceNames.has(row.source.connection_id) ? [row] : []; }
         return ids.map(id => ({ ...row, all_accounts: false, connection_ids: [id], source: { ...row.source, connection_id: id } }));
       });
       let rows = mergeAppAccessSources(expanded.filter(row=>app.state !== "reading" || row.in_force)).map(row => ({...row, name: sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source"}));

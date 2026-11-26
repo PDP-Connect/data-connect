@@ -57,12 +57,12 @@ test("ConnectorMark SSR uses stable connector identity when no optional icon was
   assert.equal(markup.includes("Custom account label"), false);
 });
 
-test("ConnectorMark keeps the genuine initials fallback for an unknown connector ID", () => {
+test("ConnectorMark keeps the first-letter fallback for an unknown connector ID", () => {
   const markup = renderToStaticMarkup(
     createElement(ConnectorMark, { connectorId: "unknown-connector", name: "Example Source" })
   );
   assert.equal(markup.includes("<svg"), false);
-  assert.ok(markup.includes('data-initials="ES"'));
+  assert.ok(markup.includes('data-initials="E"'));
 });
 
 test("preserves first-party registry aliases without borrowing brands from unrelated URLs", () => {

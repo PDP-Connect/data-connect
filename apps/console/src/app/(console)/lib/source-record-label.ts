@@ -6,7 +6,7 @@ const BOOKKEEPING_KINDS = new Set(["backup_inventory", "cache_inventory", "cover
 export function isOwnerRecordKind(name: string, connectorId: string): boolean;
 export function isOwnerRecordKind(name: string): boolean;
 export function isOwnerRecordKind(name: string, connectorId?: string): boolean {
-  return !BOOKKEEPING_KINDS.has(name) && !(connectorId === "claude-code" && name === "attachments");
+  return !BOOKKEEPING_KINDS.has(name) && !(connectorId === "claude-code" && ["attachments","usage","file_history","debug_artifacts","downloads","logs"].includes(name)) && !(connectorId === "codex" && ["history","memories"].includes(name));
 }
 export function sourceRecordLabel(name: string, streams: readonly StreamManifestEntry[] = []): string {
   const entry = streams.find((stream) => stream.name === name);

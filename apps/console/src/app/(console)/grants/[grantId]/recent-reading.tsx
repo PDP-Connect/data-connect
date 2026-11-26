@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { AppAccess } from "../app-access.ts";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { appDayHref, ReadDayLines } from "../../audit/activity-view.tsx";
@@ -12,14 +13,18 @@ export function RecentReading({
   sources,
   offset,
   demo,
+  app,
 }: {
   rows: NamedAppDay[];
   sources: HistorySource[];
   offset: number;
   demo?: string;
+  app?: Pick<AppAccess,"state"|"lastRead">;
 }) {
   if (!rows.length) {
-    return <Section title="What it has read lately"><p>It has not read anything yet.</p></Section>;
+    let empty="No recent reading to show.";
+    if(app && !app.lastRead) {empty=app.state === "stopped" ? "No reading is recorded from when it had access." : "It has not read anything yet.";}
+    return <Section title="What it has read lately"><p>{empty}</p></Section>;
   }
   return (
     <Section title="What it has read lately">
@@ -29,7 +34,7 @@ export function RecentReading({
             <Link href={appDayHref(row, demo)}>
               <p>
                 {dayLabel(row.day, offset)}{" "}
-                · read your data {row.reads} times
+                · read your data {row.reads === 1 ? "once" : `${row.reads.toLocaleString("en-US")} times`}
               </p>
               <ReadDayLines row={row} sources={sources} />
             </Link>

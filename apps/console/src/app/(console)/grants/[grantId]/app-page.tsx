@@ -132,7 +132,7 @@ export function AppPage({
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";
                 const kinds =
-                  source.kindNames ?? source.kinds.filter(isOwnerRecordKind).map((name) => sourceRecordLabel(name));
+                  source.kindNames ?? source.kinds.filter(kind=>isOwnerRecordKind(kind,source.source.connector_id??"")).map((name) => sourceRecordLabel(name));
                 const canRead = reading && !removal.removed.includes(key);
                 return (
                   <li className="py-4" key={key}>
@@ -200,7 +200,7 @@ export function AppPage({
           </ul>
         </Section>
       )}
-      {recent ? <RecentReading {...recent} demo={demo} /> : null}
+      {recent ? <RecentReading {...recent} app={app} demo={demo} /> : null}
       <Link
         className="mt-6 inline-block text-[13px] text-muted-foreground"
         href={`/grants/${encodeURIComponent(app.hrefId)}/technical${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}

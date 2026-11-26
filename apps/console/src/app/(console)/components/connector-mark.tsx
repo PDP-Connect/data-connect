@@ -81,6 +81,6 @@ export function ConnectorMark({
   return createElement(ConnectorIcon, {
     className: spacing ? TEXT_SPACING_CLASSES[spacing] : undefined,
     icon: resolvedIcon,
-    name,
+    name: resolvedIcon ? name : Array.from(name.trim())[0] ?? "?",
   });
 }

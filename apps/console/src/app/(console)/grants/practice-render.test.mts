@@ -156,7 +156,7 @@ test("service-only practice folds into one account and stays an all-accounts row
 
 test("an app with no reads says so in its recent-reading section", async()=>{
  const {RecentReading}=await import("./[grantId]/recent-reading.tsx");
- const html=renderToStaticMarkup(React.createElement(RecentReading,{rows:[],sources:[],offset:0}));
+ const html=renderToStaticMarkup(React.createElement(RecentReading,{rows:[],sources:[],offset:0,app:{state:"reading",lastRead:null}}));
  assert.match(html,/What it has read lately/);assert.match(html,/It has not read anything yet\./);
 });
 test("app and history practice authorize the same sources and reading clocks",async()=>{

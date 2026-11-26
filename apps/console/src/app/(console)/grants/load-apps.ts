@@ -34,7 +34,7 @@ export async function loadApps(demo?: string) {
         const service = connectionDisplayName(null, manifest.display_name || manifest.name, manifest.connector_id);
         row.name = row.all_accounts ? `All ${service} accounts` : service;
       }
-      row.kindNames = row.kinds.filter(isOwnerRecordKind).map((name) => sourceRecordLabel(name, manifest?.streams));
+      row.kindNames = row.kinds.filter(kind=>isOwnerRecordKind(kind,canonicalConnectorKey(connector))).map((name) => sourceRecordLabel(name, manifest?.streams));
     }
   }
   for (const app of apps) {

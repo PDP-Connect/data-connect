@@ -11,3 +11,9 @@ test("known bookkeeping kinds stay off the owner list without hiding ordinary re
   assert.equal(isOwnerRecordKind("attachments", "mail"), true);
   for (const name of ["events", "messages", "sessions", "orders", "diagnostic_messages"]) assert.equal(isOwnerRecordKind(name), true, name);
 });
+
+test("local collector bookkeeping uses the same predicate on every owner surface",()=>{
+ for(const kind of ["usage","file_history","debug_artifacts","downloads","logs","attachments"]) {assert.equal(isOwnerRecordKind(kind,"claude-code"),false,kind);}
+ for(const kind of ["history","memories"]) {assert.equal(isOwnerRecordKind(kind,"codex"),false,kind);}
+ assert.equal(isOwnerRecordKind("history","mail"),true);
+});

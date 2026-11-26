@@ -34,6 +34,8 @@
 import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Button } from "@pdpp/operator-ui/ui/button";
 import { useEffect, useMemo, useState } from "react";
+import { CalendarDateInput } from "@/app/(console)/history/calendar-date-input.tsx";
+import { isOwnerRecordKind } from "@/app/(console)/lib/source-record-label.ts";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import styles from "./consent-screen.module.css";
 import type {
@@ -189,7 +191,7 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
       {client.logo ? (
         <img alt="" className={styles.clientLogo} src={client.logo} />
       ) : (
-        <ConnectorMark connectorId={client.name} name={client.name} />
+        <ConnectorMark connectorId={client.name.toLowerCase()} name={client.name} />
       )}
       <div className={styles.consentHeaderContent}>
         <div className={styles.consentHeaderTitle}>
@@ -280,7 +282,7 @@ function StreamRow({
                   </legend>
                   <p className="pdpp-caption">Each record’s id is always included.</p>
                   {stream.fields
-                    .filter((field) => field.name !== "id")
+                    .filter((field) => !["id","record_id"].includes(field.name))
                     .map((field) => (
                       <label className={styles.fieldOption} key={field.name}>
                         <input
@@ -313,23 +315,21 @@ function StreamRow({
                   <label className="pdpp-caption" htmlFor={sinceInputId}>
                     From
                   </label>
-                  <IcInput
+                  <CalendarDateInput
                     aria-label={`${stream.timePhrase} since`}
                     className={styles.dateInput}
                     id={sinceInputId}
                     onChange={(e) => setRange(source.id, stream.name, "since", e.target.value)}
-                    type="date"
                     value={range.since}
                   />
                   <label className="pdpp-caption" htmlFor={untilInputId}>
                     To
                   </label>
-                  <IcInput
+                  <CalendarDateInput
                     aria-label={`${stream.timePhrase} until`}
                     className={styles.dateInput}
                     id={untilInputId}
                     onChange={(e) => setRange(source.id, stream.name, "until", e.target.value)}
-                    type="date"
                     value={range.until}
                   />
                 </div>
@@ -440,7 +440,7 @@ function SourceRow({
         </span>
       </summary>
       <div className={styles.streamList}>
-        {source.streams.map((stream) => (
+        {source.streams.filter(stream=>isOwnerRecordKind(stream.name,source.connectorId??"")).map((stream) => (
           <StreamRow
             key={stream.name}
             onSelectAll={() => onSelectAll(stream.id)}

@@ -28,7 +28,22 @@ const DATA_SOURCES = [
   "Airtable",
 ] as const;
 
+const DEMO_KINDS:Record<string,readonly [string,string,string,string]> = {
+  Spotify:["tracks","Your saved tracks","playlists","Your playlists"],
+  Gmail:["messages","Your emails","attachments","Your attachments"],
+  "Google Drive":["files","Your files","comments","Your comments"],
+  Calendar:["events","Your calendar entries","calendars","Your calendars"],
+  Notion:["pages","Your pages","databases","Your databases"],
+  GitHub:["repositories","Your repositories","issues","Your issues"],
+  Dropbox:["files","Your files","folders","Your folders"],
+  Linear:["issues","Your issues","projects","Your projects"],
+  Slack:["messages","Your messages","channels","Your channels"],
+  Figma:["files","Your files","comments","Your comments"],
+  Trello:["boards","Your boards","cards","Your cards"],
+  Airtable:["bases","Your bases","records","Your records"],
+};
 function sourceModel(name: string, index: number): ConsentScreenModel["sources"][number] {
+  const [firstKind,firstLabel,secondKind,secondLabel]=DEMO_KINDS[name] ?? ["files","Your files","folders","Your folders"];
   const id = `demo:${index}`;
   return {
     account: `${name} - alex@example.com`,
@@ -45,23 +60,23 @@ function sourceModel(name: string, index: number): ConsentScreenModel["sources"]
           { name: "updated_at", label: "Last updated", required: false },
         ],
         fieldsTotal: 3,
-        id: `${id}:records`,
-        label: "Records",
-        name: "records",
-        selectionValue: `${id}:records`,
+        id: `${id}:${firstKind}`,
+        label: firstLabel,
+        name: firstKind,
+        selectionValue: `${id}:${firstKind}`,
         selected: false,
-        sentence: `Records saved in ${name}.`,
+        sentence: `${firstLabel} from ${name}.`,
         timePhrase: "Last updated",
       },
       {
         fields: [],
         fieldsTotal: 0,
-        id: `${id}:activity`,
-        label: "Recent activity",
-        name: "activity",
-        selectionValue: `${id}:activity`,
+        id: `${id}:${secondKind}`,
+        label: secondLabel,
+        name: secondKind,
+        selectionValue: `${id}:${secondKind}`,
         selected: false,
-        sentence: `Recent activity from ${name}.`,
+        sentence: `${secondLabel} from ${name}.`,
       },
     ],
   };

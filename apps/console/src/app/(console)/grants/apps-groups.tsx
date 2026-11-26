@@ -91,7 +91,7 @@ export function AppsGroups({
               {choosing ? <div className="flex flex-wrap gap-2">
                 <IcButton onClick={() => setSelected(unused.map(app=>app.hrefId))} variant="ghost">Tick all</IcButton>
                 <IcButton onClick={() => {setChoosing(false);setSelected([]);setConfirm(false);}} variant="ghost">Cancel</IcButton>
-                <IcButton disabled={!chosen.length || busy} onClick={() => setConfirm(true)} variant="destructive">Remove access for {chosen.length} apps</IcButton>
+                <IcButton disabled={!chosen.length || busy || confirm} onClick={() => setConfirm(true)} variant="destructive">Remove access for {chosen.length} apps</IcButton>
               </div> : <IcButton onClick={() => { setChoosing(true); setSelected([]); }} variant="ghost">Choose apps to remove</IcButton>}
               {confirm ? (
                 <div
