@@ -223,6 +223,20 @@ export function RemoteAccessSetting({
   const actionEpoch = useRef(0);
   const loadSeq = useRef(0);
   const appliedSeq = useRef(0);
+  // The one rule that orders every read of /state. A read takes a ticket when it starts; its answer
+  // lands only if the card is mounted, no later read has landed and no action has started or ended
+  // since. Each caller keeps its own cleanup signal for its other effects.
+  const beginStateRead = () => ({ seq: ++loadSeq.current, epoch: actionEpoch.current });
+  const claimStateRead = (ticket: { seq: number; epoch: number }) => {
+    if (!mounted.current || ticket.seq < appliedSeq.current || ticket.epoch !== actionEpoch.current) return false;
+    appliedSeq.current = ticket.seq;
+    return true;
+  };
+  const applyState = (ticket: { seq: number; epoch: number }, next: State) => {
+    if (!claimStateRead(ticket)) return false;
+    setState(next);
+    return true;
+  };
   const seenSetup = useRef<string | null>(null);
   // Bumped by each poll above; a sign-in the owner is finishing reads its setup on each bump.
   const [setupTick, setSetupTick] = useState(0);
@@ -295,12 +309,11 @@ export function RemoteAccessSetting({
       return last.outcome;
     };
     const load = async () => {
-      const seq = ++loadSeq.current;
-      const startedInEpoch = actionEpoch.current;
+      const ticket = beginStateRead();
       // A poll reports on the moment it started. If an action began or ended
       // since, or a later poll already landed, this answer is out of date and
       // must not replace what the action or the later poll set.
-      const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
+      const outdated = () => !active || !claimStateRead(ticket);
       const [catalog, stateRead, hostRead, capabilityRead] = await Promise.all([
         catalogOutcome(),
         settle("/state"),
@@ -310,7 +323,6 @@ export function RemoteAccessSetting({
       if (outdated()) {
         return;
       }
-      appliedSeq.current = seq;
       const answered = (outcome: Outcome) => ("read" in outcome && outcome.read.ok ? outcome.read : null);
       const catalogResult = answered(catalog);
       const stateResult = answered(stateRead);
@@ -352,7 +364,8 @@ export function RemoteAccessSetting({
       }
       if (stateResult) {
         const next = stateResult.data as State;
-        setState(next);
+        // Claimed above, with no await since: this applies under the same ticket.
+        applyState(ticket, next);
         setStateLoaded(true);
         if (next.operations?.length) {
           setOperation((current) => (current?.stage === "applying" ? current : (next.operations?.[0] ?? current)));
@@ -420,10 +433,12 @@ export function RemoteAccessSetting({
       return;
     }
     let active = true;
+    const ticket = beginStateRead();
     void request("/state").then((result) => {
-      if (!active) return;
+      // An answer a later read or an action has passed changes neither the state nor the stale line.
+      if (!active || !claimStateRead(ticket)) return;
       if (result.ok) {
-        setState(result.data as State);
+        applyState(ticket, result.data as State);
         setStale(false);
       } else {
         setStale(true);
@@ -595,8 +610,9 @@ export function RemoteAccessSetting({
             expectedConfigurationRevision: result.draft.configuration.revision,
             usage: wayUsage,
           });
+          const ticket = beginStateRead();
           const fresh = await request("/state");
-          if (active && fresh.ok) setState(fresh.data as State);
+          if (active && fresh.ok) applyState(ticket, fresh.data as State);
         }
         return result;
       })
@@ -786,14 +802,9 @@ export function RemoteAccessSetting({
   // One read of /state under the same guard as a poll: its answer is applied only while the card is
   // mounted, no later read has landed and no action has started or ended since. Both rechecks use it.
   async function readStateFenced() {
-    const seq = ++loadSeq.current;
-    const startedInEpoch = actionEpoch.current;
+    const ticket = beginStateRead();
     const read = await request("/state");
-    const applied = read.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current;
-    if (applied) {
-      appliedSeq.current = seq;
-      setState(read.data as State);
-    }
+    const applied = read.ok && applyState(ticket, read.data as State);
     return { read, applied };
   }
   async function runRecheck(id: string, generation: number): Promise<CheckOutcome> {
@@ -934,6 +945,7 @@ export function RemoteAccessSetting({
         action: "check",
         acknowledgeDisconnect: true,
       });
+      const ticket = beginStateRead();
       const [operationResult, stateResult] = await Promise.all([
         request(`/operations/${encodeURIComponent(current.operationId)}`),
         request("/state"),
@@ -941,7 +953,7 @@ export function RemoteAccessSetting({
       if (operationResult.ok) {
         setOperation({ ...(operationResult.data as Operation), kind: (operationResult.data as Operation).kind ?? current.kind });
       }
-      if (stateResult.ok) setState(stateResult.data as State);
+      if (stateResult.ok) applyState(ticket, stateResult.data as State);
     });
   }
 

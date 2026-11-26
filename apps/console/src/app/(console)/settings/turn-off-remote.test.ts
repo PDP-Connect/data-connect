@@ -338,6 +338,89 @@ for (const late of ["a route", "no answer"] as const) {
   });
 }
 
+// The operation card's Try again reads the operation and /state together. The periodic poll reads
+// /state too; whichever read started later is the newer one, whatever order the answers arrive in.
+test("an older operation refresh that answers after a later poll does not overwrite it", async () => {
+  mock.timers.enable({ apis: ["setInterval"] });
+  const stuck = {
+    operationId: "op-9",
+    kind: "start",
+    stage: "settled",
+    failureCode: "provider_unavailable",
+    handle: { id: "route-1" },
+    recovery: { available: true, reason: "route_reconciliation_required" },
+  };
+  const withOperation = (origin: string) => {
+    const result = stateWith(route(origin)) as { ok: true; data: Record<string, unknown> };
+    return ok({ ...result.data, operations: [stuck] });
+  };
+  let mode: "now" | "hold" = "now";
+  let current = "https://first.example.test";
+  let release: ((result: Result) => void) | null = null;
+  const table: Record<string, Entry> = {
+    "/state": () => (mode === "hold" ? new Promise<Result>((resolve) => (release = resolve)) : withOperation(current)),
+    "/operations/op-9/reconcile": ok({}),
+    "/operations/op-9": ok(stuck),
+  };
+  try {
+    await withScreen("http://localhost:3000", table, async ({ press, text }) => {
+      assert.ok(text().includes("first.example.test"), text());
+      // Try again starts the older read, and its /state answer is held.
+      mode = "hold";
+      await press(/^Try again$/);
+      assert.ok(release, "the operation refresh's /state read is waiting");
+      const older = release as (result: Result) => void;
+      // A later poll reads /state and gets the newer address.
+      mode = "now";
+      current = "https://second.example.test";
+      await act(async () => mock.timers.tick(3000));
+      await act(async () => {});
+      assert.ok(text().includes("second.example.test"), "the poll applied the newer state");
+      // The older answer arrives last, with the older address. Applying the operation starts one more
+      // /state read; it is held, so only the older answer itself can change what is on screen.
+      mode = "hold";
+      await act(async () => older(withOperation("https://older.example.test")));
+      assert.ok(text().includes("second.example.test"), "the later poll's state stays");
+      assert.ok(!text().includes("older.example.test"), "the older answer does not overwrite it");
+      await act(async () => (release as unknown as (result: Result) => void)(withOperation(current)));
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// The same rule for the read that follows a finished operation.
+test("the read after a finished operation, answering after a later poll, does not overwrite it", async () => {
+  mock.timers.enable({ apis: ["setInterval"] });
+  const done = { operationId: "op-9", kind: "start", stage: "settled", failureCode: null, handle: { id: "route-1" }, recovery: null };
+  const withOperation = (origin: string) => {
+    const result = stateWith(route(origin)) as { ok: true; data: Record<string, unknown> };
+    return ok({ ...result.data, operations: [done] });
+  };
+  let stateReads = 0;
+  let current = "https://first.example.test";
+  let release: ((result: Result) => void) | null = null;
+  const table: Record<string, Entry> = {
+    // Read 1 is the page's first poll. The operation it reports starts read 2, which is held.
+    "/state": () => (++stateReads === 2 ? new Promise<Result>((resolve) => (release = resolve)) : withOperation(current)),
+  };
+  try {
+    await withScreen("http://localhost:3000", table, async ({ text }) => {
+      assert.ok(release, "the post-operation read is waiting");
+      const older = release as (result: Result) => void;
+      current = "https://second.example.test";
+      await act(async () => mock.timers.tick(3000));
+      await act(async () => {});
+      assert.ok(text().includes("second.example.test"), "the poll applied the newer state");
+      await act(async () => older(withOperation("https://older.example.test")));
+      assert.ok(text().includes("second.example.test"), "the later poll's state stays");
+      assert.ok(!text().includes("older.example.test"), "the older answer does not overwrite it");
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("two fast clicks on Turn off send one stop", async () => {
   const table = { "/state": stateWith(route(REMOTE)), "/routes/route-1/stop": ok({ operationId: "op-1" }) };
   await withScreen("http://localhost:3000", table, async ({ calls, pressTwiceAtOnce }) => {
