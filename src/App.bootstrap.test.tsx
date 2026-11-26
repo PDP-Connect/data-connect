@@ -18,6 +18,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 // paid at file import (which has no per-test timeout), not inside the 5 s test
 // budget. Nothing in the graph reads the Tauri marker at import time; every
 // isTauriRuntime() check runs inside a hook or handler.
+import { deriveTimeline } from "./apps/timeline/timeline-derivation"
 import App from "./App"
 import { deriveIconUrls } from "./apps/icon-url"
 
@@ -165,5 +166,36 @@ describe("app icon candidates", () => {
       "https://icons.example/app.png",
     ])
     expect(deriveIconUrls(null, "   ")).toEqual([])
+  })
+})
+
+describe("timeline read failure states", () => {
+  const stream = {
+    id: "demo.events",
+    label: "Demo",
+    fields: [{ name: "event_time", type: "string", format: "date-time" }],
+    primaryKey: ["id"],
+    timestampFields: ["event_time"],
+  }
+  const limits = { maxRecords: 20, maxStreams: 2 }
+
+  it("keeps unusable timestamps listed separately instead of losing their records", () => {
+    const read = deriveTimeline({ streams: [{
+      stream, hasMore: false, records: [
+        { id: "missing-zone", data: { title: "Missing zone", event_time: "2025-02-28T09:15:00" } },
+        { id: "impossible-date", data: { title: "Impossible date", event_time: "2025-02-30T09:15:00Z" } },
+      ],
+    }] }, limits)
+    expect(read.dayGroups).toEqual([])
+    expect(read.undatedRecords).toHaveLength(2)
+    expect(read.undatedRecords.every(record => record.reason === "no-usable-timestamp")).toBe(true)
+    expect(read.processedRecordCount).toBe(2)
+  })
+
+  it("does not present an empty partial page as a complete timeline", () => {
+    const read = deriveTimeline({ streams: [{ stream, hasMore: true, records: [] }] }, limits)
+    expect(read.dayGroups).toEqual([])
+    expect(read.omittedRecordCount).toBe(0)
+    expect(read.isTruncated).toBe(true)
   })
 })
