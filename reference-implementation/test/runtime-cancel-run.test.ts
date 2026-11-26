@@ -391,7 +391,7 @@ setInterval(() => {}, 1000);
       collectionMode: "full_refresh",
       connectorId: MANIFEST.connector_id,
       connectorPath: stubPath,
-      manifest: MANIFEST,
+      manifest: { ...MANIFEST, capabilities: { human_interaction: ["otp"] } },
       // An owner who never answers: the handler settles only when the test
       // releases it after the assertions.
       onInteraction: (interaction) => {

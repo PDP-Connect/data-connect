@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -883,9 +884,9 @@ rl.on('line', (line) => {
       type: string;
     };
     assert.equal(replayStart.type, "START");
-    // START lists exactly what this runtime implements. DETAIL_COVERAGE_KEY_SETS is
-    // advisory and not advertised, so this connector reports hydrated keys only.
-    assert.deepEqual(replayStart.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"]);
+    // START uses the same support declaration as the owner document.
+    assert.deepEqual(replayStart.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
+
     const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),

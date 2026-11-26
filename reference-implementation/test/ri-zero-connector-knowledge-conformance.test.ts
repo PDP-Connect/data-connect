@@ -1227,6 +1227,16 @@ test("falsifiability: a non-JSON-consuming read of an unresolvable path is corre
   );
 });
 
+test("falsifiability: an imported manifest parser makes an unresolved read a data load", () => {
+  withSyntheticProductionFile("synthetic-manifest-parser.ts", [
+    'import { readFileSync } from "node:fs";',
+    'import { parseManifestJsonText as parseProfile } from "../runtime/binding-declarations.ts";',
+    'export function readProfile(path: string) { const raw = readFileSync(path, "utf8"); return parseProfile(raw); }',
+  ].join("\n"), (relPath) => {
+    assert.ok(scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot).some((v) => v.rule === "unresolvable-data-resource-load"));
+  });
+});
+
 test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a manifest by id' shape) is not flagged", () => {
   withSyntheticProductionFile(
     "synthetic-manifest-select.ts",

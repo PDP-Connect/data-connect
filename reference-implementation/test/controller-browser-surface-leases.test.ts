@@ -2142,6 +2142,7 @@ setInterval(() => {}, 1000);
 
 const BLOCKED_OTP_MANIFEST = {
   ...MANIFEST,
+  capabilities: { ...MANIFEST.capabilities, human_interaction: ["otp"] },
   streams: [
     {
       name: "items",
