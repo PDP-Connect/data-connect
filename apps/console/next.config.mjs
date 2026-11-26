@@ -42,6 +42,7 @@ const nextConfig = {
   // dev`, which is where this app's screenshots and manual review happen.
   devIndicators: false,
   output: "standalone",
+  serverExternalPackages: ["@tnunamak/gozar"],
   // sharp ships prebuilt binaries for both glibc and musl per platform, and Next's
   // file tracer can't tell at build time which one the deploy target needs, so it
   // conservatively includes both. The console never runs on musl, but linuxdeploy
@@ -78,6 +79,10 @@ const nextConfig = {
   // biome-ignore lint/suspicious/useAwait: Preserves an established runtime, ordering, async, accessibility, or source-shape contract; covered by package verification.
   async rewrites() {
     return [
+      {
+        destination: "/api/reachability/service-proof",
+        source: "/.well-known/gozar/service",
+      },
       {
         destination: "/well-known/oauth-authorization-server",
         source: "/.well-known/oauth-authorization-server",

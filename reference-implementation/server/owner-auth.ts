@@ -60,6 +60,7 @@ import {
   type OwnerSessionStore,
   type OwnerSessionSameSite,
 } from "./owner-session.ts";
+import { isBlockedOwnerPassword, OWNER_PASSWORD_TOO_COMMON_MESSAGE } from "./owner-password-blocklist.ts";
 import {
   createOwnerPasswordVerifier,
   OWNER_PASSWORD_MIN_LENGTH,
@@ -217,6 +218,7 @@ export interface OwnerAuthPlaceholder {
     req: AuthRequest
   ) => Promise<{ credentialRevision?: string | null; sessionIdHash?: string } | null>;
   renderCsrfField: (token: string) => string;
+  requireCookieMutationCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
   requireCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
   requireOwnerSession: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => Promise<void>;
   readonly subjectId: string;
@@ -1146,13 +1148,9 @@ export function createOwnerAuthPlaceholder({
     );
   }
 
-  function requireCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+  function requireCsrfPair(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
     if (!(enabled && csrfSecret)) {
       // Owner-auth disabled — no session, no CSRF surface to protect.
-      next();
-      return;
-    }
-    if (!shouldRequireCsrf(req)) {
       next();
       return;
     }
@@ -1166,6 +1164,15 @@ export function createOwnerAuthPlaceholder({
       return;
     }
     next();
+  }
+
+  function requireCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+    if (!shouldRequireCsrf(req)) { next(); return; }
+    requireCsrfPair(req, res, next);
+  }
+
+  function requireCookieMutationCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+    requireCsrfPair(req, res, next);
   }
 
   function extractCsrfFormToken(req: AuthRequest): string {
@@ -1330,6 +1337,12 @@ export function createOwnerAuthPlaceholder({
             code: "owner_password_too_short",
             message: `New passwords must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters long.`,
           },
+        });
+        return;
+      }
+      if (isBlockedOwnerPassword(newPassword)) {
+        res.status(400).json({
+          error: { code: "owner_password_too_common", message: OWNER_PASSWORD_TOO_COMMON_MESSAGE },
         });
         return;
       }
@@ -1500,6 +1513,7 @@ export function createOwnerAuthPlaceholder({
     },
     renderCsrfField: renderCsrfHiddenField,
     requireCsrf,
+    requireCookieMutationCsrf,
     requireOwnerSession,
     subjectId: resolvedSubjectId,
   };

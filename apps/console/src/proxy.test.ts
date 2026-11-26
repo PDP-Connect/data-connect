@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import test from "node:test"
 import { NextRequest } from "next/server"
 import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants"
@@ -188,5 +190,66 @@ test("challenge consent and incomplete requests stay with the console page", asy
     const response = await proxy(new NextRequest(`http://console.test/consent${query}`))
     assert.equal(response.headers.get("x-middleware-next"), "1")
   }
+  assert.equal(fetchMock.mock.callCount(), 0)
+})
+
+// The own-address provider proves a public origin by sending a service
+// challenge to it. The public path is reverse proxy -> console -> resource
+// server, and the answer binds the Host the resource server received. So the
+// console must forward this one path to the resource server with the public
+// Host unchanged; every other proxied path rewrites Host to the upstream.
+test("the gozar service challenge reaches the resource server with the public Host", async (t) => {
+  // Dynamic: this package compiles tests as CommonJS and the library uses top-level await.
+  const { createServiceVerifier } = await import("@tnunamak/gozar")
+  const verify = createServiceVerifier()
+  const seen: { host: string | undefined }[] = []
+  const resourceServer = createServer((req, res) => {
+    seen.push({ host: req.headers.host })
+    if (!verify(req, res)) {
+      res.writeHead(404).end()
+    }
+  })
+  await new Promise<void>(resolve => resourceServer.listen(0, "127.0.0.1", resolve))
+  t.after(() => resourceServer.close())
+  const rsPort = (resourceServer.address() as AddressInfo).port
+  const previous = Object.getOwnPropertyDescriptor(process.env, "PDPP_RS_URL")
+  process.env.PDPP_RS_URL = `http://127.0.0.1:${rsPort}`
+  t.after(() => {
+    if (previous) Object.defineProperty(process.env, "PDPP_RS_URL", previous)
+    else Reflect.deleteProperty(process.env, "PDPP_RS_URL")
+  })
+
+  const nonce = "ab".repeat(32)
+  const publicHost = "vault.example.com"
+  const response = await proxy(
+    new NextRequest(`http://${publicHost}/.well-known/gozar/service?nonce=${nonce}`, {
+      headers: { host: publicHost },
+    })
+  )
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get("x-middleware-next"), null, "must not fall through to a Next page")
+  const body = (await response.json()) as { authority: string; localPort: number; nonce: string; proof: string }
+  assert.deepEqual(seen, [{ host: publicHost }])
+  assert.equal(body.authority, publicHost)
+  assert.equal(body.localPort, rsPort)
+  assert.equal(body.nonce, nonce)
+  assert.match(body.proof, /^[0-9a-f]{64}$/)
+})
+
+test("under a desktop supervisor the service challenge is not forwarded to the resource server", async (t) => {
+  const fetchMock = t.mock.method(globalThis, "fetch", () => {
+    throw new Error("the desktop challenge is answered inside the console process")
+  })
+  const previous = Object.getOwnPropertyDescriptor(process.env, "PDPP_MANAGED_DESKTOP_HOST")
+  process.env.PDPP_MANAGED_DESKTOP_HOST = "1"
+  t.after(() => {
+    if (previous) Object.defineProperty(process.env, "PDPP_MANAGED_DESKTOP_HOST", previous)
+    else Reflect.deleteProperty(process.env, "PDPP_MANAGED_DESKTOP_HOST")
+  })
+  const response = await proxy(
+    new NextRequest(`http://console.test/.well-known/gozar/service?nonce=${"ab".repeat(32)}`)
+  )
+  // Falls through to the rewrite that serves it from the console process.
+  assert.equal(response.headers.get("x-middleware-next"), "1")
   assert.equal(fetchMock.mock.callCount(), 0)
 })

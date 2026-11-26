@@ -135,6 +135,7 @@ jobs:
             echo "No reference-impacting changes detected (or reference-implementation/ does not exist in this repo yet); required context will pass without heavy reference tests."
           fi
 
+  # Patchright needs supported Ubuntu; keep native modules/browser caches on the same pinned ABI.
   typecheck-reference:
     name: typecheck reference implementation
     needs: classify

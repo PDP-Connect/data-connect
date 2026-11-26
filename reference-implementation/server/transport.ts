@@ -371,6 +371,12 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // Fastify's default handling.
   fastify.setErrorHandler((error, request, reply) => {
     const { code, statusCode } = error as { readonly code?: unknown; readonly statusCode?: unknown };
+    if (request.url.startsWith("/v1/owner/reachability")) {
+      reply.status(typeof statusCode === "number" && statusCode >= 400 && statusCode < 500 ? statusCode : 500).send({
+        error: { code: "invalid_input", message: "The reachability request could not be read." },
+      });
+      return;
+    }
     if (
       request.url.startsWith("/_ref/source-webhooks/") &&
       (code === "FST_ERR_CTP_BODY_TOO_LARGE" || statusCode === 413)

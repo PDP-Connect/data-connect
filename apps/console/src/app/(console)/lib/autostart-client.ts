@@ -5,7 +5,7 @@
  * Server-only client for the owner autostart route family
  * (`/v1/owner/autostart`, reference-implementation/server/routes/
  * owner-autostart.ts). Same owner-bearer pattern as
- * `remote-access-client.ts`/`connector-install-client.ts`.
+ * `connector-install-client.ts`.
  */
 
 import { describeErrorText } from "./describe-error.ts"

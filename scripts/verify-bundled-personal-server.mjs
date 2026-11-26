@@ -345,7 +345,9 @@ function packagedManifestFiles(root, prefixed) {
     )) {
       const path = join(current, entry.name)
       if (entry.isDirectory()) visit(path)
-      else if (entry.isFile() && entry.name !== "manifest.json") {
+      // Only the stack's own root manifest is excluded, as the stager does. A
+      // dependency may ship a nested manifest.json, which the stager hashes.
+      else if (entry.isFile() && !(current === root && entry.name === "manifest.json")) {
         files.push({
           path: relative(root, path).split("\\").join("/"),
           sha256: hashFile(path, prefixed),
