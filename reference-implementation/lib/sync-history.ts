@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { decodeHistoryCursor, HistoryInputError, historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export type SyncOutcome = "finished" | "failed" | "stopped" | "interrupted" | "could_not_start" | "syncing";
 export interface SyncHistoryInput extends HistoryInput { only_problems?: boolean; run_id?: string }
 export interface SyncEvidence { reason: string | null; error: string | null; connector_error: unknown }
@@ -55,11 +55,11 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
   if (input.connection_id) { where += " AND connector_instance_id = ?"; values.push(input.connection_id); }
   if (input.day || input.run_id) {
     if (input.run_id) { where += " AND run_id = ?"; values.push(input.run_id); }
-    if (!input.connection_id && !input.run_id) throw new RangeError("A single day requires a connection");
+    if (!input.connection_id && !input.run_id) throw new HistoryInputError("A single day requires a connection");
     const limit = historyLimit(input);
     if (input.cursor) {
-      const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString()) as [string, string];
-      if (!Array.isArray(cursor) || cursor.length !== 2 || !/^\d+$/.test(cursor[1])) throw new RangeError("Invalid cursor");
+      const cursor = decodeHistoryCursor(input.cursor) as [string, string];
+      if (!Array.isArray(cursor) || cursor.length !== 2 || !/^\d+$/.test(cursor[1])) throw new HistoryInputError("Invalid cursor");
       where += ` AND (${time} < ? OR (${time} = ? AND id < ?))`;
       values.push(cursor[0], cursor[0], cursor[1]);
     }

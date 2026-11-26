@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CONSOLE_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import { jsonObject, type AppAccess } from "./app-access.ts";
-import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { decodeHistoryCursor, HistoryInputError, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
 export interface AppReadSource { last_at?: string | null; source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
@@ -54,7 +54,7 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
 export async function readAppHistory(subjectId: string, input: AppHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<AppHistory> {
   const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
   if (input.day) {
-    if (!input.client_ids?.length) throw new RangeError("A single day requires an app");
+    if (!input.client_ids?.length) throw new HistoryInputError("A single day requires an app");
     const discoveryOnly = `${shape} IN (${DISCOVERY_SHAPES.map(value=>`'${value}'`).join(",")})`;
     const discoverySource=`CASE WHEN ${shape}='stream_metadata' THEN ${source} END`;
     const discoveryKind=`CASE WHEN ${shape}='stream_metadata' THEN ${sourceKind} END`;
@@ -71,8 +71,8 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     const limit = historyLimit(input);
     let pageWhere = where;
     if (input.cursor) {
-      const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString()) as [string, string];
-      if (!Array.isArray(cursor) || cursor.length !== 2 || typeof cursor[0] !== "string" || typeof cursor[1] !== "string") throw new RangeError("Invalid cursor");
+      const cursor = decodeHistoryCursor(input.cursor) as [string, string];
+      if (!Array.isArray(cursor) || cursor.length !== 2 || typeof cursor[0] !== "string" || typeof cursor[1] !== "string") throw new HistoryInputError("Invalid cursor");
       pageWhere += " AND (e.occurred_at < ? OR (e.occurred_at = ? AND e.event_id < ?))";
       values.push(cursor[0], cursor[0], cursor[1]);
     }
@@ -138,7 +138,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
   const allData=[...days.values()].sort((a,b)=>b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id));
   const dates=[...new Set([...allData.map(row=>row.day),...decisions.map(row=>row.day)])].sort().reverse();
   const eligible=dates.filter(day=>!input.before || day<input.before);
-  if(input.days !== undefined && (!Number.isInteger(input.days) || input.days<1 || input.days>366)) throw new RangeError("Invalid day page size");
+  if(input.days !== undefined && (!Number.isInteger(input.days) || input.days<1 || input.days>366)) throw new HistoryInputError("Invalid day page size");
   const selected=input.days ? eligible.slice(0,input.days) : eligible;
   const hasMore=selected.length<eligible.length;
   return { mode:"days", identities, data:allData.filter(row=>selected.includes(row.day)),changes:decisions.filter(row=>selected.includes(row.day)),has_more:hasMore,next_cursor:null,

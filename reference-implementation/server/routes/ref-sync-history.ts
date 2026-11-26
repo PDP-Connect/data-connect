@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { historyBounds, historyLimit, type HistoryInput } from "../../lib/history-query.ts";
+import { HistoryInputError, historyBounds, historyLimit, type HistoryInput } from "../../lib/history-query.ts";
 import { readSyncHistory } from "../../lib/sync-history.ts";
 import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
 export function parseHistoryInput(query: Record<string, unknown>): HistoryInput {
@@ -31,7 +31,7 @@ export function mountRefSyncHistory(app: HistoryRouteApp, ctx: HistoryRouteConte
       const input = parseHistoryInput(req.query ?? {});
       return res.json(await readSyncHistory({ ...input, only_problems: req.query?.only_problems === "true", ...(req.query?.run_id ? { run_id: String(req.query.run_id) } : {}) }));
     } catch (error) {
-      if (error instanceof RangeError || error instanceof SyntaxError) return ctx.pdppError(res, 400, "invalid_request", error.message);
+      if (error instanceof HistoryInputError) return ctx.pdppError(res, 400, "invalid_request", error.message);
       return ctx.handleError(res, error);
     }
   });
