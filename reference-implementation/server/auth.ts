@@ -5654,7 +5654,7 @@ export async function registerConnector(
     verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
-  assertIncomingSourceDeclarationPublisher(manifest);
+  manifest = await assertIncomingSourceDeclarationPublisher(manifest);
   validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
   // The retained identity is read here and re-checked under the publication lock in
   // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
@@ -5988,12 +5988,32 @@ function assertSourceIdentityMovable(
   }
 }
 
-/** Incoming packages cannot impersonate the server's durable compatibility projections. */
-export function assertIncomingSourceDeclarationPublisher(manifest: Record<string, unknown>): void {
+/** A returned server projection is writeable only when omitting it regenerates the same declaration. */
+export async function assertIncomingSourceDeclarationPublisher(
+  manifest: Record<string, unknown>
+): Promise<Record<string, unknown>> {
   const declaration = sourceDeclarationOf(manifest);
   if (isRecord(declaration?.publisher) && declaration.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID) {
-    throw invalidConnectorManifest("source_declaration publisher is reserved for server-generated projections");
+    const incoming = { ...manifest };
+    delete incoming.source_declaration;
+    const connectorId = storageConnectorIdOf(incoming);
+    const previous = isNonEmptyString(connectorId)
+      ? (await getConnectorCatalogStore().getManifestById(connectorId))?.manifest
+      : undefined;
+    const { storedManifest } = normalizeConnectorManifestForStorage(incoming, retainedStorageContext(previous));
+    // Use the same normalization and durable-history retention as both publication paths.
+    const regenerated = sourceDeclarationOf(retainMovedFromIdentity(JSON.stringify(storedManifest), previous));
+    if (
+      regenerated !== undefined &&
+      canonicalManifestJson(JSON.stringify(declaration)) === canonicalManifestJson(JSON.stringify(regenerated))
+    ) {
+      return incoming;
+    }
+    throw invalidConnectorManifest(
+      "source_declaration publisher is reserved for server-generated projections; remove source_declaration, because the server generates it for this publisher"
+    );
   }
+  return manifest;
 }
 
 /** Validate an explicit declaration through the Core boundary before it is retained. */
