@@ -1,0 +1,191 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/strava-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/strava",
+		"display": {
+			"name": "Strava"
+		}
+	},
+	"connector_key": "strava-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
+	"version": "0.1.49",
+	"display_name": "Strava (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FC4C02"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch", "host_http_request"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation", "host_http_request"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Every run reads activity summaries from that list. On desktop, the first run inventories all summaries and later runs discover new ones and read at most 100 activity details from a resumable queue. On mobile, every run is a full inventory of summaries and no activity details are read. Pages and details are fetched one at a time with pauses."
+		},
+		"public_listing": {
+			"tier": "preview"
+		}
+	},
+	"streams": [
+		{
+			"name": "activities",
+			"required": false,
+			"description": "Activities read from the owner's signed-in strava.com activity list. Every run emits summaries; on desktop, later runs can enrich them from activity detail pages, heart-rate streams and gear lists. Mobile runs collect summaries only, so heart rate, calories and gear stay null there. Emitted records exclude routes, GPS coordinates, activity titles and notes.",
+			"display": {
+				"label": "Your Strava activities",
+				"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, plus average and maximum heart rate, calories and gear where available (desktop detail collection only; mobile collects summaries without them). No route, no GPS coordinates, no activity titles or notes."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Strava's numeric activity ID, used as the record's primary key."
+					},
+					"activity_type": {
+						"type": ["string", "null"],
+						"description": "Strava's activity type, such as Ride, Run, Swim or Hike, or null when absent. The account export copies its Activity Type column. The browser collector uses the activity list's type; when that is absent, it uses sport_type and maps GravelRide and MountainBikeRide to Ride, TrailRun to Run and EMountainBikeRide to EBikeRide. Other values pass through unchanged.",
+						"x_pdpp_role": "primary-title"
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date",
+						"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null; otherwise this date can be the wrong local day."
+					},
+					"start_date_local": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "The athlete's local calendar day, YYYY-MM-DD, or null. Set only when the source states the local clock: a numeric UTC offset in the account export (+00:00 counts; -00:00 means unknown), or an exact local offset in the Strava activity list. A 'Z', -00:00 or zoneless value gives no local day. This is the consent_time_field: a time_range compares calendar days, and a bounded run excludes activities whose value is null."
+					},
+					"start_time": {
+						"type": "string",
+						"description": "Activity start in ISO-8601 form. The browser collector always includes an offset or Z; the account export may be zoneless. Read start_time_basis before treating it as an instant or making local time-of-day claims.",
+						"x_pdpp_role": "event-time"
+					},
+					"start_time_basis": {
+						"type": "string",
+						"enum": ["utc", "local", "unknown"],
+						"description": "The clock used for start_time: 'local' (the athlete's local clock, with its offset), 'utc' (an exact instant: UTC, or a numeric offset stated in the account export) or 'unknown' (a zoneless value). It records what the collected source establishes rather than assuming a timezone. Only a non-null start_date_local establishes the athlete's local day."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"description": "Distance in metres, or null when unavailable from the collected source."
+					},
+					"moving_time_s": {
+						"type": ["number", "null"],
+						"description": "Moving time in seconds, or null when unavailable from the collected source."
+					},
+					"elapsed_time_s": {
+						"type": ["number", "null"],
+						"description": "Elapsed time in seconds, or null when unavailable from the collected source."
+					},
+					"total_elevation_gain_m": {
+						"type": ["number", "null"],
+						"description": "Elevation gain in metres, or null when unavailable from the collected source."
+					},
+					"average_heartrate": {
+						"type": ["number", "null"],
+						"description": "Average heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the mean of the heart-rate stream samples."
+					},
+					"max_heartrate": {
+						"type": ["number", "null"],
+						"description": "Maximum heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the maximum of the heart-rate stream samples."
+					},
+					"calories_kcal": {
+						"type": ["number", "null"],
+						"description": "Calories in kilocalories as recorded by Strava, or null when unavailable from the collected source. Browser summary records carry null; detail records may also have null."
+					},
+					"gear": {
+						"type": ["string", "null"],
+						"description": "The name of the bike or shoes used, or null when unassigned or unavailable from the collected source. Browser summary records carry null; detail collection may resolve the name from the owner's gear lists."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"],
+						"description": "How this reading was collected: 'snapshot' for account-export records and 'live' for records read from the signed-in website. This identifies the collection method, not a promise of continuous refresh."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When Strava generated the account-export archive, or null when its generation date cannot be determined. Always null for browser-collected records, which do not come from an account-export archive. The key is present for both collection methods."
+					}
+				},
+				"required": [
+					"id",
+					"start_date",
+					"start_time",
+					"start_time_basis",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date_local",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"start_date_local": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["activity_type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"covered_in_full": "All Strava activities in the selected date range have already been collected.",
+		"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
+		"nothing_in_range": "Strava has no activities in the selected date range.",
+		"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
+		"sign_in_required": "Strava needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run reached a source limit. The next run will retry the remaining activity work.",
+		"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "strava_browser.ts",
+			"exception": "Preserves the app's activities payload and STATE shape.",
+			"scope_prefix": "strava",
+			"login_url": "https://www.strava.com/login",
+			"login_message": "Sign in to Strava, then return here.",
+			"collect_export": "collectStravaBrowser",
+			"probe_export": "probeStravaSession",
+			"summary": {
+				"stream": "activities",
+				"singular": "activity",
+				"plural": "activities",
+				"details": ["activities"]
+			}
+		}
+	}
+}

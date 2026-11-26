@@ -3,12 +3,12 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { startServer } from "../server/index.ts";
 
 function readShippedPolyfillManifest(file: string): unknown {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  const entry = readShippedManifests().find((candidate) => candidate.file === file);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${file}`);
   }

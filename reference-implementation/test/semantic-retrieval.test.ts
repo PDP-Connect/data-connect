@@ -46,7 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -2092,7 +2092,7 @@ test("backend identity change flips index_state to stale until rebuild restores"
 // coverage reaches existing records without connector re-ingest.
 
 function loadShippedManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === name);
+  const entry = readShippedManifests().find((candidate) => candidate.file === name);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}`);
   }

@@ -16,7 +16,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -136,7 +136,7 @@ async function fetchJson(url: string | URL, opts: RequestInit = {}): Promise<Jso
 }
 
 function loadManifest(name: string): unknown {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

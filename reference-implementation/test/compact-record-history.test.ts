@@ -20,7 +20,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 import pg from "pg";
@@ -66,9 +66,9 @@ const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 // Reference-fixture manifests are read directly from disk (test-only
 // static-file access — the same pattern connector-key.test.ts already uses —
 // NOT the runtime `getConnectorManifest` DB-catalog lookup version-disposition
-// callers use in production). The first-party polyfill manifests are read via
-// `@pdpp/polyfill-connectors`'s own `readPolyfillManifests()` export, since
-// that package — not this repo — owns their on-disk layout. Used below to
+// callers use in production). The shipped connector manifests are read via
+// the RI test helper, which preserves the old entry shape without depending on
+// the package's on-disk layout. Used below to
 // independently re-derive which (connector, stream) pairs declare each
 // `compaction_class`, so the server-list-matches-script-list guardrail tests
 // keep proving the two stay in sync without importing any list out of
@@ -84,7 +84,7 @@ interface ManifestForCompactionClassScan {
 
 function allShippedManifestsForTest(): ManifestForCompactionClassScan[] {
   const manifests: ManifestForCompactionClassScan[] = [];
-  for (const entry of readPolyfillManifests()) {
+  for (const entry of readShippedManifests()) {
     manifests.push(entry.manifest as ManifestForCompactionClassScan);
   }
   let referenceFixtureFiles: string[];

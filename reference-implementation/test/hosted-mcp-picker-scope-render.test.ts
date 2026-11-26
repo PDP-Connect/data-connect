@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import {
@@ -117,7 +117,7 @@ function renderPicker(): Promise<string> {
 test("consent preserves shipped stream display labels, scope details, and field descriptions", async () => {
   let displayedStreams = 0;
   let describedFields = 0;
-  for (const entry of readPolyfillManifests()) {
+  for (const entry of readShippedManifests()) {
     const manifest = entry.manifest as {
       streams: Array<{
         name: string;

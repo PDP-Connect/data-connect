@@ -30,7 +30,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 const TOP_LEVEL_REGEX_1 = /\.json$/;
 
@@ -55,7 +55,7 @@ interface Manifest {
 }
 
 const POLYFILL_MANIFESTS_BY_NAME = new Map(
-  readPolyfillManifests().map((entry) => [entry.file.replace(TOP_LEVEL_REGEX_1, ""), entry.manifest as Manifest])
+  readShippedManifests().map((entry) => [entry.file.replace(TOP_LEVEL_REGEX_1, ""), entry.manifest as Manifest])
 );
 const POLYFILL_MANIFEST_NAMES = [...POLYFILL_MANIFESTS_BY_NAME.keys()].sort();
 

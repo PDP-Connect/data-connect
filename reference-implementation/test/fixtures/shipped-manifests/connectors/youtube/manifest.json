@@ -1,0 +1,506 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/youtube",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/youtube",
+		"display": {
+			"name": "YouTube"
+		}
+	},
+	"connector_key": "youtube",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
+	"version": "0.2.49",
+	"mobile": { "pageshim": { "entry": "youtube.ts", "scope_prefix": "youtube", "login_url": "https://www.youtube.com/" } },
+	"display_name": "YouTube",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FF0000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_navigation", "page_script_evaluation", "page_condition_wait"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection uses the owner's authenticated YouTube browser session. Login and session repair require the owner; lists are bounded browser snapshots."
+		},
+		"public_listing": {
+			"tier": "preview",
+			"rationale": "Browser replacement for seven legacy YouTube scopes."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "Signed-in owner account identity from the account menu, plus channel fields when YouTube exposes an owner channel.",
+			"display": {
+				"label": "Your YouTube channel",
+				"detail": "The owner channel ID, URL, title, handle and avatar when visible, plus the signed-in account email when visible."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable browser-observed owner identity: native channel ID when present, otherwise the owner channel URL or signed-in account email."
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"handle": {
+						"type": ["string", "null"]
+					},
+					"email": {
+						"type": ["string", "null"],
+						"description": "Signed-in Google account email, read from the avatar menu's Switch account header; omitted when the menu shows none."
+					},
+					"joined_at": {
+						"type": ["string", "null"]
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"description": {
+						"type": ["string", "null"]
+					},
+					"country": {
+						"type": ["string", "null"]
+					},
+					"subscriber_count": {
+						"type": ["integer", "null"]
+					},
+					"view_count": {
+						"type": ["integer", "null"]
+					},
+					"video_count": {
+						"type": ["integer", "null"]
+					},
+					"channel_id": {
+						"type": ["string", "null"],
+						"description": "Native YouTube channel ID when exposed by the own-channel page."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "description"],
+					"semantic_fields": ["title", "description"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "subscriptions",
+			"required": false,
+			"description": "Channels visible in the signed-in subscriptions page.",
+			"display": {
+				"label": "Your subscriptions",
+				"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"channel_id": {
+						"type": ["string", "null"]
+					},
+					"channel_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"handle": {
+						"type": ["string", "null"]
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"subscriber_count": {
+						"type": ["integer", "null"]
+					},
+					"description": {
+						"type": ["string", "null"]
+					},
+					"is_verified": {
+						"type": ["boolean", "null"]
+					},
+					"notifications": {
+						"type": ["boolean", "null"]
+					},
+					"subscriber_count_text": {
+						"type": ["string", "null"],
+						"description": "Browser-visible raw subscriber count for legacy projection; omitted when no count text is rendered."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "playlists",
+			"required": false,
+			"description": "Owner library playlists visible in the browser.",
+			"display": {
+				"label": "Your playlists",
+				"detail": "Playlist titles, URLs and visible header metadata."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"owner": {
+						"type": ["string", "null"]
+					},
+					"owner_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"visibility": {
+						"type": ["string", "null"]
+					},
+					"video_count": {
+						"type": ["integer", "null"]
+					},
+					"view_count": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "playlist_items",
+			"required": false,
+			"description": "Videos visible in those playlists, up to 20 scroll rounds per playlist.",
+			"display": {
+				"label": "Your playlist items",
+				"detail": "Video titles and URLs from each visible playlist. Scrolling is bounded."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"playlist_id": {
+						"type": "string"
+					},
+					"video_id": {
+						"type": ["string", "null"]
+					},
+					"video_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": {
+						"type": ["string", "null"]
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"]
+					},
+					"thumbnail_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_text": {
+						"type": ["string", "null"],
+						"description": "Browser-visible duration label for legacy projection."
+					}
+				},
+				"required": ["id", "playlist_id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "likes",
+			"required": false,
+			"description": "Videos visible in the signed-in Liked Videos (LL) playlist.",
+			"display": {
+				"label": "Your liked videos",
+				"detail": "Liked video titles and URLs from the signed-in playlist. Scrolling is bounded."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"video_id": {
+						"type": ["string", "null"]
+					},
+					"video_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": {
+						"type": ["string", "null"]
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"]
+					},
+					"thumbnail_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_text": {
+						"type": ["string", "null"],
+						"description": "Browser-visible duration label for legacy projection."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "watch_later",
+			"required": false,
+			"description": "Videos visible in the signed-in Watch Later (WL) playlist.",
+			"display": {
+				"label": "Your watch later list",
+				"detail": "Saved video titles and URLs from Watch Later. Scrolling is bounded."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"video_id": {
+						"type": ["string", "null"]
+					},
+					"video_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": {
+						"type": ["string", "null"]
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"]
+					},
+					"thumbnail_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"duration_text": {
+						"type": ["string", "null"],
+						"description": "Browser-visible duration label for legacy projection."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "watch_history",
+			"required": false,
+			"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
+			"display": {
+				"label": "Your watch history",
+				"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"video_id": {
+						"type": ["string", "null"]
+					},
+					"video_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": {
+						"type": ["string", "null"]
+					},
+					"channel_url": {
+						"type": ["string", "null"],
+						"format": "uri"
+					},
+					"view_count": {
+						"type": ["integer", "null"]
+					},
+					"description": {
+						"type": ["string", "null"]
+					},
+					"position": {
+						"type": "integer",
+						"minimum": 0,
+						"description": "Current zero-based position on the observed browser history page, newest first; position can change when videos are re-watched or history changes."
+					},
+					"watched_date": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "Day from the browser section header; null when unrecognized."
+					},
+					"views_text": {
+						"type": ["string", "null"],
+						"description": "Browser-visible raw view count for legacy projection."
+					},
+					"watched_date_label": {
+						"type": ["string", "null"],
+						"description": "Browser section header as shown at capture time."
+					}
+				},
+				"required": ["id", "position", "video_url"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				},
+				"range_filters": {
+					"watched_date": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"stream_collection_failed": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
+		"page_unreadable": "The signed-in page did not expose a trustworthy record.",
+		"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
+		"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
+		"youtube_profile_account_header_unreadable": "The signed-in YouTube account menu did not finish loading.",
+		"youtube_profile_channel_link_unavailable": "The YouTube account menu did not expose the owner's channel link.",
+		"youtube_profile_channel_page_unreadable": "The owner's YouTube channel page did not expose a readable identity.",
+		"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading."
+	}
+}

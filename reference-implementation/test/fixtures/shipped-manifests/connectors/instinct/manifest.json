@@ -1,0 +1,897 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/instinct",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/instinct",
+		"display": {
+			"name": "Instinct"
+		}
+	},
+	"connector_key": "instinct",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
+	"version": "0.1.10",
+	"display_name": "Instinct",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#1F2322"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "automatic",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "low",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": true,
+			"assisted_after_owner_auth": true,
+			"max_recovery_attempts": 3,
+			"rationale": "Instinct signs in with an SMS one-time code behind a Turnstile challenge, so first login is an owner manual action in the isolated Instinct browser profile. The session then persists in that profile and scheduled refresh reuses it; assisted_after_owner_auth:true records that a background run may ask the owner to sign in again when the session lapses. Account-state streams are one small read each, and chat history pages only until the per-chat checkpoint after the first backfill, so refresh is cheap and rate-limit pressure is low."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "Collection logic is real and was exercised against a live owner account over CDP, including a full chat-history backfill and a checkpointed rerun. Instinct is invite-only private beta and the account used had no connected services, devices, trusted people, or vault entries, and its chat history held only message and tool events, so those four streams and the rarer chat event kinds have not yet been proven against non-empty data."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": true,
+			"description": "The Instinct account holder: identity, sign-in phone, roles, enabled feature flags, and the two privacy preferences Instinct exposes.",
+			"display": {
+				"label": "Your Instinct profile",
+				"detail": "Your name, email, sign-in phone number, account roles, onboarding state, which Instinct features are switched on for you, whether you opted out of training-data use, whether Instinct holds location data, and whether other people's Instincts may reach yours."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Instinct user id (stable, e.g. user-01M0...)."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "Display name used across Instinct.",
+						"x_pdpp_role": "primary-title"
+					},
+					"email": {
+						"type": ["string", "null"],
+						"description": "Email address on the Instinct account.",
+						"format": "email"
+					},
+					"phone_number": {
+						"type": ["string", "null"],
+						"description": "Phone number used to sign in to Instinct, in E.164."
+					},
+					"roles": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Account roles granted to this user (e.g. MEMBER)."
+					},
+					"enabled_feature_flags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Instinct feature flags currently switched on for this account."
+					},
+					"onboarding_step": {
+						"type": ["string", "null"],
+						"description": "Where the account sits in Instinct onboarding ('done' once complete)."
+					},
+					"training_data_opt_out": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner opted this account's data out of model training."
+					},
+					"has_location_data": {
+						"type": ["boolean", "null"],
+						"description": "True when Instinct currently holds location data for this account."
+					},
+					"agent_to_agent_enabled": {
+						"type": ["boolean", "null"],
+						"description": "True when this owner's Instinct is allowed to exchange messages with other people's Instincts."
+					},
+					"linked_sign_in_providers": {
+						"type": "array",
+						"items": {
+							"type": "object"
+						},
+						"description": "Identity providers linked for sign-in, each as {provider, subject}."
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "email", "onboarding_step"],
+					"semantic_fields": ["name"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "agent_contact",
+			"required": true,
+			"description": "The addresses Instinct assigned to the owner's agent: its SMS number, voice number, WhatsApp number, and agent mailbox.",
+			"display": {
+				"label": "How you reach your Instinct",
+				"detail": "The phone numbers and email address your Instinct agent answers on - SMS, voice, WhatsApp, and its @mail.instinct.com mailbox - plus whether voice calls and agent mail are switched on."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Constant singleton key ('agent_contact')."
+					},
+					"sms_phone_number": {
+						"type": ["string", "null"],
+						"description": "Number the owner texts to reach their agent, in E.164."
+					},
+					"voice_phone_number": {
+						"type": ["string", "null"],
+						"description": "Number the owner calls to reach their agent, in E.164."
+					},
+					"voice_calls_enabled": {
+						"type": ["boolean", "null"],
+						"description": "True when voice calling is enabled for this agent."
+					},
+					"whatsapp_channel_phone_number": {
+						"type": ["string", "null"],
+						"description": "Number the agent answers on WhatsApp, in E.164."
+					},
+					"email": {
+						"type": ["string", "null"],
+						"description": "The agent's own mailbox address.",
+						"format": "email",
+						"x_pdpp_role": "primary-title"
+					},
+					"agent_mail_status": {
+						"type": ["string", "null"],
+						"description": "Provisioning state of the agent mailbox (e.g. READY)."
+					},
+					"agent_phone_number": {
+						"type": ["string", "null"],
+						"description": "Dedicated outbound agent phone number, when one is provisioned."
+					},
+					"agent_phone_status": {
+						"type": ["string", "null"],
+						"description": "Provisioning state of the dedicated agent phone number (e.g. NOT_AVAILABLE)."
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["email", "agent_mail_status", "agent_phone_status"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "connections",
+			"required": false,
+			"description": "Third-party accounts the owner connected to Instinct so the agent can act in them, one record per connected account.",
+			"display": {
+				"label": "Services connected to your Instinct",
+				"detail": "Every outside account you linked - Google Workspace, Outlook, Linear, Notion, GitHub, Slack, Granola, Shop wallet, WHOOP, Stripe Link, WhatsApp, iMessage - with the account identity, whether it is the default for its provider, whether access was revoked, and for Google Workspace which individual services (Gmail, Calendar, Drive, ...) are switched on."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable key: '<provider>:<provider connection id>'."
+					},
+					"provider": {
+						"type": "string",
+						"description": "Which service this connection is to (e.g. google_workspace, outlook, linear, notion, github, slack, granola, shop_wallet, whoop, stripe_link, whatsapp, imessage)."
+					},
+					"connection_id": {
+						"type": ["string", "null"],
+						"description": "The provider connection id as Instinct reports it."
+					},
+					"account_email": {
+						"type": ["string", "null"],
+						"description": "Email identifying the connected account, when the provider exposes one.",
+						"format": "email"
+					},
+					"account_name": {
+						"type": ["string", "null"],
+						"description": "Human-readable account or user name on the connected service.",
+						"x_pdpp_role": "primary-title"
+					},
+					"workspace_name": {
+						"type": ["string", "null"],
+						"description": "Workspace, organization, or team name on the connected service."
+					},
+					"is_default": {
+						"type": ["boolean", "null"],
+						"description": "True when this is the default account Instinct uses for that provider."
+					},
+					"is_revoked": {
+						"type": ["boolean", "null"],
+						"description": "True when the connection exists but its access was revoked."
+					},
+					"is_connected": {
+						"type": ["boolean", "null"],
+						"description": "True when Instinct reports the connection as currently usable."
+					},
+					"services": {
+						"type": "array",
+						"items": {
+							"type": "object"
+						},
+						"description": "Per-service grants inside this connection, each as {service_id, label, connected, read_only, notification_issue}. Google Workspace only."
+					},
+					"connected_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the connection was made, as Instinct reports it (ISO 8601). Instinct reports it only for the local iMessage relay; null for every other connection."
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id", "provider"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"provider",
+						"account_email",
+						"account_name",
+						"workspace_name"
+					]
+				},
+				"range_filters": {
+					"connected_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["provider"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "devices",
+			"required": false,
+			"description": "Devices the owner enrolled with Instinct so the agent can drive them.",
+			"display": {
+				"label": "Your enrolled devices",
+				"detail": "Each phone or computer registered with Instinct: its name, hostname, OS version, device type, when it was enrolled, and its last reported connection and battery state."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Instinct device id."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "Device name the owner gave it.",
+						"x_pdpp_role": "primary-title"
+					},
+					"hostname": {
+						"type": ["string", "null"],
+						"description": "Device hostname reported by the Instinct client."
+					},
+					"os_version": {
+						"type": ["string", "null"],
+						"description": "Operating system version reported by the device."
+					},
+					"device_type": {
+						"type": ["string", "null"],
+						"description": "Device class Instinct assigned (e.g. mac, iphone)."
+					},
+					"is_connected": {
+						"type": ["boolean", "null"],
+						"description": "True when the device was online at read time."
+					},
+					"battery_level": {
+						"type": ["integer", "null"],
+						"description": "Last reported battery level, 0-100."
+					},
+					"is_charging": {
+						"type": ["boolean", "null"],
+						"description": "True when the device reported charging at read time."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the device was enrolled with Instinct (ISO 8601).",
+						"x_pdpp_role": "event-time"
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "hostname", "os_version", "device_type"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"battery_level": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["device_type"],
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "trusted_people",
+			"required": false,
+			"description": "The owner's agent-to-agent trust list: people whose Instinct may reach theirs, people they blocked, and pending requests in both directions.",
+			"display": {
+				"label": "People your Instinct trusts",
+				"detail": "Everyone on your agent-to-agent list - trusted, blocked, asking to connect, or asked by you - with their display name, the phone numbers the request came from, when it was created, and when a pending request expires."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable key: '<relationship>:<Instinct record id>'."
+					},
+					"relationship": {
+						"type": "string",
+						"description": "Which list this person is on: contact, blocked, incoming_request, or sent_request."
+					},
+					"person_id": {
+						"type": ["string", "null"],
+						"description": "Instinct's id for the person or request record."
+					},
+					"display_name": {
+						"type": ["string", "null"],
+						"description": "Name Instinct shows for this person.",
+						"x_pdpp_role": "primary-title"
+					},
+					"phone_numbers": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Phone numbers associated with this person, in E.164."
+					},
+					"status": {
+						"type": ["string", "null"],
+						"description": "Status of a pending request, when the record is a request."
+					},
+					"generation": {
+						"type": ["integer", "null"],
+						"description": "Instinct's optimistic-concurrency generation for this record."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the trust record or request was created (ISO 8601).",
+						"x_pdpp_role": "event-time"
+					},
+					"expires_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When a pending request expires (ISO 8601)."
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id", "relationship"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["display_name", "relationship", "status"],
+					"semantic_fields": ["display_name"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"expires_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["relationship"],
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "vault_entries",
+			"required": false,
+			"description": "Inventory of what the owner's Instinct vault holds. Metadata only - entry kind, label, and which fields are filled. Never the stored values.",
+			"display": {
+				"label": "What your Instinct vault holds",
+				"detail": "One row per saved vault item - logins, cards, addresses, phone numbers - showing its kind, its label, whether your agent put it there, and which of that kind's fields are filled in. The secret values themselves are never read or exported."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable key: '<kind>:<entry name>'."
+					},
+					"kind": {
+						"type": "string",
+						"description": "Vault entry kind (login, card, address, phone, ssn)."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "Label the entry is saved under.",
+						"x_pdpp_role": "primary-title"
+					},
+					"is_agent_entry": {
+						"type": ["boolean", "null"],
+						"description": "True when the agent created the entry rather than the owner."
+					},
+					"field_keys": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Field names this entry kind defines (e.g. username, password, totp). Names only."
+					},
+					"populated_field_keys": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Which of those fields currently hold a value. Names only - no values are read."
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id", "kind"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["kind", "name"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["kind"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "chats",
+			"required": true,
+			"description": "The owner's chats with their Instinct agent, as listed by the app's /agent page. A time range selects chats by last_event_at, the time of their newest event: a chat with events inside the range but a newer event after its end is not included, although its events in the range are. A chat with no events has no last_event_at, so while any chat has none, a run with an end time does not save its progress for chats and chat events.",
+			"display": {
+				"label": "Your chats with your agent",
+				"detail": "Each chat Instinct keeps with your agent (for example the main chat that gathers every channel, and a WhatsApp channel chat): its title, source, status, and whether a turn is in progress."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Instinct chat id."
+					},
+					"title": {
+						"type": ["string", "null"],
+						"description": "Chat title Instinct shows.",
+						"x_pdpp_role": "primary-title"
+					},
+					"source": {
+						"type": ["string", "null"],
+						"description": "Which channel the chat collects, as Instinct labels it (e.g. main, which gathers every channel, or whatsapp_channel)."
+					},
+					"status": {
+						"type": ["string", "null"],
+						"description": "Chat status Instinct reports."
+					},
+					"pending_turn_started_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the agent's in-progress turn started, or null when no turn is pending (ISO 8601)."
+					},
+					"last_event_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the newest event in this chat happened, as Instinct reports it (ISO 8601, second precision), or null when the chat has no events. A time range selects the chats whose latest activity falls in it.",
+						"x_pdpp_role": "event-time"
+					},
+					"observed_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "last_event_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "source", "status"],
+					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"last_event_at": ["gte", "gt", "lte", "lt"],
+					"pending_turn_started_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["source"],
+					"group_by_time": ["last_event_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "chat_events",
+			"required": true,
+			"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events. Message text, draft field values, interactions, thinking, and tool arguments and results are copied as the app shows them, so they can hold anything the agent typed or read, including values it took from the vault. A regular run reads only events newer than those already collected, so a change Instinct makes to an older event later, such as read_at or an answer to an interaction, is picked up only by a full refresh or when that part of the history is read again.",
+			"display": {
+				"label": "Your conversations with your agent",
+				"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept. Message text, form values, approvals, and tool inputs and outputs are kept as the app shows them, so they can include anything your agent typed or read, such as details it filled in from your vault."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Instinct event id."
+					},
+					"chat_id": {
+						"type": "string",
+						"description": "Id of the chat this event belongs to."
+					},
+					"type": {
+						"type": "string",
+						"description": "Event kind Instinct records (e.g. message, tool_invocation, tool_response, tool_result_block, error); says which of the per-kind fields are populated."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the event happened (ISO 8601, second precision).",
+						"x_pdpp_role": "event-time"
+					},
+					"message_id": {
+						"type": ["string", "null"],
+						"description": "Instinct message id, for message events."
+					},
+					"role": {
+						"type": ["string", "null"],
+						"description": "Who wrote the message (e.g. user, assistant).",
+						"x_pdpp_role": "actor"
+					},
+					"content": {
+						"type": ["string", "null"],
+						"description": "Message text.",
+						"x_pdpp_role": "primary-title"
+					},
+					"read_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the message was read, if Instinct had recorded it when the event was collected (ISO 8601). Instinct sets it later for a message read later, and a collected event is read again only on a full refresh."
+					},
+					"origin_kind": {
+						"type": ["string", "null"],
+						"description": "Where the message came from, as Instinct labels it."
+					},
+					"origin_agent_display_name": {
+						"type": ["string", "null"],
+						"description": "Display name of the agent that originated the message, when another agent sent it."
+					},
+					"attachments": {
+						"type": "array",
+						"description": "Files attached to the message, without their short-lived download links.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": ["string", "null"],
+									"description": "Instinct attachment id."
+								},
+								"kind": {
+									"type": ["string", "null"],
+									"description": "Attachment kind Instinct assigned."
+								},
+								"mime_type": {
+									"type": ["string", "null"],
+									"description": "Attachment MIME type."
+								},
+								"filename": {
+									"type": ["string", "null"],
+									"description": "Attachment file name."
+								},
+								"byte_size": {
+									"type": ["integer", "null"],
+									"description": "Attachment size in bytes."
+								}
+							}
+						}
+					},
+					"error_message": {
+						"type": ["string", "null"],
+						"description": "Error text, for error events."
+					},
+					"tool_name": {
+						"type": ["string", "null"],
+						"description": "Name of the tool the agent called, for tool invocation and response events."
+					},
+					"tool_call_id": {
+						"type": ["string", "null"],
+						"description": "Id linking a tool invocation to its response."
+					},
+					"tool_arguments": {
+						"type": ["string", "null"],
+						"description": "Arguments the agent passed to the tool, as Instinct recorded them (usually JSON text)."
+					},
+					"tool_response": {
+						"type": ["string", "null"],
+						"description": "What the tool returned, as Instinct recorded it."
+					},
+					"tool_is_error": {
+						"type": ["boolean", "null"],
+						"description": "True when the tool response was an error."
+					},
+					"interaction": {
+						"type": ["object", "null"],
+						"description": "An approval, question, or plan the agent put to the owner, for interaction events."
+					},
+					"interaction_response": {
+						"type": ["object", "null"],
+						"description": "The owner's answer to an interaction."
+					},
+					"thinking": {
+						"type": ["string", "null"],
+						"description": "The agent's recorded reasoning text, for thinking events."
+					},
+					"action": {
+						"type": ["object", "null"],
+						"description": "A device action the agent took (click, type, key, scroll, or command), for action events."
+					},
+					"draft_field": {
+						"type": ["object", "null"],
+						"description": "A form field the agent drafted and any edit the owner made to it."
+					},
+					"has_screenshot": {
+						"type": "boolean",
+						"description": "True when the event carried a screenshot; the image link itself is not kept."
+					}
+				},
+				"required": ["id", "chat_id", "type"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "created_at",
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"relationships": [
+				{
+					"name": "chat",
+					"stream": "chats",
+					"foreign_key": "chat_id",
+					"cardinality": "has_one"
+				}
+			],
+			"parent_streams": ["chats"],
+			"query": {
+				"search": {
+					"lexical_fields": ["content"],
+					"semantic_fields": ["content"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"read_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["type", "role"],
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"shape_check_failed": "The data from Instinct did not look like we expected",
+		"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
+		"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
+		"instinct_rate_limited": "Instinct asked us to slow down, so collection stopped early. What was collected is saved; try again later.",
+		"instinct_server_error": "Instinct's servers had a problem partway through. What was collected is saved; try again later.",
+		"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
+		"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
+		"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
+		"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+		"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
+	},
+	"profiles": [
+		{
+			"id": "account",
+			"label": "Your Instinct account and how to reach your agent",
+			"streams": [
+				{
+					"name": "profile"
+				},
+				{
+					"name": "agent_contact"
+				}
+			]
+		},
+		{
+			"id": "reach",
+			"label": "What your Instinct is connected to",
+			"streams": [
+				{
+					"name": "connections"
+				},
+				{
+					"name": "devices"
+				},
+				{
+					"name": "trusted_people"
+				}
+			]
+		},
+		{
+			"id": "conversations",
+			"label": "Your conversations with your Instinct agent",
+			"streams": [
+				{
+					"name": "chats"
+				},
+				{
+					"name": "chat_events"
+				}
+			]
+		},
+		{
+			"id": "full",
+			"label": "Everything: profile, agent contact, connections, devices, trusted people, vault inventory, chats with your agent",
+			"streams": [
+				{
+					"name": "profile"
+				},
+				{
+					"name": "agent_contact"
+				},
+				{
+					"name": "connections"
+				},
+				{
+					"name": "devices"
+				},
+				{
+					"name": "trusted_people"
+				},
+				{
+					"name": "vault_entries"
+				},
+				{
+					"name": "chats"
+				},
+				{
+					"name": "chat_events"
+				}
+			]
+		}
+	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "instinct",
+			"login_url": "https://app.instinct.com/signin?returnTo=%2Fworkspace",
+			"login_message": "Sign in to Instinct with your phone number and the SMS code, then return here.",
+			"collect_export": "collectInstinctOnPage",
+			"probe_export": "probeInstinctSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	}
+}

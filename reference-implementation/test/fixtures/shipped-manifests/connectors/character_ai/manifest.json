@@ -1,0 +1,269 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/character-ai",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/character_ai",
+		"display": {
+			"name": "Character.AI"
+		}
+	},
+	"connector_key": "character-ai",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
+	"version": "0.1.9",
+	"display_name": "Character.AI",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"],
+				"constraints": {
+					"hosts": ["https://character.ai", "https://neo.character.ai"]
+				}
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reuses the owner's character.ai browser session and the API token the signed-in page holds. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "chats",
+			"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns; a chat whose turns could not be read this run is not emitted, so its stored values stay as last read. Last interaction time is null only for a chat with no turns. The time range applies to when the chat was created; a chat with turns after the range's end is not emitted, so its stored values are never lowered and no later turn shows through them.",
+			"display": {
+				"label": "Your chats",
+				"detail": "Per chat: the character's id and name, chat type and state, when the chat was created, when its latest message was sent, and how many messages it has."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"character_id": {
+						"type": "string"
+					},
+					"character_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"creator_id": {
+						"type": ["string", "null"]
+					},
+					"type": {
+						"type": ["string", "null"]
+					},
+					"state": {
+						"type": ["string", "null"]
+					},
+					"visibility": {
+						"type": ["string", "null"]
+					},
+					"create_time": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"last_interaction_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"turn_count": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": [
+					"id",
+					"character_id",
+					"character_name",
+					"creator_id",
+					"type",
+					"state",
+					"visibility",
+					"create_time",
+					"last_interaction_time",
+					"turn_count"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "create_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": true,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["character_name"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"last_interaction_time": ["gte", "gt", "lte", "lt"],
+					"turn_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "messages",
+			"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list. Collected only together with chats. A turn that cannot be stored as it is is left out, the rest of its chat is stored, and the chat is read again next time. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
+			"display": {
+				"label": "Your messages",
+				"detail": "Each message in each chat: whether you or the character wrote it, the author's name, the message text, and when it was sent."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"chat_id": {
+						"type": "string"
+					},
+					"author_kind": {
+						"type": "string",
+						"enum": ["user", "character"]
+					},
+					"author_id": {
+						"type": ["string", "null"]
+					},
+					"author_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"text": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"primary_candidate_id": {
+						"type": "string"
+					},
+					"candidate_count": {
+						"type": "integer"
+					},
+					"is_final": {
+						"type": "boolean",
+						"const": true
+					},
+					"model_type": {
+						"type": ["string", "null"]
+					},
+					"state": {
+						"type": ["string", "null"]
+					},
+					"create_time": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"last_update_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": [
+					"id",
+					"chat_id",
+					"author_kind",
+					"author_id",
+					"author_name",
+					"text",
+					"primary_candidate_id",
+					"candidate_count",
+					"is_final",
+					"model_type",
+					"state",
+					"create_time",
+					"last_update_time"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "create_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": true,
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "chat",
+					"stream": "chats",
+					"foreign_key": "chat_id",
+					"cardinality": "has_one"
+				}
+			],
+			"parent_streams": ["chats"],
+			"query": {
+				"search": {
+					"lexical_fields": ["text", "author_name"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"last_update_time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"],
+					"group_by": ["author_kind"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
+		"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
+		"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
+		"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
+		"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
+		"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+		"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
+		"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
+		"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
+		"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
+		"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "character_ai",
+			"login_url": "https://character.ai/",
+			"login_message": "Sign in to Character.AI, then return here.",
+			"collect_export": "collectCharacterAi",
+			"probe_export": "probeCharacterAiSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	}
+}

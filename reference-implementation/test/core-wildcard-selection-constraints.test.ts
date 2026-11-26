@@ -9,12 +9,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { resolveCoreSelection } from "../server/core-source-authorization.ts";
 import { sourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/chatgpt";
-const entry = readPolyfillManifests().find(
+const entry = readShippedManifests().find(
 	(candidate) => candidate.file === "chatgpt.json",
 );
 assert.ok(entry, "expected the shipped ChatGPT manifest");

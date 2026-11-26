@@ -19,13 +19,13 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { BROWSER_SURFACE_KINDS } from "../runtime/connector-gap-bounding.ts";
 
 function manifestDeclaredBrowserSurfaceKinds(): string[] {
   const kinds: string[] = [];
-  for (const entry of readPolyfillManifests()) {
+  for (const entry of readShippedManifests()) {
     const raw = entry.manifest as { capabilities?: { browser_surface_kind?: unknown } };
     const kind = raw.capabilities?.browser_surface_kind;
     if (typeof kind === "string" && kind.trim().length > 0) {

@@ -1,0 +1,427 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/facebook",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/facebook",
+		"display": {
+			"name": "Facebook"
+		}
+	},
+	"connector_key": "facebook",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
+	"version": "0.1.12",
+	"display_name": "Facebook",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#0866FF"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_condition_wait"
+				]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "high",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Facebook restricts accounts that read quickly or repeatedly; refresh manually and not more than hourly."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"reason_display_messages": {
+		"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+		"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+		"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+		"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+		"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": true,
+			"description": "The signed-in person's own Facebook profile.",
+			"display": {
+				"label": "Your Facebook profile",
+				"detail": "Name, profile link, and the intro you filled in (bio and the lines you chose to show, such as where you live or work)."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"username": {
+						"type": ["string", "null"]
+					},
+					"profile_url": {
+						"type": "string"
+					},
+					"bio": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"intro": {
+						"type": ["array", "null"],
+						"items": {
+							"type": "string"
+						}
+					}
+				},
+				"required": ["id", "profile_url"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "username", "bio"],
+					"semantic_fields": ["bio"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "posts",
+			"required": false,
+			"description": "Posts the person published on their own timeline. Attachments are described by kind and title; media files are not downloaded.",
+			"display": {
+				"label": "Your posts",
+				"detail": "Your own words, the post's context line (such as a share or a profile picture update), the text of a post you shared, time, link, audience, and each attachment's kind and title."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"create_time": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"text": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"title": {
+						"type": ["string", "null"]
+					},
+					"shared_text": {
+						"type": ["string", "null"]
+					},
+					"attachment_title": {
+						"type": ["string", "null"]
+					},
+					"url": {
+						"type": ["string", "null"]
+					},
+					"attachments": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"kind": {
+									"type": ["string", "null"]
+								},
+								"title": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["kind", "title"]
+						}
+					},
+					"privacy": {
+						"type": ["string", "null"]
+					},
+					"privacy_label": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "create_time", "attachments"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "create_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"text",
+						"title",
+						"shared_text",
+						"attachment_title"
+					],
+					"semantic_fields": ["text", "title", "shared_text"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"],
+					"group_by": ["privacy"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "friends",
+			"required": false,
+			"description": "The person's Facebook friends.",
+			"display": {
+				"label": "Your friends",
+				"detail": "Each friend's name and profile link."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"profile_url": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "name"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "groups",
+			"required": false,
+			"description": "Facebook groups the person joined.",
+			"display": {
+				"label": "Your groups",
+				"detail": "Each group's name and link, and when you joined it if Facebook shows it."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"url": {
+						"type": "string"
+					},
+					"joined_time": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": ["id", "name", "url"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				},
+				"range_filters": {
+					"joined_time": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "reactions",
+			"required": false,
+			"description": "Likes and reactions from the person's activity log.",
+			"display": {
+				"label": "Your likes and reactions",
+				"detail": "When you liked or reacted, what Facebook says you reacted to, and the post's link and text."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["reaction"]
+					},
+					"time": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"target_url": {
+						"type": ["string", "null"]
+					},
+					"target_text": {
+						"type": ["string", "null"]
+					},
+					"post_id": {
+						"type": ["string", "null"]
+					},
+					"comment_text": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "kind", "time"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "target_text", "comment_text"],
+					"semantic_fields": ["title", "target_text", "comment_text"]
+				},
+				"range_filters": {
+					"time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["time"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "comments",
+			"required": false,
+			"description": "Comments from the person's activity log.",
+			"display": {
+				"label": "Your comments",
+				"detail": "When you commented, your comment's text, and the post it was on."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["comment"]
+					},
+					"time": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"target_url": {
+						"type": ["string", "null"]
+					},
+					"target_text": {
+						"type": ["string", "null"]
+					},
+					"post_id": {
+						"type": ["string", "null"]
+					},
+					"comment_text": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "kind", "time"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "target_text", "comment_text"],
+					"semantic_fields": ["title", "target_text", "comment_text"]
+				},
+				"range_filters": {
+					"time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["time"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "facebook",
+			"login_url": "https://www.facebook.com/login/",
+			"login_message": "Sign in to Facebook, then return here.",
+			"collect_export": "collectFacebookOnPage",
+			"probe_export": "probeFacebookSessionOnPage",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	}
+}

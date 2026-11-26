@@ -1,0 +1,729 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/tiktok",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/tiktok",
+		"display": {
+			"name": "TikTok"
+		}
+	},
+	"connector_key": "tiktok",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
+	"version": "0.3.15",
+	"display_name": "TikTok (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 604800,
+			"minimum_interval_seconds": 86400,
+			"maximum_staleness_seconds": 2592000,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "high",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection runs in the owner's own signed-in www.tiktok.com session: every request is a GET to TikTok's own web API made from inside the page, signed by TikTok's own page scripts, one at a time, 1.5 to 3 seconds apart, at most 900 per run and 200 pages per list. TikTok's terms do not permit automated access, so the owner starts every run and no run happens in the background. A sign-in prompt, a bot check, an unsigned request, a rate limit or a server error ends the run without a retry. Nothing that writes (follow, like, post, comment) is reachable."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "Built from recorded response shapes of one test account; not yet run end to end against a live TikTok session."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The signed-in owner's own TikTok profile. Follower, following, like and video counts come from the owner's own videos, so they are null for an account that has posted none. The email address, phone number and sign-in settings are not collected.",
+			"display": {
+				"label": "Your TikTok profile",
+				"detail": "Your user id, handle, nickname, bio, avatar, whether the account is private, and your follower, following, like and video counts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric user id, stable for the life of the account.",
+						"x_pdpp_role": "secondary"
+					},
+					"sec_uid": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "TikTok's public secure user id, used in profile links."
+					},
+					"unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The account's handle, without the @.",
+						"x_pdpp_role": "primary-title"
+					},
+					"nickname": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The display name."
+					},
+					"bio": {
+						"type": ["string", "null"],
+						"maxLength": 1000,
+						"description": "The profile bio."
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"format": "uri",
+						"maxLength": 2000,
+						"description": "Address of the avatar image TikTok served. Null when absent."
+					},
+					"private_account": {
+						"type": ["boolean", "null"],
+						"description": "Whether the account is private."
+					},
+					"follower_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Accounts following the owner, when collected."
+					},
+					"following_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Accounts the owner follows, when collected."
+					},
+					"like_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Likes the owner's videos have received, when collected."
+					},
+					"video_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Videos the owner has posted, when collected."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the account was created, in UTC.",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": [
+					"id",
+					"sec_uid",
+					"unique_id",
+					"nickname",
+					"bio",
+					"avatar_url",
+					"private_account",
+					"follower_count",
+					"following_count",
+					"like_count",
+					"video_count",
+					"created_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["unique_id", "nickname", "bio"],
+					"semantic_fields": ["bio"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "videos",
+			"required": false,
+			"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current; a run limited to a start date stops once TikTok's newest-first list has passed it, and a run limited to chosen videos stops once all of them were read. The video files are not collected.",
+			"display": {
+				"label": "Your TikTok videos",
+				"detail": "Each video's caption, when you posted it, its length, who can see it, and its views, likes, comments, shares, saves and reposts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric video id.",
+						"x_pdpp_role": "secondary"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the video was posted, in UTC. This is the stream's consent time field.",
+						"x_pdpp_role": "event-time"
+					},
+					"caption": {
+						"type": ["string", "null"],
+						"maxLength": 4000,
+						"description": "The video's caption, including hashtags as written.",
+						"x_pdpp_role": "primary-title"
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Length of the video in seconds."
+					},
+					"privacy": {
+						"type": ["string", "null"],
+						"enum": ["public", "friends", "private", null],
+						"description": "Who may see the video: everyone, friends only, or only the owner."
+					},
+					"play_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Views when collected."
+					},
+					"like_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Likes when collected."
+					},
+					"comment_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Comments when collected."
+					},
+					"share_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Shares when collected."
+					},
+					"save_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Saves to Favorites when collected."
+					},
+					"repost_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Reposts when collected."
+					}
+				},
+				"required": [
+					"id",
+					"created_at",
+					"caption",
+					"duration_seconds",
+					"privacy",
+					"play_count",
+					"like_count",
+					"comment_count",
+					"share_count",
+					"save_count",
+					"repost_count"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["caption"],
+					"semantic_fields": ["caption"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"play_count": ["gte", "gt", "lte", "lt"],
+					"like_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"],
+					"group_by": ["privacy"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "likes",
+			"required": false,
+			"description": "Videos the owner liked, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal (a run limited to chosen videos stops once all of them were read), so a caption or author name can change between runs; a video unliked since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
+			"display": {
+				"label": "Videos you liked on TikTok",
+				"detail": "The videos you liked: who posted each, its caption and when it was posted."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric video id.",
+						"x_pdpp_role": "secondary"
+					},
+					"author_id": {
+						"type": ["string", "null"],
+						"pattern": "^[0-9]{1,30}$",
+						"description": "The numeric user id of the account that posted the video."
+					},
+					"author_unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The handle of the account that posted the video, without the @."
+					},
+					"author_nickname": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The display name of the account that posted the video."
+					},
+					"caption": {
+						"type": ["string", "null"],
+						"maxLength": 4000,
+						"description": "The video's caption.",
+						"x_pdpp_role": "primary-title"
+					},
+					"video_created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the video was posted, in UTC. Not when it was liked."
+					}
+				},
+				"required": [
+					"id",
+					"author_id",
+					"author_unique_id",
+					"author_nickname",
+					"caption",
+					"video_created_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["caption", "author_unique_id", "author_nickname"],
+					"semantic_fields": ["caption"]
+				},
+				"range_filters": {
+					"video_created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["video_created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "favorites",
+			"required": false,
+			"description": "Videos the owner saved to Favorites, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal (a run limited to chosen videos stops once all of them were read), so a caption or author name can change between runs; a video removed from Favorites since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
+			"display": {
+				"label": "Your TikTok Favorites",
+				"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric video id.",
+						"x_pdpp_role": "secondary"
+					},
+					"author_id": {
+						"type": ["string", "null"],
+						"pattern": "^[0-9]{1,30}$",
+						"description": "The numeric user id of the account that posted the video."
+					},
+					"author_unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The handle of the account that posted the video, without the @."
+					},
+					"author_nickname": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The display name of the account that posted the video."
+					},
+					"caption": {
+						"type": ["string", "null"],
+						"maxLength": 4000,
+						"description": "The video's caption.",
+						"x_pdpp_role": "primary-title"
+					},
+					"video_created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the video was posted, in UTC. Not when it was saved."
+					}
+				},
+				"required": [
+					"id",
+					"author_id",
+					"author_unique_id",
+					"author_nickname",
+					"caption",
+					"video_created_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["caption", "author_unique_id", "author_nickname"],
+					"semantic_fields": ["caption"]
+				},
+				"range_filters": {
+					"video_created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["video_created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "favorite_collections",
+			"required": false,
+			"description": "The collections the owner made in Favorites: name and how many videos each holds. Covers, owner id and owner name are not collected. Every run reads the whole list again to TikTok's own end signal.",
+			"display": {
+				"label": "Your TikTok Favorites collections",
+				"detail": "The name of each collection you made in Favorites and how many videos it holds."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric collection id.",
+						"x_pdpp_role": "secondary"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The collection's name.",
+						"x_pdpp_role": "primary-title"
+					},
+					"item_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Videos in the collection when collected, as TikTok counts them."
+					}
+				},
+				"required": ["id", "name", "item_count"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				},
+				"range_filters": {
+					"item_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "collection_items",
+			"required": false,
+			"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal (a run limited to chosen collections or videos reads only the collections they name); a collection whose list TikTok did not finish is retried on the next run, and one whose answer cannot be read fails the stream. The video files are not collected.",
+			"display": {
+				"label": "Videos in your TikTok Favorites collections",
+				"detail": "For each collection, the videos in it: who posted each, its caption and when it was posted."
+			},
+			"semantics": "mutable_state",
+			"parent_streams": ["favorite_collections"],
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}:[0-9]{1,30}$",
+						"description": "The collection id and the video id, joined by a colon.",
+						"x_pdpp_role": "secondary"
+					},
+					"collection_id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "The collection the video sits in. Joins to favorite_collections.id."
+					},
+					"video_id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric video id. Joins to favorites.id."
+					},
+					"author_id": {
+						"type": ["string", "null"],
+						"pattern": "^[0-9]{1,30}$",
+						"description": "The numeric user id of the account that posted the video."
+					},
+					"author_unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The handle of the account that posted the video, without the @."
+					},
+					"caption": {
+						"type": ["string", "null"],
+						"maxLength": 4000,
+						"description": "The video's caption.",
+						"x_pdpp_role": "primary-title"
+					},
+					"video_created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the video was posted, in UTC. Not when it was saved."
+					}
+				},
+				"required": [
+					"id",
+					"collection_id",
+					"video_id",
+					"author_id",
+					"author_unique_id",
+					"caption",
+					"video_created_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["caption", "author_unique_id"],
+					"semantic_fields": ["caption"]
+				},
+				"range_filters": {
+					"video_created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["video_created_at"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "following",
+			"required": false,
+			"description": "Accounts the owner follows: handle, display name and id. Every run reads the whole list again (a run limited to chosen accounts stops once all of them were read); the stream fails rather than reports complete when TikTok cuts the list short.",
+			"display": {
+				"label": "Accounts you follow on TikTok",
+				"detail": "Each account's handle, display name and id, and whether it is verified or private."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric user id of the account.",
+						"x_pdpp_role": "secondary"
+					},
+					"unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The account's handle, without the @.",
+						"x_pdpp_role": "primary-title"
+					},
+					"nickname": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The account's display name."
+					},
+					"sec_uid": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "TikTok's public secure user id of the account."
+					},
+					"verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether TikTok shows the account as verified."
+					},
+					"private_account": {
+						"type": ["boolean", "null"],
+						"description": "Whether the account is private."
+					}
+				},
+				"required": [
+					"id",
+					"unique_id",
+					"nickname",
+					"sec_uid",
+					"verified",
+					"private_account"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["unique_id", "nickname"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["verified", "private_account"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "followers",
+			"required": false,
+			"description": "Accounts that follow the owner: handle, display name and id. Every run reads the whole list again (a run limited to chosen accounts stops once all of them were read); the stream fails rather than reports complete when TikTok cuts the list short.",
+			"display": {
+				"label": "Your TikTok followers",
+				"detail": "Each follower's handle, display name and id, and whether it is verified or private."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,30}$",
+						"description": "TikTok's own numeric user id of the account.",
+						"x_pdpp_role": "secondary"
+					},
+					"unique_id": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The account's handle, without the @.",
+						"x_pdpp_role": "primary-title"
+					},
+					"nickname": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The account's display name."
+					},
+					"sec_uid": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "TikTok's public secure user id of the account."
+					},
+					"verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether TikTok shows the account as verified."
+					},
+					"private_account": {
+						"type": ["boolean", "null"],
+						"description": "Whether the account is private."
+					}
+				},
+				"required": [
+					"id",
+					"unique_id",
+					"nickname",
+					"sec_uid",
+					"verified",
+					"private_account"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["unique_id", "nickname"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["verified", "private_account"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
+		"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
+		"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
+		"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
+		"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
+		"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
+		"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
+		"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
+		"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
+		"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
+		"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+		"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
+		"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "tiktok",
+			"login_url": "https://www.tiktok.com/login",
+			"login_message": "Sign in to TikTok, then return here.",
+			"collect_export": "collectTikTok",
+			"probe_export": "probeTikTokSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	}
+}

@@ -1,0 +1,500 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/spotify",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/spotify",
+		"display": {
+			"name": "Spotify"
+		}
+	},
+	"connector_key": "spotify",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
+	"version": "0.1.59",
+	"display_name": "Spotify",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#1ED760"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_navigation", "page_script_evaluation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"public_listing": {
+			"tier": "preview",
+			"rationale": "Browser-session replacement for the legacy Spotify connector. Collects profile, playlists, playlist items, saved tracks, recent playback contexts, and bounded top artist and track rankings through the authenticated web player."
+		},
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reuses the owner's open.spotify.com browser session. Existing sessions can refresh unattended while valid, but first collection and expired sessions require the owner to sign in through the browser handoff."
+		}
+	},
+	"streams": [
+		{
+			"name": "playlists",
+			"description": "User's playlists.",
+			"display": {
+				"label": "Your playlists",
+				"detail": "Playlist names, ownership, public/collaborative flags, track counts, snapshot IDs."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"owner_id": {
+						"type": ["string", "null"]
+					},
+					"owner_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"public": {
+						"type": ["boolean", "null"]
+					},
+					"collaborative": {
+						"type": ["boolean", "null"]
+					},
+					"track_count": {
+						"type": ["integer", "null"]
+					},
+					"snapshot_id": {
+						"type": ["string", "null"]
+					},
+					"description": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"followers": {
+						"type": ["integer", "null"]
+					},
+					"images": {
+						"type": "array"
+					}
+				},
+				"required": ["id", "name"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": true,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "owner_name", "description"],
+					"semantic_fields": ["description"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "playlist_items",
+			"description": "Tracks within the user's playlists (D3 child stream of playlists).",
+			"display": {
+				"label": "Your playlist tracks",
+				"detail": "One record per track in a playlist: playlist, track identity, position, when and by whom it was added."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"playlist_id": {
+						"type": "string"
+					},
+					"track_id": {
+						"type": ["string", "null"]
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"position": {
+						"type": "integer"
+					},
+					"added_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"added_by": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"artist_names": {
+						"type": "array"
+					},
+					"album_name": {
+						"type": ["string", "null"]
+					},
+					"duration_ms": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id", "playlist_id", "position"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "added_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "playlist",
+					"stream": "playlists",
+					"foreign_key": "playlist_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "album_name"]
+				},
+				"range_filters": {
+					"added_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["added_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "saved_tracks",
+			"description": "User's saved/liked tracks.",
+			"display": {
+				"label": "Your saved tracks",
+				"detail": "Liked tracks, when they were added, artist/album context."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": ["string", "null"]
+					},
+					"identity_unresolved": {
+						"type": "boolean"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"artist_names": {
+						"type": "array"
+					},
+					"album_name": {
+						"type": ["string", "null"]
+					},
+					"duration_ms": {
+						"type": ["integer", "null"]
+					},
+					"popularity": {
+						"type": ["integer", "null"]
+					},
+					"added_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"isrc": {
+						"type": ["string", "null"]
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"explicit": {
+						"type": ["boolean", "null"]
+					},
+					"album_artist_names": {
+						"type": "array"
+					}
+				},
+				"required": ["id", "identity_unresolved", "name"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "added_at",
+			"consent_time_field": "added_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": true,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "album_name"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["added_at"]
+				},
+				"range_filters": {
+					"added_at": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "profile",
+			"description": "The authenticated Spotify account's profile from the web player.",
+			"display": {
+				"label": "Your Spotify profile",
+				"detail": "Account id, display name, follower count."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"display_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"followers": {
+						"type": ["integer", "null"]
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"images": {
+						"type": "array"
+					},
+					"following": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["display_name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "recently_played_contexts",
+			"description": "Recently played playback contexts and each context’s last played track. Spotify returns contexts, not individual play events. The connector saves checkpoint state when Spotify ends the list (a short page, or an empty 404 past the end or at the start) and withholds it at its 20-page cap.",
+			"display": {
+				"label": "Recently played contexts",
+				"detail": "Album, playlist, or artist context URI, its most recently played track, and last played time."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"uri": {
+						"type": "string"
+					},
+					"last_played_time": {
+						"type": "integer",
+						"minimum": 0,
+						"x_pdpp_role": "event-time"
+					},
+					"last_played_track_uri": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "uri", "last_played_time"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "last_played_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"last_played_time": ["gt", "gte", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "top_artists",
+			"description": "Spotify’s ranked artists for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+			"display": {
+				"label": "Your top artists",
+				"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"genres": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"popularity": {
+						"type": ["integer", "null"]
+					},
+					"followers": {
+						"type": ["integer", "null"]
+					},
+					"time_range": {
+						"type": "string",
+						"enum": ["short_term", "long_term"]
+					}
+				},
+				"required": ["id", "time_range"]
+			},
+			"primary_key": ["id", "time_range"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "top_tracks",
+			"description": "Spotify’s ranked tracks for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+			"display": {
+				"label": "Your top tracks",
+				"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"uri": {
+						"type": ["string", "null"]
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"artist_names": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"album_name": {
+						"type": ["string", "null"]
+					},
+					"duration_ms": {
+						"type": ["integer", "null"]
+					},
+					"time_range": {
+						"type": "string",
+						"enum": ["short_term", "long_term"]
+					}
+				},
+				"required": ["id", "time_range"]
+			},
+			"primary_key": ["id", "time_range"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "album_name"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "spotify",
+			"collect_export": "spotifyMobileCollect",
+			"probe_export": "probeSpotifyMobileSession",
+			"login_url": "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+		}
+	},
+	"reason_display_messages": {
+		"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+		"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
+		"spotify_playlist_rows_unsupported": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read.",
+		"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+		"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+		"spotify_recently_played_unavailable": "Spotify did not return your recently played list this time, so it was not exported. Try again later.",
+		"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld.",
+		"spotify_stream_outcome_unproven": "Spotify did not confirm whether this part was read completely, so it was not marked complete. Try again later.",
+		"stream_collection_failed": "Spotify could not be read completely this time, so this part was not marked complete. Try again later."
+	}
+}

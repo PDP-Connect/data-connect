@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { classifyConnectorSetupModality, type ConnectorManifestLike } from "../server/connection-setup-plan.ts";
@@ -590,7 +590,7 @@ test("username_password bundles inject secret aliases and source non-secret fiel
 });
 
 test("current Jellyfin username_password manifest keeps required base_url in sourceBinding while secrets come from the sealed bundle", withStore(async (store) => {
-  const manifestEntry = readPolyfillManifests().find((entry) => entry.file === "jellyfin.json");
+  const manifestEntry = readShippedManifests().find((entry) => entry.file === "jellyfin.json");
   assert.ok(manifestEntry, "current Jellyfin manifest must be available from the installed profile package");
   const sourceBinding = {
     kind: "static_secret_draft",

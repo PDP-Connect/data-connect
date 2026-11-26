@@ -1,0 +1,420 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/mountain-project",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/mountain_project",
+		"display": {
+			"name": "Mountain Project"
+		}
+	},
+	"connector_key": "mountain-project",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
+	"version": "0.1.2",
+	"display_name": "Mountain Project",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#336799"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"],
+				"constraints": {
+					"hosts": ["https://www.mountainproject.com"]
+				}
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "low",
+			"bot_detection_sensitivity": "low",
+			"background_safe": false,
+			"rationale": "Collection reuses the owner's signed-in mountainproject.com session and makes three same-origin GETs per run, one second apart: the profile page and the site's own CSV exports of the owner's ticks and to-do list. First collection and an expired session need the owner to sign in through the browser handoff."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "Built 2026-11-11. The parsers were checked against the real tick and to-do exports and the profile page of a project-owned test account (5 ticks, 3 to-dos; counts matched); a full connector run through the browser handoff on a real account has not been done yet."
+		}
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "mountain_project",
+			"login_url": "https://www.mountainproject.com/auth/login",
+			"login_message": "Sign in to Mountain Project (email, onX, Facebook or Apple), then return here.",
+			"collect_export": "collectMountainProject",
+			"probe_export": "probeMountainProjectSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The owner's own Mountain Project profile: name, location, join date, picture and the profile's tick and to-do counts. Age, gender and points are not collected.",
+			"display": {
+				"label": "Your Mountain Project profile",
+				"detail": "Display name, profile location, member-since date, profile picture link, and how many ticks and to-dos the profile counts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,12}$",
+						"description": "Mountain Project's user id.",
+						"x_pdpp_role": "secondary"
+					},
+					"display_name": {
+						"type": "string",
+						"maxLength": 500,
+						"description": "The name shown on the profile.",
+						"x_pdpp_role": "primary-title"
+					},
+					"profile_url": {
+						"type": "string",
+						"description": "The owner's profile page."
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"description": "The profile picture URL; null when none is shown."
+					},
+					"location": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The location the owner put on their profile."
+					},
+					"member_since": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "The day the account was created, as the profile states it."
+					},
+					"tick_count": {
+						"type": ["integer", "null"],
+						"description": "How many ticks the profile counts; null when the profile shows no count."
+					},
+					"todo_count": {
+						"type": ["integer", "null"],
+						"description": "How many to-do routes the profile counts; null when the profile shows no count."
+					}
+				},
+				"required": [
+					"id",
+					"display_name",
+					"profile_url",
+					"avatar_url",
+					"location",
+					"member_since",
+					"tick_count",
+					"todo_count"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["display_name", "location"]
+				},
+				"range_filters": {
+					"member_since": ["gte", "gt", "lte", "lt"],
+					"tick_count": ["gte", "gt", "lte", "lt"],
+					"todo_count": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "ticks",
+			"required": true,
+			"description": "Every climb the owner logged (ticked) on Mountain Project, one record per tick, read from the site's own tick CSV export: the day, the route with its grade, type, location and length, how it was climbed, pitches, the owner's notes, stars and suggested grade. Every run re-reads the whole export. The time range applies to the tick's day.",
+			"display": {
+				"label": "Your ticks",
+				"detail": "Each climb you logged: date, route, grade, route type, location, style and lead style, pitches, your notes, your stars and your suggested grade."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "<route_id>:<date>:<n>. The export carries no tick id; n counts the owner's ticks of the same route on the same day, in export order (newest first), from 1. Adding or deleting one such tick shifts the others' n."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The day of the climb.",
+						"x_pdpp_role": "event-time"
+					},
+					"route_id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,12}$",
+						"description": "Mountain Project's route id, from the route URL."
+					},
+					"route_name": {
+						"type": "string",
+						"maxLength": 500,
+						"description": "The route's name.",
+						"x_pdpp_role": "primary-title"
+					},
+					"route_url": {
+						"type": "string",
+						"description": "The route's page on mountainproject.com."
+					},
+					"rating": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "The route's grade as Mountain Project shows it, for example \"5.10a\", \"V4\" or \"5.11 V1+\"."
+					},
+					"rating_code": {
+						"type": ["integer", "null"],
+						"description": "Mountain Project's numeric sort code for the grade."
+					},
+					"location": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The route's location path, outermost area first (state or country down to the crag)."
+					},
+					"avg_stars": {
+						"type": ["number", "null"],
+						"description": "The community's average star rating of the route."
+					},
+					"your_stars": {
+						"type": ["number", "null"],
+						"description": "The owner's own star rating of the route; null when they gave none."
+					},
+					"route_type": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Route types, for example Trad, Sport, TR, Boulder, Alpine, Ice."
+					},
+					"your_rating": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "The grade the owner suggested for the route; null when they gave none."
+					},
+					"length_ft": {
+						"type": ["integer", "null"],
+						"description": "The route's length in feet, as the export states it."
+					},
+					"pitches": {
+						"type": ["integer", "null"],
+						"description": "Pitches recorded on the tick."
+					},
+					"style": {
+						"type": ["string", "null"],
+						"maxLength": 100,
+						"description": "How the route was climbed: Lead, Follow, TR, Solo, Send, Flash or Attempt. Null when the owner left it blank."
+					},
+					"lead_style": {
+						"type": ["string", "null"],
+						"maxLength": 100,
+						"description": "For a lead: Onsight, Flash, Redpoint, Pinkpoint or Fell/Hung. Null otherwise."
+					},
+					"notes": {
+						"type": ["string", "null"],
+						"maxLength": 100000,
+						"description": "The owner's notes on the tick."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"route_id",
+					"route_name",
+					"route_url",
+					"rating",
+					"rating_code",
+					"location",
+					"avg_stars",
+					"your_stars",
+					"route_type",
+					"your_rating",
+					"length_ft",
+					"pitches",
+					"style",
+					"lead_style",
+					"notes"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["route_name", "notes", "rating"],
+					"semantic_fields": ["notes"]
+				},
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"rating_code": ["gte", "gt", "lte", "lt"],
+					"pitches": ["gte", "gt", "lte", "lt"],
+					"length_ft": ["gte", "gt", "lte", "lt"],
+					"your_stars": ["gte", "gt", "lte", "lt"],
+					"avg_stars": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"],
+					"group_by": ["style", "lead_style"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "saved_routes",
+			"required": false,
+			"description": "The routes on the owner's Mountain Project to-do list, one record per route, read from the site's own to-do CSV export: the route with its grade, type, location, length and pitch count, plus the owner's stars and suggested grade when given. Every run re-reads the whole list. A route the owner removes from the list is not reported as deleted.",
+			"display": {
+				"label": "Your to-do list",
+				"detail": "Each route on your to-do list: name, grade, route type, location, length, pitches, average stars, and your own stars and grade if you gave them."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,12}$",
+						"description": "The route id; a route is on the to-do list at most once."
+					},
+					"route_id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,12}$",
+						"description": "Mountain Project's route id, from the route URL."
+					},
+					"route_name": {
+						"type": "string",
+						"maxLength": 500,
+						"description": "The route's name.",
+						"x_pdpp_role": "primary-title"
+					},
+					"route_url": {
+						"type": "string",
+						"description": "The route's page on mountainproject.com."
+					},
+					"rating": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "The route's grade as Mountain Project shows it, for example \"5.10a\", \"V4\" or \"5.11 V1+\"."
+					},
+					"rating_code": {
+						"type": ["integer", "null"],
+						"description": "Mountain Project's numeric sort code for the grade."
+					},
+					"location": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The route's location path, outermost area first (state or country down to the crag)."
+					},
+					"avg_stars": {
+						"type": ["number", "null"],
+						"description": "The community's average star rating of the route."
+					},
+					"your_stars": {
+						"type": ["number", "null"],
+						"description": "The owner's own star rating of the route; null when they gave none."
+					},
+					"route_type": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Route types, for example Trad, Sport, TR, Boulder, Alpine, Ice."
+					},
+					"your_rating": {
+						"type": ["string", "null"],
+						"maxLength": 200,
+						"description": "The grade the owner suggested for the route; null when they gave none."
+					},
+					"length_ft": {
+						"type": ["integer", "null"],
+						"description": "The route's length in feet, as the export states it."
+					},
+					"pitches": {
+						"type": ["integer", "null"],
+						"description": "The route's pitch count."
+					}
+				},
+				"required": [
+					"id",
+					"route_id",
+					"route_name",
+					"route_url",
+					"rating",
+					"rating_code",
+					"location",
+					"avg_stars",
+					"your_stars",
+					"route_type",
+					"your_rating",
+					"length_ft",
+					"pitches"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["route_name", "rating"]
+				},
+				"range_filters": {
+					"rating_code": ["gte", "gt", "lte", "lt"],
+					"pitches": ["gte", "gt", "lte", "lt"],
+					"length_ft": ["gte", "gt", "lte", "lt"],
+					"avg_stars": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"stream_collection_failed": "Mountain Project could not be read completely this time. Nothing already saved was lost.",
+		"records_unreadable": "Some rows of your Mountain Project export could not be read and were not saved. Everything else was saved.",
+		"export_shorter_than_profile_count": "Your Mountain Project export had fewer entries than your profile counts, so this list may be incomplete. Everything in the export was saved.",
+		"mountain_project_auth_failed": "Your Mountain Project session has ended. Sign in to Mountain Project again to continue.",
+		"mountain_project_interrupted": "The Mountain Project page was closed or left during the sync. Sync again to continue.",
+		"mountain_project_rate_limited": "Mountain Project is limiting requests right now. The sync will try again later.",
+		"mountain_project_server_error": "Mountain Project is having trouble right now. The sync will try again later.",
+		"mountain_project_network_error": "Mountain Project could not be reached. Check your connection; the sync will try again later.",
+		"mountain_project_invalid_payload": "Mountain Project answered in a format this connector does not recognize. A connector update is needed."
+	}
+}

@@ -1,0 +1,446 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/linkedin",
+		"display": {
+			"name": "LinkedIn"
+		}
+	},
+	"connector_key": "linkedin",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
+	"version": "0.3.44",
+	"display_name": "LinkedIn",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#0A66C2"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "linkedin",
+			"login_url": "https://www.linkedin.com/login",
+			"login_message": "Sign in to LinkedIn, then return here.",
+			"collect_export": "collectLinkedInPageShim",
+			"probe_export": "probeLinkedInSession",
+			"summary": { "singular": "record", "plural": "records" }
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "LinkedIn aggressively blocks automated access; profile refresh is manual-only."
+		},
+		"public_listing": {
+			"tier": "preview"
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": true,
+			"description": "The user's LinkedIn profile.",
+			"display": {
+				"label": "Your LinkedIn profile",
+				"detail": "Name, headline, summary, location, industry, current position, URL."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"full_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"headline": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"summary": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"location": {
+						"type": ["string", "null"]
+					},
+					"industry": {
+						"type": ["string", "null"]
+					},
+					"public_url": {
+						"type": ["string", "null"]
+					},
+					"current_position_title": {
+						"type": ["string", "null"]
+					},
+					"current_company": {
+						"type": ["string", "null"]
+					},
+					"connection_count": {
+						"type": ["integer", "null"],
+						"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Falls back to the walked distinct connection count with a diagnostic when the summary is unavailable or fails owner validation; the fallback does not prove inventory completeness."
+					},
+					"profile_picture_url": {
+						"type": ["string", "null"],
+						"description": "Dash profile's own display image, falling back to /me's miniProfile picture. Null when neither is present."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["full_name", "headline", "summary", "location"],
+					"semantic_fields": ["headline", "summary"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "experience",
+			"required": true,
+			"description": "Work experience entries.",
+			"display": {
+				"label": "Your work experience",
+				"detail": "Title, company, start/end dates, location, description per role."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"company": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"employment_type": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": ["string", "null"],
+						"description": "Partial date at source precision: YYYY or YYYY-MM (LinkedIn never reports day precision for experience).",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"description": "Partial date at source precision: YYYY or YYYY-MM. Null means the role is current."
+					},
+					"location": {
+						"type": ["string", "null"]
+					},
+					"description": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "company", "location", "description"],
+					"semantic_fields": ["title", "description"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "education",
+			"required": true,
+			"description": "Education entries.",
+			"display": {
+				"label": "Your education",
+				"detail": "School, degree, field of study, start/end dates."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"school": {
+						"type": ["string", "null"]
+					},
+					"degree": {
+						"type": ["string", "null"]
+					},
+					"field_of_study": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": ["string", "null"],
+						"description": "Partial date at source precision: YYYY or YYYY-MM.",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"description": "Partial date at source precision: YYYY or YYYY-MM. Null means ongoing."
+					},
+					"grade": {
+						"type": ["string", "null"]
+					},
+					"logo_url": {
+						"type": ["string", "null"],
+						"description": "School logo image. Null when the source shape (any of school.logo.vectorImage, the typed com.linkedin.common.VectorImage key, or the older schoolLogo.vectorImage) is absent."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["school", "degree"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "skills",
+			"description": "Skills listed on the profile.",
+			"display": {
+				"label": "Your skills",
+				"detail": "Skill names plus endorsement counts if visible."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"endorsement_count": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id", "name"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "languages",
+			"required": true,
+			"description": "Languages listed on the profile.",
+			"display": {
+				"label": "Your languages",
+				"detail": "Language name plus proficiency level, if visible."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"proficiency": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "name"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "proficiency"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "connections",
+			"required": true,
+			"description": "The owner's first-degree LinkedIn connections.",
+			"display": {
+				"label": "Your connections",
+				"detail": "Name, headline, profile URL, and date connected."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The connected member's LinkedIn URN."
+					},
+					"full_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"headline": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"profile_url": {
+						"type": ["string", "null"]
+					},
+					"connected_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["full_name", "headline"],
+					"semantic_fields": ["headline"]
+				},
+				"range_filters": {
+					"connected_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["connected_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"absent": "LinkedIn did not provide this field",
+		"malformed": "LinkedIn returned this field in an unreadable format",
+		"invalid_value": "LinkedIn returned a value outside the expected format",
+		"source_unavailable": "LinkedIn did not return the source needed for this field",
+		"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+		"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+		"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+		"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+		"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+		"malformed_row": "LinkedIn returned an entry in an unreadable format",
+		"no_readable_content": "LinkedIn returned an entry with no readable content",
+		"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+		"id_absent": "LinkedIn did not provide the entry identifier",
+		"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+		"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+		"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+		"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+		"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+		"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+		"id_empty": "LinkedIn returned an empty entry identifier",
+		"name_absent": "LinkedIn did not provide the entry name",
+		"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+		"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+		"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+		"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+		"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+		"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+		"name_empty": "LinkedIn returned an empty entry name",
+		"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+		"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+		"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+		"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+		"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+		"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+		"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+		"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
+		"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+		"stream_collection_failed": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+		"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+		"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+		"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+		"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+		"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+		"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+		"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+		"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+		"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+		"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+		"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+		"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+		"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+		"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+		"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+		"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+		"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+		"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+		"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+		"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+		"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+		"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+		"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+		"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+		"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+		"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+		"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+		"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+		"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+		"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
+	}
+}

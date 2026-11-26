@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { ConnectionRefreshEvidence } from "../runtime/connection-health.ts";
 import { isAssistedRefresh, isManualRefreshOnly } from "../runtime/connection-health.ts";
 import { synthesizeRenderedVerdict } from "../runtime/rendered-verdict.ts";
@@ -39,7 +39,7 @@ interface RefreshPolicyManifest {
 }
 
 function readRefreshPolicy(connector: string): RefreshPolicyManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${connector}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${connector}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${connector}.json`);
   }

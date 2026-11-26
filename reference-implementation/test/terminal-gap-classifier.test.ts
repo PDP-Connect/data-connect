@@ -20,7 +20,7 @@
 
 import { strict as assert } from "node:assert/strict";
 import { test } from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -32,7 +32,7 @@ import {
 } from "../server/stores/terminal-gap-classifier.ts";
 
 function loadRawManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 interface ManifestProvenCapabilities {
   capabilities?: {
@@ -38,7 +38,7 @@ test("no manifest claims a proven capability its declared setup modality cannot 
   // able to claim static_secret_live proof without declaring the
   // static_secret setup modality, or provider_auth_lifecycle proof without
   // declaring the provider_authorization setup modality.
-  for (const { file: entry, manifest } of readPolyfillManifests()) {
+  for (const { file: entry, manifest } of readShippedManifests()) {
     const raw = manifest as ManifestProvenCapabilities & {
       setup?: { modality?: unknown };
     };

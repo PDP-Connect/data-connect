@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { composeConnectorChildEnvironment } from "../runtime/connector-child-environment.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 
@@ -54,7 +54,7 @@ interface ShippedConnector {
 }
 
 function shippedConnector(file: string): ShippedConnector {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  const entry = readShippedManifests().find((candidate) => candidate.file === file);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${file}`);
   }
@@ -98,7 +98,7 @@ for (const [file, keys] of Object.entries(OWNED_TUNING_KEYS)) {
     });
 
     test(`${key} does not reach any other shipped connector child`, () => {
-      const others = readPolyfillManifests()
+      const others = readShippedManifests()
         .map((entry) => entry.file)
         .filter((candidate) => candidate !== file);
       assert.ok(others.length > 7, "every shipped manifest is checked, not only the owners");

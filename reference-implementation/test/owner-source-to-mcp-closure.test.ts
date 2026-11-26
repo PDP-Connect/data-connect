@@ -7,7 +7,7 @@ import test from "node:test";
 import { buildLocalDeviceRecordEnvelope, LocalDeviceClient } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
 import { readSampleRecord } from "@pdpp/polyfill-connectors/fixture-samples";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
@@ -175,7 +175,7 @@ function startClosureServer(): Promise<StartedServer> {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

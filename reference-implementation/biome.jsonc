@@ -30,6 +30,8 @@
       // reference-full.openapi.json also exceeds Biome's source-size ceiling.
       "!!openapi",
       "!!test/fixtures/*.json",
+      // Exact upstream bytes are checked by sync-shipped-manifests.mjs.
+      "!!test/fixtures/shipped-manifests",
       "!!**/next-env.d.ts",
       "!!**/report.*.json"
     ]

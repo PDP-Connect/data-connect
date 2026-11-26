@@ -1,0 +1,1640 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/apple-health",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/apple_health",
+		"display": {
+			"name": "Apple Health"
+		}
+	},
+	"connector_key": "apple-health",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
+	"version": "0.2.10",
+	"display_name": "Apple Health",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FF2D55"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"filesystem": {
+				"required": true
+			}
+		},
+		"environment_variables": ["APPLE_HEALTH_EXPORT_DIR"]
+	},
+	"setup": {
+		"modality": "manual_or_upload",
+		"manual_or_upload": {
+			"label": "Apple Health export",
+			"description": "Export your Apple Health data from your iPhone, then upload the .zip (or the export.xml inside it) here.",
+			"acquisition_methods": [
+				{
+					"label": "Export from the Health app",
+					"platform": "mobile",
+					"posture": "primary",
+					"detail": "On your iPhone, open the Health app, tap your profile picture (top right), scroll down, and tap Export All Health Data. Confirm Export, then AirDrop, save, or share the resulting export.zip to a device where you can upload it here.",
+					"help_url": "https://support.apple.com/guide/iphone/share-your-health-data-iph5ede58c3d/ios"
+				},
+				{
+					"label": "Upload the export XML if the .zip cannot be opened",
+					"platform": "device",
+					"posture": "advanced",
+					"detail": "If the import says your export.zip cannot be opened here, unzip it on a computer (it contains apple_health_export/export.xml; on a phone set to another language the file name may be translated, for example eksport.xml) and, if that XML file is under 8 GB, upload it instead of the archive. The XML is larger than the .zip it came from, so this does not help an archive over the upload limit."
+				}
+			],
+			"accepted_file_extensions": [".zip", ".xml"],
+			"import_dir_env_var": "APPLE_HEALTH_EXPORT_DIR",
+			"help_url": "https://support.apple.com/guide/iphone/share-your-health-data-iph5ede58c3d/ios",
+			"help_text": "Apple Health does not expose an account API or OAuth grant. This source imports an owner-exported export.zip or export.xml produced by the iPhone Health app.",
+			"large_file_fallback": "A full Health export can run to several GB for a long-lived account, and the XML inside export.zip is larger than the archive, so unzipping does not help an archive over the upload limit. An archive within the limit that cannot be opened here, such as one of 4 GB or more in the zip64 format, can be unzipped on a computer and its export XML uploaded instead, if that file is under 8 GB; the XML is read as a stream.",
+			"validation": {
+				"kind": "apple_health_export",
+				"file_backed": true,
+				"max_file_bytes": 8589934592
+			},
+			"validation_expectations": [
+				"Detected an Apple Health export (export.xml, standalone or inside export.zip)",
+				"Estimated health record and workout counts",
+				"Detected record date range",
+				"Duplicate, empty, unsupported, or too-large file status"
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "low",
+			"bot_detection_sensitivity": "low",
+			"background_safe": false,
+			"rationale": "Apple Health imports require the user to produce a new export.xml from iOS; cannot be refreshed in the background."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "activity",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Activity, such as steps, distances, energy burned, flights climbed, exercise, move and stand time, stand hours, running, cycling, rowing and paddling metrics, workout effort, VO2 max and low cardio fitness notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your activity",
+				"detail": "Readings such as steps; walking, running, cycling, swimming, wheelchair, rowing, paddling, skating and snow-sports distances; flights climbed; active and resting energy; exercise, move and stand minutes and stand hours; running and cycling speed, power, cadence and form; workout effort; VO2 max, and notifications of low cardio fitness. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "body_measurements",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Body measurements: height, body mass, body mass index, lean body mass, body fat percentage, waist circumference and sleeping wrist temperature, which Apple also uses to estimate menstrual cycles. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your body measurements",
+				"detail": "Height, weight, body mass index, lean body mass, body fat percentage, waist circumference, and the wrist temperature your Apple Watch measures while you sleep, which Apple also uses to estimate your menstrual cycle. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "reproductive_health",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Reproductive health: menstrual flow and bleeding, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation and menopause. It also carries the three symptoms HealthKit's documentation files under Reproduction (breast pain, pelvic pain and vaginal dryness). That is a deliberate deviation from Apple's grouping, which lists them among the symptoms: it keeps reproductive information behind this stream's own grant, so a grant of the symptoms stream never carries it. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your reproductive health",
+				"detail": "Cycle tracking and reproductive health: menstrual flow and spotting, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation, menopause, and bleeding after menopause or during or after pregnancy. It also includes three reproduction-related symptoms, breast pain, pelvic pain and vaginal dryness, which are kept here rather than with your other symptoms so that they are shared only if you share this. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "hearing",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Hearing: environmental and headphone audio exposure, environmental sound reduction, and loud-environment and headphone-level notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your hearing and sound exposure",
+				"detail": "Environmental sound levels, headphone audio levels, the sound reduction your headphones applied, and notifications of loud environments and loud headphone audio. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "vital_signs",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Vital signs: heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib burden, oxygen saturation, body temperature, blood pressure, respiratory rate, and high, low and irregular heart rhythm and hypertension notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your vital signs",
+				"detail": "Heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib history, blood oxygen, body temperature, blood pressure and respiratory rate, and notifications of a high, low or irregular heart rhythm and of possible hypertension. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "lab_results",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Lab and test results: blood glucose, insulin delivery, inhaler usage, forced vital capacity, forced expiratory volume, peak expiratory flow rate, electrodermal activity, peripheral perfusion index and number of times fallen. Clinical records from healthcare providers, which Health keeps apart from these, are not included. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your lab and test results",
+				"detail": "Blood glucose, insulin delivery, inhaler use, lung function (forced vital capacity, FEV1 and peak expiratory flow), electrodermal activity, peripheral perfusion index, and the number of times you fell. Health records that a doctor, clinic or hospital shared with Health are not included. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "sleep",
+			"required": false,
+			"description": "Apple Health sleep records: sleep analysis, sleep apnea notifications and sleeping breathing disturbances, from the types HealthKit's documentation groups under Mindfulness and sleep, and the export's sleep duration goal. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your sleep",
+				"detail": "Sleep stages and time in bed, breathing disturbances while you sleep, sleep apnea notifications, and your sleep duration goal. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "mindfulness",
+			"required": false,
+			"description": "Apple Health mindful sessions, the mindfulness type HealthKit's documentation groups under Mindfulness and sleep. Kept apart from sleep so that each has its own grant. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your mindful minutes",
+				"detail": "Your mindful minutes: when each mindfulness session began and ended. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "nutrition",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Nutrition: dietary energy, macronutrients, vitamins, minerals, caffeine and water. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your nutrition",
+				"detail": "What you logged eating and drinking: energy, carbohydrates, fat, protein, sugar and fibre, vitamins and minerals, caffeine and water. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "alcohol_consumption",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Alcohol consumption: blood alcohol content and number of alcoholic beverages. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your alcohol consumption",
+				"detail": "Blood alcohol content and the number of alcoholic drinks you logged. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "mobility",
+			"required": false,
+			"description": "Apple Health records of the types HealthKit's documentation groups under Mobility: walking steadiness and its notifications, six-minute walk distance, walking speed, step length, asymmetry and double support, and stair ascent and descent speed. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your mobility",
+				"detail": "Walking steadiness and its notifications, walking speed, step length, walking asymmetry and double support time, stair ascent and descent speed, and six-minute walk distance. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "symptoms",
+			"required": false,
+			"description": "Apple Health symptom records, the types HealthKit's documentation lists as symptom type identifiers, except the three it files under Reproduction (breast pain, pelvic pain and vaginal dryness), which are in reproductive_health. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your symptoms",
+				"detail": "Symptoms you logged, such as headache, fatigue, fever, coughing, nausea, dizziness, mood changes, sleep changes, skin and hair changes and bladder incontinence. Breast pain, pelvic pain and vaginal dryness are in Reproductive health instead. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "other",
+			"required": false,
+			"description": "Apple Health records of every type no other stream carries: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any type this version does not assign to an area, such as one added to HealthKit later. A record is never dropped for having an unfamiliar type; this stream's receipt counts such records under records_type_unrecognized. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
+			"display": {
+				"label": "Your other Health data",
+				"detail": "Everything that belongs to none of the other areas: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any kind of Health data this version does not recognise yet, such as one Apple adds in a later iOS release, whatever it measures. Nothing is dropped for having an unfamiliar type, and the import receipt says how many such readings arrived. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"unit": {
+						"type": ["string", "null"]
+					},
+					"value": {
+						"type": ["number", "null"]
+					},
+					"value_raw": {
+						"type": ["string", "null"]
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"creation_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"was_user_entered": {
+						"type": ["boolean", "null"],
+						"description": "True when the owner typed this reading in by hand rather than a sensor recording it. Extracted from the HKWasUserEntered metadata entry. This is the one metadata key worth publishing: it separates measured from asserted, which changes how a reader should weigh the value."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"type",
+					"start_date",
+					"end_date",
+					"creation_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"creation_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "workouts",
+			"required": false,
+			"description": "Apple Health workouts. Not incremental: every import re-sends every workout in the export under an id derived from its type, start and end, so a workout already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edited workout replaces the one already held, unless the edit changed its type, start or end; it then arrives as a new workout beside the old one.",
+			"display": {
+				"label": "Your workouts",
+				"detail": "Workout type, with duration in minutes, energy in kilocalories and distance in kilometres, each converted from whatever unit the export stated, plus start and end dates, the time-zone offset where it began, which shows when you were in another time zone, and up to 500 pause or segment markers and up to 500 per-metric statistics per workout, which summarise readings taken during it, such as its average, minimum and maximum heart rate; a workout with more of either has that list cut at 500, and the import receipt names which list under fields_unavailable. On iPhones running iOS 16 or later, a workout can also carry separate detail for each activity within it; that per-activity detail is not included, and the activities' statistics are used only to add up the workout's totals where the workout's own do not. Such exports typically state no total distance or energy for a workout, so those are added up from the workout's own statistics, or from its activities' where those record a kind the workout's own lack, never from both; where each records a kind of distance the other lacks, the total is left empty and the import receipt says so. A quantity that is not a number, or whose unit could not be converted, is left empty rather than guessed, and the import receipt says so. Application and source names are excluded, as is the workout's weather block and any GPS route, because weather on a known date reconstructs location. The device's maker, model, and hardware, firmware and software versions are kept; its name and identifiers are not. Workouts are told apart by their type, start and end only: two of the same type with the same start and end arrive once, whatever their duration, distance, energy or device, and the import receipt counts the second as a duplicate; on a very large export this stops once 100,000 different workouts have been remembered, and the workouts import receipt says so. Every import brings in everything in your export again, and a workout you already have is updated rather than duplicated; a workout you delete in Health is not removed here."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"workout_activity_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"duration_minutes": {
+						"type": ["number", "null"]
+					},
+					"total_energy_burned_kcal": {
+						"type": ["number", "null"],
+						"description": "Active energy burned during the workout, in kilocalories, converted from the unit the export states. The workout's own total where the export states one. Exports from iOS 16 and later typically state none, and the total is then the sum of the workout's active energy statistics, or, for a workout with none of its own, the sum of its activities', never both. Null, with nothing on the receipt, when the export states neither. Also null when the workout's own total is not a number, when a unit, the workout's own or a statistic's, cannot be converted, when a statistic states no sum, when one states a sum or unit but no type, or when the statistics were not all kept; in those cases the workouts receipt lists total_energy_burned_kcal under fields_unavailable."
+					},
+					"total_distance_km": {
+						"type": ["number", "null"],
+						"description": "Distance covered during the workout, in kilometres, converted from the unit the export states. The workout's own total where the export states one. Exports from iOS 16 and later typically state none, and the total is then the sum of the workout's distance statistics of every kind (a swim, a ride and a run add up) where they include every kind its activities have, or otherwise the sum of its activities', never both. Null, with nothing on the receipt, when the export states neither. Also null when the workout's own total is not a number, when the workout's own statistics and its activities' each include a kind of distance the other lacks, when a unit, the workout's own or a statistic's, cannot be converted, when a statistic states no sum, when one states a sum or unit but no type, or when the statistics were not all kept; in those cases the workouts receipt lists total_distance_km under fields_unavailable."
+					},
+					"device": {
+						"type": ["string", "null"],
+						"description": "The device that recorded it, as the hardware fields of Apple's device description: manufacturer, model, hardware, firmware and software, in that order, for those present. Each is written key:value, with \", \" (a comma and a space) before each key after the first, for example \"manufacturer:Apple Inc., model:Watch, hardware:Watch6,2, software:9.1\"; values are as the export states them and may themselves contain commas. Never the device's name or its identifiers. Null when the export states none of these fields, and also when a description is present but cannot be read unambiguously, because it is not in Apple's device-description form or one of these fields appears in it twice; the stream's receipt then lists device under fields_unavailable."
+					},
+					"events": {
+						"type": ["array", "null"],
+						"description": "Pause, resume and segment markers Apple recorded against the workout as a whole, up to 500 per workout. If a workout carried more, the list is a prefix and the workouts receipt lists events under fields_unavailable. Markers nested inside a WorkoutActivity (iOS 16 and later) belong to that activity and are not included.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"type": {
+									"type": ["string", "null"]
+								},
+								"date": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"duration_minutes": {
+									"type": ["number", "null"]
+								}
+							}
+						}
+					},
+					"statistics": {
+						"type": ["array", "null"],
+						"description": "Per-metric summary statistics Apple recorded for the workout as a whole, such as its average, minimum and maximum heart rate, as typed quantities, up to 500 per workout. Statistics nested inside a WorkoutActivity (iOS 16 and later) belong to that activity and are not included. If a workout carried more, the list is a prefix and the workouts receipt lists statistics under fields_unavailable; it does the same when a statistic states a figure that is not a number, which is published as null. Bounded deliberately: an open shape would carry whatever a third-party application chose to write.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"type": {
+									"type": ["string", "null"]
+								},
+								"unit": {
+									"type": ["string", "null"]
+								},
+								"sum": {
+									"type": ["number", "null"]
+								},
+								"average": {
+									"type": ["number", "null"]
+								},
+								"minimum": {
+									"type": ["number", "null"]
+								},
+								"maximum": {
+									"type": ["number", "null"]
+								}
+							}
+						}
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"end_date": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate, as stamped by the Health app. This is the age of the DATA. A reader must date Apple Health records by this and not by when collection ran."
+					},
+					"start_utc_offset_minutes": {
+						"type": ["integer", "null"],
+						"minimum": -1080,
+						"maximum": 1080,
+						"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
+					}
+				},
+				"required": [
+					"id",
+					"workout_activity_type",
+					"start_date",
+					"end_date",
+					"freshness"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"end_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["workout_activity_type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "coverage_diagnostics",
+			"required": false,
+			"description": "One receipt per requested data stream per import, saying what was covered and why it ends where it does. Like any stream, it honours a resource list: a request for specific receipt ids receives only those.",
+			"display": {
+				"label": "What was imported",
+				"detail": "A short receipt for each kind of data in each import: whether everything in your export was read, how many records arrived and the earliest and latest dates among them, how many duplicates were discarded, how many entries could not be read or were of a kind this version does not recognise, the names of any fields left empty, and the date your export was taken. The receipts alone therefore show, for each kind of data, whether you have any, how many, and over what dates: for example, whether your export holds reproductive-health records, how many, and from when to when."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"stream": {
+						"type": ["string", "null"],
+						"description": "The data stream this record accounts for: one of the health-area streams, or workouts."
+					},
+					"status": {
+						"type": "string",
+						"enum": ["complete", "partial", "empty"],
+						"description": "Whether the covered window matches the requested window. A stream with records is also 'partial', whatever its window, when rows may be missing (collection_interrupted, records_unreadable) or a newer export may not have been read (newer_upload_too_large, uploads_not_all_compared). 'empty' is an ordinary outcome, not a failure. Under a resource list, a record requested by id that cannot be read is not reported on the receipt, since an unreadable row has no id to match against the request; 'complete' and covered_in_full then speak only for the rows that could be read, so a reader that asked for specific ids should check that each one arrived."
+					},
+					"reason": {
+						"type": "string",
+						"enum": [
+							"covered_in_full",
+							"nothing_in_range",
+							"awaiting_upload",
+							"source_unreadable",
+							"export_extraction_failed",
+							"collection_interrupted",
+							"records_unreadable",
+							"window_unavailable",
+							"newer_upload_too_large",
+							"uploads_not_all_compared"
+						],
+						"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner and has a reason_display_messages entry. newer_upload_too_large replaces covered_in_full and nothing_in_range on the receipts of an import that read an export beside a newer .zip it could not open, for its size or the number of files it holds, since the export inside that .zip may supersede what was read. uploads_not_all_compared replaces them in the same way when there were more than 100 uploads and only 100 were inspected, so a newer export among the others may not have been read. A receipt with any other reason keeps that reason.",
+						"x_pdpp_role": "primary-title"
+					},
+					"record_count": {
+						"type": ["integer", "null"],
+						"description": "Records emitted for this stream in this import."
+					},
+					"duplicates_discarded": {
+						"type": ["integer", "null"],
+						"description": "Records dropped because a record with the same id had already been seen in this import. A health record's id is derived from its type and its start, end and creation dates, and a workout's from its type, start and end: fields every grant carries, so an id reveals nothing a grant withholds. Records alike in those are counted here whatever their values, units, devices or other fields. Suppression remembers up to 400,000 distinct identities across all the health-area streams together, and up to 100,000 workouts. A stream that meets a new identity after its budget is spent says so: its count is a floor from there, and duplicates_discarded appears under its fields_unavailable. Published because once source names are excluded a reader cannot audit any dropping from the records themselves, and a silent discard is indistinguishable from a reading that never existed."
+					},
+					"records_skipped_unreadable": {
+						"type": ["integer", "null"],
+						"description": "Rows that could not be parsed, or that the schema rejected, and were skipped. These fail identically on every retry; re-importing will not recover them. Unreadable rows are not counted when the stream was asked for specific record ids, since a row that could not be read has no id to match one against; a requested row the schema rejected is. Rows outside the requested window are not counted."
+					},
+					"records_type_unrecognized": {
+						"type": ["integer", "null"],
+						"description": "Records delivered on this stream whose type this version does not assign to any health area, for example one Apple added to HealthKit after this version was written. Such records are delivered on the other stream rather than dropped, so only the other stream's receipt can count any; grouping that stream by type shows which they are. Records outside the requested window or not asked for are not counted."
+					},
+					"fields_unavailable": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Fields the schema declares that were left empty, or cut short, on at least one record this import delivered for the stream, so a column of nulls is never mistaken for a column of absent readings; exported_at is listed whenever the export states no ExportDate. Records outside the requested window, not asked for, discarded as duplicates or rejected as unreadable do not contribute. One entry names a field of this receipt instead: duplicates_discarded, listed once the stream's identity budget is spent, after which that count is a floor. Empty when nothing was left out."
+					},
+					"window_requested_from": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"window_requested_to": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"window_covered_from": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Null when nothing was covered. A reader must render this window rather than the requested one."
+					},
+					"window_covered_to": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["snapshot"],
+						"description": "Always \"snapshot\". An Apple Health export is a point-in-time dump produced by hand on the device and is never live. Declared as a single-value enum because a reader should not have to handle a \"live\" case this source cannot produce."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The export's own ExportDate. The age of the data."
+					}
+				},
+				"required": [
+					"id",
+					"status",
+					"reason",
+					"fields_unavailable",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of",
+			"query": {
+				"range_filters": {
+					"window_requested_from": ["gte", "gt", "lte", "lt"],
+					"window_requested_to": ["gte", "gt", "lte", "lt"],
+					"window_covered_from": ["gte", "gt", "lte", "lt"],
+					"window_covered_to": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["exported_at"],
+					"group_by": ["stream", "reason", "status"]
+				}
+			}
+		}
+	],
+	"reason_display_messages": {
+		"covered_in_full": "Everything of this kind in your export for this period was imported.",
+		"nothing_in_range": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read.",
+		"awaiting_upload": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready.",
+		"source_unreadable": "That file isn't an Apple Health export we can read. It should be the export.zip your iPhone produced, or the export.xml from inside it.",
+		"export_extraction_failed": "We couldn't read your export, so nothing was imported. If it is a .zip that is incomplete, take a fresh export on your iPhone and upload it again. If the .zip cannot be opened here and the export XML inside it is under 8 GB, unzip it on a computer and upload that XML instead.",
+		"collection_interrupted": "Your export file ended earlier than expected, so some records may be missing. Take a fresh export on your iPhone and upload the new file.",
+		"records_unreadable": "Some entries in your export couldn't be read and were skipped - everything else imported normally. Importing the same file again won't recover them.",
+		"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have.",
+		"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here.",
+		"uploads_not_all_compared": "You have more than 100 uploads and only 100 were checked, so a newer export among the others may not have been read. Remove old exports from your uploads, then import again."
+	}
+}

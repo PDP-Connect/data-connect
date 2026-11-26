@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 
@@ -74,7 +74,7 @@ const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token"
 const SUPPORTED_RANGE_OPERATORS = new Set(["gte", "gt", "lte", "lt"]);
 const AGGREGATION_DECLARED_CONNECTORS = ["ynab", "chase", "usaa", "gmail", "slack"];
 const POLYFILL_MANIFESTS_BY_NAME = new Map(
-  readPolyfillManifests().map((entry) => [entry.file.replace(REGEXP_1, ""), entry.manifest as Manifest])
+  readShippedManifests().map((entry) => [entry.file.replace(REGEXP_1, ""), entry.manifest as Manifest])
 );
 const POLYFILL_MANIFEST_NAMES = [...POLYFILL_MANIFESTS_BY_NAME.keys()].sort();
 

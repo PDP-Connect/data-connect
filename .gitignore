@@ -66,6 +66,8 @@ src-tauri/auth-page/
 # Devcontainer (local dev environment)
 .devcontainer/
 connectors/
+!reference-implementation/test/fixtures/shipped-manifests/connectors/
+!reference-implementation/test/fixtures/shipped-manifests/connectors/**
 .vercel
 pdpp-runtime/.install-stamp
 

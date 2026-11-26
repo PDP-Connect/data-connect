@@ -1,0 +1,612 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/muse",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/muse",
+		"display": {
+			"name": "Muse (Meta)"
+		}
+	},
+	"connector_key": "muse",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
+	"version": "0.1.12",
+	"display_name": "Muse (Meta)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#0467DF"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"browser": {
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_condition_wait"
+				]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection runs inside the owner's signed-in muse.ai tab and reads through the web app's own gateway client to the owner's Muse VM. Meta sign-in is strict about automation; refresh manually."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "conversations",
+			"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them. A time window selects chats by their last update.",
+			"display": {
+				"label": "Your Muse chats",
+				"detail": "Chat title, snippet of the latest message, create and update times, and whether the chat is the main chat, a thread, archived or pinned."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"snippet": {
+						"type": ["string", "null"]
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"updated_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"is_primary": {
+						"type": ["boolean", "null"]
+					},
+					"is_thread": {
+						"type": ["boolean", "null"]
+					},
+					"archived": {
+						"type": "boolean"
+					},
+					"pinned": {
+						"type": ["boolean", "null"]
+					},
+					"status": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "archived"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "updated_at",
+			"consent_time_field": "updated_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "snippet"],
+					"semantic_fields": ["title", "snippet"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"updated_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "messages",
+			"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat, or to the start of the requested time window. Collected only together with conversations (each message's chat record is emitted before it, unless the chat record itself is outside the requested window or resources); a request for messages without conversations is answered with scope_not_supported. A message is emitted again under the same id when its chat's transcript changes.",
+			"display": {
+				"label": "Your Muse messages",
+				"detail": "Role, message text, time, the message it replies to, source and visibility."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"session_id": {
+						"type": "string"
+					},
+					"role": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"text": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"text_binary_reason": {
+						"type": ["string", "null"],
+						"description": "Why text is null although the source had text: it held characters that cannot be stored as text."
+					},
+					"occurred_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"reply_to_message_id": {
+						"type": ["string", "null"]
+					},
+					"source": {
+						"type": ["string", "null"]
+					},
+					"visibility": {
+						"type": ["string", "null"]
+					},
+					"seq": {
+						"type": ["integer", "null"]
+					}
+				},
+				"required": ["id", "session_id", "occurred_at"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "occurred_at",
+			"consent_time_field": "occurred_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"required": false,
+			"parent_streams": ["conversations"],
+			"relationships": [
+				{
+					"name": "conversation",
+					"stream": "conversations",
+					"foreign_key": "session_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["text"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"occurred_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["occurred_at"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "activities",
+			"description": "What the agent did, from Muse's activity log: tasks it ran, searches, reminders it set, files it changed.",
+			"display": {
+				"label": "Your Muse agent activity",
+				"detail": "Activity type, title, status, the task it belonged to and when it happened."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"message_id": {
+						"type": ["string", "null"]
+					},
+					"type": {
+						"type": "string"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"subtitle": {
+						"type": ["string", "null"]
+					},
+					"status": {
+						"type": ["string", "null"]
+					},
+					"status_title": {
+						"type": ["string", "null"]
+					},
+					"task_label": {
+						"type": ["string", "null"]
+					},
+					"timestamp": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": ["id", "type", "timestamp"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "timestamp",
+			"consent_time_field": "timestamp",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "task_label"],
+					"semantic_fields": ["title", "task_label"]
+				},
+				"range_filters": {
+					"timestamp": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["timestamp"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "goals",
+			"description": "Goals you set in Muse and goals the agent tracks for you.",
+			"display": {
+				"label": "Your Muse goals",
+				"detail": "Goal title, summary, description, status and momentum, whether you or the agent set it, and its times."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"source": {
+						"type": ["string", "null"]
+					},
+					"slug": {
+						"type": ["string", "null"]
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"status": {
+						"type": ["string", "null"]
+					},
+					"summary": {
+						"type": ["string", "null"]
+					},
+					"description": {
+						"type": ["string", "null"]
+					},
+					"momentum_status": {
+						"type": ["string", "null"]
+					},
+					"emoji": {
+						"type": ["string", "null"]
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"updated_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"last_activity_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "updated_at",
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "summary", "description"],
+					"semantic_fields": ["title", "summary", "description"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"],
+					"updated_at": ["gte", "gt", "lte", "lt"],
+					"last_activity_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "scheduled_tasks",
+			"description": "Scheduled tasks and reminders the agent runs for you, from tasks.list.",
+			"display": {
+				"label": "Your Muse scheduled tasks",
+				"detail": "Task title, schedule, mode, whether it is enabled, next run time, time zone and cadence."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"schedule_key": {
+						"type": ["string", "null"]
+					},
+					"mode": {
+						"type": ["string", "null"]
+					},
+					"enabled": {
+						"type": ["boolean", "null"]
+					},
+					"is_heartbeat": {
+						"type": ["boolean", "null"]
+					},
+					"next_run_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"timezone": {
+						"type": ["string", "null"]
+					},
+					"cadence_kind": {
+						"type": ["string", "null"]
+					},
+					"cadence_time": {
+						"type": ["string", "null"]
+					},
+					"cadence_interval_seconds": {
+						"type": ["integer", "null"]
+					},
+					"cadence_run_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"next_run_at": ["gte", "gt", "lte", "lt"],
+					"cadence_run_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["next_run_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "memory_files",
+			"description": "The agent's memory and profile files (MEMORY.md, USER.md, SOUL.md, IDENTITY.md, PROACTIVE_PREFERENCES.md) at the root of its workspace. No other file is read.",
+			"display": {
+				"label": "Your Muse agent's memory",
+				"detail": "Full text of what the agent remembers about you, its profile of you, and its own identity and preferences, with each file's size and modified time."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"path": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"text": {
+						"type": ["string", "null"]
+					},
+					"text_binary_reason": {
+						"type": ["string", "null"],
+						"description": "Why text is null although the file had content: it held characters that cannot be stored as text."
+					},
+					"size": {
+						"type": ["integer", "null"]
+					},
+					"modified_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": ["id", "path"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "modified_at",
+			"consent_time_field": "modified_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["text"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"modified_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["modified_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "files",
+			"description": "Recent files in your Muse library (uploaded or produced by the agent): metadata only, no file contents.",
+			"display": {
+				"label": "Your Muse files",
+				"detail": "File name, path, size and modified time."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"path": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"size": {
+						"type": ["integer", "null"]
+					},
+					"modified_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": ["id", "path"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "modified_at",
+			"consent_time_field": "modified_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "path"],
+					"semantic_fields": ["name", "path"]
+				},
+				"range_filters": {
+					"modified_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["modified_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "connected_apps",
+			"description": "Services you connected to Muse (or that need you to reconnect them). Available but unconnected services are not included.",
+			"display": {
+				"label": "Your Muse connected apps",
+				"detail": "Service id and name, connection state, how it is managed, and whether it needs re-authorization."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"state": {
+						"type": ["string", "null"]
+					},
+					"management_kind": {
+						"type": ["string", "null"]
+					},
+					"needs_reauth": {
+						"type": ["boolean", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"required": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"],
+					"semantic_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "muse",
+			"login_url": "https://muse.ai/",
+			"login_message": "Sign in to Muse, then return here.",
+			"collect_export": "collectMuse",
+			"probe_export": "probeMuseSessionOnPage",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	},
+	"reason_display_messages": {
+		"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
+	}
+}

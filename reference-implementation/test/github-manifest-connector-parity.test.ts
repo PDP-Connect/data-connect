@@ -46,7 +46,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..");
@@ -71,7 +71,7 @@ function manifestStreamNames(manifestPath: string): string[] {
 }
 
 function readShippedGithubManifest(): Manifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "github.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "github.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for github.json");
   }

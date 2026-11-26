@@ -17,7 +17,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
@@ -135,7 +135,7 @@ test("OTP denylist equals every manifest that declares an OTP posture, computed 
   // Recomputed here straight from the shipped manifests, so this asserts
   // against the ground truth rather than re-running the harness's own
   // derivation.
-  const declaredOtp = readPolyfillManifests()
+  const declaredOtp = readShippedManifests()
     .filter((entry) => {
       const manifest = entry.manifest as { capabilities?: Record<string, unknown> };
       const capabilities = manifest.capabilities ?? {};

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { after, afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 
@@ -54,12 +53,10 @@ const { buildHostedMcpConsentChallengeModel } = await import(
 const { resolveStreamScopeSelection } = await import(
   "../../../../../reference-implementation/server/hosted-mcp-stream-scope.ts"
 );
-const manifest = JSON.parse(
-  readFileSync(
-    new URL("../../../../../node_modules/@pdpp/polyfill-connectors/manifests/spotify.json", import.meta.url),
-    "utf8",
-  ),
+const { readShippedManifests } = await import(
+  "../../../../../reference-implementation/test/helpers/shipped-manifests.ts"
 );
+const manifest = readShippedManifests().find((entry) => entry.file === "spotify.json").manifest;
 const model = await buildHostedMcpConsentChallengeModel(
   "challenge",
   "owner",

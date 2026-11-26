@@ -14,7 +14,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import {
   canonicalConnectorKey,
@@ -56,7 +56,7 @@ function readManifestsFromDir(dir: string): ManifestFileEntry[] {
  * `{ name, manifest }` shape `readManifestsFromDir` produces for the
  * reference-fixture root, so both sources compose identically below. */
 function readShippedPolyfillManifestEntries(): ManifestFileEntry[] {
-  return readPolyfillManifests().map((entry) => ({
+  return readShippedManifests().map((entry) => ({
     manifest: entry.manifest as Record<string, unknown>,
     name: entry.file,
   }));
@@ -154,7 +154,7 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
   // 'browser' binding" 400 the google_takeout enroll smoke hit.
   const { LOCAL_COLLECTOR_DEFINITIONS } = await import("@pdpp/polyfill-connectors/collectors");
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const manifestEntry = readPolyfillManifests().find(
+    const manifestEntry = readShippedManifests().find(
       (candidate) => candidate.file === `${definition.entry}.json`
     );
     if (!manifestEntry) {

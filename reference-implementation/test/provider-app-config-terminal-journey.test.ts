@@ -33,7 +33,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
@@ -74,7 +74,7 @@ async function fetchJson(url: string | URL, opts: RequestInit = {}): Promise<Jso
 }
 
 function readShippedPolyfillManifest(file: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  const entry = readShippedManifests().find((candidate) => candidate.file === file);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${file}`);
   }

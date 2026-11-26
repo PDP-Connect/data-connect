@@ -23,7 +23,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { resolveCoreSelection } from "../server/core-source-authorization.ts";
 import {
@@ -39,7 +39,7 @@ import { buildHostedMcpAuthorizationDetailForConnector } from "../server/routes/
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/chatgpt";
 const SOURCE_KEY = JSON.stringify([CONNECTOR_ID, ""]);
 
-const manifestEntry = readPolyfillManifests().find((entry) => entry.file === "chatgpt.json");
+const manifestEntry = readShippedManifests().find((entry) => entry.file === "chatgpt.json");
 assert.ok(manifestEntry, "expected the shipped ChatGPT manifest");
 const MANIFEST = manifestEntry.manifest as { streams: Array<Record<string, unknown> & { name: string }> };
 

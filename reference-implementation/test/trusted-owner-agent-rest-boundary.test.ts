@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { registerConnector as registerConnectorCatalog } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
@@ -107,7 +107,7 @@ interface ConnectorManifest {
 }
 
 function loadShippedPolyfillManifest(file: string): ConnectorManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  const entry = readShippedManifests().find((candidate) => candidate.file === file);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${file}`);
   }

@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -198,7 +198,7 @@ async function approveClientGrant(
 }
 
 function loadManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

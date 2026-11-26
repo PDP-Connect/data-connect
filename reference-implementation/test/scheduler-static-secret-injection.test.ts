@@ -43,7 +43,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { configuredBrowserChannel } from "@pdpp/polyfill-connectors/browser-launch";
 import { resolveBrowserRuntimeVisibility } from "@pdpp/polyfill-connectors/connector-runtime";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { isRunningInContainer } from "@pdpp/polyfill-connectors/runtime-environment";
 import {
   buildConnectionScopedSecretEnv,
@@ -677,7 +677,7 @@ test("scheduled runs inject store credentials env-absent for every static-secret
 
 test("startServer controller and scheduler-manager pass operator policy into spawned connector children", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-prod-env-policy-"));
-  const providerManifestEntry = readPolyfillManifests().find(
+  const providerManifestEntry = readShippedManifests().find(
     (candidate) => candidate.file === "google_maps_data_portability.json"
   );
   if (!providerManifestEntry) {
@@ -685,7 +685,7 @@ test("startServer controller and scheduler-manager pass operator policy into spa
   }
   // biome-ignore lint/suspicious/noExplicitAny: matches the looseness of the JSON.parse(...) form this replaces.
   const providerManifest = providerManifestEntry.manifest as any;
-  const manualManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "whatsapp.json");
+  const manualManifestEntry = readShippedManifests().find((candidate) => candidate.file === "whatsapp.json");
   if (!manualManifestEntry) {
     throw new Error("no polyfill manifest found for whatsapp.json");
   }

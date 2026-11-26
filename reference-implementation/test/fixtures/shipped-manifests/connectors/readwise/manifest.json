@@ -1,0 +1,316 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/readwise",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/readwise",
+		"display": {
+			"name": "Readwise"
+		}
+	},
+	"connector_key": "readwise",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/readwise",
+	"version": "0.1.0",
+	"display_name": "Readwise",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#222222"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"constraints": {
+					"hosts": ["readwise.io"]
+				}
+			}
+		}
+	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "personal_access_token",
+			"label": "Readwise access token",
+			"description": "Use the Readwise access token for the account whose highlights this connection should collect.",
+			"submit_label": "Create Readwise connection and start first sync",
+			"fields": [
+				{
+					"name": "secret",
+					"label": "Readwise access token",
+					"type": "password",
+					"required": true,
+					"secret": true,
+					"autocomplete": "off",
+					"help_url": "https://readwise.io/access_token",
+					"help_text": "Copy your access token from readwise.io/access_token, then paste it here.",
+					"env": ["READWISE_ACCESS_TOKEN"]
+				}
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"refresh_policy": {
+			"recommended_mode": "automatic",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "none",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "low",
+			"background_safe": true,
+			"rationale": "Readwise's export endpoint uses a long-lived token, is rate limited (HTTP 429 with Retry-After), and supports updatedAfter, so a daily incremental sync is enough."
+		},
+		"public_listing": {
+			"tier": "development"
+		},
+		"auth": {
+			"kind": "env",
+			"required": ["READWISE_ACCESS_TOKEN"]
+		}
+	},
+	"streams": [
+		{
+			"name": "books",
+			"required": true,
+			"description": "Books, articles and other sources the owner has highlighted in Readwise.",
+			"display": {
+				"label": "Your Readwise sources",
+				"detail": "Titles, authors, category, source, cover image, links, document notes and tags."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable Readwise user_book_id, stored as a decimal string."
+					},
+					"title": {
+						"type": "string",
+						"x_pdpp_role": "primary-title",
+						"description": "Readable title of the source, falling back to its original title."
+					},
+					"author": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor",
+						"description": "Author or creator of the source."
+					},
+					"category": {
+						"type": ["string", "null"],
+						"description": "Readwise source category, such as books, articles, tweets or podcasts."
+					},
+					"source": {
+						"type": ["string", "null"],
+						"description": "Service the source was imported from, such as kindle or reader."
+					},
+					"cover_image_url": {
+						"type": ["string", "null"],
+						"description": "URL of the source's cover image."
+					},
+					"source_url": {
+						"type": ["string", "null"],
+						"description": "Original source URL, falling back to Readwise's unique URL."
+					},
+					"readwise_url": {
+						"type": ["string", "null"],
+						"description": "URL of the source in Readwise."
+					},
+					"document_note": {
+						"type": ["string", "null"],
+						"description": "Owner's note on the source as a whole."
+					},
+					"summary": {
+						"type": ["string", "null"],
+						"description": "Source summary returned by Readwise."
+					},
+					"asin": {
+						"type": ["string", "null"],
+						"description": "Amazon Standard Identification Number when provided."
+					},
+					"tags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Names of tags attached to the source."
+					},
+					"is_deleted": {
+						"type": "boolean",
+						"description": "Provider deletion flag. Deleted sources emit a tombstone."
+					},
+					"text_encoding": {
+						"type": "string",
+						"enum": ["pdpp-safe-escape-v1"],
+						"description": "Reversible encoding used by descriptive text and tag fields."
+					}
+				},
+				"required": ["id", "title", "tags", "is_deleted", "text_encoding"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "author", "summary"],
+					"semantic_fields": ["title", "summary"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "highlights",
+			"required": true,
+			"description": "Every Readwise highlight with its note, tags, location and source book.",
+			"display": {
+				"label": "Your Readwise highlights",
+				"detail": "Highlighted text, your notes, tags, colour, favourite flag, location, and the title and author of the source."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Stable Readwise highlight ID, stored as a decimal string."
+					},
+					"book_id": {
+						"type": "string",
+						"description": "Readwise source ID matching books.id."
+					},
+					"book_title": {
+						"type": "string",
+						"description": "Source title copied onto the highlight for independent search and display."
+					},
+					"book_author": {
+						"type": ["string", "null"],
+						"description": "Source author copied onto the highlight."
+					},
+					"book_category": {
+						"type": ["string", "null"],
+						"description": "Readwise category of the source."
+					},
+					"text": {
+						"type": "string",
+						"x_pdpp_role": "primary-title",
+						"description": "Text highlighted by the owner."
+					},
+					"note": {
+						"type": ["string", "null"],
+						"description": "Owner's note on the highlight."
+					},
+					"color": {
+						"type": ["string", "null"],
+						"description": "Highlight color returned by Readwise."
+					},
+					"location": {
+						"type": ["number", "null"],
+						"description": "Highlight position in the units described by location_type."
+					},
+					"location_type": {
+						"type": ["string", "null"],
+						"description": "Units or ordering used for the highlight position."
+					},
+					"url": {
+						"type": ["string", "null"],
+						"description": "URL associated with the individual highlight."
+					},
+					"readwise_url": {
+						"type": ["string", "null"],
+						"description": "URL of the highlight in Readwise."
+					},
+					"tags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Names of tags attached to the highlight."
+					},
+					"is_favorite": {
+						"type": "boolean",
+						"description": "Whether the owner marked this highlight as a favorite."
+					},
+					"is_discard": {
+						"type": "boolean",
+						"description": "Whether Readwise marked this highlight as discarded."
+					},
+					"is_deleted": {
+						"type": "boolean",
+						"description": "True when the highlight or its source is deleted. Emits a tombstone."
+					},
+					"highlighted_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "Time the highlight was taken, when provided by Readwise."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Time the highlight was created in Readwise."
+					},
+					"updated_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Time the highlight was last updated in Readwise."
+					},
+					"text_encoding": {
+						"type": "string",
+						"enum": ["pdpp-safe-escape-v1"],
+						"description": "Reversible encoding used by descriptive text and tag fields."
+					}
+				},
+				"required": [
+					"id",
+					"book_id",
+					"book_title",
+					"text",
+					"tags",
+					"is_favorite",
+					"is_discard",
+					"is_deleted",
+					"text_encoding"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "updated_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["text", "note", "book_title", "book_author"],
+					"semantic_fields": ["text", "note"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["highlighted_at", "created_at"]
+				},
+				"range_filters": {
+					"highlighted_at": ["gte", "gt", "lte", "lt"],
+					"created_at": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window",
+			"relationships": [
+				{
+					"name": "book",
+					"stream": "books",
+					"foreign_key": "book_id",
+					"cardinality": "has_one"
+				}
+			]
+		}
+	],
+	"reason_display_messages": {
+		"readwise_auth_failed": "Readwise did not accept the access token. Copy a fresh token from readwise.io/access_token and connect again."
+	}
+}

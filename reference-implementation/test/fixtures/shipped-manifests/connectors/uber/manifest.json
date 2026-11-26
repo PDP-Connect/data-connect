@@ -1,0 +1,212 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/uber",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/uber",
+		"display": {
+			"name": "Uber"
+		}
+	},
+	"connector_key": "uber",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
+	"version": "1.0.28",
+	"display_name": "Uber",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			},
+			"browser": {
+				"required": true
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Uber trip history is browser-scraped behind a login wall; refresh manually."
+		},
+		"public_listing": {
+			"tier": "supported"
+		}
+	},
+	"streams": [
+		{
+			"name": "trips",
+			"required": true,
+			"description": "Uber trips, one record per trip hydrated from the GetTrip GraphQL operation (status, requested/completed times, pickup/dropoff addresses, driver, distance, duration, product type, fare total). The Activities list feed only supplies trip identity (see capability-map.json's lead_decision_live).",
+			"display": {
+				"label": "Your Uber trips",
+				"detail": "Trip status, date, pickup/dropoff addresses, driver name, distance, duration, vehicle type, and fare total."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"status": {
+						"type": ["string", "null"]
+					},
+					"requested_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"completed_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"pickup_address": {
+						"type": ["string", "null"]
+					},
+					"dropoff_address": {
+						"type": ["string", "null"]
+					},
+					"driver_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"fare_total": {
+						"type": ["string", "null"]
+					},
+					"fare_total_cents": {
+						"type": ["integer", "null"],
+						"x_pdpp_role": "amount"
+					},
+					"distance_meters": {
+						"type": ["number", "null"]
+					},
+					"duration_seconds": {
+						"type": ["integer", "null"]
+					},
+					"distance_display": {
+						"type": ["string", "null"]
+					},
+					"duration_display": {
+						"type": ["string", "null"]
+					},
+					"product_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"is_surge": {
+						"type": ["boolean", "null"]
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "requested_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["driver_name"]
+				},
+				"range_filters": {
+					"requested_at": ["gte", "gt", "lte", "lt"],
+					"completed_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["requested_at"],
+					"group_by": ["status", "product_type"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "receipts",
+			"required": false,
+			"description": "Per-trip receipt detail: itemized fare breakdown, currency, and receipt totals. 1:1 with trips. Fetched from GetReceipt only.",
+			"display": {
+				"label": "Your Uber receipts",
+				"detail": "Itemized fare breakdown, currency, and the receipt's headline total. Fetched per-trip, so this stream is only populated when explicitly requested — a trips-only grant performs no GetReceipt calls."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"trip_id": {
+						"type": "string"
+					},
+					"currency": {
+						"type": ["string", "null"]
+					},
+					"fare_total": {
+						"type": ["string", "null"]
+					},
+					"fare_total_cents": {
+						"type": ["integer", "null"],
+						"x_pdpp_role": "amount"
+					},
+					"fare_breakdown": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"label": {
+									"type": "string"
+								},
+								"amount_cents": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["label"]
+						}
+					}
+				},
+				"required": ["id", "trip_id"]
+			},
+			"primary_key": ["trip_id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "trip",
+					"stream": "trips",
+					"foreign_key": "trip_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"range_filters": {
+					"fare_total_cents": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"sum": ["fare_total_cents"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"state_stream": "trips",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
+		"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
+	}
+}

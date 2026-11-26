@@ -32,7 +32,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -135,7 +135,7 @@ async function registerManifest(asUrl: string, manifest: Manifest): Promise<void
 }
 
 function loadManifest(filename: string): Manifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === filename);
+  const entry = readShippedManifests().find((candidate) => candidate.file === filename);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${filename}`);
   }

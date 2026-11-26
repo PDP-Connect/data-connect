@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -96,7 +96,7 @@ async function manifestBackedCompactionClassResolver(connectorId: unknown): Prom
     return null;
   }
   const entryName = `${connectorId.replace(/-/g, "_")}.json`;
-  const polyfillEntry = readPolyfillManifests().find((candidate) => candidate.file === entryName);
+  const polyfillEntry = readShippedManifests().find((candidate) => candidate.file === entryName);
   if (polyfillEntry) {
     return polyfillEntry.manifest as Record<string, unknown>;
   }

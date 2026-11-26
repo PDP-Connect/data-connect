@@ -17,7 +17,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 test("no manifest with a filesystem binding advertises capabilities.proven.local_collector unless it also has runtime_requirements.bindings.filesystem", () => {
   // Guards the inverse direction: a manifest cannot claim the local-collector
@@ -25,7 +25,7 @@ test("no manifest with a filesystem binding advertises capabilities.proven.local
   // meaningful. This is the regression the task's method explicitly calls
   // out: "a malformed manifest ever claims a capability its declared setup
   // modality cannot support."
-  for (const { file: entry, manifest } of readPolyfillManifests()) {
+  for (const { file: entry, manifest } of readShippedManifests()) {
     const raw = manifest as {
       connector_key?: string;
       runtime_requirements?: { bindings?: Record<string, unknown> };
