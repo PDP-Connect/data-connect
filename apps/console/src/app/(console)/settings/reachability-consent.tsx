@@ -309,7 +309,7 @@ export function RuntimeRouteConsentCard({
       <h3 className="pdpp-label">Details of this connection changed</h3>
       {valid ? (
         <>
-          <p className="pdpp-caption break-words">Connects to: {review.scope?.query.target}</p>
+          {review.scope?.query.target ? <p className="pdpp-caption break-words">Connects to: {review.scope.query.target}</p> : null}
           {review.scope?.query.expectedOrigin ? (
             <p className="pdpp-caption break-words">Your address will be: {review.scope.query.expectedOrigin}</p>
           ) : null}

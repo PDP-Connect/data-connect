@@ -184,6 +184,8 @@ test("turn on card shows the exact address and target covered by approval", () =
   const html = renderToStaticMarkup(turnOnCard(review));
   assert.match(html, /Your address will be: https:\/\/owner\.fixture\.invalid/);
   assert.match(html, /Connects to: fixture-target/);
+  const empty = renderToStaticMarkup(turnOnCard({ ...review, consent: { ...review.consent, scope: { ...review.consent.scope, query: { ...review.consent.scope?.query, target: "" } } } } as typeof review));
+  assert.doesNotMatch(empty, /Connects to/);
 });
 
 test("canary private fields are absent from projected setup and route snapshots", () => {

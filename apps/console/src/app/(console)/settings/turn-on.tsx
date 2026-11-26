@@ -83,7 +83,7 @@ export function TurnOnCard({
         Details · everything {plain(candidate.display.label)} tells us about this connection
       </h4>
       <div className="grid gap-3">
-        <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
+        {consent.scope?.query.target ? <p className="pdpp-caption break-words">Connects to: {consent.scope.query.target}</p> : null}
         {consent.scope?.query.expectedOrigin ? (
           <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
         ) : null}
