@@ -507,7 +507,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
       source = { ...source, source_kind: "local_device", source_visibility: "archived", status: "paused" };
       break;
     case 2:
-      source = { ...source, revoked_at: DEMO_SUCCESS, source_visibility: "setup_failed", status: "revoked" };
+      source = { ...source, total_records: 0, total_records_state: "known_zero", connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, revoked_at: DEMO_SUCCESS, source_visibility: "setup_failed", status: "revoked" };
       connectionStatus = "revoked";
       setupFailed = true;
       break;
@@ -643,7 +643,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
 
   return {
     ...model,
-    streams: [6, 7, 22].includes(row) ? model.streams.map((stream) => ({ ...stream, record_count: 0, count_state: "known_zero" as const })) : model.streams,
+    streams: [2, 6, 7, 22].includes(row) ? model.streams.map((stream) => ({ ...stream, record_count: 0, count_state: "known_zero" as const })) : model.streams,
     manualUploadHref: row === 18 ? `/connect/manual-upload/claude-code?connection_id=${model.connectionId}` : model.manualUploadHref,
     collectionFactsByStream: visibleFacts,
     connectionHealth: health,

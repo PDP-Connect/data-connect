@@ -81,7 +81,7 @@ import {
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
 } from "../../lib/source-actionability.ts";
-import { type SourceStatusAction, sourceStateSentence, sourceStatusWords } from "../../lib/source-status-words.ts";
+import { type SourceStatusAction, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { readConnectorUpdates } from "../connector-updates-read.ts";
@@ -772,6 +772,7 @@ function ConnectorPageView({
   // Pause is offered only on a connection that is actually collecting. A
   // draft/revoked/already-paused row has nothing to pause, and the route would
   // answer `connector_instance_not_active` anyway.
+  const neverConnected = sourceNeverConnected(source);
   const archived = source.source_visibility === "archived";
   const oneTime = source.source_kind === "manual" || source.rendered_verdict?.pill.label === "Import complete";
   const pausable = !(revoked || paused || archived || oneTime) && overview.connectionStatus === "active";
@@ -868,7 +869,7 @@ function ConnectorPageView({
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
-        count={visibleTotal}
+        count={neverConnected ? undefined : visibleTotal}
         description={undefined}
         title={
           <span>
@@ -889,16 +890,16 @@ function ConnectorPageView({
       <Suspense fallback={null}>
         <SourceUpdateSlot demoModel={updateDemo} displayName={displayName} updates={updates} version={null} />
       </Suspense>
-      <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
+      {!neverConnected ? <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         <SourceRecords model={model} />
         {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>Add another export</Link>
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
         </div> : null}
-      </Section>
-      {!archived && !oneTime ? <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
+      </Section> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
       <RecentRunsSection recentRuns={recentRuns} />
-          {configuration ? (
+          {configuration && !neverConnected ? (
             <ConnectionConfiguration
               config={configuration}
               connectionId={connectorInstanceId ?? connectionId}
@@ -907,11 +908,11 @@ function ConnectorPageView({
             />
           ) : null}
           <Section title="Manage">
-            <RenameConnection
+            {!neverConnected ? <RenameConnection
               connectionId={renameSelector}
               currentLabel={connectionLabelSeed}
               typeName={formatConnectorKeyForDisplay(connectorId)}
-            />
+            /> : null}
             {scheduleSyncAvailable ? ( <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" /> ) : null}
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
             <CredentialRepairLinks
@@ -920,7 +921,7 @@ function ConnectorPageView({
               storedCredentialUpdateHref={credentialUpdateHref}
               hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
             />
-            {addAnotherAccountAction}
+            {!neverConnected && !revoked ? addAnotherAccountAction : null}
             <ConnectionDangerZone
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
@@ -930,6 +931,7 @@ function ConnectorPageView({
               message={dangerMessage ? "Done." : undefined}
               setupFailed={setupFailed}
               inactive={revoked || archived || oneTime}
+              neverConnected={neverConnected}
             />
           </Section>
 
@@ -1256,7 +1258,7 @@ function ConnectorPrimaryHeaderAction({
     return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;
   }
   if (statusAction?.kind === "continue_setup") {
-    return <form action={resumeSetupConnectionAction}><input name="connection_id" type="hidden" value={routeConnectionId} /><IcButton size="sm" type="submit" variant={statusAction.filled ? "default" : "ghost"}>Continue setup</IcButton></form>;
+    return <form action={resumeSetupConnectionAction}><input name="connection_id" type="hidden" value={routeConnectionId} /><IcButton size="sm" type="submit" variant={statusAction.filled ? "default" : "ghost"}>{statusAction.label}</IcButton></form>;
   }
   if (statusAction?.kind === "install") {
     return <ConnectorInstallPrompt actionLabel={statusAction.label} connectorKey={installKey} displayName={displayName} routeId={connectionId ?? connectorId} variant="inline" />;

@@ -318,14 +318,14 @@ test("a paused historical archive names the resume action and keeps credential r
   // The source page uses this action to resume the archived source directly.
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: false }).action,
-    { kind: "resume", label: "Resume syncing", filled: false }
+    { kind: "resume", label: "Resume", filled: false }
   );
   assert.deepEqual(
     sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action,
-    { kind: "repair_credential", label: "Continue", filled: false }
+    { kind: "repair_credential", label: "Resume", filled: false }
   );
   // The home and list do not know whether the source page can resume directly.
-  assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Continue", filled: false });
+  assert.deepEqual(sourceStatusWords(archive, { now: NOW }).action, { kind: "repair_credential", label: "Resume", filled: false });
   // No server sign-in action does not mean no sign-in is needed.
   assert.equal(sourceStatusWords(archive, { now: NOW, signInRepairAvailable: true }).action?.kind, "repair_credential");
 });
@@ -454,4 +454,34 @@ test("all returned screen strings omit raw dates, ids, and internal vocabulary",
   for (const value of [serverCta.words, serverCta.action?.label ?? "", sourceStateSentence(serverCtaSource, { now: NOW, name: "Example source" }).text]) {
     assert.equal(forbidden.test(value), false, `server CTA: ${value}`);
   }
+});
+
+test("only the sole unmeasured-completeness maintainer cause gets the plain synced sentence", () => {
+  const unmeasured = requiredAction({ audience: "maintainer", kind: "code_fix", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" }, cta: "Some data from this source isn't being measured yet", urgency: "soon" });
+  const base = source({ owner_state: { ...healthyState, resolver: "blocked_maintainer" }, rendered_verdict: verdict("Not measured", [unmeasured]) });
+  const words = sourceStatusWords(base, { now: NOW });
+  assert.equal(words.words, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
+  assert.equal(words.needsYou, false);
+  assert.equal(words.tone, "plain");
+  assert.equal(words.action?.label, "Sync now");
+  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, words.words);
+  for (const actions of [[{ ...unmeasured, cta: "Fix the copy" }], [{ ...unmeasured, terminal: true }], [unmeasured, requiredAction()]]) {
+    assert.match(sourceStateSentence({ ...base, rendered_verdict: verdict("Not measured", actions) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
+  }
+  assert.match(sourceStateSentence({ ...base, last_run: { run_id: "failed", status: "failed", event_count: 0, failure_reason: "failed", first_at: SUCCESS, last_at: SUCCESS, started_at: SUCCESS, finished_at: SUCCESS } }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
+  assert.match(sourceStateSentence({ ...base, connection_health: health({ last_success_at: null }) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
+});
+
+test("never connected requires failed setup, a known zero count and no successful sync", () => {
+  const base = source({ source_visibility: "setup_failed", total_records: 0, total_records_state: "known_zero", connection_health: health({ last_success_at: null }) });
+  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Northwind was never connected.");
+  assert.equal(sourceStatusWords(base, { now: NOW }).action?.label, "Try again");
+  for (const change of [{ total_records: 1 }, { total_records_state: "unknown" as const }, { connection_health: health() }, { source_visibility: "active" as const }]) {
+    assert.doesNotMatch(sourceStateSentence({ ...base, ...change }, { now: NOW, name: "Northwind" }).text, /was never connected/);
+  }
+});
+
+test("a paused device sentence names where to resume", () => {
+  const local = source({ status: "paused", source_kind: "local_device", owner_state: { ...healthyState, resolver: "owner_paused" } });
+  assert.equal(sourceStateSentence(local, { now: NOW, name: "Northwind", deviceName: "Work computer" }).text, "Paused on Work computer. Resume it there.");
 });

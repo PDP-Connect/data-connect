@@ -222,3 +222,17 @@ test("copying stop asks before stopping and preserves copied data in its explana
   assert.match(html, /role="alertdialog"/);
   assert.match(visibleText(html), /Keep going/);
 });
+
+test("a first connection that failed before its sign-in page opened says what did not start", () => {
+  const failed = status({ setup_state: "first_sync_failed", last_error: { reason: "The sign-in computer was unavailable.", remediation: "Try again." } });
+  const facts: FirstSyncFacts = { kinds: null, schedule: undefined, signedIn: false, runStatus: "surface_failed" };
+  const outcome = firstSyncOutcome(failed, "Northwind", facts);
+  assert.equal(headlineFor(outcome, "Northwind"), "Northwind didn't connect.");
+  assert.equal(outcome.kind, "failed");
+  if (outcome.kind !== "failed") return;
+  assert.equal(outcome.reason, "DataConnect could not open Northwind's sign-in page.");
+  assert.equal(outcome.retry.label, "Try again");
+  assert.equal(outcome.wentWrong, failed.last_error?.reason);
+  const afterCopy = firstSyncOutcome(failed, "Northwind", { ...facts, kinds: [{ count: 1, kind: "messages" }] });
+  assert.ok(afterCopy.kind === "failed" && afterCopy.reason === "Something went wrong while copying your data.");
+});

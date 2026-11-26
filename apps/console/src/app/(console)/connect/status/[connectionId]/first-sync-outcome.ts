@@ -189,7 +189,10 @@ export function firstSyncOutcome(
 		timedOut ||
 		busy
 	) {
-		const title = stopped
+		const neverStarted = status.setup_kind === "browser_session" && facts.runStatus === "surface_failed" &&
+      facts.signedIn !== true && collectedKinds(facts).length === 0 &&
+      (status.run?.records_emitted ?? 0) === 0 && (status.run?.reported_records_emitted ?? 0) === 0;
+    const title = stopped
 			? "You stopped this."
 			: timedOut
 				? `The sign-in to ${name} wasn't finished.`
@@ -205,7 +208,7 @@ export function firstSyncOutcome(
 					? "Nothing is lost. Start again when you're ready."
 					: busy
 						? ""
-						: outcomeCopy.failedFallback,
+						: neverStarted ? `DataConnect could not open ${name}'s sign-in page.` : outcomeCopy.failedFallback,
 			retry: {
 				href: retryHref,
 				label: stopped

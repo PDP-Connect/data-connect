@@ -133,7 +133,7 @@ test("delete copy erases this connection, discloses grants, and offers cancel-ru
 
 test("delete requires reproducing the connection id before the destructive submit enables", async () => {
   const src = await read(DANGER_ZONE_FILE);
-  assert.match(src, /const confirmed = typed === displayName/);
+  assert.match(src, /const confirmed = neverConnected \|\| typed === displayName/);
   assert.match(src, /name="confirm_delete"\s+type="hidden"\s+value=\{confirmed \? connectionId : ""\}/);
   assert.match(src, /disabled=\{!confirmed\}/);
   assert.match(await read(ACTIONS_FILE), ACT_CONFIRM_DELETE_GUARD_RE);

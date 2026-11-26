@@ -106,6 +106,28 @@ function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
   return canStartSync(source) ? action("sync_now", "Sync now", false) : null;
 }
 
+export function sourceNeverConnected(source: RefConnectorSummary): boolean {
+  return source.source_visibility === "setup_failed" &&
+    source.total_records === 0 &&
+    (source.total_records_state === "known_zero" || source.total_records_state === "known") &&
+    !lastSuccessfulSync(source);
+}
+
+// These are the two exact CTAs authored only by the unmeasured-completeness
+// branch in runtime/rendered-verdict.ts. Unknown or changed server copy stays
+// on the maintainer path; never infer this exception from code_fix alone.
+function onlyUnmeasuredCompleteness(source: RefConnectorSummary): boolean {
+  const actions = source.rendered_verdict?.required_actions ?? [];
+  const item = actions[0];
+  return Boolean(lastSuccessfulSync(source)) &&
+    (!source.last_run || ["succeeded", "completed", "success", "succeeded_with_gaps"].includes(source.last_run.status)) &&
+    actions.length === 1 &&
+    item?.audience === "maintainer" && item.kind === "code_fix" && !item.terminal &&
+    item.satisfied_when.kind === "none" && item.surface?.kind === "maintainer" &&
+    (item.cta === "Some data from this source isn't being measured yet" ||
+      item.cta === "Some data from this source ended before it could be measured, and this one-time import will not run again");
+}
+
 function lifecycleRow(
   source: RefConnectorSummary,
   projection: ReturnType<typeof projectSourceActionability>,
@@ -113,7 +135,9 @@ function lifecycleRow(
 ): MatchedStatus | null {
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null };
   if (projection.renderedStatus.kind === "setup_failed") {
-    return { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
+    return sourceNeverConnected(source)
+      ? { row: 2, words: `${source.display_name} was never connected.`, tone: "faint", action: action("continue_setup", "Try again", false) }
+      : { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };
   if (source.connector_implementation?.state === "not_installed") {
@@ -127,7 +151,7 @@ function lifecycleRow(
       const fallbackAction = source.source_kind === "local_device"
         ? syncAction(source)
         : source.status === "paused"
-          ? action("resume", "Resume syncing", false)
+          ? action("resume", "Resume", false)
           : syncAction(source);
       const firstSyncAction = fallbackAction?.kind === "sync_now"
         ? { ...fallbackAction, label: "Retry first sync" }
@@ -157,8 +181,8 @@ function lifecycleRow(
       ? action("view_device", "View this device", false)
       : source.source_binding_kind === "historical_archive"
         ? signInRepairAvailable === false
-          ? action("resume", "Resume syncing", false)
-          : action("repair_credential", "Continue", false)
+          ? action("resume", "Resume", false)
+          : action("repair_credential", "Resume", false)
         : action("resume", "Resume", false);
     return { row: 10, words: "Paused", tone: "faint", action: pausedAction };
   }
@@ -230,6 +254,7 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
     return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction };
   }
   if (resolver === "blocked_maintainer") {
+    if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}. DataConnect can't yet tell whether it got everything.`, tone: "plain", action: syncAction(source) };
     return { row: 13, words: "Waiting on a fix from the DataConnect maintainers", tone: "plain", action: null };
   }
   if (
@@ -329,7 +354,7 @@ function matchStateSentence(
 
   switch (status.row) {
     case 1: return { text: "Archived. It no longer syncs." };
-    case 2: return { text: "Setup was never completed." };
+    case 2: return { text: sourceNeverConnected(source) ? `${options.name} was never connected.` : "Setup was never completed." };
     case 3: return { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" };
     case 4: return { text: `DataConnect needs to get ${options.name} ready again.` };
     case 5: return { text: `The first copy of ${options.name} may not be complete.`, slot: "what_you_can_do" };
@@ -355,6 +380,7 @@ function matchStateSentence(
     }
     case 9: return { text: "Setup is in progress." };
     case 10:
+      if (source.source_kind === "local_device") return { text: `Paused on ${options.deviceName ?? "the computer that holds this data"}. Resume it there.` };
       return source.status === "paused"
         ? {
             text: withLastSync(
@@ -379,7 +405,8 @@ function matchStateSentence(
       }
       return { text: `The last sync did not finish. DataConnect will try again on its own${coming ? ` ${coming}` : ""}.` };
     }
-    case 13: return { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do." };
+    case 13: if (onlyUnmeasuredCompleteness(source)) return { text: status.words };
+      return { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do." };
     case 14:
     case 15:
     case 16: {

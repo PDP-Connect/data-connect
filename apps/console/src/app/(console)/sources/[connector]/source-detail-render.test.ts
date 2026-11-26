@@ -326,3 +326,12 @@ test("state-specific sections, counts and sentences do not contradict each other
   assert.equal(install.split("DataConnect needs to get Claude Code workstation ready again.").length, 2);
   assert.equal([...((await renderDemo("status-10")).window.document.querySelectorAll("a, button"))].filter((node) => /Resume/.test(node.textContent ?? "")).length, 1);
 });
+
+test("a source that never connected offers only retry and removal", async () => {
+  const document = (await renderDemo("status-2")).window.document;
+  const text = document.body.textContent ?? "";
+  assert.match(text, /Claude Code workstation was never connected\./);
+  assert.match(text, /Try again/);
+  assert.match(text, /Takes Claude Code workstation off your list\. There is nothing to erase\./);
+  assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again/);
+});

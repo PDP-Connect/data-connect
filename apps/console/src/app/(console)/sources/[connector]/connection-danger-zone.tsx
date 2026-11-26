@@ -22,6 +22,7 @@ interface Props {
 	message?: string;
 	setupFailed?: boolean;
   inactive?: boolean;
+  neverConnected?: boolean;
 	initialDialog?: "reset" | "disconnect" | "delete";
 }
 
@@ -42,6 +43,7 @@ export function ConnectionDangerZone({
 	message,
 	setupFailed = false,
   inactive = false,
+  neverConnected = false,
 	initialDialog,
 }: Props) {
 	return (
@@ -72,6 +74,7 @@ export function ConnectionDangerZone({
 								/>
 							)}
 							<DeleteForm
+                neverConnected={neverConnected}
 								activeRunId={activeRunId}
 								connectionId={connectionId}
 								displayName={displayName}
@@ -248,21 +251,23 @@ function RevokeForm({
 }
 
 function DeleteForm({
+  neverConnected,
 	activeRunId,
 	connectionId,
 	displayName,
 	initialOpen,
 }: {
-	activeRunId: string | null;
+	neverConnected: boolean;
+  activeRunId: string | null;
 	connectionId: string;
 	displayName: string;
 	initialOpen: boolean;
 }) {
 	const [open, setOpen] = useState(initialOpen);
 	const [typed, setTyped] = useState("");
-	const confirmed = typed === displayName;
-	const label = "Delete and erase the records";
-	const sentence = sourceRemovalCopy.delete(displayName);
+	const confirmed = neverConnected || typed === displayName;
+	const label = neverConnected ? `Remove ${displayName}` : "Delete and erase the records";
+	const sentence = neverConnected ? `Takes ${displayName} off your list. There is nothing to erase.` : sourceRemovalCopy.delete(displayName);
 	const close = () => {
 		setOpen(false);
 		setTyped("");
@@ -281,7 +286,7 @@ function DeleteForm({
 							type="hidden"
 							value={confirmed ? connectionId : ""}
 						/>
-						<label
+						{!neverConnected ? <label
 							className="pdpp-caption flex flex-col gap-1 text-muted-foreground"
 							htmlFor="confirm-delete-input"
 						>
@@ -294,7 +299,7 @@ function DeleteForm({
 								onChange={(event) => setTyped(event.target.value)}
 								value={typed}
 							/>
-						</label>
+						</label> : null}
 						<IcButton
 							disabled={!confirmed}
 							size="sm"
