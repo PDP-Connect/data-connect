@@ -3,6 +3,11 @@
 
 import { getDb } from "./db.ts";
 import { isPostgresStorageBackend } from "./postgres-storage.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+} from "./storage-generation.ts";
 
 type ProjectionError = Error & { code?: string };
 type IsoTimestamp = string;
@@ -583,6 +588,7 @@ export async function rebuildDatasetSummaryProjection(
   { retryConflicts = true, signal }: { retryConflicts?: boolean; signal?: AbortSignal } = {}
 ): Promise<DatasetSummaryProjection | (DatasetSummary & { metadata: ProjectionMetadata })> {
   assertSqliteBackendForDatasetSummary("rebuildDatasetSummaryProjection");
+  const storageGeneration = currentStorageGeneration();
   const startedAt = nowIso();
   const before = getDatasetSummaryProjection();
   if (isRebuildLeaseActive(before.metadata, startedAt)) {
@@ -596,7 +602,8 @@ export async function rebuildDatasetSummaryProjection(
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal);
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const result = await attemptDatasetSummaryRebuild(dependencies, rebuildGeneration, signal);
+      const result = await attemptDatasetSummaryRebuild(dependencies, rebuildGeneration, signal, storageGeneration);
+      assertCurrentStorageGeneration(storageGeneration);
       if (result.committed) {
         noteDatasetSummaryAutoHealSuccess();
         return result.value;
@@ -624,6 +631,7 @@ export async function rebuildDatasetSummaryProjection(
     writeDatasetSummaryProjectionPreservingSummary(after, supersededRebuildMetadata(after, conflictAt), conflictAt);
     return getDatasetSummaryProjection();
   } catch (err) {
+    assertCurrentStorageGeneration(storageGeneration);
     const endedAt = nowIso();
     const current = getDatasetSummaryProjection();
     if (current.metadata.rebuild_started_at === startedAt) {
@@ -636,7 +644,8 @@ export async function rebuildDatasetSummaryProjection(
 async function attemptDatasetSummaryRebuild(
   dependencies: RebuildDatasetSummaryDependencies,
   rebuildGeneration: number,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  storageGeneration: number
 ): Promise<
   { committed: true; value: DatasetSummary & { metadata: ProjectionMetadata } } | { committed: false; value: null }
 > {
@@ -675,6 +684,7 @@ async function attemptDatasetSummaryRebuild(
   };
   const seeds = dependencies.listStreamProjectionSeeds ? await dependencies.listStreamProjectionSeeds() : [];
   throwIfAborted(signal);
+  assertCurrentStorageGeneration(storageGeneration);
   const committed = writeDatasetSummaryProjectionWithStreamSeedsGuarded(
     summary,
     metadata,
@@ -760,8 +770,13 @@ const DATASET_SUMMARY_AUTO_HEAL_MAX_CONSECUTIVE_FAILURES = 5;
 let datasetSummaryAutoHealRetryAfterMs = 0;
 let datasetSummaryAutoHealConsecutiveFailures = 0;
 let datasetSummaryAutoHealNow = () => Date.now();
+const datasetSummaryDeferredRepairs = new Map<number, ReturnType<typeof setTimeout>>();
 
 export function __resetDatasetSummaryAutoHealThrottleForTest(): void {
+  for (const timer of datasetSummaryDeferredRepairs.values()) {
+    clearTimeout(timer);
+  }
+  datasetSummaryDeferredRepairs.clear();
   datasetSummaryAutoHealRetryAfterMs = 0;
   datasetSummaryAutoHealConsecutiveFailures = 0;
   datasetSummaryAutoHealNow = () => Date.now();
@@ -793,6 +808,38 @@ function noteDatasetSummaryAutoHealSuccess(): void {
   datasetSummaryAutoHealRetryAfterMs = 0;
 }
 
+// One bounded retry after a read conflict, outside the request. Keep it
+// deduplicated until completion and fenced to the storage that scheduled it.
+function deferDatasetSummaryRepair(dependencies: RebuildDatasetSummaryDependencies): void {
+  const generation = currentStorageGeneration();
+  if (datasetSummaryDeferredRepairs.has(generation)) {
+    return;
+  }
+  const timer = setTimeout(async () => {
+    try {
+      if (!isCurrentStorageGeneration(generation) || datasetSummaryAutoHealExhausted()) {
+        return;
+      }
+      const before = reclaimExpiredRebuildLease(getDatasetSummaryProjection());
+      if (!datasetSummaryProjectionNeedsHeal(before) || isRebuildLeaseActive(before.metadata)) {
+        return;
+      }
+      const repaired = await rebuildDatasetSummaryProjection(dependencies);
+      if (repaired.metadata.state !== "fresh") {
+        noteDatasetSummaryAutoHealCooldown();
+      }
+    } catch {
+      if (isCurrentStorageGeneration(generation)) {
+        noteDatasetSummaryAutoHealFailure();
+      }
+    } finally {
+      datasetSummaryDeferredRepairs.delete(generation);
+    }
+  }, DATASET_SUMMARY_AUTO_HEAL_COOLDOWN_MS);
+  timer.unref();
+  datasetSummaryDeferredRepairs.set(generation, timer);
+}
+
 // A projection needs auto-heal when it has never converged (`computed_at`
 // null), when a prior rebuild left it in the terminal `failed` state, or
 // when it is stale for a reason only a full rebuild clears (`owesFullRebuild`,
@@ -814,8 +861,9 @@ function datasetSummaryProjectionNeedsHeal(projection: DatasetSummaryProjection)
 
 /**
  * Read-path auto-heal makes at most one rebuild pass. A generation conflict
- * leaves the result stale and consumes cooldown. The explicit rebuild can
- * afford to try again on the same request.
+ * leaves the result stale and consumes cooldown, with one deferred bounded
+ * repair so convergence does not depend on another read. The explicit rebuild
+ * can afford to try again on the same request.
  *
  * This is the fix for "why wouldn't the projection heal automatically":
  * `rebuildDatasetSummaryProjection` had exactly one caller, an
@@ -855,6 +903,7 @@ export async function ensureDatasetSummaryProjectionHealthy(
     const healed = await rebuildDatasetSummaryProjection(dependencies, { retryConflicts: false });
     if (healed.metadata.state !== "fresh") {
       noteDatasetSummaryAutoHealCooldown();
+      deferDatasetSummaryRepair(dependencies);
     }
     return getDatasetSummaryProjection();
   } catch {

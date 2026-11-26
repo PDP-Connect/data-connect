@@ -25,6 +25,7 @@ async function withTempDb<T>(fn: () => Promise<T>): Promise<T> {
     __resetDatasetSummaryAutoHealThrottleForTest();
     return await fn();
   } finally {
+    __resetDatasetSummaryAutoHealThrottleForTest();
     closeDb();
     rmSync(dir, { force: true, recursive: true });
   }
@@ -100,6 +101,100 @@ test("a read reclaims an expired refresh even when no delta has arrived", () =>
     const healed = await ensureDatasetSummaryProjectionHealthy(healthyDependencies);
     assert.equal(healed.metadata.state, "fresh");
     assert.equal(healed.metadata.rebuild_status, "idle");
+  }));
+
+test("a read conflict converges after cooldown without another read", (t) =>
+  withTempDb(async () => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let passes = 0;
+    const dependencies = {
+      ...healthyDependencies,
+      getCounts: () => {
+        passes += 1;
+        if (passes === 1) {
+          markDatasetSummaryProjectionStale("concurrent delta");
+        }
+        return healthyDependencies.getCounts();
+      },
+    };
+    const result = await ensureDatasetSummaryProjectionHealthy(dependencies);
+    assert.equal(result.metadata.state, "stale");
+    assert.equal(passes, 1, "GET performs only one pass");
+    await ensureDatasetSummaryProjectionHealthy(dependencies);
+    t.mock.timers.tick(30_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(passes, 2, "one deferred repair is deduplicated across reads");
+    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh");
+  }));
+
+test("deferred repair is bounded under continuous conflicts", (t) =>
+  withTempDb(async () => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let passes = 0;
+    await ensureDatasetSummaryProjectionHealthy({
+      ...healthyDependencies,
+      getCounts: () => {
+        passes += 1;
+        markDatasetSummaryProjectionStale("concurrent delta");
+        return healthyDependencies.getCounts();
+      },
+    });
+    t.mock.timers.tick(30_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(passes, 9, "one GET pass plus at most eight deferred attempts");
+    assert.equal(getDatasetSummaryProjection().metadata.state, "stale");
+    t.mock.timers.tick(60_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(passes, 9, "deferred repair does not reschedule itself");
+  }));
+
+test("deferred repair drops work when its database has been replaced", (t) =>
+  withTempDb(async () => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let passes = 0;
+    await ensureDatasetSummaryProjectionHealthy({
+      ...healthyDependencies,
+      getCounts: () => {
+        passes += 1;
+        markDatasetSummaryProjectionStale("concurrent delta");
+        return healthyDependencies.getCounts();
+      },
+    });
+    closeDb();
+    initDb(":memory:");
+    t.mock.timers.tick(30_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(passes, 1);
+    assert.equal(getDatasetSummaryProjection().generation, 0);
+  }));
+
+test("an in-flight deferred repair cannot publish into a replacement database", (t) =>
+  withTempDb(async () => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let passes = 0;
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await ensureDatasetSummaryProjectionHealthy({
+      ...healthyDependencies,
+      getCounts: async () => {
+        passes += 1;
+        if (passes === 1) {
+          markDatasetSummaryProjectionStale("concurrent delta");
+        } else {
+          await paused;
+        }
+        return healthyDependencies.getCounts();
+      },
+    });
+    t.mock.timers.tick(30_000);
+    assert.equal(passes, 2);
+    closeDb();
+    initDb(":memory:");
+    release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(getDatasetSummaryProjection().generation, 0);
   }));
 
 test("a read makes one rebuild pass and a conflict consumes cooldown without clearing earlier failures", () =>
