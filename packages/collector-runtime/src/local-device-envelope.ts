@@ -59,7 +59,19 @@ export interface CanonicalTerminalFactInput {
   readonly stream: string;
 }
 
-export interface TerminalRunCommitEnvelopeInput {
+export interface CanonicalCoverageFactInput {
+  readonly artifact_digest?: string;
+  readonly manifest_fingerprint?: string;
+  readonly runtime_accounting?: Record<string, unknown>;
+  readonly scoped: boolean;
+  readonly stores: readonly {
+    readonly store: string;
+    readonly status: "collected" | "partial" | "unavailable" | "failed";
+  }[];
+  readonly stream: string;
+}
+
+interface TerminalRunCommitEnvelopeBase {
   readonly collection_boundary: string;
   readonly commit_id: string;
   readonly connector_id: string;
@@ -68,9 +80,13 @@ export interface TerminalRunCommitEnvelopeInput {
   readonly run_id: string;
   readonly source_instance_id: string;
   readonly state_delta: Readonly<Record<string, unknown>>;
-  readonly terminal_facts: readonly CanonicalTerminalFactInput[];
-  readonly version: 1;
 }
+
+export type TerminalRunCommitEnvelopeInput = TerminalRunCommitEnvelopeBase &
+  (
+    | { readonly terminal_facts: readonly CanonicalTerminalFactInput[]; readonly version: 1 }
+    | { readonly terminal_facts: readonly CanonicalCoverageFactInput[]; readonly version: 2 }
+  );
 
 /**
  * The one hash-authority projection shared by collector and reference server
@@ -81,6 +97,29 @@ export interface TerminalRunCommitEnvelopeInput {
  * identity MUST already be canonical before entry.
  */
 export function canonicalTerminalRunCommitEnvelope(input: TerminalRunCommitEnvelopeInput): unknown {
+  if (input.version === 2) {
+    return toCanonicalValue({
+      collection_boundary: input.collection_boundary,
+      commit_id: input.commit_id,
+      connector_id: input.connector_id,
+      connector_instance_id: input.connector_instance_id,
+      device_id: input.device_id,
+      run_id: input.run_id,
+      source_instance_id: input.source_instance_id,
+      state_delta: input.state_delta,
+      terminal_facts: input.terminal_facts
+        .map((fact) => ({
+          ...(fact.artifact_digest ? { artifact_digest: fact.artifact_digest } : {}),
+          ...(fact.manifest_fingerprint ? { manifest_fingerprint: fact.manifest_fingerprint } : {}),
+          ...(fact.runtime_accounting ? { runtime_accounting: fact.runtime_accounting } : {}),
+          scoped: fact.scoped,
+          stores: [...fact.stores].sort((left, right) => left.store.localeCompare(right.store)),
+          stream: fact.stream,
+        }))
+        .sort((left, right) => left.stream.localeCompare(right.stream)),
+      version: 2,
+    });
+  }
   return toCanonicalValue({
     collection_boundary: input.collection_boundary,
     commit_id: input.commit_id,

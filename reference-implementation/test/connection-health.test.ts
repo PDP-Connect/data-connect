@@ -108,6 +108,38 @@ function backoff(overrides: Partial<ConnectionBackoffEvidence> = {}): Connection
   };
 }
 
+// ─── Coverage: a connector's own report is not runtime evidence ───────────
+
+test("coverage: a connector-reported collection is unknown with a named cause, never complete or healthy", () => {
+  const snap = computeConnectionHealth(
+    input({
+      coverage: { axis: "unknown", unknownReportedCollected: true },
+      freshness: { axis: "fresh" },
+      run: run(),
+    })
+  );
+  assert.notEqual(snap.state, "healthy");
+  assert.equal(snap.axes.coverage, "unknown");
+  const condition = findCondition(snap, "SourceCoverageComplete");
+  assert.equal(condition?.status, "unknown");
+  assert.equal(condition?.reason, CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED);
+  assert.equal(condition?.origin, "connector");
+  assert.match(condition?.message ?? "", /connector reports/i);
+  assert.match(condition?.message ?? "", /not independently checked/i);
+  assert.equal(snap.forward_disposition, "complete");
+});
+
+test("coverage: unknown without the reported-collected cause stays unmeasured", () => {
+  const snap = computeConnectionHealth(
+    input({ coverage: { axis: "unknown" }, freshness: { axis: "fresh" }, run: run() })
+  );
+  assert.equal(snap.forward_disposition, "unmeasured");
+  assert.notEqual(
+    findCondition(snap, "SourceCoverageComplete")?.reason,
+    CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED
+  );
+});
+
 // ─── 1. Projection unreliable → unknown ───────────────────────────────────
 
 test("unknown: any unreliable required projection forces unknown and names the source", () => {

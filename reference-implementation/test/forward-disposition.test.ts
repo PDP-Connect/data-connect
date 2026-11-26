@@ -179,6 +179,20 @@ test("terminal: a terminal_gap blocked on attention awaits the owner (attention 
   assert.equal(deriveForwardDisposition(input({ attentionOpen: true, coverage: "terminal_gap" })), "awaiting_owner");
 });
 
+// ─── connector-reported collection is not a measurement gap ───────────────────
+
+test("reported-collected: unknown coverage carrying a connector report owes no further run", () => {
+  assert.equal(deriveForwardDisposition(input({ coverage: "unknown", reportedCollected: true })), "complete");
+});
+
+test("reported-collected: the flag does not soften a real gap", () => {
+  assert.equal(deriveForwardDisposition(input({ coverage: "terminal_gap", reportedCollected: true })), "terminal");
+  assert.equal(
+    deriveForwardDisposition(input({ coverage: "retryable_gap", gapRetryable: true, reportedCollected: true })),
+    "resumable"
+  );
+});
+
 // ─── unknown denominator is unmeasured, not complete or resumable ─────────────
 
 test("unknown-denominator: unknown coverage is unmeasured, not complete or resumable (fresh)", () => {

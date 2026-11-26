@@ -28,8 +28,10 @@
 import { createHash } from "node:crypto";
 import type { CollectionScope } from "@pdpp/reference-contract/evidence";
 import {
+  handleLocalDeviceRunStart,
   handleLocalDeviceTerminalCollection,
   handleLocalDeviceTerminalRunCommit,
+  type RegisteredCollectionProfileRelease,
 } from "../../operations/local-device-terminal-collection.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { type DeviceAttemptContext, fingerprintDeviceAttemptManifest } from "../device-ingest-attempt-context.ts";
@@ -38,7 +40,14 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
-import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
+import type { LocalCoverageAsOf } from "../ref-control.ts";
+import {
+  type CollectionRevisionEventInput,
+  isCollectionRevisionUnavailable,
+  issueCollectionRunSequence,
+  recordCollectionRevisionEvent,
+} from "../stores/collection-revision-store.ts";
+import { commitTerminalRun, findTerminalRunReceipt } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
   type EnrolledSourceKind,
@@ -477,18 +486,21 @@ interface ConnectorDetailGapStore {
   }) => Promise<GapRow[]>;
   listPendingGapsForConnector?: (connectorId: string, options: { limit: number }) => Promise<GapRow[]>;
   markGapStatus: (gapId: string, status: string, options: { runId?: string }) => Promise<GapRow>;
-  upsertPendingGap: (params: {
-    connectorId: string;
-    connectorInstanceId: string;
-    stream: string;
-    source: unknown;
-    detailLocator: unknown;
-    reason: string;
-    lastError: unknown;
-    discoveredRunId?: string;
-    lastRunId?: string;
-    retryable?: boolean;
-  }) => Promise<GapRow>;
+  upsertPendingGap: (
+    params: {
+      connectorId: string;
+      connectorInstanceId: string;
+      stream: string;
+      source: unknown;
+      detailLocator: unknown;
+      reason: string;
+      lastError: unknown;
+      discoveredRunId?: string;
+      lastRunId?: string;
+      retryable?: boolean;
+    },
+    options?: { readonly collectionRevision?: CollectionRevisionEventInput }
+  ) => Promise<GapRow>;
 }
 
 export interface MountRefDeviceExportersContext {
@@ -530,6 +542,11 @@ export interface MountRefDeviceExportersContext {
   // connector. Used to derive the enrolled source kind from the manifest
   // bindings. Async to match the host's `getConnectorManifest`.
   getConnectorManifest: (connectorId: string) => Promise<SourceKindManifestLike | null> | SourceKindManifestLike | null;
+  getExpectedArtifactDigest?: (connectorId: string) => string | null;
+  getRegisteredCollectionProfileRelease?: (
+    connectorId: string,
+    connectorInstanceId: string
+  ) => RegisteredCollectionProfileRelease | null;
   getDefaultConnectorDetailGapStore: () => ConnectorDetailGapStore;
   getOwnerSubjectId: (req: unknown) => string;
   getSemanticCapabilityIdentity: () => string;
@@ -545,6 +562,10 @@ export interface MountRefDeviceExportersContext {
   // `{ store, stream, status }` triple per store — never paths, payloads,
   // the coverage `reason` text, or secrets.
   listLocalCoverageDiagnostics: (storageTarget: StorageTarget) => Promise<LocalCoverageRow[]>;
+  // The owner projection's fenced local coverage verdict for one connection
+  // (the connector summary's coverage axis and `coverage_as_of`), or `null`
+  // when the connection does not resolve.
+  readCurrentLocalCoverage: (connectorInstanceId: string) => Promise<CurrentLocalCoverage | null>;
   maintainRecordIndexes: (
     storageTarget: StorageTarget,
     record: unknown,
@@ -1520,16 +1541,31 @@ export interface LocalCoverageRow {
  * Per-source-instance local-completeness projection surfaced in the
  * device-exporter diagnostics (Section 5.3). Carries only safe coverage
  * statuses and counts; never raw paths, payloads, reasons, or secrets.
- * `observed` is false when the instance has no coverage records yet (no run
- * has requested `coverage_diagnostics`), so absence reads as absence.
+ *
+ * `by_store`, `counts_by_status`, `store_count` and `unaccounted_stores` are
+ * historical inventory: the latest live `coverage_diagnostics` records, with
+ * no run, release, generation, revision or scope behind them. They never
+ * claim current completeness. `observed` is false when the instance has no
+ * such records, so absence reads as absence.
+ *
+ * `fully_accounted` and `coverage_as_of` are the owner projection's fenced
+ * verdict for the connection: true only while a v2 terminal proof is current
+ * and the coverage axis is `complete`, with the as-of that proof carries.
  */
 interface LocalCoverageProjection {
   by_store: Record<string, string>;
   counts_by_status: Record<string, number>;
+  coverage_as_of: LocalCoverageAsOf | null;
   fully_accounted: boolean;
   observed: boolean;
   store_count: number;
   unaccounted_stores: string[];
+}
+
+/** The owner projection's coverage verdict for one connection. */
+export interface CurrentLocalCoverage {
+  readonly asOf: LocalCoverageAsOf | null;
+  readonly axis: string;
 }
 
 const COVERAGE_STATUSES = [
@@ -1542,7 +1578,11 @@ const COVERAGE_STATUSES = [
   "unaccounted",
 ] as const;
 
-function summarizeLocalCoverage(rows: readonly LocalCoverageRow[]): LocalCoverageProjection {
+function summarizeLocalCoverage(
+  rows: readonly LocalCoverageRow[],
+  current: CurrentLocalCoverage | null
+): LocalCoverageProjection {
+  const fullyAccounted = current?.axis === "complete" && current.asOf !== null;
   const countsByStatus: Record<string, number> = {};
   for (const status of COVERAGE_STATUSES) {
     countsByStatus[status] = 0;
@@ -1560,9 +1600,10 @@ function summarizeLocalCoverage(rows: readonly LocalCoverageRow[]): LocalCoverag
   return {
     by_store: byStore,
     counts_by_status: countsByStatus,
-    // `fully_accounted` requires actually observing coverage. An empty
-    // coverage set is "nothing seen", not "everything accounted for".
-    fully_accounted: rows.length > 0 && unaccountedStores.length === 0,
+    coverage_as_of: fullyAccounted ? (current?.asOf ?? null) : null,
+    // Never derived from the inventory above: those rows can outlive the
+    // owner coverage a later refused or failed run retired.
+    fully_accounted: fullyAccounted,
     observed: rows.length > 0,
     store_count: rows.length,
     // biome-ignore lint/suspicious/useArraySortCompare: Input ordering is intentionally the runtime’s established default string order.
@@ -1693,7 +1734,9 @@ async function aggregateLocalCoverage(
       const rows = await ctx.listLocalCoverageDiagnostics(
         referenceLocalDeviceStorageTarget(ctx, connectorId, connectorInstanceId)
       );
-      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows));
+      // A failed verdict read shows no positive; the inventory still shows.
+      const current = await ctx.readCurrentLocalCoverage(connectorInstanceId).catch(() => null);
+      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows, current));
     } catch {
       // Leave unset → EMPTY_LOCAL_COVERAGE (observed=false) in projection.
     }
@@ -1808,6 +1851,7 @@ const EMPTY_LOCAL_COVERAGE: LocalCoverageProjection = Object.freeze({
     string,
     number
   >,
+  coverage_as_of: null,
   fully_accounted: false,
   observed: false,
   store_count: 0,
@@ -2523,6 +2567,9 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
     ctx.requireDeviceExporterCredential,
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this boundary deliberately keeps credential, identity, hash, and response precedence visible together.
     async (req: RouteRequest, res: RouteResponse) => {
+      // Set once the device and source are authorized. Every later refusal is a
+      // batch the server received for this connection and did not admit.
+      let observedConnectorInstanceId: string | null = null;
       try {
         const deviceId = decodeURIComponent(req.params.deviceId as string);
         if (deviceId !== req.deviceExporter?.deviceId) {
@@ -2548,6 +2595,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           return;
         }
         const { sourceInstance, connectorInstance } = authorized;
+        observedConnectorInstanceId = connectorInstance.connectorInstanceId;
         const sourceConnectorMatches = sameConnectorType(ctx, sourceInstance.connectorId, requestConnectorId);
         // Reservation identity and attempt facts use the canonical connector
         // key, not the URL/legacy alias supplied by the collector. This keeps
@@ -2563,6 +2611,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
         if (!SHA256_HEX.test(bodyHash) || (bodyHash !== canonical.hash && bodyHash !== collectorEnvelopeHash)) {
+          await observeRefusedBatch(connectorInstance.connectorInstanceId);
           ctx.pdppError(
             res,
             400,
@@ -2585,6 +2634,23 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
       } catch (err) {
+        // A batch refused after authorization is an observed attempt, and its
+        // revision is its only durable effect. When that revision cannot be
+        // recorded (or an earlier one in this request failed), the device gets
+        // the retryable 503, never a definitive refusal the server cannot order.
+        if (
+          observedConnectorInstanceId &&
+          (isCollectionRevisionUnavailable(err) || !(await recordedRefusal(observedConnectorInstanceId)))
+        ) {
+          res.setHeader("Retry-After", "1");
+          ctx.pdppError(
+            res,
+            503,
+            "device_ingest_retryable",
+            "Device ingest is temporarily unavailable; retry the same batch"
+          );
+          return;
+        }
         if (err instanceof ctx.DeviceBatchConflictError) {
           ctx.pdppError(
             res,
@@ -2631,6 +2697,34 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
   );
 }
 
+/**
+ * Record a refused batch for an authorized connection, so it retires any
+ * earlier local coverage proof (see collection-revision-store.ts). The caller
+ * awaits this before it answers the device, so the device cannot send a later
+ * terminal commit that the server orders before this event. Throws
+ * `CollectionRevisionUnavailableError` when the revision is not recorded; the
+ * route's catch then answers 503 instead of the refusal.
+ */
+async function observeRefusedBatch(connectorInstanceId: string): Promise<void> {
+  await recordCollectionRevisionEvent(connectorInstanceId, {
+    at: new Date().toISOString(),
+    event: "batch_rejected",
+  });
+}
+
+/** `observeRefusedBatch` for the route's catch: false (and a server log line) when the revision is not recorded. */
+async function recordedRefusal(connectorInstanceId: string): Promise<boolean> {
+  try {
+    await observeRefusedBatch(connectorInstanceId);
+    return true;
+  } catch (error) {
+    console.warn(
+      `[device-exporters] refused batch not recorded; answering 503 connector_instance_id=${connectorInstanceId} code=${String((error as { code?: unknown } | null)?.code ?? "unknown")}`
+    );
+    return false;
+  }
+}
+
 async function processDeviceIngestBatch(
   ctx: MountRefDeviceExportersContext,
   res: RouteResponse,
@@ -2675,6 +2769,7 @@ async function processDeviceIngestBatch(
     const existing = await ctx.deviceExporterStore.getBatchOutcome(deviceId, batchId);
     if (existing) {
       if (!deviceBatchIdentityMatches(existing, identity)) {
+        await observeRefusedBatch(connectorInstanceId);
         ctx.pdppError(
           res,
           409,
@@ -2692,6 +2787,7 @@ async function processDeviceIngestBatch(
     // New malformed candidates retain the historical 400, but an existing
     // device/batch reservation owns conflict precedence.
     if (!sourceConnectorMatches) {
+      await observeRefusedBatch(connectorInstanceId);
       ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
       return;
     }
@@ -2866,6 +2962,11 @@ async function processDeviceIngestBatch(
         source_instance_id: sourceInstanceId,
         status: "accepted",
       };
+      // The accepted transition takes the batch's `batch_accepted` collection
+      // revision in its own transaction, as each record write above took its
+      // `batch_record` revision. It commits before the acknowledgement, and
+      // the device sends its terminal commit only after this response, so the
+      // commit always gets the later revision.
       maybeDeviceIngestStoreFault("before-complete-processing-batch");
       await ctx.deviceExporterStore.completeProcessingBatch({
         acceptedAt: new Date().toISOString(),
@@ -3037,6 +3138,7 @@ export function mountRefDeviceExporterSourceInstanceStatePut(app: AppLike, ctx: 
   );
   mountRefDeviceExporterTerminalCollection(app, ctx);
   mountRefDeviceExporterTerminalRunCommit(app, ctx);
+  mountRefDeviceExporterRunStart(app, ctx);
 }
 
 // POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/terminal-collection
@@ -3070,7 +3172,24 @@ export function mountRefDeviceExporterTerminalRunCommit(app: AppLike, ctx: Mount
         ctx: {
           ...ctx,
           commitTerminalRun: ctx.commitTerminalRun ?? commitTerminalRun,
+          findTerminalRunReceipt,
         },
+        req,
+        res,
+        resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>
+          await resolveAuthorizedDeviceSource(ctx, req, res, deviceId, sourceInstanceId, { notFoundStatus: 404 }),
+      })
+  );
+}
+
+// POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts
+export function mountRefDeviceExporterRunStart(app: AppLike, ctx: MountRefDeviceExportersContext): void {
+  app.post(
+    "/_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts",
+    ctx.requireDeviceExporterCredential,
+    async (req: RouteRequest, res: RouteResponse) =>
+      await handleLocalDeviceRunStart({
+        ctx: { ...ctx, issueRunSequence: issueCollectionRunSequence },
         req,
         res,
         resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>
@@ -3198,20 +3317,26 @@ async function reportLocalCollectorGap(
     ...(details ? { details } : {}),
   };
   const store = ctx.getDefaultConnectorDetailGapStore();
-  const gap = await store.upsertPendingGap({
-    connectorId,
-    connectorInstanceId,
-    detailLocator,
-    lastError,
-    reason,
-    // The route requires a boolean (validateGapReportFields); an explicit false is
-    // kept in storage, never converted to a recoverable legacy NULL.
-    ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
-    source,
-    stream: syntheticStream,
-    ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
-    ...(lastRunId ? { lastRunId } : {}),
-  });
+  // A delivered failure report is an observed attempt: it retires any earlier
+  // coverage proof for this connection. The gap and its revision commit in one
+  // transaction; if the revision cannot be recorded, no gap is stored.
+  const gap = await store.upsertPendingGap(
+    {
+      connectorId,
+      connectorInstanceId,
+      detailLocator,
+      lastError,
+      reason,
+      // The route requires a boolean (validateGapReportFields); an explicit false is
+      // kept in storage, never converted to a recoverable legacy NULL.
+      ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
+      source,
+      stream: syntheticStream,
+      ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
+      ...(lastRunId ? { lastRunId } : {}),
+    },
+    { collectionRevision: { at: new Date().toISOString(), event: "failure_report", runId: lastRunId } }
+  );
   res.status(201).json({
     attempt_count: gap.attempt_count,
     connector_id: connectorId,

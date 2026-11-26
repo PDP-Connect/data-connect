@@ -95,6 +95,12 @@ export type VerdictLabel =
   | "Archived"
   | "Can't collect"
   | "Checking"
+  // A local connector reported every store collected and nothing in the run's
+  // delivery contradicts it, but the runtime holds no evidence about the source
+  // itself. Neutral: it is not "Healthy" (nothing independent verified it) and
+  // it is not trouble (nothing disagrees with it). Derived from the
+  // `coverage_reported_collected` reason, never from a tone.
+  | "Collected, not independently checked"
   | "Healthy"
   | "Import complete"
   | "Missing data"
@@ -404,6 +410,13 @@ export interface StreamRollup {
    * `retry_by_runtime`.
    */
   readonly recovery_action?: string | null;
+  /**
+   * Whether this stream's `unknown` coverage is the connector's own positive
+   * report, cross-checked against delivery accounting but not against the
+   * source. Read only to say whose claim it is; it never raises the stream's
+   * coverage above `unknown`. Optional; absent reads `false`.
+   */
+  readonly reported_collected?: boolean;
   readonly stream_id: string;
   /**
    * Whether this stream's ENTIRE terminal shortfall carries durable per-item
@@ -806,6 +819,9 @@ function labelForPill(
   if (tone === "green" && snapshot.axes.outbox === "active") {
     return "Syncing";
   }
+  if (tone === "grey" && coverageIsReportedOnly(snapshot)) {
+    return "Collected, not independently checked";
+  }
   // A one-time import that reached green did so BECAUSE freshness is
   // not_applicable, not because it proved current. "Healthy" implies an
   // ongoing collection loop this source will never run again; "Import
@@ -894,6 +910,37 @@ export function freshnessNotApplicable(snapshot: ConnectionHealthSnapshot): bool
       condition.type === "Fresh" &&
       condition.status === "not_applicable" &&
       condition.reason === CONNECTION_CONDITION_REASONS.FRESHNESS_NOT_APPLICABLE_COMPLETE
+  );
+}
+
+/**
+ * Whether the connection's coverage is the connector's own report and nothing
+ * more: the connector reported every store collected, nothing in the run's
+ * delivery contradicts it, and the runtime holds no evidence about the source
+ * itself. Read from the `SourceCoverageComplete` condition's reason, the one
+ * place that decision is made.
+ */
+export function coverageIsReportedOnly(snapshot: ConnectionHealthSnapshot): boolean {
+  return snapshot.conditions.some(
+    (condition) =>
+      condition.type === "SourceCoverageComplete" &&
+      condition.reason === CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED
+  );
+}
+
+/**
+ * Whether the headline `unknown` is only the neutral reported-collected state:
+ * the one `unknown` the runtime names and does not treat as missing evidence.
+ * Every consumer that asks "is there unknown evidence here?" must use this
+ * instead of reading `state` or `unknown_reasons` itself, so the fleet verdict,
+ * the console summary and the pill cannot disagree about it.
+ */
+export function unknownIsOnlyReportedCollected(snapshot: ConnectionHealthSnapshot): boolean {
+  return (
+    snapshot.state === "unknown" &&
+    snapshot.unknown_reasons.length > 0 &&
+    snapshot.unknown_reasons.every((reason) => reason === CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED) &&
+    coverageIsReportedOnly(snapshot)
   );
 }
 
@@ -1200,6 +1247,7 @@ function streamDisposition(
     gapRetryable: stream.gap_retryable,
     refresh,
     schedule,
+    reportedCollected: stream.reported_collected === true,
     unfillableAccounted: stream.unfillable_accounted === true,
   });
 }
@@ -2493,6 +2541,11 @@ function noActionOwedForwardStatement(snapshot: ConnectionHealthSnapshot, stream
   if (streams.some((stream) => isOptionalTerminalLoss(stream))) {
     return "Collecting normally, apart from optional data this source can no longer provide.";
   }
+  // The runtime holds no evidence about the source itself, so it cannot say the
+  // source is covered. It can say what the connector reported.
+  if (coverageIsReportedOnly(snapshot)) {
+    return "The connector reports it collected everything. PDP Connect has not independently checked that.";
+  }
   return "Current and collecting normally.";
 }
 
@@ -2628,7 +2681,10 @@ function buildStreamRows(
       considered: stream.considered,
       coverage: stream.coverage,
       disposition,
-      statement: streamStatement(disposition, snapshot.badges.syncing, freshnessNotApplicable(snapshot)),
+      statement:
+        stream.reported_collected === true && disposition === "complete"
+          ? "The connector reports it collected this."
+          : streamStatement(disposition, snapshot.badges.syncing, freshnessNotApplicable(snapshot)),
       stream_id: stream.stream_id,
     };
   });

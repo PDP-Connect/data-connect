@@ -16,7 +16,7 @@ import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
-  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+    DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   OBSERVATION_CAPABILITY,
@@ -2654,7 +2654,7 @@ const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapabilit
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
  * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
- * advisory capability never blocks the run.
+ * elective capability never blocks the run.
  */
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;

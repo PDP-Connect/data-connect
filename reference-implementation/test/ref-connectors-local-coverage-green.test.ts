@@ -35,6 +35,7 @@ import {
   projectConnectorSummaryConnectionHealth,
 } from "../server/ref-control.ts";
 import { rebuildRetainedSize } from "../server/retained-size-read-model.ts";
+import { advanceSqliteCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultConnectorStateStore } from "../server/stores/connector-state-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -252,10 +253,16 @@ function seedCoverage(rows: readonly TestCoverageRow[], { includeExpected = true
       stream: "coverage_diagnostics",
     });
   });
+  // A committed snapshot is a state commit: it takes the connection's next
+  // collection revision, which the projection binds the proof to.
+  const revision = advanceSqliteCollectionRevisionInTransaction(getDb(), CONNECTOR_INSTANCE_ID, {
+    at: "2026-06-03T11:58:31.000Z",
+    event: "state_commit",
+  })?.revision;
   getDb()
     .prepare(
-      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at)
-       VALUES (?, ?, 'coverage_diagnostics', ?, ?)`
+      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, collection_revision)
+       VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?)`
     )
     .run(
       STATE_CONNECTOR_ID,
@@ -268,7 +275,8 @@ function seedCoverage(rows: readonly TestCoverageRow[], { includeExpected = true
           stream: stream ?? null,
         })),
       }),
-      "2026-06-03T11:58:31.000Z"
+      "2026-06-03T11:58:31.000Z",
+      revision ?? null
     );
 }
 
@@ -399,8 +407,23 @@ async function projectConnection() {
   return row;
 }
 
+// A legacy `coverage_diagnostics` snapshot names no run and no release digest,
+// so the owner projection cannot say what "complete as of" it would describe.
+// It never shows positive coverage: these tests pin that the snapshot still
+// classifies (via `deriveLocalCoverageAxis`) while the projection is unknown.
+const LEGACY_WITHHELD = "a legacy diagnostics snapshot has no run id or release digest, so it never shows as complete";
+
+async function legacySnapshotAxis() {
+  return deriveLocalCoverageAxis(
+    (await readCommittedLocalCoverageDiagnostics({
+      connector_id: CONNECTOR_ID,
+      connector_instance_id: CONNECTOR_INSTANCE_ID,
+    })) as Parameters<typeof deriveLocalCoverageAxis>[0]
+  ).axis;
+}
+
 test(
-  "healthy drained local collector with full coverage diagnostics projects coverage=complete (no longer unknown)",
+  "healthy drained local collector with full legacy coverage diagnostics projects coverage=unknown (no run provenance)",
   withTmpDb(async () => {
     seedConnector();
     await seedInstance();
@@ -434,40 +457,30 @@ test(
     const row = await projectConnection();
     const health = row.connection_health;
 
-    // The durable coverage evidence proves complete coverage, so the projection
-    // must NOT remain coverage_unknown. This is the core fix: the live symptom
-    // was `SourceCoverageComplete:coverage_unknown` on a drained collector.
-    assert.equal(health.axes.coverage, "complete");
+    // The snapshot accounts for every store, but it names no run and no
+    // release, so the projection withholds it: coverage is unknown.
+    assert.equal(await legacySnapshotAxis(), "complete", "the snapshot itself classifies as complete");
+    assert.equal(health.axes.coverage, "unknown", LEGACY_WITHHELD);
+    assert.equal(row.coverage_as_of, null, "unknown coverage carries no as-of");
     assert.equal(health.axes.outbox, "idle");
 
     const reportByStream = Object.fromEntries(row.collection_report.map((entry) => [entry.stream, entry]));
-    assert.equal(
-      reportByStream.messages?.coverage_condition,
-      "complete",
-      "local coverage diagnostics prove messages complete directly, and it also agrees with state_stream parent inheritance"
-    );
-    assert.equal(
-      reportByStream.attachments?.coverage_condition,
-      "complete",
-      "local coverage diagnostics prove attachments complete directly, and it also agrees with state_stream parent inheritance"
-    );
+    assert.equal(reportByStream.messages?.coverage_condition, "unknown", `messages: ${LEGACY_WITHHELD}`);
+    assert.equal(reportByStream.attachments?.coverage_condition, "unknown", `attachments: ${LEGACY_WITHHELD}`);
     assert.equal(
       reportByStream.coverage_diagnostics?.coverage_condition,
-      "complete",
-      "coverage_diagnostics proves itself complete once durable diagnostic rows exist"
+      "unknown",
+      `coverage_diagnostics: ${LEGACY_WITHHELD}`
     );
-    assert.equal(
-      reportByStream.sessions?.coverage_condition,
-      "complete",
-      "local coverage diagnostics should prove per-stream coverage even when the stream emitted no retained records"
-    );
-    assert.notEqual(reportByStream.messages?.forward_disposition, "unmeasured");
-    assert.notEqual(reportByStream.sessions?.forward_disposition, "unmeasured");
+    assert.equal(reportByStream.sessions?.coverage_condition, "unknown", `sessions: ${LEGACY_WITHHELD}`);
+    // Without a current proof the next run's effect is not measured either.
+    assert.equal(reportByStream.messages?.forward_disposition, "unmeasured", LEGACY_WITHHELD);
+    assert.equal(reportByStream.sessions?.forward_disposition, "unmeasured", LEGACY_WITHHELD);
 
     const coverageCondition = health.conditions.find((c) => c.type === "SourceCoverageComplete");
     assert.ok(coverageCondition);
-    assert.equal(coverageCondition.status, "true");
-    assert.notEqual(coverageCondition.reason, "coverage_unknown");
+    assert.equal(coverageCondition.status, "unknown", LEGACY_WITHHELD);
+    assert.equal(coverageCondition.reason, "coverage_unknown");
 
     // Headline: this connector declares NO refresh policy, so freshness is
     // `unknown` and the local-device collection verdict is not established. The
@@ -904,7 +917,7 @@ test(
 const ALWAYS_FRESH_REFRESH_POLICY = { maximum_staleness_seconds: 100 * 365 * 24 * 60 * 60 };
 
 test(
-  "local committed coverage supports a healthy local-device verdict",
+  "local committed legacy coverage does not support a healthy local-device verdict without run provenance",
   withTmpDb(async () => {
     // Same fully-green device evidence as the idle case above, but the manifest
     // now declares a refresh policy that the recent healthy heartbeat satisfies.
@@ -930,15 +943,21 @@ test(
     const row = await projectConnection();
     const health = row.connection_health;
 
-    assert.equal(health.axes.coverage, "complete");
+    assert.equal(await legacySnapshotAxis(), "complete", "the snapshot itself classifies as complete");
+    assert.equal(health.axes.coverage, "unknown", LEGACY_WITHHELD);
     assert.equal(health.axes.outbox, "idle");
     assert.equal(health.axes.freshness, "fresh");
-    assert.equal(health.state, "healthy");
+    assert.notEqual(health.state, "healthy", `${LEGACY_WITHHELD}, so it cannot make the verdict healthy`);
 
+    // A clean local collection is "drained with complete coverage"; without a current proof it is not established.
     const collection = health.conditions.find((c) => c.type === "CollectionSucceeded");
     assert.ok(collection);
-    assert.equal(collection.status, "true");
-    assert.equal(collection.origin, "local_device");
+    assert.equal(collection.status, "unknown", LEGACY_WITHHELD);
+    assert.equal(
+      collection.origin,
+      "connector",
+      "no local-device collection is established, so the generic condition applies"
+    );
   })
 );
 
@@ -973,9 +992,9 @@ test(
     assert.equal(row.freshness.status, "current");
     assert.equal(row.freshness.captured_at, HEARTBEAT_AT);
     assert.equal(health.axes.freshness, "fresh");
-    assert.equal(health.axes.coverage, "complete");
+    assert.equal(health.axes.coverage, "unknown", LEGACY_WITHHELD);
     assert.equal(health.axes.outbox, "idle");
-    assert.equal(health.state, "healthy");
+    assert.notEqual(health.state, "healthy", `${LEGACY_WITHHELD}, so it cannot make the verdict healthy`);
   })
 );
 
@@ -1297,7 +1316,7 @@ test("SourceCoverageComplete names a stale collector build, not a generic 'evide
 });
 
 test(
-  "local collector with unaccounted stores projects coverage gaps with actionable reason, not unknown",
+  "local collector with unaccounted stores in a legacy snapshot projects unknown, never complete",
   withTmpDb(async () => {
     seedConnector();
     await seedInstance();
@@ -1315,20 +1334,19 @@ test(
     const row = await projectConnection();
     const health = row.connection_health;
 
-    // Coverage must surface the gap honestly rather than hiding it behind green
-    // or behind a generic unknown.
-    assert.notEqual(health.axes.coverage, "unknown");
+    // The snapshot itself still names the shortfall, but a legacy snapshot is
+    // not current evidence about a run, so the projection is unknown, never green.
+    assert.equal(await legacySnapshotAxis(), "gaps", "the snapshot itself names the unaccounted store");
+    assert.equal(health.axes.coverage, "unknown", LEGACY_WITHHELD);
     assert.notEqual(health.axes.coverage, "complete");
 
     const coverageCondition = health.conditions.find((c) => c.type === "SourceCoverageComplete");
     assert.ok(coverageCondition);
-    assert.equal(coverageCondition.status, "false");
-    // Reason/remediation must be actionable and name the coverage shortfall.
-    assert.ok(coverageCondition.remediation);
-    assert.notEqual(coverageCondition.reason, "coverage_unknown");
+    assert.equal(coverageCondition.status, "unknown", LEGACY_WITHHELD);
+    assert.equal(coverageCondition.reason, "coverage_unknown");
 
-    // Degraded, not silently healthy.
-    assert.equal(health.state, "degraded");
+    // Never silently healthy.
+    assert.notEqual(health.state, "healthy");
   })
 );
 
@@ -1649,6 +1667,33 @@ test("a local_device connection's foreign (non-scheduler-managed) run does not p
   });
   assert.notEqual(health.axes.coverage, "complete");
   assert.equal(health.axes.coverage, "unknown");
+});
+
+test("a local_device connection's device terminal run stays quarantined even when stamped scheduler_managed", () => {
+  // A database whose column default was once `true` stamped device terminal
+  // commits `scheduler_managed = true`. A device terminal commit stamps the
+  // connection's collection revision; that, not the flag, says the run is
+  // not the connection's own scheduler history.
+  const failed = { ...ownScopedRunSummary({ scheduler_managed: true, status: "failed" }), failure_reason: "boom" };
+  const healthOf = (lastRun: ConnectorRunSummary) =>
+    projectConnectorSummaryConnectionHealth({
+      freshness: FRESH_FRESHNESS,
+      lastRun,
+      lastSuccessfulRun: null,
+      localDeviceBacked: true,
+      manifestStreams: ownScopedManifestStreams(),
+      nowIso: NOW,
+      outbox: { axis: "idle" },
+      pendingDetailGaps: [],
+      schedule: { enabled: true },
+    });
+
+  assert.equal(healthOf(failed).reason_code, "boom", "control: the connection's own scheduler run is evidence");
+  assert.equal(
+    healthOf({ ...failed, collection_revision: 7 }).reason_code,
+    null,
+    "a device terminal run is quarantined whatever its flag says"
+  );
 });
 
 test("a local_device connection's run with scheduler_managed unset (legacy/absent evidence) stays quarantined", () => {
