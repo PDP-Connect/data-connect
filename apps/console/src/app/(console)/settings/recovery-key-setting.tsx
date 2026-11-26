@@ -173,7 +173,7 @@ export function RecoveryKeySetting({
           </label>
           {passwordSource === "desktop" ? (
             <p className="pdpp-caption text-muted-foreground">
-              You can see it under <a className="underline" href="/settings/sign-in">Password and sign-in</a>.
+              You can see your password under <a className="underline" href="/settings/sign-in">Password and sign-in</a>.
             </p>
           ) : null}
           <div className="flex flex-wrap items-center gap-2">

@@ -145,12 +145,12 @@ test("no password set says to choose one and links to sign-in settings", async (
 test("a password DataConnect made adds the pointer to Password and sign-in", async () => {
   await mountSetting({ passwordSource: "desktop" }, async ({ container, press }) => {
     await press("Show recovery code")
-    assert.match(container.textContent ?? "", /You can see it under Password and sign-in\./)
+    assert.match(container.textContent ?? "", /You can see your password under Password and sign-in\./)
     assert.ok(container.querySelector('a[href="/settings/sign-in"]'))
   })
   await mountSetting({ passwordSource: "app" }, async ({ container, press }) => {
     await press("Show recovery code")
-    assert.doesNotMatch(container.textContent ?? "", /You can see it under/)
+    assert.doesNotMatch(container.textContent ?? "", /You can see your password under/)
   })
 })
 
