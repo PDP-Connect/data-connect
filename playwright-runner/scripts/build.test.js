@@ -174,3 +174,22 @@ describe("copyBrowserDirectory", () => {
     }
   })
 })
+
+
+it("refuses browser provisioning without an exact supported Linux release", () => {
+  expect(supportsBrowserProvisioning("linux", 'VERSION_ID="12"\n')).toBe(false)
+  expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12.1"\n')).toBe(false)
+  expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12"\n')).toBe(true)
+})
+
+it("does not leave a browser destination behind after a missing-cache copy", () => {
+  const root = mkdtempSync(join(tmpdir(), "browser-copy-missing-"))
+  try {
+    const output = join(root, "output")
+    expect(() => copyBrowserDirectory(join(root, "missing"), output))
+      .toThrow(expect.objectContaining({ code: "ENOENT" }))
+    expect(() => readFileSync(output)).toThrow(expect.objectContaining({ code: "ENOENT" }))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
