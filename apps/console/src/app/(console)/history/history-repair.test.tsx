@@ -22,6 +22,19 @@ test("same failed-sync evidence gives every current surface the history cause an
     ["assistance_timed_out","The sign-in wasn't finished.","Try again"],
     ["ingest_endpoint_saturated","DataConnect could not save the copies because its storage was busy. DataConnect tries again at the next check.",null],
     ["surface_start_failed","DataConnect could not start its browser. DataConnect tries again at the next check.",null],
+    ["rate_limited","Northwind asked DataConnect to slow down. DataConnect tries again at the next check.",null],
+    ["auth_blocked","Northwind didn't let DataConnect sign in.","Sign in again"],
+    ["static_secret_credential_unavailable","DataConnect could not find the saved sign-in details for Northwind.","Sign in again"],
+    ["headed_browser_unavailable","DataConnect could not start its browser. DataConnect tries again at the next check.",null],
+    ["ingest_http_error","DataConnect could not save the copies because its storage refused them. This needs a fix from the people who maintain DataConnect.",null],
+    ["connector_protocol_violation","The connector for Northwind sent something DataConnect could not accept. This needs a fix from the people who maintain DataConnect.",null],
+    ["ECONNREFUSED","DataConnect could not reach everything it needs to sync Northwind. DataConnect tries again at the next check.",null],
+    ["launch_failed","DataConnect could not start the connector for Northwind. DataConnect tries again at the next check.",null],
+    ["controller_restarted","DataConnect restarted before the sync finished. DataConnect tries again at the next check.",null],
+    ["run_timed_out","DataConnect stopped the sync because it took too long. DataConnect tries again at the next check.",null],
+    ["connector_exit_without_done","The connector for Northwind stopped before reporting its result. DataConnect tries again at the next check.",null],
+    ["stream_collection_failed","DataConnect could not copy some records from Northwind.","Try again"],
+    ["venmo_login_incomplete_after_submit","The sign-in wasn't finished.","Try again"],
     ["unknown","Something stopped Northwind from syncing.","Try again"],
   ] as const) {
     const shared={...source,display_name:"Northwind",connector_display_name:"Northwind",last_run:{...source.last_run!,status:"failed",failure_reason:reason},owner_state:{...source.owner_state!,resolver:"system_degraded" as const}};
@@ -30,7 +43,9 @@ test("same failed-sync evidence gives every current surface the history cause an
     assert.equal(sourceStateSentence(shared,{now:new Date(),name:"Northwind"}).text,sentence);
     const words=sourceStatusWords(shared,{now:new Date()});
     const list=toSourceInstanceView(shared).statusWords;
-    const home=buildHomeViewModel({approvals:[],approvalsFailed:false,approvalsHaveMore:false,grants:[],grantsFailed:false,grantsHaveMore:false,ownerClients:[],ownerClientsFailed:false,ownerClientsHaveMore:false,sourcePage:{kind:"ok",hasMore:false,sources:[shared]},summary:null,summaryFailed:false,traces:[],tracesFailed:false,tracesHaveMore:false,now:new Date(),reloadHref:"/",hrefs:{addSource:"/sources/add",connect:"/connect",deployment:"/deployment",deploymentTokens:"/deployment/tokens",grant:(id)=>`/grants/${id}`,grants:"/grants",source:(id)=>`/sources/${id}`,sources:"/sources"}}).dataSources[0]!.status;
+    const homeModel=buildHomeViewModel({approvals:[],approvalsFailed:false,approvalsHaveMore:false,grants:[],grantsFailed:false,grantsHaveMore:false,ownerClients:[],ownerClientsFailed:false,ownerClientsHaveMore:false,sourcePage:{kind:"ok",hasMore:false,sources:[shared]},summary:null,summaryFailed:false,traces:[],tracesFailed:false,tracesHaveMore:false,now:new Date(),reloadHref:"/",hrefs:{addSource:"/sources/add",connect:"/connect",deployment:"/deployment",deploymentTokens:"/deployment/tokens",grant:(id)=>`/grants/${id}`,grants:"/grants",source:(id)=>`/sources/${id}`,sources:"/sources"}});
+    const home=(homeModel.dataSources[0] ?? homeModel.needs[0])!.status!;
+    if(label === "Sign in again") assert.equal(homeModel.needs[0]?.actionLabel,label);
     for(const status of [list,home]) {assert.equal(status.words,sentence);assert.equal(status.action?.label ?? null,label);}
     assert.equal(words.words,sentence);assert.equal(words.action?.label ?? null,label);
   }

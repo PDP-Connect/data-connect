@@ -17,6 +17,7 @@ export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): Syn
   if (/\b(auth_failed|invalid_credentials|authentication_failed|login_failed|credential_invalid|credentials_invalid|stored_credential_rejected)\b/.test(text)) return { sentence: `${name} didn't accept the sign-in.`, action: "Sign in again", known: true };
   if (/\b(auth_blocked|login_blocked|access_denied)\b/.test(text)) return { sentence: `${name} didn't let DataConnect sign in.`, action: "Sign in again", known: true };
   if (/\b(interaction_timeout|assistance_timeout|assistance_timed_out|login_timeout)\b/.test(text)) return { sentence: "The sign-in wasn't finished.", action: "Try again", known: true };
+  if (/\b(?:rate_limited|upstream_pressure)\b/.test(text)) return { sentence: `${name} asked DataConnect to slow down. DataConnect tries again at the next check.`, action: null, known: true };
   if (/\bstatic_secret_credential_unavailable\b/.test(text)) return { sentence: `DataConnect could not find the saved sign-in details for ${name}.`, action: "Sign in again", known: true };
   if (/\b(?:surface_start_failed|headed_browser_unavailable)\b|browsertype\.launch/.test(text)) return { sentence: "DataConnect could not start its browser. DataConnect tries again at the next check.", action: null, known: true };
   if (/\bingest_endpoint_saturated\b/.test(text)) return { sentence: "DataConnect could not save the copies because its storage was busy. DataConnect tries again at the next check.", action: null, known: true };

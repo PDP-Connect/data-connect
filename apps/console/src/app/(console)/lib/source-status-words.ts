@@ -269,7 +269,7 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
   if (source.last_run?.status === "failed") {
     const run = source.last_run;
     const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, source.connector_display_name || source.display_name);
-    return { row: 16, words: cause.sentence, tone: "plain", action: cause.action && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", cause.action, true) : null };
+    return { row: 16, words: cause.sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: cause.action && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", cause.action, true) : null };
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
@@ -316,7 +316,7 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
 
 export function sourceStatusWords(source: RefConnectorSummary, options: SourceStatusOptions): SourceStatusWords {
   const matched = matchSourceStatus(source, options);
-  return { ...matched, needsYou: NEEDS_YOU_ROWS.has(matched.row) && matched.action !== null && !(matched.row === 8 && (matched.action.kind === "sync_now" || (ownerAction(source)?.surface?.kind === "local_device" && !ownerAction(source)?.remediation?.commands.length))) };
+  return { ...matched, needsYou: (NEEDS_YOU_ROWS.has(matched.row) || matched.action?.kind === "repair_sign_in") && matched.action !== null && !(matched.row === 8 && (matched.action.kind === "sync_now" || (ownerAction(source)?.surface?.kind === "local_device" && !ownerAction(source)?.remediation?.commands.length))) };
 }
 
 export function isUpToDateRow(row: SourceStatusRow): boolean {
