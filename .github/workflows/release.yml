@@ -13,6 +13,30 @@ on:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
     branches-ignore: [testeng/integration]
+    # The installer matrix takes 20 to 50 minutes per platform, so a pull
+    # request builds it only when it changes an input of the packaging itself.
+    # Every merge to main still builds all four installers through the
+    # automatic desktop release, and workflow_dispatch builds any branch.
+    # All of scripts/ counts, tests included: build steps reach helpers
+    # through npm scripts and child processes as well as direct imports, and
+    # neither a per-file list nor a test-file exclusion can be checked
+    # against those edges.
+    # scripts/release-workflow.test.ts checks that every file the build job
+    # runs, with its local imports, falls under these paths.
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/desktop-release.yml
+      - package.json
+      - package-lock.json
+      - index.html
+      - tsconfig*.json
+      - vite.config.ts
+      - src/**
+      - src-tauri/**
+      - playwright-runner/**
+      - personal-server/**
+      - pdpp-runtime/**
+      - scripts/**
   release:
     types: [created]
   workflow_dispatch:
@@ -44,9 +68,6 @@ jobs:
   build:
     # A dispatch with release_tag only runs clean-install against that release.
     if: inputs.publish_tag != '' || github.event_name == 'pull_request' || (github.event_name == 'release' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -166,9 +187,6 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
           cache-directories: ${{ matrix.os_family == 'windows' && 'C:\t' || '' }}
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Stage Node.js runtime sidecar
         shell: bash

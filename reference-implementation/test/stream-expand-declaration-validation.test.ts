@@ -178,6 +178,24 @@ test("validateStreamExpandDeclarations: rejects a non-positive or inverted limit
   );
 });
 
+test("validateStreamExpandDeclarations: rejects a limit the read path cannot resolve", () => {
+  const unsafe = Number.MAX_SAFE_INTEGER + 1;
+  assertRejects(
+    {
+      query: { expand: [{ max_limit: unsafe, name: "lines" }] },
+      relationships: [{ cardinality: "has_many", foreign_key: "order_id", name: "lines", stream: "order_lines" }],
+    },
+    "limits must be safe integers"
+  );
+  assertRejects(
+    {
+      query: { expand: [{ default_limit: unsafe, name: "lines" }] },
+      relationships: [{ cardinality: "has_many", foreign_key: "order_id", name: "lines", stream: "order_lines" }],
+    },
+    "limits must be safe integers"
+  );
+});
+
 test("validateStreamExpandDeclarations: rejects a has_one relationship that declares limits", () => {
   assertRejects(
     {

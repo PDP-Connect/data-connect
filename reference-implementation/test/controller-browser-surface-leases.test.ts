@@ -671,6 +671,56 @@ test("host endpoint 500 with a structured sandbox-unavailable body surfaces brow
   );
 });
 
+test("a host start that fails after an unanswered lease POST is released by its run id", async (t) => {
+  const hostRequests: [string, string][] = [];
+  const hostFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    hostRequests.push([method, String(input)]);
+    if (hostRequests.length === 1) {
+      // No answer: the runtime gives up on the POST while the host may still be starting.
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }
+    if (method === "POST") {
+      return {
+        json: async () => ({ error: "surface_start_failed", message: "Browser exited before DevTools was ready" }),
+        ok: false,
+        status: 500,
+      } as Response;
+    }
+    return { json: async () => ({}), ok: true, status: 204 } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    requestTimeoutMs: 1,
+    token: "shared-secret",
+  });
+  const { calls, controller } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    browserSurfaceAllocator: hostAllocator,
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
+    ownerToken: "owner-token",
+    runId: "run_host_unanswered",
+  });
+
+  assert.equal(result.status, "surface_failed");
+  assert.equal(calls.runConnector, 0);
+  // The second POST asks about the same run; the failed start is then released by that run id.
+  assert.deepEqual(hostRequests, [
+    ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
+    ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
+    ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_unanswered"],
+  ]);
+});
+
 test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
   const hostRequests: { method: string; url: string }[] = [];
   const hostBodies: unknown[] = [];

@@ -29,7 +29,13 @@ const TOP_LEVEL_REGEX_2 = /spine exploded/;
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emitSpineEvent, getRunStartedEvent, getRunTerminalEvent, listSpineEventsPage } from "../lib/spine.ts";
+import {
+  emitSpineEvent,
+  getRunRecordOutcomes,
+  getRunStartedEvent,
+  getRunTerminalEvent,
+  listSpineEventsPage,
+} from "../lib/spine.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import type { MountRefRunStatusContext, RunStatusBody } from "../server/routes/ref-run-status.ts";
 import { mountRefRunStatus } from "../server/routes/ref-run-status.ts";
@@ -80,6 +86,7 @@ function makeRes(): TestResponse {
       failure: null,
       links: { timeline: "" },
       object: "run_status",
+      record_outcomes: { unaccounted_by_stream: {} },
       run_id: "",
       started_at: null,
       status: "active",
@@ -105,6 +112,7 @@ function makeRes(): TestResponse {
 function makeCtx(overrides: Partial<MountRefRunStatusContext> = {}): MountRefRunStatusContext {
   return {
     controller: { findActiveRunByRunId: () => null },
+    getRunRecordOutcomes: () => ({ rejected_in_batches: 0, unaccounted_by_stream: {} }),
     getRunStartedEvent: () => null,
     getRunTerminalEvent: () => null,
     handleError: (_res: unknown, err: unknown) => {
@@ -146,6 +154,7 @@ function makeSpineCtx(overrides: Partial<MountRefRunStatusContext> = {}): MountR
         trace_id: event.trace_id ?? null,
       };
     },
+    getRunRecordOutcomes: (runId) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId) => getRunTerminalEvent(runId),
     ...overrides,
@@ -383,6 +392,151 @@ test("run-status route: known_gaps passes through from the terminal event, windo
     by_reason: { manifest_stream_unresolved: 1 },
     count: 1,
     truncated: false,
+  });
+});
+
+async function emitBatch(runId: string, stream: string, recordsPermanentlyRejected?: number): Promise<void> {
+  await emitSpineEvent({
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: {
+      batch_size: 5,
+      ...(recordsPermanentlyRejected === undefined ? {} : { records_permanently_rejected: recordsPermanentlyRejected }),
+    },
+    event_type: "run.batch_ingested",
+    object_id: runId,
+    object_type: "run",
+    run_id: runId,
+    status: "succeeded",
+    stream_id: stream,
+    trace_id: "trace_status_1",
+  });
+}
+
+async function emitEvidence(runId: string, stream: string, unaccounted: number): Promise<void> {
+  await emitSpineEvent({
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: { considered: unaccounted, outcomes: { emitted: 0, gapped: 0, unaccounted, unchanged: 0 } },
+    event_type: "run.stream_evidence_declared",
+    object_id: runId,
+    object_type: "run",
+    run_id: runId,
+    status: "succeeded",
+    stream_id: stream,
+    trace_id: "trace_status_1",
+  });
+}
+
+async function emitCompleted(runId: string, data: Record<string, unknown> = {}): Promise<void> {
+  await emitSpineEvent({
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: { ...data, source: { id: CONNECTOR_ID, kind: "connector" } },
+    event_type: "run.completed",
+    object_id: runId,
+    object_type: "run",
+    occurred_at: "2026-06-10T19:06:00.000Z",
+    run_id: runId,
+    status: "succeeded",
+    trace_id: "trace_status_1",
+  });
+}
+
+async function fetchRunStatus(runId: string): Promise<TestResponse> {
+  const app = makeApp();
+  mountRefRunStatus(app, makeSpineCtx());
+  const res = makeRes();
+  await getRoute(app, ROUTE)({ params: { runId } }, res);
+  return res;
+}
+
+test("run-status route: record_outcomes sums every batch and evidence event of an active run", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_active");
+  await emitBatch("run_outcomes_active", "orders", 2);
+  await emitBatch("run_outcomes_active", "orders", 0);
+  await emitBatch("run_outcomes_active", "messages", 3);
+  await emitEvidence("run_outcomes_active", "orders", 4);
+  await emitEvidence("run_outcomes_active", "orders", 1);
+  await emitEvidence("run_outcomes_active", "messages", 0);
+  await emitEvidence("run_outcomes_active", "photos", 6);
+  // Another run's events are not counted.
+  await emitBatch("run_outcomes_other", "orders", 100);
+
+  const res = await fetchRunStatus("run_outcomes_active");
+
+  assert.equal(res._body.status, "active");
+  assert.deepEqual(res._body.record_outcomes, {
+    permanently_rejected: 5,
+    unaccounted_by_stream: { orders: 5, photos: 6 },
+  });
+});
+
+test("run-status route: the terminal event's rejected total wins over the batch sum", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_terminal");
+  await emitBatch("run_outcomes_terminal", "orders", 2);
+  await emitCompleted("run_outcomes_terminal", { records_permanently_rejected: 7 });
+
+  const res = await fetchRunStatus("run_outcomes_terminal");
+
+  assert.equal(res._body.status, "completed");
+  assert.equal(res._body.record_outcomes.permanently_rejected, 7);
+});
+
+test("run-status route: a finished run with no terminal total falls back to the batch sum", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_fallback");
+  await emitBatch("run_outcomes_fallback", "orders", 2);
+  await emitBatch("run_outcomes_fallback", "orders", 1);
+  await emitCompleted("run_outcomes_fallback");
+
+  const res = await fetchRunStatus("run_outcomes_fallback");
+
+  assert.equal(res._body.record_outcomes.permanently_rejected, 3);
+});
+
+test("run-status route: a run with no rejected or unaccounted records reports zero and no streams", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_clean");
+  await emitBatch("run_outcomes_clean", "orders", 0);
+  await emitEvidence("run_outcomes_clean", "orders", 0);
+  await emitCompleted("run_outcomes_clean", { records_permanently_rejected: 0 });
+
+  const res = await fetchRunStatus("run_outcomes_clean");
+
+  assert.deepEqual(res._body.record_outcomes, { permanently_rejected: 0, unaccounted_by_stream: {} });
+});
+
+test("run-status route: batch events without a count make the rejected total absent, not 0", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_legacy");
+  await emitBatch("run_outcomes_legacy", "orders", 2);
+  await emitBatch("run_outcomes_legacy", "orders");
+  await emitEvidence("run_outcomes_legacy", "orders", 3);
+
+  const res = await fetchRunStatus("run_outcomes_legacy");
+
+  assert.equal("permanently_rejected" in res._body.record_outcomes, false);
+  assert.deepEqual(res._body.record_outcomes.unaccounted_by_stream, { orders: 3 });
+});
+
+test("run-status route: totals cover a run whose events span more than one timeline page", async (t) => {
+  freshDb(t);
+  await emitStarted("run_outcomes_long");
+  for (let i = 0; i < 250; i += 1) {
+    await emitBatch("run_outcomes_long", "orders", 1);
+  }
+  await emitEvidence("run_outcomes_long", "orders", 9);
+  const firstPage = await listSpineEventsPage("run", "run_outcomes_long", { limit: 100 });
+  assert.equal(firstPage.events.length, 100, "the timeline needs several pages for this run");
+
+  const res = await fetchRunStatus("run_outcomes_long");
+
+  assert.deepEqual(res._body.record_outcomes, {
+    permanently_rejected: 250,
+    unaccounted_by_stream: { orders: 9 },
   });
 });
 

@@ -9,6 +9,7 @@ import { test } from "node:test";
 
 import { getPdppCacheLayout, writePdppSecretFile } from "../src/cache-layout.ts";
 import { runCli } from "../src/index.ts";
+import { buildReadRequest, runRead } from "../src/read/commands.ts";
 
 const PROVIDER = "https://provider.test";
 
@@ -365,7 +366,7 @@ test("read search preserves bounded evidence descriptors and read continuation i
   }
 });
 
-test("read commands ignore owner-token flags and use cached client grant only", async () => {
+test("read commands reject owner-token flags without sending a request", async () => {
   const cacheRoot = await makeCredentialCache("client-read-token");
   const calls: { url: URL; init: Record<string, unknown> }[] = [];
   const originalFetch = globalThis.fetch;
@@ -387,8 +388,10 @@ test("read commands ignore owner-token flags and use cached client grant only", 
       captured.io
     );
 
-    assert.equal(code, 0);
-    assert.equal(calls.length, 1);
+    assert.equal(code, 2);
+    assert.equal(calls.length, 0);
+    assert.equal(JSON.parse(captured.stderr()).param, "owner-token");
+    assert.ok(!captured.stderr().includes("owner-secret"));
     // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
     assert.doesNotMatch(captured.stdout(), /owner-secret|client-read-token/);
   } finally {
@@ -447,6 +450,234 @@ test("read aggregate builds group_by_time aggregate requests from cached grant",
     await rm(cacheRoot, { recursive: true, force: true });
   }
 });
+
+// Response shapes follow server/request-helpers.ts and the canonical list envelope.
+for (const format of ["json", "jsonl", "table"]) {
+  for (const allowPartial of [false, true]) {
+    test(`partial_results preserves rows in ${format}, allow-partial=${allowPartial}`, async () => {
+      await withReadResponse({ data: [{ id: "returned-row" }], meta: { warnings: [{ code: "partial_results" }] } },
+        ["--format", format, "--data", ...(allowPartial ? ["--allow-partial"] : [])], (code, captured) => {
+          assert.equal(code, allowPartial ? 0 : 7);
+          assert.ok(captured.stdout().includes("returned-row"));
+          assert.ok(captured.stderr().includes(allowPartial ? "partial_results" : "incomplete_results"));
+          if (format === "json" && !allowPartial) assert.equal(JSON.parse(captured.stderr()).code, "incomplete_results");
+        });
+    });
+  }
+}
+
+for (const format of ["json", "jsonl", "table"]) {
+  for (const allowPartial of [false, true]) {
+    for (const nextCursor of [undefined, "next-page", 123, "  "]) {
+      const usable = nextCursor === "next-page";
+      test(`has_more in ${format}, allow-partial=${allowPartial}, cursor=${JSON.stringify(nextCursor)}`, async () => {
+        await withReadResponse({ data: [{ id: "returned-row" }], has_more: true, next_cursor: nextCursor },
+          ["--format", format, ...(allowPartial ? ["--allow-partial"] : [])], (code, captured) => {
+            assert.equal(code, usable || allowPartial ? 0 : 7);
+            assert.ok(captured.stdout().includes("returned-row"));
+            if (usable) assert.ok(captured.stdout().includes(nextCursor));
+            else assert.ok(captured.stderr().includes("incomplete_results"));
+          });
+      });
+    }
+  }
+}
+
+for (const [command, args, flags] of [
+  ["schema", [], {}], ["streams", [], {}], ["query-records", ["messages"], {}],
+  ["fetch", ["messages", "id"], {}], ["field-window", ["messages", "id"], { field: "text" }],
+  ["search", ["query"], {}], ["aggregate", ["messages"], { metric: "count" }],
+]) {
+  test(`${command} forwards explicit source selectors and rejects unknown flags`, () => {
+    const selectors = command === "search" ? { "connection-id": "cin_two" } : { "connector-id": "chat", "connection-id": "cin_two" };
+    const url = new URL(buildReadRequest(command, args, { ...flags, ...selectors }, PROVIDER).url);
+    assert.equal(url.searchParams.get("connector_id"), command === "search" ? null : "chat");
+    assert.equal(url.searchParams.get("connection_id"), "cin_two");
+    if (command === "search") {
+      assert.throws(() => buildReadRequest(command, args, { "connector-id": "chat" }, PROVIDER),
+        (error) => error.details.param === "connector-id");
+    }
+    assert.throws(() => buildReadRequest(command, args, { ...flags, typo: "ignored" }, PROVIDER),
+      (error) => error.details.param === "typo" && error.message.includes("Valid flags:"));
+    assert.throws(() => buildReadRequest(command, args, { ...flags, "connection-id": " " }, PROVIDER),
+      (error) => error.details.param === "connection-id" && error.message.includes("Missing value"));
+    assert.throws(() => buildReadRequest(command, [...args, "surplus"], flags, PROVIDER),
+      (error) => error.message === "Unexpected argument: surplus");
+  });
+}
+
+for (const [argv, message] of [
+  [["query-records", PROVIDER, "messages", "--connection-id="], "Missing value for --connection-id"],
+  [["query-records", PROVIDER, "messages", "--connector-id="], "Missing value for --connector-id"],
+  [["query-records", PROVIDER, "messages", "--allow-partial", "false"], "Unexpected argument: false"],
+  [["search", PROVIDER, "two", "words"], "Unexpected argument: words"],
+]) {
+  test(`read refuses ${argv.slice(3).join(" ")} without sending a request`, async () => {
+    const cacheRoot = await makeCredentialCache("fixture-token");
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = () => {
+      requests += 1;
+      return Promise.resolve(jsonResponse(200, { data: [] }));
+    };
+    try {
+      const captured = captureIo();
+      assert.equal(await runCli(["read", ...argv, "--cache-root", cacheRoot], captured.io), 2);
+      const error = JSON.parse(captured.stderr());
+      assert.equal(error.code, "invalid_argument");
+      assert.equal(error.message, message);
+      assert.equal(requests, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test("inline selector values preserve equals signs", async () => {
+  await withReadResponse({ data: [] }, ["--connection-id=opaque=connection"], (code, _captured, url) => {
+    assert.equal(code, 0);
+    assert.equal(url.searchParams.get("connection_id"), "opaque=connection");
+  });
+});
+
+test("read rejects command-specific unknown flags before fetching or loading credentials", async () => {
+  const captured = captureIo();
+  assert.equal(await runCli(["read", "query-records", PROVIDER, "messages", "--q", "ignored"], captured.io), 2);
+  const error = JSON.parse(captured.stderr());
+  assert.equal(error.code, "invalid_argument");
+  assert.equal(error.param, "q");
+  assert.ok(error.message.includes("--q"));
+  assert.ok(error.message.includes("--connector-id"));
+});
+
+test("read query-records passes both explicit source selectors unchanged", async () => {
+  await withReadResponse({ data: [] }, ["--connector-id", "https://registry.test/connectors/chat", "--connection-id", "cin_two"],
+    (code, _captured, url) => {
+      assert.equal(code, 0);
+      assert.equal(url.searchParams.get("connector_id"), "https://registry.test/connectors/chat");
+      assert.equal(url.searchParams.get("connection_id"), "cin_two");
+    });
+});
+
+for (const [status, expected] of [[401, 3], [403, 4], [400, 1]]) {
+  test(`read HTTP ${status} preserves typed diagnostics and Request-Id`, async () => {
+    const choices = [{ connector_id: "chat", connection_id: "cin_one" }, { connector_id: "chat", connection_id: "cin_two" }];
+    await withReadResponse({ error: { code: "ambiguous_connection", message: "Choose a connection", param: "connection_id", available_connections: choices } },
+      [], (code, captured) => {
+        assert.equal(code, expected);
+        assert.deepEqual(JSON.parse(captured.stderr()), { code: "ambiguous_connection", message: "Choose a connection", status,
+          param: "connection_id", request_id: "req_fixture", retryable: false, available_connections: choices });
+      }, status);
+  });
+}
+
+test("read text errors list available choices on one line", async () => {
+  await withReadResponse({ error: { code: "ambiguous_connection", message: "Choose", available_connections: [{ connection_id: "cin_two" }] } },
+    ["--format", "table"], (code, captured) => {
+      assert.equal(code, 1);
+      assert.ok(captured.stderr().includes("cin_two"));
+      assert.ok(captured.stderr().includes("req_fixture"));
+      assert.equal(captured.stderr().trim().split("\n").length, 1);
+    }, 400);
+});
+
+test("read network failures have a distinct retryable diagnostic", async () => {
+  await withReadResponse(null, [], (code, captured) => {
+    assert.equal(code, 6);
+    assert.equal(JSON.parse(captured.stderr()).code, "network_error");
+    assert.equal(JSON.parse(captured.stderr()).retryable, true);
+  });
+});
+
+test("read response-body network failures have the network exit code", async () => {
+  const cacheRoot = await makeCredentialCache("fixture-token");
+  try {
+    const captured = captureIo();
+    const code = await runRead(["streams", PROVIDER, "--cache-root", cacheRoot], captured.io, async () => ({
+      status: 200,
+      text: async () => { throw new Error("response interrupted"); },
+    }));
+    assert.equal(code, 6);
+    assert.equal(JSON.parse(captured.stderr()).code, "network_error");
+  } finally {
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+test("bare --allow-partial before the positionals does not swallow the provider URL", async () => {
+  await withReadResponse({ data: [{ id: "returned-row" }], has_more: true }, [], (code, captured, url) => {
+    assert.equal(code, 0);
+    assert.equal(url.pathname, "/v1/streams/messages/records");
+    assert.ok(captured.stdout().includes("returned-row"));
+  }, 200, ["--allow-partial"]);
+});
+
+test("a switch never consumes the next argument, even a literal false", async () => {
+  const cacheRoot = await makeCredentialCache("fixture-token");
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: URL[] = [];
+  globalThis.fetch = (input) => {
+    requestedUrls.push(new URL(input));
+    return Promise.resolve(
+      jsonResponse(200, { object: "search_result_list", data: [], meta: { warnings: [{ code: "partial_results" }] } })
+    );
+  };
+  try {
+    const captured = captureIo();
+    const code = await runCli(["read", "search", PROVIDER, "--allow-partial", "false", "--cache-root", cacheRoot],
+      captured.io);
+    assert.equal(code, 0);
+    assert.equal(requestedUrls[0]?.searchParams.get("q"), "false");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+for (const [value, expectedCode] of [["true", 0], ["false", 7], ["yes", 2]]) {
+  test(`--allow-partial=${value} exits ${expectedCode} on partial_results`, async () => {
+    await withReadResponse({ data: [{ id: "returned-row" }], meta: { warnings: [{ code: "partial_results" }] } },
+      [`--allow-partial=${value}`], (code, captured) => {
+        assert.equal(code, expectedCode);
+        if (expectedCode === 2) {
+          assert.equal(JSON.parse(captured.stderr()).param, "allow-partial");
+        }
+      });
+  });
+}
+
+test("partial_results stays incomplete when the page also has a usable next_cursor", async () => {
+  await withReadResponse(
+    { data: [{ id: "returned-row" }], has_more: true, next_cursor: "next-page", meta: { warnings: [{ code: "partial_results" }] } },
+    [], (code, captured) => {
+      assert.equal(code, 7);
+      assert.ok(captured.stdout().includes("next-page"));
+      assert.equal(JSON.parse(captured.stderr()).code, "incomplete_results");
+    });
+});
+
+async function withReadResponse(body, flags, check, status = 200, beforePositionals = []) {
+  const cacheRoot = await makeCredentialCache("fixture-token");
+  const originalFetch = globalThis.fetch;
+  let requestedUrl;
+  globalThis.fetch = async (input) => {
+    requestedUrl = new URL(input);
+    if (body === null) throw new Error("connection reset");
+    return new Response(JSON.stringify(body), { status, headers: { "Request-Id": "req_fixture" } });
+  };
+  try {
+    const captured = captureIo();
+    const code = await runCli(
+      ["read", "query-records", ...beforePositionals, PROVIDER, "messages", "--cache-root", cacheRoot, ...flags],
+      captured.io
+    );
+    check(code, captured, requestedUrl);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+}
 
 async function makeCredentialCache(accessToken) {
   const cacheRoot = await mkdtemp(join(tmpdir(), "pdpp-cli-read-"));

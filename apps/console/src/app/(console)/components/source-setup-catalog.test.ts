@@ -13,7 +13,7 @@ import {
   parseConnectorInstallStatusResponse,
 } from "../lib/connector-install-contract.ts";
 import { connectorInstallCatalogFixture, connectorInstallStatusFixture } from "../lib/connector-install-fixtures.ts";
-import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
+import { connectorInstallRowModel, type ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 
 // The catalog's import graph reaches `server-only`, which throws outside a
 // server component, and its recovery notice calls `useRouter`, which needs a
@@ -57,7 +57,8 @@ async function render(
   installCatalogTransientlyUnavailable: boolean,
   entry: ConnectorCatalogEntry = reddit,
   lifecycle?: ConnectorInstallLifecycle,
-  installSkippedEntries = 0
+  installSkippedEntries = 0,
+  query = ""
 ): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
@@ -68,7 +69,7 @@ async function render(
       installSkippedEntries,
       // The page builds this from the empty catalog a busy snapshot returns.
       installLifecycleByConnector: lifecycle ? { [entry.connectorKey]: lifecycle } : {},
-      query: "",
+      query,
     })
   );
 }
@@ -78,7 +79,11 @@ test("a busy package catalog does not hide an unregistered connector", async () 
 });
 
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
-  assert.doesNotMatch(await render(false), />Reddit</);
+  const empty = await render(false);
+  assert.doesNotMatch(empty, />Reddit</);
+  assert.match(empty, /No connectors are available to add\./);
+  assert.doesNotMatch(empty, /No connector matched/);
+  assert.match(await render(false, reddit, undefined, 0, "calendar"), /No connector matched .*calendar.*Try the source name or connector key/);
 });
 
 const INSTALL_BUTTON = />Install<\/button>/;
@@ -290,4 +295,34 @@ test("an installed connector that the reference has not registered shows registr
   const registered = await render(false, { ...setupCapable, registrationStatus: "registered" }, lifecycle);
   assert.doesNotMatch(registered, /Registration pending/);
   assert.match(registered, NEW_BROWSER_SETUP);
+});
+
+test("package state distinguishes an included connector from an unavailable listing without offering Install", () => {
+  const lifecycle = { catalog: null, installed: null };
+  const bundled = connectorInstallRowModel({ ...setupCapable, registrationStatus: "registered" }, lifecycle);
+  const absent = connectorInstallRowModel({ ...setupCapable, registrationStatus: "not_registered" }, lifecycle);
+  assert.deepEqual([bundled.activationState, bundled.activationLabel, bundled.action], ["not_listed", "Included", null]);
+  assert.deepEqual([absent.activationState, absent.activationLabel, absent.action], ["not_listed", "Not available in this app", null]);
+});
+
+test("a newer package leaves the installed version visible and explicitly names the update target", () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const target = {
+    ...browserPackage.catalog,
+    digest: "sha256:" + "e".repeat(64),
+    version: "2.0.0",
+    latest: true,
+  };
+  const saved = { ...installed, digest: "sha256:" + "a".repeat(64), version: "1.0.0" };
+  const available = connectorInstallRowModel(setupCapable, { catalog: target, installed: saved });
+  assert.deepEqual([available.activationState, available.installedVersion, available.action], [
+    "update_available", "1.0.0", { digest: target.digest, kind: "update", version: "2.0.0" },
+  ]);
+  const noTarget = connectorInstallRowModel(setupCapable, {
+    catalog: { ...target, latest: false },
+    installed: saved,
+  });
+  assert.deepEqual([noTarget.activationState, noTarget.installedVersion, noTarget.action], ["active", "1.0.0", null]);
 });
