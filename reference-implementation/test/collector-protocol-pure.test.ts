@@ -56,8 +56,9 @@ test("readCollectorProtocolHeader: reads the canonical header, trimmed", () => {
   assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: "2" }), "2");
 });
 
-test("readCollectorProtocolHeader: an array-valued header uses the first entry (trimmed)", () => {
-  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["  7  ", "8"] }), "7");
+test("readCollectorProtocolHeader: a single-entry array is trimmed; a repeated header is ambiguous", () => {
+  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["  7  "] }), "7");
+  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["  7  ", "8"] }), null);
 });
 
 test("readCollectorProtocolHeader: absent / blank header -> null", () => {

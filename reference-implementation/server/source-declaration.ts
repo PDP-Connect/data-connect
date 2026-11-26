@@ -58,23 +58,85 @@ function validationMessage(): string {
   return structural.join("; ");
 }
 
-function assertLocalSchemaReferences(value: unknown, path: string): void {
-  if (Array.isArray(value)) {
-    for (const [index, child] of value.entries()) {
-      assertLocalSchemaReferences(child, `${path}/${index}`);
-    }
+function assertJsonPointerTarget(reference: string, resource: unknown, path: string): void {
+  let fragment: string;
+  try {
+    fragment = decodeURIComponent(reference.slice(1));
+  } catch {
+    throw new InvalidSourceDeclarationError(`${path} must be a valid local fragment reference`);
+  }
+  // Empty fragments and named anchors keep their existing behaviour.
+  if (!fragment.startsWith("/")) {
     return;
   }
-  if (!(value && typeof value === "object")) {
-    return;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    const childPath = `${path}/${key}`;
-    if ((key === "$ref" || key === "$dynamicRef") && (typeof child !== "string" || !child.startsWith("#"))) {
-      throw new InvalidSourceDeclarationError(`${childPath} must be a local fragment reference`);
+  let target = resource;
+  for (const token of fragment.slice(1).split("/")) {
+    const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (
+      /~(?![01])/u.test(token) ||
+      !target || typeof target !== "object" ||
+      (Array.isArray(target) && !/^(0|[1-9][0-9]*)$/u.test(key)) ||
+      !Object.hasOwn(target, key)
+    ) {
+      throw new InvalidSourceDeclarationError(`${path} must point to an existing local schema`);
     }
-    assertLocalSchemaReferences(child, childPath);
+    target = (target as JsonObject)[key];
   }
+  if (typeof target !== "boolean" && (!target || typeof target !== "object" || Array.isArray(target))) {
+    throw new InvalidSourceDeclarationError(`${path} must point to an existing local schema`);
+  }
+}
+
+// JSON Schema 2020-12 applicators (plus the draft-07 spellings Ajv still
+// accepts), by the shape of their value. Every other keyword holds data or an
+// annotation (`examples`, `default`, `const`, `enum`, ...), so a "$ref" inside
+// it is a literal value, not a reference.
+const SCHEMA_KEYWORDS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const SCHEMA_ARRAY_KEYWORDS = new Set(["allOf", "anyOf", "items", "oneOf", "prefixItems"]);
+const SCHEMA_MAP_KEYWORDS = new Set(["$defs", "definitions", "dependencies", "dependentSchemas", "patternProperties", "properties"]);
+
+/** Check the local JSON Pointer references of an embedded schema without resolving remote schemas. */
+export function assertLocalSchemaReferences(schema: unknown, path: string): void {
+  function visitSchema(value: unknown, at: string, resource: unknown): void {
+    if (!(value && typeof value === "object" && !Array.isArray(value))) {
+      return;
+    }
+    const object = value as JsonObject;
+    const currentResource = typeof object.$id === "string" ? object : resource;
+    for (const [key, child] of Object.entries(object)) {
+      const childPath = `${at}/${key}`;
+      if (key === "$ref" || key === "$dynamicRef") {
+        if (typeof child !== "string" || !child.startsWith("#")) {
+          throw new InvalidSourceDeclarationError(`${childPath} must be a local fragment reference`);
+        }
+        assertJsonPointerTarget(child, currentResource, childPath);
+      } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(child)) {
+        for (const [index, member] of child.entries()) {
+          visitSchema(member, `${childPath}/${index}`, currentResource);
+        }
+      } else if (SCHEMA_KEYWORDS.has(key)) {
+        visitSchema(child, childPath, currentResource);
+      } else if (SCHEMA_MAP_KEYWORDS.has(key) && child && typeof child === "object" && !Array.isArray(child)) {
+        for (const [name, member] of Object.entries(child as JsonObject)) {
+          visitSchema(member, `${childPath}/${name.replace(/~/g, "~0").replace(/\//g, "~1")}`, currentResource);
+        }
+      }
+    }
+  }
+  visitSchema(schema, path, schema);
 }
 
 function requireEmbeddedStreamSchemas(declaration: SourceDeclaration): void {

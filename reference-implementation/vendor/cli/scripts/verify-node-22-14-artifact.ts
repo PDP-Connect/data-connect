@@ -34,23 +34,31 @@ const tempRoot = mkdtempSync(resolve(tmpdir(), "pdpp-cli-node-22-14-gate-"));
 const probe = createNodeProbe(tempRoot);
 const sourceEnv = bindNodeEnvironment(process.env, process.execPath);
 const env = addNodeProbeToEnvironment(sourceEnv, probe);
+// pack-install-run hosts the reference server in-process, and the server needs
+// a newer Node than the CLI's floor. It runs on PDPP_ARTIFACT_HARNESS_NODE and
+// binds every child it starts (npm, npx, the installed CLI) to this Node. The
+// harness itself is not probed: only its children must run on the floor.
+const harnessNode = process.env.PDPP_ARTIFACT_HARNESS_NODE ?? process.execPath;
+const { NODE_OPTIONS: _probeOption, ...harnessEnv } = env;
 const headSha = gitHeadSha(packageRoot);
 const contentSha256 = packageContentSha256(packageRoot);
 
 try {
-  execFileSync("pnpm", ["build"], {
+  execFileSync("npm", ["run", "build"], {
     cwd: packageRoot,
-    env: labelChildEnvironment(env, "pnpm build"),
+    env: labelChildEnvironment(env, "npm run build"),
     stdio: "inherit",
   });
   const output = execFileSync(
-    process.execPath,
+    harnessNode,
     ["--import", "tsx", resolve(packageRoot, "scripts/pack-install-run.ts")],
     {
       cwd: packageRoot,
       env: labelChildEnvironment(
         {
-          ...env,
+          ...harnessEnv,
+          ...(sourceEnv.NODE_OPTIONS ? { NODE_OPTIONS: sourceEnv.NODE_OPTIONS } : {}),
+          PDPP_ARTIFACT_NODE_EXEC_PATH: process.execPath,
           PDPP_ARTIFACT_EXPECTED_NODE_VERSION: NODE_22_14_VERSION,
           PDPP_ARTIFACT_EXPECTED_NODE_EXEC_PATH: process.execPath,
           PDPP_ARTIFACT_EXPECTED_GIT_HEAD_SHA: headSha,
@@ -74,11 +82,11 @@ try {
     packageContentSha256: contentSha256,
   });
   assert.ok(
-    receipt.subprocesses.some(({ label }: { label: string }) => label === "pnpm build"),
+    receipt.subprocesses.some(({ label }: { label: string }) => label === "npm run build"),
     "receipt missed the build subprocess"
   );
   assert.ok(
-    receipt.subprocesses.some(({ label }: { label: string }) => label.startsWith("npm ")),
+    receipt.subprocesses.some(({ label }: { label: string }) => label.startsWith("npm ") && label !== "npm run build"),
     "receipt missed npm subprocesses"
   );
   assert.ok(

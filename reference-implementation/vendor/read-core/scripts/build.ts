@@ -17,7 +17,7 @@ await rm(distDir, { force: true, recursive: true });
 // misses the .cmd shim npm writes for bin entries (no shell means no PATHEXT
 // resolution), so this failed with ENOENT on every Windows build of a
 // consumer package that vendors this script.
-await execFileAsync("npx", ["tsc", "--project", "tsconfig.build.json"], {
+await execFileAsync("npx", ["--no-install", "tsc", "--project", "tsconfig.build.json"], {
   cwd: packageRoot,
   shell: platform === "win32",
 });

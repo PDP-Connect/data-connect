@@ -167,7 +167,7 @@ test("probe 1: a repair-candidate upsert failure durably fails the row instead o
     try {
       result = await reconcileConnectorSummaryEvidence(null);
 
-      assert.equal(result.repaired, 1, "the repair pass still counts the attempt");
+      assert.equal(result.repaired, 0, "a failed repair is not counted as repaired");
       assert.equal(result.failed, 1, "the repair pass correctly detects and counts the failure");
 
       const after = getDb()

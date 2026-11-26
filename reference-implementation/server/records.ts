@@ -42,6 +42,7 @@ import {
   iterate,
   iterateDynamicSqlAcknowledged,
   referenceQueries,
+  transaction,
   writeTransaction,
 } from "../lib/db.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
@@ -75,6 +76,7 @@ import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-mode
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
+import { validateReadQueryKeys } from "./read-query-params.ts";
 import {
   postgresDeleteAllRecords,
   postgresDeleteRecord,
@@ -119,6 +121,7 @@ import {
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -355,6 +358,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -363,6 +367,9 @@ interface ResponseRecord {
   // (`getRecordAcrossBindings`/`postgresGetRecord`) — never on a list
   // response. `undefined`/absent, not `0`, when unmeasured.
   record_json_bytes?: number;
+  // Why an owner tombstone left the result (Core: owner tombstones). The wire
+  // shape strips it from client tombstones.
+  removal?: "deleted" | "left_query";
   stream: string;
 }
 type EffectiveParentRow = VisibleRecordRow & { responseRecord: ResponseRecord };
@@ -393,6 +400,12 @@ interface RecordSnapshot {
   version: number;
 }
 interface ChangesSinceCursor {
+  /**
+   * `connector_instances.record_reset_generation` (decimal text) when the
+   * token was issued. Absent on `beginning` and on tokens issued before the
+   * epoch was added; an absent epoch is generation "0".
+   */
+  epoch?: string;
   kind?: "changes_since";
   version: number;
 }
@@ -415,10 +428,8 @@ interface ChangeGroupRow {
   record_key: string;
 }
 interface VersionCounterRow {
+  changes_floor: number;
   max_version: number;
-}
-interface MinVersionRow {
-  min_version: number | null;
 }
 interface AggregateRecordRow {
   record_json: string;
@@ -641,6 +652,7 @@ type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
   after_version?: number;
   cursor_value?: unknown;
+  epoch?: unknown;
   order?: unknown;
   primary_key?: unknown;
   session?: unknown;
@@ -1384,11 +1396,12 @@ function writeRecordChange({
 }
 
 // The retained-size delta accounting MUST count/sum exactly the rows the prune
-// DELETE will remove. Both helpers therefore carry the SAME anchor-preserving
-// `NOT EXISTS` clause as `recordsIngestPruneRecordChanges` (see
-// queries/records/ingest/prune-record-changes.sql). If these predicates ever
-// diverge, the retained-size read model would over-report pruned bytes/rows
-// for keys whose anchor we now keep. Kept in lockstep on purpose.
+// DELETE will remove. Both helpers therefore carry the SAME anchor- and
+// baseline-preserving clauses as `recordsIngestPruneRecordChanges` (see
+// queries/records/ingest/prune-record-changes.sql); each takes the horizon
+// twice. If these predicates ever diverge, the retained-size read model would
+// over-report pruned bytes/rows for keys whose anchor or baseline we keep.
+// Kept in lockstep on purpose.
 const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
   AND NOT EXISTS (
     SELECT 1
@@ -1397,6 +1410,14 @@ const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+  )
+  AND EXISTS (
+    SELECT 1 FROM record_changes n
+     WHERE n.connector_instance_id = record_changes.connector_instance_id
+       AND n.stream = record_changes.stream
+       AND n.record_key = record_changes.record_key
+       AND n.version > record_changes.version
+       AND n.version <= ?
   )`;
 
 function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: string, versionBefore: number): number {
@@ -1408,7 +1429,7 @@ function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: str
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.bytes || 0);
 }
 
@@ -1421,7 +1442,7 @@ function getPrunedRecordChangeCount(connectorInstanceId: string, stream: string,
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.count || 0);
 }
 
@@ -2245,7 +2266,20 @@ function pruneRecordChangeHistory(
   const cutoff = nextVersion - changeHistoryLimit;
   const prunedBytesForDelta = getPrunedRecordChangeJsonBytes(connectorInstanceId, stream, cutoff);
   const prunedRowsForDelta = getPrunedRecordChangeCount(connectorInstanceId, stream, cutoff);
-  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff]);
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
+    getDb()
+      .prepare(
+        `UPDATE version_counter SET changes_floor = MAX(changes_floor, ?)
+          WHERE connector_instance_id = ? AND stream = ?`
+      )
+      .run(cutoff, connectorInstanceId, stream);
+  }
+  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff, cutoff]);
   return { prunedBytesForDelta, prunedRowsForDelta };
 }
 
@@ -2968,33 +3002,6 @@ function projectFields(data: RecordData, fields: string[] | undefined): RecordDa
   return result;
 }
 
-// Canonical public read query-param allowlist. `connection_id` is the
-// canonical public connection identifier; `connector_instance_id` is the
-// deprecated wire alias accepted during the migration window defined by
-// `openspec/changes/expose-connection-identity-on-public-read`. Both are
-// optional filters today; when storage enumerates multiple connections per
-// owner they will narrow the result set. `subject_id` is forwarded by some
-// MCP / dashboard clients for diagnostic context and is allowlisted alongside
-// `connector_id` for parity with `/v1/streams` and `/v1/schema`.
-const SUPPORTED_RECORD_QUERY_PARAMS = new Set([
-  "changes_since",
-  "connection_id",
-  "connector_id",
-  "connector_instance_id",
-  "count",
-  "cursor",
-  "expand",
-  "expand_limit",
-  "fields",
-  "filter",
-  "limit",
-  "order",
-  "sort",
-  "subject_id",
-  "view",
-  "window",
-]);
-
 // Canonical graded-count vocabulary. Spec:
 //   openspec/changes/canonicalize-public-read-contract design.md ("Counts")
 //   reference-contract `CountKindSchema`
@@ -3009,20 +3016,6 @@ const SUPPORTED_COUNT_KINDS = new Set(["none", "estimated", "exact"]);
 //   reference-implementation-architecture/spec.md
 //   (#"The record-list read MAY expose bounded window aggregate metadata")
 const SUPPORTED_WINDOW_KINDS = new Set(["none", "exact"]);
-const SUPPORTED_AGGREGATE_QUERY_PARAMS = new Set([
-  "connection_id",
-  "connector_id",
-  "connector_instance_id",
-  "field",
-  "filter",
-  "granularity",
-  "group_by",
-  "group_by_time",
-  "limit",
-  "metric",
-  "subject_id",
-  "time_zone",
-]);
 
 /**
  * Re-export the canonical alias contract helpers so existing imports from
@@ -3443,10 +3436,7 @@ function validateTopLevelQueryParams(
   requestParams: RequestParams,
   manifestStream: ManifestStream | null = null
 ): { direction: PageOrder; field: string } | null {
-  const unsupported = Object.keys(requestParams).filter((key) => !SUPPORTED_RECORD_QUERY_PARAMS.has(key));
-  if (unsupported.length) {
-    throw invalidQueryError(`Unsupported query parameter: ${unsupported.join(", ")}`);
-  }
+  validateReadQueryKeys("records", requestParams);
   validateConnectionAlias(requestParams);
   validateCountKind(requestParams.count);
   validateWindowKind(requestParams.window);
@@ -3583,10 +3573,7 @@ function resolveSortEntry(entry: string, sortableFields: Set<string>): { directi
 }
 
 function validateTopLevelAggregateParams(requestParams: RequestParams): void {
-  const unsupported = Object.keys(requestParams).filter((key) => !SUPPORTED_AGGREGATE_QUERY_PARAMS.has(key));
-  if (unsupported.length) {
-    throw invalidQueryError(`Unsupported query parameter: ${unsupported.join(", ")}`);
-  }
+  validateReadQueryKeys("aggregate", requestParams);
   validateConnectionAlias(requestParams);
 }
 
@@ -3779,6 +3766,19 @@ function resolveAggregateTimeGrouping(
   return { granularity: granularityRaw, timeZone: resolveAggregateTimeZone(timeZoneRaw) };
 }
 
+// Like the other read parameters, an optional aggregate dimension is absent
+// when null, undefined or "". Any other value must be a nonblank string:
+// String() would read a repeated parameter such as ["day"] as "day".
+function parseOptionalAggregateDimension(value: unknown, name: string): string | null {
+  if (isNullish(value) || value === "") {
+    return null;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidQueryError(`${name} must be a nonblank string`);
+  }
+  return value.trim();
+}
+
 function normalizeAggregateRequest(
   requestParams: RequestParams,
   streamGrant: StreamGrant,
@@ -3792,22 +3792,11 @@ function normalizeAggregateRequest(
   }
 
   const metric = normalizeAggregateMetric(requestParams.metric);
-  const field =
-    isNullish(requestParams.field) || requestParams.field === "" ? null : String(requestParams.field).trim();
-  const groupBy =
-    isNullish(requestParams.group_by) || requestParams.group_by === "" ? null : String(requestParams.group_by).trim();
-  const groupByTime =
-    isNullish(requestParams.group_by_time) || requestParams.group_by_time === ""
-      ? null
-      : String(requestParams.group_by_time).trim();
-  const granularityRaw =
-    isNullish(requestParams.granularity) || requestParams.granularity === ""
-      ? null
-      : String(requestParams.granularity).trim();
-  const timeZoneRaw =
-    isNullish(requestParams.time_zone) || requestParams.time_zone === ""
-      ? null
-      : String(requestParams.time_zone).trim();
+  const field = parseOptionalAggregateDimension(requestParams.field, "field");
+  const groupBy = parseOptionalAggregateDimension(requestParams.group_by, "group_by");
+  const groupByTime = parseOptionalAggregateDimension(requestParams.group_by_time, "group_by_time");
+  const granularityRaw = parseOptionalAggregateDimension(requestParams.granularity, "granularity");
+  const timeZoneRaw = parseOptionalAggregateDimension(requestParams.time_zone, "time_zone");
 
   // Exactly one grouping dimension in v1: group_by XOR group_by_time.
   if (groupBy && groupByTime) {
@@ -4316,6 +4305,10 @@ function decorateRecordWithConnectionIdentity(record: ResponseRecord, identity: 
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -4653,7 +4646,12 @@ function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (decoded.kind !== "changes_since" || typeof decoded.version !== "number" || !Number.isInteger(decoded.version)) {
     return null;
   }
-  return { kind: "changes_since", version: decoded.version };
+  if (decoded.epoch === undefined) {
+    return { kind: "changes_since", version: decoded.version };
+  }
+  return typeof decoded.epoch === "string"
+    ? { epoch: decoded.epoch, kind: "changes_since", version: decoded.version }
+    : null;
 }
 
 // Self-teaching error message: when a caller passes something other than the
@@ -4689,13 +4687,16 @@ function encodeChangesPageCursor({
   sinceVersion,
   afterVersion,
   sessionMaxVersion,
+  epoch,
 }: {
   afterVersion: number;
+  epoch: string;
   sessionMaxVersion: number;
   sinceVersion: number;
 }): string {
   return encodeCursor({
     after_version: afterVersion,
+    epoch,
     kind: "page",
     session: "changes",
     session_max_version: sessionMaxVersion,
@@ -4703,8 +4704,8 @@ function encodeChangesPageCursor({
   });
 }
 
-function encodeChangesSinceCursor(version: number): string {
-  return encodeCursor({ kind: "changes_since", version });
+function encodeChangesSinceCursor(version: number, epoch: string): string {
+  return encodeCursor({ epoch, kind: "changes_since", version });
 }
 
 function getSnapshotAtVersion(
@@ -5094,8 +5095,17 @@ export async function recordCurrentGenerationUndeclaredWrite(
   });
 }
 
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+function readRecordResetGeneration(connectorInstanceId: string): string {
+  const row = getOne<{ reset_generation: string }>(referenceQueries.recordsDeleteGetRecordResetGeneration, [
+    connectorInstanceId,
+  ]);
+  return String(row?.reset_generation ?? "0");
+}
+
 interface ValidatedChangeVersions {
   effectiveSessionMaxVersion: number;
+  epoch: string;
   verifiedAfterVersion: number;
   verifiedSinceVersion: number;
 }
@@ -5120,6 +5130,22 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
+  // A bulk reset deletes the stream's records, history and version counter in
+  // one transaction and advances the connection's reset generation in that
+  // same transaction, so versions can be reissued afterwards. A token (or page
+  // cursor) minted under an earlier generation names versions from a space
+  // that no longer exists and must not be replayed against the new one.
+  // `beginning` and version-0 tokens hold no consumer state and stay valid.
+  const epoch = readRecordResetGeneration(connectorInstanceId);
+  const tokenEpoch = changesSince === null ? changesCursor?.epoch : changesSince.epoch;
+  if (tokenEpoch !== undefined && typeof tokenEpoch !== "string") {
+    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
+  }
+  const tokenHoldsNoState = changesSince !== null && changesSince.version === 0;
+  if (!tokenHoldsNoState && (tokenEpoch ?? "0") !== epoch) {
+    throw codedError("changes_since cursor predates a stream reset; full re-sync required", "cursor_expired");
+  }
+
   const vcRow = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [
     connectorInstanceId,
     stream,
@@ -5130,16 +5156,28 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
-  const minChangeRow = getOne<MinVersionRow>(referenceQueries.recordsSnapshotsGetMinRecordChangeVersion, [
-    connectorInstanceId,
-    stream,
-  ]);
-  const minVersion = minChangeRow?.min_version ?? null;
-  if (minVersion !== null && sinceVersion < minVersion - 1) {
-    throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
+  // `changes_floor` is the horizon below which history was pruned or compacted:
+  // a cursor at or above it can resolve every key's snapshot, one below it would
+  // get its deletions silently suppressed. (MIN(version) cannot say so: a cold
+  // key's anchor pins it near 1.) `beginning` needs no predecessor and stays
+  // valid as the recovery request. A continued page is read at
+  // `session_max_version`; once the horizon passes that snapshot the session
+  // expires rather than serve an incomplete page.
+  const changesFloor = vcRow?.changes_floor ?? 0;
+  const belowFloor = sinceVersion > 0 && sinceVersion < changesFloor;
+  const sessionSnapshotPruned = changesSince === null && effectiveSessionMaxVersion < changesFloor;
+  if (belowFloor || sessionSnapshotPruned) {
+    throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
+  }
+  // The counter only grows within a generation, so a token or page cursor past
+  // the head names versions this database never issued, as after restoring an
+  // older backup. Answering it would return an empty page and a token at the
+  // older head, which cannot tell the client to drop what it learned after it.
+  if (Math.max(sinceVersion, afterVersion, effectiveSessionMaxVersion) > currentMaxVersion) {
+    throw codedError("changes_since cursor is ahead of the stream's history; full re-sync required", "cursor_expired");
   }
 
-  return { effectiveSessionMaxVersion, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
+  return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
 
 function fetchChangeGroupBatch(
@@ -5248,6 +5286,7 @@ function resolveChangeGroupRecord(
       emitted_at: current.emitted_at,
       id: group.record_key,
       object: "record",
+      removal: "deleted",
       stream,
     };
     decorateRecordWithConnectionIdentity(deletedRecord, recordIdentity);
@@ -5289,7 +5328,12 @@ interface QueryRecordsChangesSinceArgs {
   stream: string;
 }
 
-function queryRecordsChangesSince({
+/** One deferred transaction pins one read snapshot for the epoch, floor, groups and snapshot lookups. */
+function queryRecordsChangesSince(args: QueryRecordsChangesSinceArgs): ListResponse {
+  return transaction(() => readChangesSinceSnapshot(args));
+}
+
+function readChangesSinceSnapshot({
   changesSince,
   compiledFilters,
   connectorInstanceId,
@@ -5300,12 +5344,8 @@ function queryRecordsChangesSince({
   requestWarnings,
   stream,
 }: QueryRecordsChangesSinceArgs): ListResponse {
-  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion } = validateChangesSinceVersions(
-    changesSince,
-    paginationCursor,
-    connectorInstanceId,
-    stream
-  );
+  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion, epoch } =
+    validateChangesSinceVersions(changesSince, paginationCursor, connectorInstanceId, stream);
 
   const visibleChanges = collectVisibleChanges(
     connectorInstanceId,
@@ -5335,12 +5375,13 @@ function queryRecordsChangesSince({
     }
     response.next_cursor = encodeChangesPageCursor({
       afterVersion: lastGroup.latestVersion,
+      epoch,
       sessionMaxVersion: effectiveSessionMaxVersion,
       sinceVersion: verifiedSinceVersion,
     });
   }
 
-  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion);
+  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, epoch);
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }
@@ -5468,7 +5509,8 @@ interface ValidatedQueryContext {
 
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5482,6 +5524,7 @@ function validateQueryCursors(
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5531,7 +5574,7 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,

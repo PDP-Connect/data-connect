@@ -37,6 +37,7 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
+  getRunRecordOutcomes,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
@@ -168,7 +169,6 @@ import { projectStorageDisplayName, resolveRequestConnectionId } from "./connect
 import {
   AmbiguousConnectionError,
   listActiveBindingsForGrant,
-  listGrantedConnectionsForStream,
   projectBindingForWire,
 } from "./connection-identity.ts";
 import { type ConnectorManifestLike, connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
@@ -205,7 +205,15 @@ import {
   runtimeBrowserCapabilityFromEnv,
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
-import { deriveReferenceFreshness } from "./freshness.ts";
+import { getLatestConnectorRunSummary, getManifestRefreshPolicy } from "./connector-run-evidence.ts";
+import {
+  buildConnectorAwareFreshness,
+  buildConnectorDiscoveryItem,
+  buildConnectorSchemaItem,
+  buildStreamMetadataEntry,
+  getConnectorFreshnessEvidence,
+  listSubjectVisibleStreamSummaries,
+} from "./connector-schema-builder.ts";
 import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
@@ -319,7 +327,6 @@ import {
   listDatasetTopConnectorCandidates,
   listLocalCoverageDiagnostics,
   listStreamsAcrossBindings,
-  listStreamsByResolvedBindings,
   maintainRecordIndexes,
   prepareDeviceFinalRecords,
   putSyncState,
@@ -1815,13 +1822,13 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError, statusOverride?: number) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {
@@ -2144,6 +2151,7 @@ async function requireTokenWithIntrospection(
     }
   }
   if (!info.active) {
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
@@ -2160,25 +2168,25 @@ async function requireTokenWithIntrospection(
     await emitAuthGateQueryRejection(req, res, info, {
       code: info.inactive_reason || "authentication_error",
       message: gateErrMsg,
+      // The token is rejected, so the recorded status is the 401 sent below
+      // even where the internal code (grant_invalid) maps to 403.
+      status: 401,
     });
     if (info.inactive_reason === "grant_revoked") {
-      return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
+      return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
     if (info.inactive_reason === "grant_expired") {
-      return pdppError(res, 403, "grant_expired", "Grant has expired");
+      return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "authentication_error", "Invalid or expired token");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;
@@ -2217,7 +2225,7 @@ async function emitAuthGateQueryRejection(
   req: ReqLike,
   res: ResLike,
   info: TokenInfo,
-  rejection: { code: string; message: string; sourceDescriptor?: unknown }
+  rejection: { code: string; message: string; sourceDescriptor?: unknown; status?: number }
 ) {
   const authGateQuery = inferAuthGateQueryContext(req, info);
   if (!(authGateQuery && info.trace_id)) {
@@ -2247,7 +2255,7 @@ async function emitAuthGateQueryRejection(
   };
   await emitQueryReceived(authGateContext, req);
   const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
-  await emitQueryRejected(authGateContext, req, gateErr);
+  await emitQueryRejected(authGateContext, req, gateErr, rejection.status);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -3726,682 +3734,6 @@ export async function resolveGrantScopedStateGrant(connectorId: string, grantId:
   }
 }
 
-function normalizePrimaryKey(primaryKey: unknown): string[] {
-  if (Array.isArray(primaryKey)) {
-    return primaryKey as string[];
-  }
-  if (typeof primaryKey === "string" && primaryKey.trim()) {
-    return [primaryKey];
-  }
-  return [];
-}
-
-function buildFreshness(lastUpdated: string | null = null) {
-  return deriveReferenceFreshness({ recordLastUpdatedAt: lastUpdated });
-}
-
-async function getLatestConnectorRunSummary(
-  connectorId: string | null,
-  status: string | null = null,
-  connectorInstanceId: string | null | undefined = null
-) {
-  if (!connectorId) {
-    return null;
-  }
-  const filters = {
-    limit: 1,
-    sourceId: connectorId,
-    sourceKind: "connector",
-    ...(status ? { status } : {}),
-    ...(connectorInstanceId ? { connectorInstanceId } : {}),
-  };
-  const { summaries } = await listSpineCorrelations("run", filters);
-  const summary = summaries[0] || null;
-  if (!summary) {
-    return null;
-  }
-  return {
-    last_at: summary.last_at,
-    status: summary.status,
-  };
-}
-
-function getManifestRefreshPolicy(manifest: Record<string, unknown> | null | undefined) {
-  const capabilities = manifest?.capabilities;
-  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) {
-    return null;
-  }
-  return (capabilities as Record<string, unknown>).refresh_policy ?? null;
-}
-
-function getMaximumStalenessSeconds(refreshPolicy: unknown) {
-  if (!refreshPolicy || typeof refreshPolicy !== "object" || Array.isArray(refreshPolicy)) {
-    return null;
-  }
-  const value = (refreshPolicy as Record<string, unknown>).maximum_staleness_seconds;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
-}
-
-async function getConnectorFreshnessEvidence({
-  storageBinding,
-  manifest,
-}: {
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown> | null | undefined;
-}) {
-  const connectorId = storageBinding.connector_id ?? null;
-  const refreshPolicy = getManifestRefreshPolicy(manifest);
-  const [lastRun, lastSuccessfulRun] = await Promise.all([
-    getLatestConnectorRunSummary(connectorId),
-    getLatestConnectorRunSummary(connectorId, "succeeded"),
-  ]);
-  return {
-    lastRun,
-    lastSuccessfulRun,
-    maximumStalenessSeconds: getMaximumStalenessSeconds(refreshPolicy),
-  };
-}
-
-function buildConnectorAwareFreshness(
-  evidence:
-    | {
-        lastRun?: { last_at?: string | null; status?: string | null } | null;
-        lastSuccessfulRun?: { last_at?: string | null } | null;
-        maximumStalenessSeconds?: number | null;
-      }
-    | null
-    | undefined,
-  recordLastUpdatedAt: string | null = null
-) {
-  return deriveReferenceFreshness({
-    lastAttemptedAt: evidence?.lastRun?.last_at ?? null,
-    lastAttemptStatus: evidence?.lastRun?.status ?? null,
-    lastSuccessfulRunAt: evidence?.lastSuccessfulRun?.last_at ?? null,
-    maximumStalenessSeconds: evidence?.maximumStalenessSeconds ?? null,
-    recordLastUpdatedAt,
-  });
-}
-
-function hasObjectEntries(value: unknown): boolean {
-  return !!(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0);
-}
-
-function getNonNullSchemaTypes(schema: Record<string, unknown> | null | undefined): Set<string> {
-  const rawType = schema?.type;
-  if (!rawType) {
-    return new Set();
-  }
-  const types = Array.isArray(rawType) ? rawType : [rawType];
-  return new Set((types as string[]).filter((type) => type !== "null"));
-}
-
-function isExactFilterableSchema(schema: Record<string, unknown> | null | undefined): boolean {
-  const types = getNonNullSchemaTypes(schema);
-  if (types.size !== 1) {
-    return false;
-  }
-  const [type] = types;
-  return ["boolean", "integer", "number", "string"].includes(type as string);
-}
-
-function buildFieldCapabilityFlag({
-  declared,
-  granted,
-  operators = null,
-}: {
-  declared: boolean;
-  granted: boolean;
-  operators?: unknown;
-}): Record<string, unknown> {
-  const flag: Record<string, unknown> = {
-    declared,
-    usable: declared && granted,
-  };
-  if (operators) {
-    flag.operators = operators;
-  }
-  if (declared && !granted) {
-    flag.reason = "field_not_granted";
-  }
-  return flag;
-}
-
-function buildFieldAggregationCapabilities(
-  aggregations: Record<string, unknown> | null | undefined,
-  field: string,
-  granted: boolean
-) {
-  return {
-    count_distinct: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.count_distinct) && aggregations.count_distinct.includes(field),
-      granted,
-    }),
-    group_by: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by) && aggregations.group_by.includes(field),
-      granted,
-    }),
-    group_by_time: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by_time) && aggregations.group_by_time.includes(field),
-      granted,
-    }),
-    max: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.max) && aggregations.max.includes(field),
-      granted,
-    }),
-    min: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.min) && aggregations.min.includes(field),
-      granted,
-    }),
-    sum: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.sum) && aggregations.sum.includes(field),
-      granted,
-    }),
-  };
-}
-
-function buildFieldCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null
-) {
-  const schema = (manifestStream?.schema || {}) as Record<string, unknown>;
-  const properties = (schema.properties || {}) as Record<string, unknown>;
-  const fieldDeclarations = new Map<string, string>();
-  for (const declarations of [manifestStream?.fields, schema.fields]) {
-    if (!Array.isArray(declarations)) {
-      continue;
-    }
-    for (const declaration of declarations) {
-      if (
-        declaration &&
-        typeof declaration === "object" &&
-        typeof (declaration as Record<string, unknown>).name === "string" &&
-        ((declaration as Record<string, unknown>).name as string).trim().length > 0 &&
-        typeof (declaration as Record<string, unknown>).type === "string" &&
-        ((declaration as Record<string, unknown>).type as string).trim().length > 0
-      ) {
-        fieldDeclarations.set(
-          (declaration as Record<string, unknown>).name as string,
-          ((declaration as Record<string, unknown>).type as string).trim()
-        );
-      }
-    }
-  }
-  const grantedFields =
-    // biome-ignore lint/correctness/noUnsafeOptionalChaining: The preceding guard establishes this optional value before access.
-    Array.isArray(streamGrant?.fields) && (streamGrant?.fields as unknown[]).length > 0
-      ? new Set(streamGrant?.fields as unknown[])
-      : null;
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const rangeFilters = (query.range_filters || {}) as Record<string, unknown>;
-  const search = (query.search || {}) as Record<string, unknown>;
-  const lexicalFields = new Set(Array.isArray(search.lexical_fields) ? (search.lexical_fields as unknown[]) : []);
-  const semanticFields = new Set(Array.isArray(search.semantic_fields) ? (search.semantic_fields as unknown[]) : []);
-  const aggregations = (query.aggregations || {}) as Record<string, unknown>;
-
-  return Object.fromEntries(
-    Object.entries(properties).map(([field, fieldSchema]) => {
-      const schemaObj = (fieldSchema && typeof fieldSchema === "object" ? fieldSchema : {}) as Record<string, unknown>;
-      const granted = !grantedFields || grantedFields.has(field);
-      const rangeOperators = Array.isArray(rangeFilters[field]) ? (rangeFilters[field] as unknown[]) : null;
-      // Optional declared presentation type, sourced either from the JSON
-      // Schema extension (`schema.properties[field].x_pdpp_type`) or from a
-      // sandbox-shaped field declaration (`fields[]` or `schema.fields[]`,
-      // with `{ name, type, semantic_class }`). Surfaced as an additive `type`
-      // on the field_capabilities entry only; it does not influence any filter,
-      // search, aggregation, grant, or retrieval decision below.
-      const declaredType =
-        typeof schemaObj.x_pdpp_type === "string" && (schemaObj.x_pdpp_type as string).trim().length > 0
-          ? (schemaObj.x_pdpp_type as string).trim()
-          : fieldDeclarations.get(field) || null;
-      const declaredRole =
-        typeof schemaObj.x_pdpp_role === "string" && (schemaObj.x_pdpp_role as string).trim().length > 0
-          ? (schemaObj.x_pdpp_role as string).trim()
-          : null;
-      return [
-        field,
-        {
-          ...(declaredType ? { type: declaredType } : {}),
-          ...(declaredRole ? { role: declaredRole } : {}),
-          aggregation: buildFieldAggregationCapabilities(aggregations, field, granted),
-          granted,
-          lexical_search: buildFieldCapabilityFlag({
-            declared: lexicalFields.has(field),
-            granted,
-          }),
-          schema: fieldSchema,
-          semantic_search: buildFieldCapabilityFlag({
-            declared: semanticFields.has(field),
-            granted,
-          }),
-          ...(streamGrant === null
-            ? {
-                exact_filter: buildFieldCapabilityFlag({
-                  declared: isExactFilterableSchema(schemaObj),
-                  granted,
-                }),
-                range_filter: buildFieldCapabilityFlag({
-                  declared: Boolean(rangeOperators),
-                  granted,
-                  operators: rangeOperators || undefined,
-                }),
-              }
-            : {}),
-        },
-      ];
-    })
-  );
-}
-
-function buildStreamMetadataEntry({
-  manifestStream,
-  streamGrant = null,
-  grantStreams = [] as Record<string, unknown>[],
-  freshness = null as ReturnType<typeof buildFreshness> | null,
-  grantedConnections = null as unknown[] | null,
-  manifestStreamNames = null as Set<string> | null,
-}: {
-  manifestStream: Record<string, unknown>;
-  streamGrant?: Record<string, unknown> | null;
-  grantStreams?: Record<string, unknown>[];
-  freshness?: ReturnType<typeof buildFreshness> | null;
-  grantedConnections?: unknown[] | null;
-  manifestStreamNames?: Set<string> | null;
-}) {
-  const projectedManifestStream = streamGrant ? projectManifestStreamForGrant(streamGrant) : manifestStream;
-  const expandStreamGrant = streamGrant ? { ...streamGrant, grantStreams } : null;
-  const entry: Record<string, unknown> = {
-    consent_time_field: projectedManifestStream.consent_time_field,
-    cursor_field: projectedManifestStream.cursor_field,
-    expand_capabilities: buildExpandCapabilities(projectedManifestStream, expandStreamGrant, manifestStreamNames),
-    field_capabilities: buildFieldCapabilities(projectedManifestStream, streamGrant),
-    freshness: freshness ?? buildFreshness(null),
-    name: projectedManifestStream.name,
-    object: "stream_metadata",
-    primary_key: normalizePrimaryKey(projectedManifestStream.primary_key),
-    query: projectedManifestStream.query || {},
-    relationships: projectedManifestStream.relationships || [],
-    schema: projectedManifestStream.schema,
-    selection: projectedManifestStream.selection,
-    semantics: projectedManifestStream.semantics,
-    views: projectedManifestStream.views || [],
-  };
-  if (streamGrant) {
-    entry.instance_ids = Array.isArray(streamGrant.instance_ids) ? [...streamGrant.instance_ids] : [];
-    if (Array.isArray(streamGrant.resources)) {
-      entry.resources = [...streamGrant.resources];
-    }
-    if (streamGrant.time_constraint && typeof streamGrant.time_constraint === "object") {
-      entry.time_constraint = structuredClone(streamGrant.time_constraint);
-    }
-  }
-  if (Array.isArray(grantedConnections)) {
-    entry.granted_connections = grantedConnections;
-  }
-  return entry;
-}
-
-function projectManifestStreamForGrant(streamGrant: Record<string, unknown>): Record<string, unknown> {
-  // Resolved grants retain authorization facts, not live schema definitions.
-  // Do not copy property schemas, requiredness, $defs, query affordances, or
-  // relationships from the current declaration into a client projection.
-  // A future grant shape can retain a typed schema snapshot explicitly; until
-  // then, empty field schemas are the only honest projection.
-  const fields = Array.isArray(streamGrant.fields)
-    ? (streamGrant.fields as unknown[]).filter((field): field is string => typeof field === "string")
-    : [];
-  const grantedFields = new Set(fields);
-  const schema: Record<string, unknown> = {
-    additionalProperties: false,
-    properties: Object.fromEntries([...grantedFields].map((field) => [field, {}])),
-    type: "object",
-  };
-  const timeConstraint =
-    streamGrant.time_constraint && typeof streamGrant.time_constraint === "object"
-      ? (streamGrant.time_constraint as Record<string, unknown>)
-      : null;
-  const frozenTimeField = typeof timeConstraint?.field === "string" ? timeConstraint.field : undefined;
-  return {
-    name: streamGrant.name,
-    schema,
-    ...(frozenTimeField ? { consent_time_field: frozenTimeField } : {}),
-  };
-}
-// Emit one `expand_capabilities` entry per enabled parent-stream relation (a
-// `query.expand[]` capability backed by a `relationships[]` declaration),
-// including relations whose target stream is unreadable under the current
-// request. Declared-but-unreadable relations stay visible with `usable: false`
-// and a `reason` enum value so a console can tell "no relation declared" apart
-// from "relation declared but not readable here".
-//
-// `manifestStreamNames`, when provided, is the set of streams the loaded
-// manifest declares; a relation pointing at a stream outside that set is
-// surfaced as `related_stream_unknown` rather than silently dropped.
-function buildExpandCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null,
-  manifestStreamNames: Set<string> | null = null
-) {
-  const rawRelationships = Array.isArray(manifestStream?.relationships)
-    ? (manifestStream?.relationships as Record<string, unknown>[])
-    : [];
-  const relationships = new Map(rawRelationships.map((relationship) => [relationship.name as string, relationship]));
-  const rawGrantStreams = streamGrant?.grantStreams as Record<string, unknown>[] | undefined;
-  const grantedStreams = Array.isArray(rawGrantStreams)
-    ? new Set(rawGrantStreams.map((stream) => stream.name as string))
-    : null;
-
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const expandList = Array.isArray(query.expand) ? (query.expand as Record<string, unknown>[]) : [];
-
-  return expandList
-    .map((capability) => {
-      const relationship = relationships.get(capability.name as string);
-      if (!relationship) {
-        return null;
-      }
-      const targetStream = relationship.stream as string;
-      const known = !manifestStreamNames || manifestStreamNames.has(targetStream);
-      const granted = known && (!grantedStreams || grantedStreams.has(targetStream));
-      const usable = known && granted;
-      const entry: Record<string, unknown> = {
-        cardinality: relationship.cardinality,
-        granted,
-        name: capability.name,
-        // `stream` (back-compat) and `target_stream` both name the related child
-        // stream; the canonical, self-describing name is `target_stream`.
-        stream: targetStream,
-        target_stream: targetStream,
-        usable,
-      };
-      if (relationship.foreign_key) {
-        // The field on the child carrying the parent's key. `child_parent_key_field`
-        // is the canonical name; `foreign_key` stays as a back-compat alias with
-        // the identical value.
-        entry.child_parent_key_field = relationship.foreign_key;
-        entry.foreign_key = relationship.foreign_key;
-      }
-      if (capability.default_limit !== undefined) {
-        entry.default_limit = capability.default_limit;
-      }
-      if (capability.max_limit !== undefined) {
-        entry.max_limit = capability.max_limit;
-      }
-      if (!usable) {
-        entry.reason = known ? "related_stream_not_granted" : "related_stream_unknown";
-      }
-      return entry;
-    })
-    .filter(Boolean);
-}
-
-// biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
-function buildDiscoveryUrl(path: string, connectorId: string | null = null) {
-  const connectorQuery = connectorId ? `?connector_id=${encodeURIComponent(connectorId)}` : "";
-  return `${path}${connectorQuery}`;
-}
-
-function buildStreamDiscoveryCapabilities({
-  connectorId = null as string | null,
-  stream,
-}: {
-  connectorId?: string | null;
-  stream: Record<string, unknown>;
-}) {
-  const encodedStream = encodeURIComponent(stream.name as string);
-  const query = (stream.query || {}) as Record<string, unknown>;
-  const rangeFilters = query.range_filters;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const expand = query.expand;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const aggregations = query.aggregations;
-  const hasAggregations = hasObjectEntries(aggregations);
-
-  return {
-    aggregate: hasAggregations,
-    aggregate_url: hasAggregations ? buildDiscoveryUrl(`/v1/streams/${encodedStream}/aggregate`, connectorId) : null,
-    changes_since: true,
-    exact_filters: true,
-    expand: Array.isArray(expand) && expand.length > 0,
-    metadata_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}`, connectorId),
-    range_filters: hasObjectEntries(rangeFilters),
-    records: true,
-    records_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}/records`, connectorId),
-    stream_metadata: true,
-  };
-}
-
-function buildStreamDiscoverySummary({
-  connectorId = null as string | null,
-  stream,
-  summary = null as Record<string, unknown> | null,
-  freshnessEvidence = null as Parameters<typeof buildConnectorAwareFreshness>[0],
-}: {
-  connectorId?: string | null;
-  stream: Record<string, unknown>;
-  summary?: Record<string, unknown> | null;
-  freshnessEvidence?: Parameters<typeof buildConnectorAwareFreshness>[0];
-}) {
-  const lastUpdated = (summary?.last_updated as string | null | undefined) || null;
-  return {
-    capabilities: buildStreamDiscoveryCapabilities({ connectorId, stream }),
-    freshness: buildConnectorAwareFreshness(freshnessEvidence, lastUpdated),
-    last_updated: lastUpdated,
-    name: stream.name,
-    object: "stream",
-    record_count: summary?.record_count || 0,
-  };
-}
-
-function mergeStreamSummary(
-  current: Record<string, unknown> | undefined,
-  next: Record<string, unknown>
-): Record<string, unknown> {
-  const currentUpdated = typeof current?.last_updated === "string" ? current.last_updated : null;
-  const nextUpdated = typeof next.last_updated === "string" ? next.last_updated : null;
-  return {
-    last_updated: !currentUpdated || (nextUpdated && nextUpdated > currentUpdated) ? nextUpdated : currentUpdated,
-    name: next.name,
-    object: "stream",
-    record_count: Number(current?.record_count || 0) + Number(next.record_count || 0),
-  };
-}
-
-async function listSubjectVisibleStreamSummaries({
-  storageBinding,
-  manifest,
-  grant,
-  ownerSubjectId,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant: Record<string, unknown> | null;
-  ownerSubjectId: string | null;
-}): Promise<Record<string, unknown>[]> {
-  const manifestStreams = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const effectiveGrant = grant ?? {
-    streams: manifestStreams.flatMap((stream) =>
-      typeof stream.name === "string" && stream.name ? [{ name: stream.name }] : []
-    ),
-  };
-  const grantStreams = Array.isArray(effectiveGrant.streams)
-    ? (effectiveGrant.streams as Record<string, unknown>[])
-    : [];
-  const typedGrant = {
-    ...effectiveGrant,
-    streams: grantStreams.filter((streamGrant) => typeof streamGrant.name === "string" && streamGrant.name),
-  } as unknown as Parameters<typeof listStreamsByResolvedBindings>[0];
-  const rows = await listStreamsByResolvedBindings(
-    typedGrant,
-    manifest as Parameters<typeof listStreamsByResolvedBindings>[1],
-    async (streamGrant) => {
-      try {
-        const resolved = await resolveReadRequestBindings({
-          grant: typedGrant,
-          ownerRead: grant === null,
-          ...(ownerSubjectId ? { ownerSubjectId } : {}),
-          requestParams: {},
-          storageBinding: storageBinding as unknown as NonNullable<
-            Parameters<typeof resolveReadRequestBindings>[0]["storageBinding"]
-          >,
-          streamName: streamGrant.name,
-        });
-        return resolved.bindings;
-      } catch (error) {
-        if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
-          return [];
-        }
-        throw error;
-      }
-    }
-  );
-  const summaries = new Map<string, Record<string, unknown>>();
-  for (const summary of rows) {
-    summaries.set(summary.name, mergeStreamSummary(summaries.get(summary.name), { ...summary }));
-  }
-  return [...summaries.values()];
-}
-
-async function buildConnectorSchemaItem({
-  source,
-  storageBinding,
-  manifest,
-  grant = null as Record<string, unknown> | null,
-  ownerSubjectId = null as string | null,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant?: Record<string, unknown> | null;
-  ownerSubjectId?: string | null;
-}) {
-  const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
-  const rawStreamSummaries = await listSubjectVisibleStreamSummaries({
-    grant,
-    manifest,
-    ownerSubjectId,
-    source,
-    storageBinding,
-  });
-  const streamSummaries = rawStreamSummaries as Record<string, unknown>[];
-  const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
-  const grantStreamsArr = Array.isArray(grant?.streams) ? (grant?.streams as Record<string, unknown>[]) : [];
-  const grantStreamByName = grant
-    ? new Map(grantStreamsArr.map((streamGrant) => [streamGrant.name as string, streamGrant]))
-    : null;
-  const manifestStreamsArr = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const visibleStreams: Record<string, unknown>[] = grant
-    ? (grantStreamsArr
-        .map((streamGrant) => manifestStreamsArr.find((stream) => stream.name === streamGrant.name))
-        .filter(Boolean) as Record<string, unknown>[])
-    : manifestStreamsArr;
-  const grantStreams = grantStreamsArr;
-  // Streams the loaded manifest declares — lets the expand-capabilities builder
-  // distinguish "target stream not granted" from "target stream unknown".
-  const manifestStreamNames = new Set(manifestStreamsArr.map((stream) => stream.name as string));
-  const freshnessEvidence = await getConnectorFreshnessEvidence({
-    manifest,
-    storageBinding,
-  });
-
-  const streams = await Promise.all(
-    visibleStreams.map(async (manifestStream) => {
-      const streamName = manifestStream.name as string;
-      const summary = summaryByName.get(streamName);
-      const lastUpdated = (summary?.last_updated as string | null | undefined) || null;
-      const streamGrant = grantStreamByName ? grantStreamByName.get(streamName) || null : null;
-      let grantedConnections: unknown[] | null = null;
-      if (connectorId && ownerSubjectId) {
-        const authorizedInstanceIds = Array.isArray(streamGrant?.instance_ids)
-          ? (streamGrant.instance_ids as string[])
-          : [];
-        grantedConnections = await listGrantedConnectionsForStream({
-          authorizedInstanceIds: grant ? authorizedInstanceIds : null,
-          connectorId,
-          ownerSubjectId,
-        });
-      }
-      return buildStreamMetadataEntry({
-        freshness: buildConnectorAwareFreshness(freshnessEvidence, lastUpdated),
-        grantedConnections,
-        grantStreams,
-        manifestStream,
-        manifestStreamNames,
-        streamGrant,
-      });
-    })
-  );
-
-  const item: Record<string, unknown> = {
-    object: "connector",
-    source,
-    stream_count: streams.length,
-    streams,
-  };
-  if (connectorId) {
-    item.connector_key = connectorId;
-    item.connector_id = connectorId;
-  }
-  return item;
-}
-
-async function buildConnectorDiscoveryItem({
-  source,
-  storageBinding,
-  manifest,
-  grant = null as Record<string, unknown> | null,
-  ownerSubjectId = null as string | null,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant?: Record<string, unknown> | null;
-  ownerSubjectId?: string | null;
-}) {
-  const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
-  const rawSummaries = await listSubjectVisibleStreamSummaries({
-    grant,
-    manifest,
-    ownerSubjectId,
-    source,
-    storageBinding,
-  });
-  const streamSummaries = rawSummaries as Record<string, unknown>[];
-  const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
-  const manifestStreamsArr = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const grantStreamsArr = Array.isArray(grant?.streams) ? (grant?.streams as Record<string, unknown>[]) : [];
-  const visibleStreams: Record<string, unknown>[] = grant
-    ? (grantStreamsArr
-        .map((streamGrant) => manifestStreamsArr.find((stream) => stream.name === streamGrant.name))
-        .filter(Boolean) as Record<string, unknown>[])
-    : manifestStreamsArr;
-  const freshnessEvidence = await getConnectorFreshnessEvidence({
-    manifest,
-    storageBinding,
-  });
-
-  const item: Record<string, unknown> = {
-    object: "connector",
-    source,
-    stream_count: visibleStreams.length,
-    streams: visibleStreams.map((stream) =>
-      buildStreamDiscoverySummary({
-        connectorId,
-        freshnessEvidence,
-        stream,
-        summary: summaryByName.get(stream.name as string) || null,
-      })
-    ),
-  };
-
-  if (connectorId) {
-    item.connector_key = connectorId;
-    item.connector_id = connectorId;
-  }
-
-  return item;
-}
-
 /**
  * Options threaded through `decorateBlobRefValue`/`decorateRecordBlobRefs`.
  * `withBlobSize` is opt-in and defaults to false/unchanged behavior:
@@ -5364,6 +4696,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
   });
 
+  // One resolver for the AS issuer: the metadata `issuer` and the RFC 9207
+  // `iss` on authorization responses both come from here, so they cannot drift.
+  const resolveExplicitAsIssuer = () =>
+    opts.asIssuer ||
+    opts.asPublicUrl ||
+    (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+    null;
+  const resolveAsIssuer = (req: unknown) =>
+    resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], resolveExplicitAsIssuer());
+
   // AS `/.well-known/oauth-authorization-server` is mounted via
   // `server/routes/root-and-discovery.ts` per OpenSpec change
   // `split-reference-server-by-route-family`. Behaviour-preserving
@@ -5380,11 +4722,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     rejectUntrustedMetadataHost: rejectUntrustedMetadataHost as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["rejectUntrustedMetadataHost"],
-    resolveExplicitIssuer: () =>
-      opts.asIssuer ||
-      opts.asPublicUrl ||
-      (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
-      null,
+    resolveExplicitIssuer: resolveExplicitAsIssuer,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5527,6 +4865,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           >,
         }
       : {}),
+    resolveIssuer: resolveAsIssuer as unknown as Parameters<typeof mountAsAuthorize>[1]["resolveIssuer"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -5954,6 +5293,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ? R
         : never;
     },
+    getRunRecordOutcomes: (runId: string) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
     handleError,
@@ -7295,6 +6635,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    resolveIssuer: resolveAsIssuer,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 
@@ -9803,6 +9144,7 @@ export async function startServer(opts: ServerOpts = {}) {
         onRound: (summary: SweepSummary, round: number) => {
           if (
             ((summary as unknown as Record<string, unknown>).repaired as number) > 0 ||
+            ((summary as unknown as Record<string, unknown>).failed as number) > 0 ||
             ((summary as unknown as Record<string, unknown>).skipped as number) > 0 ||
             summary.incomplete
           ) {

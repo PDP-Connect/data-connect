@@ -71,19 +71,24 @@ function makeRes(): { captured: CapturedResponse; res: unknown } {
 }
 
 async function withMountedRoutes(
-  fn: (routes: FakeApp["routes"]) => Promise<void>,
+  fn: (routes: FakeApp["routes"], store: ReturnType<typeof createRemoteAccessConfigStore>) => Promise<void>,
   // No test but the dedicated remote-disconnect-risk ones below sends a
   // Host header, so isRemoteOriginRequest is false regardless of what this
   // contract declares unless a test opts into a real referenceOrigin --
   // an empty contract is the simplest honest default for everyone else.
   contract = parseReachabilityContract({ env: {} }),
-  ownerPasswordOwnerSet: () => Promise<boolean> = async () => true
+  ownerPasswordOwnerSet: () => Promise<boolean> = async () => true,
+  loadedConfig?: RemoteAccessConfig
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "owner-remote-access-route-"));
   const previousKey = process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
   process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY = TEST_CREDENTIAL_ENCRYPTION_KEY;
   try {
     const app = new FakeApp();
+    const store = createRemoteAccessConfigStore(dir);
+    if (loadedConfig) {
+      store.load = async () => loadedConfig;
+    }
     mountOwnerRemoteAccess(app as unknown as Parameters<typeof mountOwnerRemoteAccess>[0], {
       contract,
       handleError: (res, err) => {
@@ -97,9 +102,9 @@ async function withMountedRoutes(
       requireOwner: (...args: unknown[]) => (args[2] as () => void)(),
       requireToken: (...args: unknown[]) => (args[2] as () => void)(),
       ownerPasswordOwnerSet,
-      store: createRemoteAccessConfigStore(dir),
+      store,
     });
-    await fn(app.routes);
+    await fn(app.routes, store);
   } finally {
     if (previousKey === undefined) {
       delete process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
@@ -213,6 +218,27 @@ test("GET config returns the off default before anything is saved", async () => 
   });
 });
 
+test("GET config omits sealed credentials and preserves every public field", async () => {
+  const fixture: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    cloudflare_tunnel_token_sealed: "fake-sealed-tunnel-token",
+    ngrok_authtoken_sealed: "fake-sealed-authtoken",
+    tunnel_error: "Stopped",
+  };
+  const { ngrok_authtoken_sealed: _ngrok, cloudflare_tunnel_token_sealed: _cloudflare, ...publicConfig } = fixture;
+  await withMountedRoutes(async (routes) => {
+    const handler = routes.get("GET /v1/owner/remote-access/config");
+    assert.ok(handler);
+    const { captured, res } = makeRes();
+    await handler({}, res);
+    assert.equal(captured.status, 200);
+    const body = captured.body as { data: RemoteAccessConfig };
+    assert.equal("ngrok_authtoken_sealed" in body.data, false);
+    assert.equal("cloudflare_tunnel_token_sealed" in body.data, false);
+    assert.deepEqual(body.data, publicConfig);
+  }, undefined, undefined, fixture);
+});
+
 test("POST config persists a valid user_supplied_origin config and GET reflects it", async () => {
   await withMountedRoutes(async (routes) => {
     const postHandler = routes.get("POST /v1/owner/remote-access/config");
@@ -265,7 +291,7 @@ test("POST config rejects a non-HTTPS origin with a 400 and does not persist it"
 });
 
 test("POST config seals a submitted ngrok authtoken and never echoes it back", async () => {
-  await withMountedRoutes(async (routes) => {
+  await withMountedRoutes(async (routes, store) => {
     const postHandler = routes.get("POST /v1/owner/remote-access/config");
     const getHandler = routes.get("GET /v1/owner/remote-access/config");
     const ngrokConfig = {
@@ -291,12 +317,14 @@ test("POST config seals a submitted ngrok authtoken and never echoes it back", a
     await getHandler?.({}, get.res);
     const storedBody = get.captured.body as { data: RemoteAccessConfig & { ngrok_authtoken_sealed?: string } };
     assert.equal(storedBody.data.provider, "ngrok");
-    // Persisted on disk, but sealed -- not the plaintext token.
-    assert.ok(storedBody.data.ngrok_authtoken_sealed);
-    assert.doesNotMatch(storedBody.data.ngrok_authtoken_sealed ?? "", /shhh-ngrok-authtoken/);
+    assert.equal("ngrok_authtoken_sealed" in storedBody.data, false);
+    // Read persistence directly: HTTP responses must not expose sealed credentials.
+    const stored = await store.load();
+    assert.ok(stored.ngrok_authtoken_sealed);
+    assert.doesNotMatch(stored.ngrok_authtoken_sealed, /shhh-ngrok-authtoken/);
 
     const cipher = createCredentialCipherFromEnv();
-    assert.equal(cipher.open(storedBody.data.ngrok_authtoken_sealed ?? ""), "shhh-ngrok-authtoken");
+    assert.equal(cipher.open(stored.ngrok_authtoken_sealed), "shhh-ngrok-authtoken");
   });
 });
 
@@ -443,7 +471,7 @@ test("GET inspect is a static capability probe, independent of the stored postur
 });
 
 test("POST config seals a submitted Cloudflare tunnel token and never echoes it back", async () => {
-  await withMountedRoutes(async (routes) => {
+  await withMountedRoutes(async (routes, store) => {
     const postHandler = routes.get("POST /v1/owner/remote-access/config");
     const getHandler = routes.get("GET /v1/owner/remote-access/config");
     const cloudflareConfig = {
@@ -479,16 +507,18 @@ test("POST config seals a submitted Cloudflare tunnel token and never echoes it 
       data: RemoteAccessConfig & { cloudflare_tunnel_token_sealed?: string };
     };
     assert.equal(storedBody.data.provider, "cloudflare_tunnel");
-    // Persisted on disk, but sealed -- not the plaintext token.
-    assert.ok(storedBody.data.cloudflare_tunnel_token_sealed);
+    assert.equal("cloudflare_tunnel_token_sealed" in storedBody.data, false);
+    // Read persistence directly: HTTP responses must not expose sealed credentials.
+    const stored = await store.load();
+    assert.ok(stored.cloudflare_tunnel_token_sealed);
     assert.doesNotMatch(
-      storedBody.data.cloudflare_tunnel_token_sealed ?? "",
+      stored.cloudflare_tunnel_token_sealed,
       /shhh-cloudflare-tunnel-token/
     );
 
     const cipher = createCredentialCipherFromEnv();
     assert.equal(
-      cipher.open(storedBody.data.cloudflare_tunnel_token_sealed ?? ""),
+      cipher.open(stored.cloudflare_tunnel_token_sealed),
       "shhh-cloudflare-tunnel-token"
     );
   });

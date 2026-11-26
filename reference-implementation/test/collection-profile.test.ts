@@ -8775,15 +8775,16 @@ rl.on('line', (line) => {
     }
   );
 
-  // ── 8. Failed DONE does not ingest remaining buffered records ──
+  // ── 8. Failed DONE ingests the remaining validated records but commits no STATE ──
 
-  await t.test("DONE(failed) does not flush remaining buffered records", async () => {
+  await t.test("DONE(failed) flushes remaining buffered records but commits no STATE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
     const { ownerToken, connectorId } = await setupConnector(server, asPort);
 
-    // Connector emits a record then fails — the record should NOT be ingested
-    // (records are flushed only on DONE(succeeded))
+    // Connector emits a record then fails. The record is validated and already
+    // emitted, so it is ingested (as a mid-run batch would be); only STATE is
+    // withheld on a failed run.
     const { connectorPath, cleanup } = createTestConnector([
       {
         data: { id: "should_not_persist", value: "fail" },
@@ -8816,8 +8817,8 @@ rl.on('line', (line) => {
       assert.equal(result.status, "failed");
       assert.equal(checkpointSummaryOf(result).mode, "checkpointed_streaming");
       assert.equal(checkpointSummaryOf(result).commit_status, "not_committed");
-      assert.equal(checkpointSummaryOf(result).records_flushed, 0);
-      assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 1);
+      assert.equal(checkpointSummaryOf(result).records_flushed, 1);
+      assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
       assert.equal(checkpointSummaryOf(result).state_streams_staged, 0);
       assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
       assert.equal(result.terminal_reason, "connector_reported_failed");
@@ -8826,10 +8827,10 @@ rl.on('line', (line) => {
         retryable: true,
       });
 
-      // Check RS — record should NOT be present
+      // Check RS — the record is present
       const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken);
       const found = bodyRecords.find((r) => r.data?.id === "should_not_persist");
-      assert.ok(!found, "Records from a failed run should not be ingested");
+      assert.ok(found, "Validated records from a failed run are ingested");
 
       const asUrl = `http://localhost:${asPort}`;
       const { body: runTimeline } = await fetchJson<TimelineBody>(
@@ -8838,8 +8839,8 @@ rl.on('line', (line) => {
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
       assert.ok(failedEvent, "run.failed should be emitted when the connector reports DONE(failed)");
       assert.equal(failedEvent.data.reason, "connector_reported_failed");
-      assert.equal(failedEvent.data.records_flushed, 0);
-      assert.equal(failedEvent.data.buffered_records_dropped, 1);
+      assert.equal(failedEvent.data.records_flushed, 1);
+      assert.equal(failedEvent.data.buffered_records_dropped, 0);
       assert.equal(failedEvent.data.state_streams_staged, 0);
       assert.equal(failedEvent.data.state_streams_committed, 0);
       assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");

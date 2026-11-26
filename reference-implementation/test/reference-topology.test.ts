@@ -111,22 +111,30 @@ test("reference browser origin uses the browser-visible request origin before co
   );
 });
 
-test("an unsupported explicit reference mode fails instead of being inferred away", () => {
+test("unsupported explicit topology modes fail before public hints are considered", () => {
   for (const hints of [{}, { asPublicUrl: "https://reference.example.test" }]) {
-    assert.throws(
-      () => resolveReferenceMode({ env: {}, explicitMode: "compsoed", ...hints }),
-      /explicit reference mode/i
-    );
+    assert.throws(() => resolveReferenceTopology({
+      explicitMode: "compsoed",
+      env: {},
+      ...hints,
+    }), /explicit reference mode/i);
   }
-  assert.equal(resolveReferenceMode({ env: {}, explicitMode: " DIRECT " }), REFERENCE_MODE_DIRECT);
-  assert.equal(resolveReferenceMode({ env: {}, explicitMode: "  " }), REFERENCE_MODE_DIRECT);
 });
 
-test("an unsupported PDPP_REFERENCE_MODE fails only when the ambient source is consulted", () => {
-  const env = { AS_PUBLIC_URL: "https://reference.example.test", PDPP_REFERENCE_MODE: "compsoed" };
+test("unsupported ambient topology modes fail only when that source is consulted", () => {
+  const env = { PDPP_REFERENCE_MODE: "compsoed", AS_PUBLIC_URL: "https://reference.example.test" };
   assert.throws(() => resolveReferenceMode({ env }), /PDPP_REFERENCE_MODE/);
-  assert.equal(resolveReferenceMode({ env, ignoreAmbient: true }), REFERENCE_MODE_DIRECT);
-  assert.equal(resolveReferenceMode({ env, explicitMode: "direct" }), REFERENCE_MODE_DIRECT);
-  assert.equal(resolveReferenceMode({ env: { PDPP_REFERENCE_MODE: " CoMpOsEd " } }), REFERENCE_MODE_COMPOSED);
-  assert.equal(resolveReferenceMode({ env: { PDPP_REFERENCE_MODE: " " } }), REFERENCE_MODE_DIRECT);
+  assert.equal(resolveReferenceMode({ env, ignoreAmbient: true }), "direct");
+  assert.equal(resolveReferenceMode({ env, explicitMode: " DIRECT " }), "direct");
+  assert.equal(resolveReferenceMode({ env, asPublicUrl: "https://reference.example.test" }), "composed");
+});
+
+test("blank and missing modes keep the existing inference and defaults", () => {
+  assert.equal(resolveReferenceMode({ env: {} }), "direct");
+  assert.equal(resolveReferenceMode({ explicitMode: "  ", env: { PDPP_REFERENCE_MODE: " " } }), "direct");
+  assert.equal(resolveReferenceMode({
+    explicitMode: " ",
+    env: { PDPP_REFERENCE_MODE: " ", AS_PUBLIC_URL: "https://reference.example.test" },
+  }), "composed");
+  assert.equal(resolveReferenceMode({ env: { PDPP_REFERENCE_MODE: " CoMpOsEd " } }), "composed");
 });
