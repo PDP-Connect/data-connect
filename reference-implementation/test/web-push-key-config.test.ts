@@ -88,3 +88,39 @@ test("lock screen words contain no protocol or private interaction content", asy
   assert.equal(trial.body, "This is a test. Notifications work on this device.");
   for (const payload of [pending, waiting, trial]) assert.doesNotMatch(`${payload.title} ${payload.body}`, /PDPP|owner|connector|private value/);
 });
+
+
+for (const [name, saved] of [
+  ["corrupt JSON", "{synthetic-private-value"],
+  ["missing private key", JSON.stringify({ publicKey: "synthetic-public-value" })],
+  ["non-string key", JSON.stringify({ publicKey: 42, privateKey: "synthetic-private-value" })],
+] as const) {
+  test(`a stored pair with ${name} is invalid without rotation`, async () => {
+    let generateCalls = 0
+    let stored = saved
+    const config = await resolvePersistentWebPushConfig({
+      env: { PDPP_CREDENTIAL_ENCRYPTION_KEY: "practice-encryption-key" },
+      store: {
+        getOrCreate: async ({ create }) => {
+          if (!stored) { generateCalls++; stored = await create() }
+          return stored
+        },
+      },
+    })
+    assert.equal(config.enabled, false)
+    assert.equal(config.unavailableReason, "Invalid stored web push key pair")
+    assert.equal(config.publicKey, null)
+    assert.equal(config.privateKey, null)
+    assert.equal(stored, saved)
+    assert.equal(generateCalls, 0)
+  })
+}
+
+test("an unavailable key store retains the existing startup fallback", async () => {
+  const config = await resolvePersistentWebPushConfig({
+    env: { PDPP_CREDENTIAL_ENCRYPTION_KEY: "practice-encryption-key" },
+    store: { getOrCreate: async () => { throw new Error("store unavailable") } },
+  })
+  assert.equal(config.enabled, false)
+  assert.equal(config.unavailableReason, "VAPID public/private keys are not configured")
+})

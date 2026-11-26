@@ -19,9 +19,10 @@ export async function resolvePersistentWebPushConfig({
   const explicit = resolveWebPushConfig(env)
   // A partially configured environment is an operator error: never mix pairs.
   if (explicit.publicKey || explicit.privateKey) return explicit
+  let saved: string
   try {
     if (!resolveCredentialEncryptionKey(env)) return explicit
-    const saved = await store.getOrCreate({
+    saved = await store.getOrCreate({
       identityGroup: "dataconnect-notifications",
       logicalKey: "key-pair",
       create: () => {
@@ -33,15 +34,28 @@ export async function resolvePersistentWebPushConfig({
         })
       },
     })
-    const pair = JSON.parse(saved) as { publicKey: string; privateKey: string }
-    if (!pair.publicKey || !pair.privateKey) return explicit
+  } catch {
+    // Losing the key provider must not rotate an existing pair or prevent startup.
+    return explicit
+  }
+  const invalid: WebPushConfig = {
+    enabled: false,
+    privateKey: null,
+    publicKey: null,
+    subject: explicit.subject,
+    unavailableReason: "Invalid stored web push key pair",
+  }
+  try {
+    const pair: unknown = JSON.parse(saved)
+    if (!pair || typeof pair !== "object" ||
+      !("publicKey" in pair) || typeof pair.publicKey !== "string" || !pair.publicKey.trim() ||
+      !("privateKey" in pair) || typeof pair.privateKey !== "string" || !pair.privateKey.trim()) return invalid
     return resolveWebPushConfig({
       ...env,
       PDPP_WEB_PUSH_VAPID_PUBLIC_KEY: pair.publicKey,
       PDPP_WEB_PUSH_VAPID_PRIVATE_KEY: pair.privateKey,
     })
   } catch {
-    // Losing the key provider must not rotate an existing pair or prevent startup.
-    return explicit
+    return invalid
   }
 }
