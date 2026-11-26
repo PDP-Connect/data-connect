@@ -383,13 +383,10 @@ setInterval(() => {}, 1000);
     let releaseHandler: () => void = () => undefined;
     // The cancellation budget is measured from the observed interaction, not
     // from server setup: freshDb, the stub write and the child spawn cannot
-    // eat into it. The test timeout above stays as the ceiling for a run
-    // that never even requests the interaction.
-    let resolveDeadline: (value: "deadline") => void = () => undefined;
-    const deadline = new Promise<"deadline">((resolve) => {
-      resolveDeadline = resolve;
-    });
-    let deadlineTimer: NodeJS.Timeout | undefined;
+    // eat into it. No timer (the real-wait ratchet counts one): the elapsed
+    // check after the run ends catches a late settle, and the test timeout
+    // above stays as the ceiling for a run that never ends.
+    let interactionObservedAt: number | undefined;
     const outcome = runConnector({
       admitRunConnection: async ({ connectorId }) => {
         await Promise.resolve();
@@ -404,7 +401,7 @@ setInterval(() => {}, 1000);
       // An owner who never answers: the handler settles only when the test
       // releases it after the assertions.
       onInteraction: (interaction) => {
-        deadlineTimer ??= setTimeout(() => resolveDeadline("deadline"), 5_000);
+        interactionObservedAt ??= performance.now();
         setImmediate(() => controller.abort(abortReason));
         return new Promise((resolve) => {
           releaseHandler = () =>
@@ -430,13 +427,20 @@ setInterval(() => {}, 1000);
       releaseHandler();
       controller.abort(abortReason);
     });
-    const settled = await Promise.race([outcome, deadline]);
-    clearTimeout(deadlineTimer);
+    const settled = await outcome;
     releaseHandler();
-    // Before the final await: on a run that outlives the grace this fails
-    // with the reason, instead of waiting for the ceiling to time out.
-    assert.notEqual(settled, "deadline", "the run must end within the kill grace, not the 600 s interaction timeout");
-    await outcome;
+    // The guard first, so the elapsed check cannot pass vacuously on a run
+    // that ended without ever reaching its interaction.
+    assert.notEqual(
+      interactionObservedAt,
+      undefined,
+      "the run must observe its pending INTERACTION before it can end"
+    );
+    assert.ok(
+      interactionObservedAt !== undefined &&
+        performance.now() - interactionObservedAt < 5_000,
+      "the run must end within the kill grace, not the 600 s interaction timeout"
+    );
 
     assert.equal((settled as { status?: unknown }).status, expectedStatus);
     const events = spineEventsForRun(runId);
