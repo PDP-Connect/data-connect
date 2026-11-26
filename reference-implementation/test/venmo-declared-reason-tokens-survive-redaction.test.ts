@@ -40,16 +40,19 @@ import { boundConnectorErrorMessage } from "../runtime/connector-gap-bounding.ts
 import { declaredReasonTokensFor } from "../runtime/declared-reason-tokens.ts";
 
 /**
- * A synthetic token of the same length class as the real production one (31
+ * A synthetic token of the same length class as the real production one (34
  * chars vs `venmo_probe_transport_error`'s 27) — both well over the 24-char
- * threshold where `LONG_OPAQUE_RE` starts eating.
+ * threshold where `LONG_OPAQUE_RE` starts eating. It carries a digit, so the
+ * lowercase-word rule (`keepSnakeCaseWords` in stderr-redact.ts) does not keep
+ * it: only the declaration does. A token of lowercase words alone, like the
+ * real one, now survives without a declaration.
  *
  * The `fake_session_failed:` prefix in the fixtures below is deliberately 19
  * chars, mirroring the real `venmo_session_failed:`. It has to stay under 24
  * or LONG_OPAQUE_RE redacts the PREFIX too, and these assertions would then
  * be pinning two redactions while claiming to pin one.
  */
-const DECLARED_TOKEN = "synthetic_probe_transport_error";
+const DECLARED_TOKEN = "synthetic_probe_transport_error_v2";
 const manifestDeclaring = (tokens: readonly string[]) => ({
   capabilities: { declared_reason_tokens: tokens },
 });
@@ -79,7 +82,7 @@ test("declaredReasonTokensFor returns undefined when nothing is declared — byt
   assert.equal(declaredReasonTokensFor(manifestDeclaring([])), undefined);
   // And boundConnectorErrorMessage with no declared set still redacts exactly
   // as before for a connector that declares nothing.
-  const raw = "fake_session_failed: some_twenty_four_plus_char_token";
+  const raw = "fake_session_failed: some_twenty_four_plus_char_token_v2";
   assert.equal(boundConnectorErrorMessage(raw, declaredReasonTokensFor({})), boundConnectorErrorMessage(raw));
 });
 

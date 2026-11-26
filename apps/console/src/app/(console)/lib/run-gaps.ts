@@ -264,6 +264,27 @@ export function formatRecoveryHint(gap: KnownGap): string {
   return `${formatGapReason(action)}${retryable}`;
 }
 
+/**
+ * The connector sends the recovery hint on these gap kinds (`SKIP_RESULT`
+ * and a failed `DONE`). The runtime writes the hint on every other kind.
+ */
+const CONNECTOR_HINT_GAP_KINDS: ReadonlySet<string> = new Set(["run_failed", "skip_result"]);
+
+/**
+ * The label in front of a gap's recovery hint, or `null` when there is
+ * nothing to show. A connector's hint is its suggestion, never an
+ * instruction to the owner (Collection Profile 0.2.0, Section 5.11), so it is
+ * labelled as the connector's. A connector that sent no hint suggested
+ * nothing, so its gap shows no hint at all.
+ */
+export function recoveryHintLabel(gap: KnownGap): "connector suggests" | "recovery" | null {
+  if (!CONNECTOR_HINT_GAP_KINDS.has(gap.kind)) {
+    return "recovery";
+  }
+  const action = gap.recovery_hint?.action;
+  return action && action !== "unknown" ? "connector suggests" : null;
+}
+
 export function normalizeKnownGaps(raw: unknown): KnownGap[] {
   if (!Array.isArray(raw)) {
     return [];
