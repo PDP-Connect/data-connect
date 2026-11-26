@@ -39,7 +39,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { exec, referenceQueries } from "../lib/db.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
@@ -234,7 +234,7 @@ interface ReferenceManifest {
 }
 
 function loadPackageManifest(name: string): ReferenceManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

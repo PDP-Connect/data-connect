@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { SourceDeclaration } from "@pdpp/reference-contract/public/source";
 import { requireSourceDeclaration, snapshotSourceDeclaration } from "../server/source-declaration.ts";
 import {
@@ -328,7 +328,7 @@ test("legacy adapter refuses 0.3.0 until the whole profile is implemented", () =
 
 test("legacy corpus projects into the neutral SourceDeclaration contract", () => {
   const rejected = new Map<string, string>();
-  for (const { file: filename, manifest: rawManifest } of readPolyfillManifests()) {
+  for (const { file: filename, manifest: rawManifest } of readShippedManifests()) {
     const manifest = rawManifest as Record<string, unknown>;
     try {
       sourceDeclarationFromLegacyConnectorManifest(manifest, {

@@ -35,7 +35,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 
@@ -160,7 +160,7 @@ function loadManifest(name: string): ConnectorManifest {
   if (TEST_MANIFESTS_DIR_OVERRIDE) {
     return JSON.parse(readFileSync(join(TEST_MANIFESTS_DIR_OVERRIDE, name), "utf8")) as ConnectorManifest;
   }
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === name);
+  const entry = readShippedManifests().find((candidate) => candidate.file === name);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}`);
   }

@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { createTraceContext, emitSpineEvent } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
@@ -221,7 +221,7 @@ function setUniqueConnectorKey(manifest: JsonObject, key: string): JsonObject {
 }
 
 function readGmailManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for gmail.json");
   }
@@ -2190,7 +2190,7 @@ test("gmail message expansion rejects missing child grant and reverse thread rel
 });
 
 function readSlackManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "slack.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "slack.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for slack.json");
   }
@@ -2322,7 +2322,7 @@ async function seedSlackExpansionFixture(rsUrl: string, ownerToken: string, conn
 }
 
 test("first-party manifests declare only parent-to-child query.expand entries with FK on child", () => {
-  const manifests = readPolyfillManifests()
+  const manifests = readShippedManifests()
     .map(({ file, manifest }) => ({
       manifest: manifest as JsonObject,
       // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
@@ -2388,7 +2388,7 @@ test("first-party manifests declare only parent-to-child query.expand entries wi
 //   openspec/changes/add-record-relationship-navigation/.
 
 function readGithubManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "github.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "github.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for github.json");
   }

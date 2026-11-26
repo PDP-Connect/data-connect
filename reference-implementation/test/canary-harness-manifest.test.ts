@@ -17,7 +17,6 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
@@ -40,6 +39,7 @@ import {
   parseManifest,
   shouldRollback,
 } from "../scripts/canary/manifest.ts";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { CANARY_TRIGGERABLE_POSTURES, deriveOtpDenylist } from "../scripts/canary/otp-posture.ts";
 
 // --- ManifestError message assertions, hoisted so each `assert.throws`
@@ -129,29 +129,6 @@ test("OTP denylist catches wholefoods, which the hand-maintained list missed", (
   // was absent from the six hardcoded names. Derivation closes it by
   // construction; this test fails if anyone re-freezes the list.
   assert.equal(isOtpDenylisted("wholefoods"), true, "wholefoods declares an OTP posture and must be denylisted");
-});
-
-test("OTP denylist equals every manifest that declares an OTP posture, computed independently of the harness", () => {
-  // Recomputed here straight from the shipped manifests, so this asserts
-  // against the ground truth rather than re-running the harness's own
-  // derivation.
-  const declaredOtp = readPolyfillManifests()
-    .filter((entry) => {
-      const manifest = entry.manifest as { capabilities?: Record<string, unknown> };
-      const capabilities = manifest.capabilities ?? {};
-      const refreshPolicy = capabilities.refresh_policy as { interaction_posture?: string } | undefined;
-      const posture = refreshPolicy?.interaction_posture;
-      const interactions = capabilities.human_interaction;
-      return posture === "otp_likely" || (Array.isArray(interactions) && interactions.includes("otp"));
-    })
-    .map((entry) => entry.file.slice(0, -".json".length))
-    .sort();
-
-  assert.deepEqual(
-    [...OTP_DENYLISTED_CONNECTORS].sort(),
-    declaredOtp,
-    "the derived denylist must equal exactly the manifests declaring an OTP posture"
-  );
 });
 
 test("derivation is fail-closed: a manifest proves safety or it is denied", () => {
@@ -749,5 +726,17 @@ test("evaluateAfter turns a throwing probe into a failed outcome so rollback can
     } else {
       process.env.PDPP_CANARY_ORIGIN = saved;
     }
+  }
+});
+
+test("snapshot OTP posture is derived from injected manifests", () => {
+  const entries = readShippedManifests();
+  assert.ok(entries.length > 0);
+  const denied = deriveFromFixtures(Object.fromEntries(entries.map(({ file, manifest }) => [file, JSON.stringify(manifest)])));
+  for (const { file, manifest } of entries) {
+    const capabilities = (manifest as { capabilities?: { human_interaction?: string[]; refresh_policy?: { interaction_posture?: string } } }).capabilities;
+    const posture = capabilities?.refresh_policy?.interaction_posture;
+    const allowed = typeof posture === "string" && CANARY_TRIGGERABLE_POSTURES.has(posture) && !capabilities?.human_interaction?.includes("otp");
+    assert.equal(denied.includes(file.slice(0, -5)), !allowed, file);
   }
 });

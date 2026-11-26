@@ -56,7 +56,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { exec, referenceQueries } from "../lib/db.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
@@ -679,7 +679,7 @@ test("owner-agent delete erases a connection completely: records, history, blobs
 
 test("owner-agent delete removes revoked Gmail data without deleting a shared blob or sibling duplicate", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
-    const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+    const gmailManifestEntry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
     if (!gmailManifestEntry) {
       throw new Error("no polyfill manifest found for gmail.json");
     }
@@ -743,7 +743,7 @@ test("owner-agent delete removes revoked Gmail data without deleting a shared bl
 
 test("shared-blob connection deletion rolls back the full SQLite cascade after the record purge", async () => {
   await withServer(async ({ asUrl }) => {
-    const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+    const gmailManifestEntry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
     if (!gmailManifestEntry) {
       throw new Error("no polyfill manifest found for gmail.json");
     }

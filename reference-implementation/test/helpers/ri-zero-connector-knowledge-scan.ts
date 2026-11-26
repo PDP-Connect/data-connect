@@ -32,7 +32,7 @@
 import { createRequire } from "node:module";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./shipped-manifests.ts";
 
 import {
   isExemptDataLoadPath,
@@ -55,10 +55,8 @@ export interface Violation {
 
 const PRODUCTION_SCAN_ROOTS = ["cli", "lib", "operations", "runtime", "scripts", "server"];
 
-// Reference-fixture manifests are still a real repo-relative directory. The
-// first-party polyfill manifests are NOT — they ship inside the
-// `@pdpp/polyfill-connectors` package, read via its own `readPolyfillManifests()`
-// export (see the two functions below), never by walking a repo path.
+// Reference-fixture manifests are a repo-relative directory. Shipped connector
+// manifests come from the pinned RI snapshot through the shared test helper.
 const REFERENCE_FIXTURE_MANIFEST_ROOT = "reference-implementation/fixtures/seed-manifests";
 
 /**
@@ -274,8 +272,7 @@ export function productionFiles({ repoRoot }: ScanRoots): string[] {
  * `src/`. Resolved through the package's own `./collectors` export (which
  * points at `src/collector-registry.ts`) rather than a hardcoded
  * `node_modules/...` path, so this follows the package wherever it is
- * installed from — the same posture as this file's `readPolyfillManifests()`
- * import.
+ * installed from.
  */
 export function sharedLibrarySrcDir(): string {
   const require = createRequire(import.meta.url);
@@ -364,12 +361,12 @@ function readReferenceFixtureManifests(repoRoot: string): Record<string, unknown
   return parsedManifests;
 }
 
-/** Every manifest `@pdpp/polyfill-connectors` ships, parsed. An unreadable
- * manifest set contributes zero entries (matching this scanner's posture for
- * the reference-fixture root above) rather than crashing the guard. */
+/** Every manifest in the pinned shipped-manifest snapshot, parsed. An unreadable
+ * snapshot contributes zero entries (matching this scanner's posture for the
+ * reference-fixture root above) rather than crashing the guard. */
 function readShippedPolyfillManifests(): Record<string, unknown>[] {
   try {
-    return readPolyfillManifests().map((entry) => entry.manifest as Record<string, unknown>);
+    return readShippedManifests().map((entry) => entry.manifest as Record<string, unknown>);
   } catch {
     return [];
   }

@@ -666,7 +666,7 @@ test("controller.listSchedules suppresses stale error code and next_due_at when 
   const { startServer } = await import("../server/index.ts");
   const { getDefaultSchedulerStore } = await import("../server/stores/scheduler-store.ts");
   const { closeDb } = await import("../server/db.ts");
-  const { readPolyfillManifests } = await import("@pdpp/polyfill-connectors/manifests");
+  const { readShippedManifests } = await import("./helpers/shipped-manifests.ts");
   // Use the polyfill USAA manifest directly — it is the live shape the
   // manifest reconcile installs at startup, with refresh_policy
   // {recommended_mode: 'manual', background_safe: false}. Pinning the
@@ -674,7 +674,7 @@ test("controller.listSchedules suppresses stale error code and next_due_at when 
   // relaxes USAA's policy back to automatic without owner intent. (Reddit
   // and Amazon are no longer usable here: both now declare
   // background_safe: true for owner opt-in scheduling.)
-  const usaaManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "usaa.json");
+  const usaaManifestEntry = readShippedManifests().find((candidate) => candidate.file === "usaa.json");
   if (!usaaManifestEntry) {
     throw new Error("no polyfill manifest found for usaa.json");
   }

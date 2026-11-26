@@ -55,6 +55,7 @@ import { fileURLToPath } from "node:url";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { resolveNekoBrowserSurfaceControllerOptions } from "../server/index.ts";
 import type { BrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 /**
  * `resolveNekoBrowserSurfaceControllerOptions` only ever calls `listSurfaces`,
@@ -366,9 +367,7 @@ test("ChatGPT large-history guardrails are wired into Docker runtime config", as
 });
 
 test("USAA remains an owner-present managed n.eko connector in the committed runtime config, not background-safe", async () => {
-  const usaaManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}node_modules/@pdpp/polyfill-connectors/manifests/usaa.json`, "utf8")
-  );
+  const usaaManifest = readShippedManifests().find((entry) => entry.file === "usaa.json")?.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(usaaManifest.connector_id, USAA_CONNECTOR_ID);
@@ -380,9 +379,7 @@ test("USAA remains an owner-present managed n.eko connector in the committed run
 });
 
 test("Amazon stays owner-present managed on n.eko while declaring a persistent session", async () => {
-  const amazonManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}node_modules/@pdpp/polyfill-connectors/manifests/amazon.json`, "utf8")
-  );
+  const amazonManifest = readShippedManifests().find((entry) => entry.file === "amazon.json")?.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(amazonManifest.connector_id, AMAZON_CONNECTOR_ID);
@@ -403,9 +400,7 @@ test("Amazon stays owner-present managed on n.eko while declaring a persistent s
 });
 
 test("Reddit stays owner-present managed on n.eko while declaring a persistent session", async () => {
-  const redditManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}node_modules/@pdpp/polyfill-connectors/manifests/reddit.json`, "utf8")
-  );
+  const redditManifest = readShippedManifests().find((entry) => entry.file === "reddit.json")?.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(redditManifest.connector_id, REDDIT_CONNECTOR_ID);

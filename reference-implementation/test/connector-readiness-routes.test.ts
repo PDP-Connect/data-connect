@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { type ConnectorInstallService, createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
@@ -73,7 +73,7 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
 
 // A real browser-bound manifest under a made-up key: nothing about the key matters.
 function browserManifest(connectorId: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "amazon.json");
   assert.ok(entry, "the amazon polyfill manifest is the browser-bound base");
   return {
     ...(entry.manifest as Record<string, unknown>),

@@ -1,0 +1,741 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/coros-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/coros_browser",
+		"display": {
+			"name": "COROS (Browser Sign-In)"
+		}
+	},
+	"connector_key": "coros-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/coros-browser",
+	"version": "0.1.2",
+	"display_name": "COROS (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#F8273B"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			},
+			"browser": {
+				"required": true
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": [
+			"manual_action"
+		],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the account, activity list, daily metrics and training calendar that t.coros.com (COROS Training Hub) loads for the owner's own signed-in session, from inside that page, with the access token the app keeps in its own cookie, on the account's regional API host; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on COROS's own sign-in page. The first run reads activities from the start of the grant, or all of them when the grant sets no start; daily metrics from the start of the grant or the last 180 days; and the training calendar from four weeks back to four weeks ahead. Later runs re-read the last two weeks of activities, the last week of daily metrics and the calendar's coming four weeks, then continue from where the last run stopped. One run makes at most 400 requests, one at a time with pauses; past that, the next run continues."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The owner's COROS account: their user id, nickname, region and unit system, how many activities COROS holds, and their current resting, threshold and maximum heart rate. No email address, birthday or body measurements are read.",
+			"display": {
+				"label": "Your COROS profile",
+				"detail": "Nickname, region, units, activity count and current heart-rate thresholds."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "COROS's user id."
+					},
+					"nickname": {
+						"type": [
+							"string",
+							"null"
+						],
+						"x_pdpp_role": "primary-title",
+						"description": "The owner's COROS nickname."
+					},
+					"region": {
+						"type": "string",
+						"enum": [
+							"us",
+							"cn",
+							"eu",
+							"sg"
+						],
+						"description": "The COROS data region the account lives in."
+					},
+					"unit_system": {
+						"type": [
+							"string",
+							"null"
+						],
+						"enum": [
+							"metric",
+							"imperial",
+							null
+						],
+						"description": "The unit system the owner chose in COROS."
+					},
+					"activity_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"minimum": 0,
+						"description": "How many activities COROS holds for the account."
+					},
+					"resting_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Current resting heart rate, in beats per minute."
+					},
+					"threshold_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Current lactate threshold heart rate, in beats per minute."
+					},
+					"max_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Current maximum heart rate, in beats per minute."
+					}
+				},
+				"required": [
+					"id",
+					"nickname",
+					"region",
+					"unit_system",
+					"activity_count",
+					"resting_heart_rate_bpm",
+					"threshold_heart_rate_bpm",
+					"max_heart_rate_bpm"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "activities",
+			"required": false,
+			"description": "Activities in the owner's COROS Training Hub activity list: the sport, when each started (UTC) and on which local day, total and active time, distance, calories, average heart rate, COROS training load, ascent and descent, average power and cadence, steps and the device name. Activity names, routes, GPS tracks and laps are not read.",
+			"display": {
+				"label": "Your COROS activities",
+				"detail": "Sport, start time, duration, distance, calories, heart rate and training load for each activity. No names, routes or locations."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "COROS's activity id (labelId)."
+					},
+					"sport_type": {
+						"type": "integer",
+						"description": "COROS's numeric sport type, such as 100 for Run or 200 for Bike."
+					},
+					"sport": {
+						"type": [
+							"string",
+							"null"
+						],
+						"x_pdpp_role": "primary-title",
+						"description": "COROS's name for the sport type, as Training Hub writes it, such as Run, Trail_Run, Bike or Pool_Swim; null for a sport type this connector does not know. COROS's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the activity started (RFC 3339, UTC)."
+					},
+					"end_at": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date-time",
+						"description": "When the activity ended (RFC 3339, UTC); null when COROS gives no end."
+					},
+					"start_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date",
+						"description": "The local calendar day the activity started on, from the activity's own time zone; null when COROS gives neither a zone nor a day."
+					},
+					"utc_offset_minutes": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"minimum": -960,
+						"maximum": 960,
+						"description": "The activity's offset from UTC at its start, in minutes, as the watch recorded it."
+					},
+					"total_time_s": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Time from start to finish, pauses included, in seconds."
+					},
+					"workout_time_s": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Active (timer) time, in seconds."
+					},
+					"distance_m": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Distance, in metres; null for an activity without one."
+					},
+					"calories_kcal": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Energy expended, in kilocalories."
+					},
+					"average_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Average heart rate, in beats per minute; null when none was recorded."
+					},
+					"training_load": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "COROS's training load score for the activity."
+					},
+					"ascent_m": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Total ascent, in metres."
+					},
+					"descent_m": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Total descent, in metres."
+					},
+					"average_power_w": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 5000,
+						"description": "Average power, in watts; null when none was recorded."
+					},
+					"average_cadence": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "Average cadence as COROS reports it (steps or revolutions per minute, by sport); null when none was recorded."
+					},
+					"steps": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Steps during the activity; null when none were counted."
+					},
+					"device": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The name of the device that recorded the activity, such as a watch model, or the owner's own name for it."
+					}
+				},
+				"required": [
+					"id",
+					"sport_type",
+					"sport",
+					"start_at",
+					"end_at",
+					"start_date",
+					"utc_offset_minutes",
+					"total_time_s",
+					"workout_time_s",
+					"distance_m",
+					"calories_kcal",
+					"average_heart_rate_bpm",
+					"training_load",
+					"ascent_m",
+					"descent_m",
+					"average_power_w",
+					"average_cadence",
+					"steps",
+					"device"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"end_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"start_date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"distance_m": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"total_time_s": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"training_load": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": [
+						"start_at",
+						"start_date"
+					],
+					"group_by": [
+						"sport"
+					]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "daily_metrics",
+			"required": false,
+			"description": "COROS's training and recovery metrics for each of the owner's days: resting heart rate, overnight heart rate variability and its normal range, the day's training load, acute and chronic load, fatigue and load ratio, VO2max, threshold heart rate and pace, and COROS's stamina level. A day COROS holds nothing for has no record.",
+			"display": {
+				"label": "Your COROS daily metrics",
+				"detail": "Resting heart rate, HRV, training load, fatigue, VO2max and threshold values for each day."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, YYYY-MM-DD; one record per day."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time",
+						"description": "The owner's local calendar day, as COROS dates it."
+					},
+					"resting_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Resting heart rate for the day, in beats per minute."
+					},
+					"hrv_ms": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"x_pdpp_role": "amount",
+						"description": "Average overnight heart rate variability, in milliseconds; null for a night without a reading."
+					},
+					"hrv_normal_low_ms": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "Low end of the owner's normal overnight HRV range, in milliseconds, as COROS sets it."
+					},
+					"hrv_normal_high_ms": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "High end of the owner's normal overnight HRV range, in milliseconds, as COROS sets it."
+					},
+					"training_load": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "Training load accumulated over the day, on COROS's scale."
+					},
+					"acute_load": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "COROS's acute (short-term) training load."
+					},
+					"chronic_load": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "COROS's chronic (long-term, base fitness) training load."
+					},
+					"fatigue": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "COROS's fatigue value for the day."
+					},
+					"load_ratio": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "COROS's ratio of acute to chronic training load."
+					},
+					"vo2max": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 100,
+						"description": "COROS's VO2max estimate, in ml/kg/min."
+					},
+					"threshold_heart_rate_bpm": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Lactate threshold heart rate, in beats per minute."
+					},
+					"threshold_pace_s_per_km": {
+						"type": [
+							"number",
+							"null"
+						],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 3600,
+						"description": "Lactate threshold pace, in seconds per kilometre."
+					},
+					"stamina_level": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "COROS's stamina level score for the day."
+					},
+					"stamina_level_7d": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "COROS's seven-day stamina level score."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"resting_heart_rate_bpm",
+					"hrv_ms",
+					"hrv_normal_low_ms",
+					"hrv_normal_high_ms",
+					"training_load",
+					"acute_load",
+					"chronic_load",
+					"fatigue",
+					"load_ratio",
+					"vo2max",
+					"threshold_heart_rate_bpm",
+					"threshold_pace_s_per_km",
+					"stamina_level",
+					"stamina_level_7d"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"resting_heart_rate_bpm": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"hrv_ms": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"training_load": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"vo2max": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": [
+						"date"
+					]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "planned_workouts",
+			"required": false,
+			"description": "Workouts on the owner's COROS Training Hub calendar, past and up to four weeks ahead: the day, the workout's name and sport, its planned training load, how much of it was completed and the activity that completed it.",
+			"display": {
+				"label": "Your COROS training calendar",
+				"detail": "Planned workouts by day, with their sport, planned load and completion."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, the plan's id and the workout's place in that plan, joined by colons; the plan id is empty for a workout outside a plan."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time",
+						"description": "The calendar day the workout is planned for."
+					},
+					"name": {
+						"type": [
+							"string",
+							"null"
+						],
+						"x_pdpp_role": "primary-title",
+						"description": "The workout's name, as the owner or their coach wrote it; null when it has none."
+					},
+					"sport_type": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "COROS's numeric sport for the workout: a workout category from 1 (Run) to 9 (Hyrox), or an activity sport type such as 100."
+					},
+					"sport": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The sport's name as Training Hub's calendar shows it, such as Run, Bike, Swim or Strength; null when unknown. COROS's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"planned_training_load": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "The workout's planned training load, on COROS's scale."
+					},
+					"completion_rate": {
+						"type": [
+							"number",
+							"null"
+						],
+						"minimum": 0,
+						"description": "How much of the workout was completed, as COROS rates it (1 is fully)."
+					},
+					"completed_activity_id": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The id of the activity that completed the workout, matching an activities record; null while none has."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"name",
+					"sport_type",
+					"sport",
+					"planned_training_load",
+					"completion_rate",
+					"completed_activity_id"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"name"
+					]
+				},
+				"range_filters": {
+					"date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"planned_training_load": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": [
+						"date"
+					],
+					"group_by": [
+						"sport"
+					]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "COROS Training Hub stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+		"sign_in_required": "COROS Training Hub needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run read as much COROS history as one run allows. The next run continues from where this one stopped.",
+		"source_unreadable": "COROS Training Hub answered with something this connector doesn't recognise, so nothing more was read. COROS may have changed its site; please report this rather than retrying."
+	}
+}

@@ -156,8 +156,8 @@ async function login(asUrl: string): Promise<string> {
 }
 
 async function registerConnector(asUrl: string, name: string): Promise<void> {
-  const { readPolyfillManifests } = await import("@pdpp/polyfill-connectors/manifests");
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const { readShippedManifests } = await import("./helpers/shipped-manifests.ts");
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
