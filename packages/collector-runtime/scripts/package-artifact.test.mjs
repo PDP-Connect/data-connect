@@ -11,7 +11,11 @@ import {
   assertProtocolBuildMatchesReceipt,
   cloneCommittedSourceTree,
   computeSourceInputsDigest,
+  generateArtifactMetadata,
+  verifyArtifactMetadata,
 } from "./package-artifact.mjs";
+
+const COMMIT_FIRST_ERROR = /commit first/i;
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const protocolRoot = resolve(packageRoot, "..", "connector-protocol");
@@ -52,5 +56,49 @@ test("runtime clones resolve connector-protocol from their archived sibling", as
     assert.equal(resolvedProtocol, await realpath(clone.clonedProtocolRoot));
   } finally {
     await rm(clone.cloneDir, { force: true, recursive: true });
+  }
+});
+
+for (const untracked of [false, true]) {
+  test(`generate refuses ${untracked ? "untracked" : "modified"} package source and names it`, async () => {
+    const sourcePath = resolve(packageRoot, "src", untracked ? "artifact-untracked-fixture.ts" : "index.ts");
+    const original = untracked ? null : await readFile(sourcePath);
+    const metadataPath = resolve(packageRoot, "artifact.json");
+    const metadata = await readFile(metadataPath);
+    try {
+      await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+      await assert.rejects(generateArtifactMetadata, (error) => {
+        assert.match(error.message, COMMIT_FIRST_ERROR);
+        assert.ok(error.message.includes(untracked ? "artifact-untracked-fixture.ts" : "index.ts"));
+        return true;
+      });
+      assert.deepEqual(await readFile(metadataPath), metadata, "refusal must leave the receipt unchanged");
+    } finally {
+      if (untracked) {
+        await rm(sourcePath, { force: true });
+      } else {
+        await writeFile(sourcePath, original);
+      }
+      await writeFile(metadataPath, metadata);
+    }
+  });
+}
+
+test("receipt digest and identity match HEAD despite working-tree edits", async () => {
+  const sourcePath = resolve(packageRoot, "src", "index.ts");
+  const manifestPath = resolve(packageRoot, "package.json");
+  const source = await readFile(sourcePath);
+  const manifest = await readFile(manifestPath, "utf8");
+  const committedDigest = await computeSourceInputsDigest();
+  try {
+    await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+    assert.notEqual(await computeSourceInputsDigest(), committedDigest);
+    const metadata = await verifyArtifactMetadata();
+    assert.equal(metadata.source_inputs_sha256, committedDigest);
+    await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(manifest), version: "99.0.0" }));
+    assert.equal((await verifyArtifactMetadata()).package_version, JSON.parse(manifest).version);
+  } finally {
+    await writeFile(sourcePath, source);
+    await writeFile(manifestPath, manifest);
   }
 });

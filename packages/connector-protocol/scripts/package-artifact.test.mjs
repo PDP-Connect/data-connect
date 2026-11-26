@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile, rm } from "node:fs/promises";
+import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,11 @@ import {
   buildPackage,
   computeDeclarationDigest,
   computeSourceInputsDigest,
+  generateArtifactMetadata,
   verifyArtifactMetadata,
 } from "./package-artifact.mjs";
+
+const COMMIT_FIRST_ERROR = /commit first/i;
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(packageRoot, "dist");
@@ -142,4 +145,48 @@ test("verifyArtifactMetadata succeeds against the real installed npm binary with
   assert.match(verified.artifact_sha256, HEX_256);
   assert.match(verified.artifact_sha512, HEX_512);
   assert.match(verified.artifact_sha1, HEX_160);
+});
+
+for (const untracked of [false, true]) {
+  test(`generate refuses ${untracked ? "untracked" : "modified"} package source and names it`, async () => {
+    const sourcePath = resolve(packageRoot, "src", untracked ? "artifact-untracked-fixture.ts" : "auth.ts");
+    const original = untracked ? null : await readFile(sourcePath);
+    const metadataPath = resolve(packageRoot, "artifact.json");
+    const metadata = await readFile(metadataPath);
+    try {
+      await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+      await assert.rejects(generateArtifactMetadata, (error) => {
+        assert.match(error.message, COMMIT_FIRST_ERROR);
+        assert.ok(error.message.includes(untracked ? "artifact-untracked-fixture.ts" : "auth.ts"));
+        return true;
+      });
+      assert.deepEqual(await readFile(metadataPath), metadata, "refusal must leave the receipt unchanged");
+    } finally {
+      if (untracked) {
+        await rm(sourcePath, { force: true });
+      } else {
+        await writeFile(sourcePath, original);
+      }
+      await writeFile(metadataPath, metadata);
+    }
+  });
+}
+
+test("receipt digest and identity match HEAD despite working-tree edits", async () => {
+  const sourcePath = resolve(packageRoot, "src", "auth.ts");
+  const manifestPath = resolve(packageRoot, "package.json");
+  const source = await readFile(sourcePath);
+  const manifest = await readFile(manifestPath, "utf8");
+  const committedDigest = await computeSourceInputsDigest();
+  try {
+    await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+    assert.notEqual(await computeSourceInputsDigest(), committedDigest);
+    const metadata = await verifyArtifactMetadata();
+    assert.equal(metadata.source_inputs_sha256, committedDigest);
+    await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(manifest), version: "99.0.0" }));
+    assert.equal((await verifyArtifactMetadata()).package_version, JSON.parse(manifest).version);
+  } finally {
+    await writeFile(sourcePath, source);
+    await writeFile(manifestPath, manifest);
+  }
 });
