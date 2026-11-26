@@ -1016,3 +1016,10 @@ test("a failed state has one plain sentence, one next step, and closed Details",
     dom.window.close();
   }
 });
+
+test("the password-store messages read as plain sentences", async () => {
+	const { ERROR_MESSAGES } = await import("./reachability-errors.ts");
+	assert.equal(ERROR_MESSAGES.secret_backend_locked, "This computer’s password store is locked. Unlock it, then try again.");
+	assert.equal(ERROR_MESSAGES.secret_backend_unavailable, "DataConnect couldn't reach this computer’s password store. Try again.");
+	for (const message of Object.values(ERROR_MESSAGES)) { assert.ok(!/the this /i.test(message), message); }
+});
