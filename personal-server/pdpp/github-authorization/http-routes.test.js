@@ -48,6 +48,46 @@ function createRedemptionApp({ externalOrigin } = {}) {
   return { app, redemptions }
 }
 
+function consentHandler(adapter) {
+  const routes = new Map()
+  registerGithubAuthorizationRoutes({
+    app: { post: (path, ...handlers) => routes.set(path, handlers.at(-1)) },
+    devToken: "test-only",
+    adapter,
+  })
+  return routes.get("/v1/pdpp/consent-requests")
+}
+
+test("consent handler rejects malformed JSON before invoking the adapter", async () => {
+  let called = false
+  const handle = consentHandler({ createConsentRequest() { called = true } })
+  const response = await handle({
+    req: { json: async () => { throw new SyntaxError("invalid fixture JSON") } },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.equal(called, false)
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "invalid fixture JSON", code: "invalid_request" },
+  })
+})
+
+test("consent handler returns the adapter's explicit refusal code", async () => {
+  const handle = consentHandler({
+    createConsentRequest() {
+      throw Object.assign(new Error("The request has no data selection"), { code: "missing_selection" })
+    },
+  })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture", scopes: [] }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "The request has no data selection", code: "missing_selection" },
+  })
+})
+
 test("credential redemption accepts direct local request origin", async () => {
   const { app, redemptions } = createRedemptionApp()
   const authorization = await redemptionAuthorization({
