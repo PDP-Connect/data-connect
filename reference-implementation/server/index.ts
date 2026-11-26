@@ -105,6 +105,7 @@ import {
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createBrowserEnrollmentReadinessResolver } from "./connector-readiness.ts";
 import { remoteAccessConfigPath } from "./remote-access-store.ts";
+import { createOwnerPasswordCheck } from "./owner-password-check.ts";
 import { ownerPasswordManagedByDesktop } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
@@ -8168,6 +8169,14 @@ function buildRsApp(opts: ServerOpts = {}) {
   mountOwnerRecoveryKit(app, {
     exporter: createServerRecoveryKitExporter(),
     handleError,
+    ownerPassword: createOwnerPasswordCheck({
+      loginRateLimit: rsOwnerAuthConfig.loginRateLimit,
+      password: rsOwnerAuthConfig.password,
+      store: opts.ownerPasswordVerifierStore
+        ? { readVerifier: async () => (await opts.ownerPasswordVerifierStore?.read()) ?? null }
+        : null,
+      verifier: opts.ownerAuthPasswordVerifier ?? null,
+    }),
     requireOwner,
     requireToken,
   } as unknown as Parameters<typeof mountOwnerRecoveryKit>[1]);
