@@ -429,7 +429,7 @@ function validateMyDevicesOnlyConfig(config: RemoteAccessConfig): { ok: true; co
  * `owner-remote-access.ts`'s POST /config handler, paired with
  * `isRemoteOriginRequest` (`reachability-contract.ts`): if the request is
  * remote AND this returns true, the config change could strand the owner
- * with no path back except physical access to the machine -- Tim's exact
+ * with no path back except physical access to the machine -- the motivating
  * scenario.
  *
  * `submittingCredential` has to be an explicit input, not inferred by
