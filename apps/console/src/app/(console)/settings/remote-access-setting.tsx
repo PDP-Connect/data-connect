@@ -480,11 +480,16 @@ export function RemoteAccessSetting({
     const previous = preparing.current?.token === token ? preparing.current.tail : Promise.resolve();
     const run = previous.then(() => {
       if (!isCurrent()) throw new PreparationStopped();
-      return prepareTurnOn(request, { providerId, usage }, {
+      let passwordStateTicket: ReturnType<typeof beginStateRead> | null = null;
+      const prepareRequest: typeof requestReachability = (path, body) => {
+        if (path === "/state") passwordStateTicket = beginStateRead();
+        return request(path, body);
+      };
+      return prepareTurnOn(prepareRequest, { providerId, usage }, {
         isCurrent,
         mayRunActions: () => !passwordMissingNow.current,
         onPasswordMissing: () => {
-          if (!isCurrent()) return;
+          if (!isCurrent() || !passwordStateTicket || !claimStateRead(passwordStateTicket)) return;
           passwordMissingNow.current = true;
           actionEpoch.current += 1;
           setState((current) => ({ ...current, passwordSet: false }));

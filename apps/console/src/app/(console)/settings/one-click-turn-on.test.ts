@@ -1046,6 +1046,29 @@ test("a poll already in flight cannot overwrite a fresh missing-password observa
   });
 });
 
+test("an older missing-password observation cannot overwrite a newer true poll", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const privateState = deferred<Result>();
+  let states = 0;
+  const handler = host({
+    "/state": () => ++states === 2
+      ? privateState.promise as unknown as Result
+      : ok({ ...idleState, passwordSet: true }),
+  });
+  await withScreen(handler, async ({ calls, settle, text }) => {
+    assert.equal(states, 2, "the preparation has started its private state read");
+    await act(async () => t.mock.timers.tick(3_000));
+    await settle();
+    assert.equal(states, 3, "the newer poll has returned true");
+    assert.equal(calls.filter((call) => call.url === "/state").length, 3);
+
+    await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
+    await settle();
+    assert.doesNotMatch(text(), /Step 1: Set a password/, "the older observation cannot overwrite the newer true state");
+    assert.match(text(), /Step 2 of 2/, "the page keeps the turn-on step available");
+  });
+});
+
 test("a route preparation read stops applying after the selected way changes", async () => {
   const oldState = deferred<Result>();
   const alternate = { ...provider, providerId: "cloudflare-named", label: "Cloudflare" };
