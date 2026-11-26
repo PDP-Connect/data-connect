@@ -267,6 +267,7 @@ export function projectAppAccess(
         grantEvents
           .filter(
             (event) =>
+              connection === null ||
               event.connector_instance_id === connection ||
               (event.connector_instance_id === null && sourceKinds.size === 1),
           )

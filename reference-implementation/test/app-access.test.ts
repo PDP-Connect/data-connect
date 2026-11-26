@@ -11,7 +11,7 @@ import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../ser
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 import { removeAppAccess } from "../lib/remove-app-access.ts";
 import { revokeGrant, revokeGrantPackage, requirePersistedGrantState } from "../server/auth.ts";
-import type { AppAccess } from "../lib/app-access.ts";
+import { projectAppAccess, type AppAccess } from "../lib/app-access.ts";
 import { createCimdDocument, createHostedMcpGrantPackage } from "../server/auth.ts";
 import { createSqliteConsentDeviceAuthDriver } from "./helpers/sqlite-consent-device-auth-driver.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -625,4 +625,10 @@ test('Postgres merges service-only access using the owner connection inventory a
     await initPostgresStorage({backend:'postgres',databaseUrl});
     await checkMergedSources(async(sql,values)=>{let i=0;return postgresQuery(sql.replaceAll('?',()=>`$${++i}`),values);},()=>postgresListAppAccess('merge_owner',NOW));
   });
+});
+
+test("a service-only row retains reads attributed to any of its accounts",()=>{
+ const apps=projectAppAccess([{grant_id:"service",client_id:"app",status:"active",issued_at:ISSUED,expires_at:null,grant_json:{source:{kind:"connector",id:"mail"},streams:[{name:"messages"}]},storage_binding_json:{connector_id:"mail"},trust_signal_json:null,metadata_json:null}],[{grant_id:"service",connector_instance_id:"cin_one",last_read_at:NOW,revoked_at:null,reads_last_7_days:1}],[],[],NOW,[{connector_id:"mail",connector_instance_id:"cin_one"},{connector_id:"mail",connector_instance_id:"cin_two"}]);
+ assert.equal(apps[0]?.sources[0]?.last_read_at,NOW);
+ assert.equal(apps[0]?.sources[0]?.all_accounts,true);
 });
