@@ -15,13 +15,15 @@ const SEARCH_MODE_PATHS: Record<string, string> = {
 
 export function readHelp(binName = "pdpp"): string {
   return `Grant-scoped reads (uses pdpp connect/token cache, never owner credentials):
-  ${binName} read schema <provider-url> [--view compact] [--stream <name>] [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
-  ${binName} read streams <provider-url> [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
-  ${binName} read query-records <provider-url> <stream> [--connection-id <cin>] [--limit <n>] [--cursor <cursor>] [--fields a,b] [--sort <spec>] [--count none|estimated|exact] [--filter-json <json>] [--format json|jsonl|table]
-  ${binName} read fetch <provider-url> <stream> <record-id> [--connection-id <cin>] [--fields a,b] [--format json|table]
-  ${binName} read field-window <provider-url> <stream> <record-id> --field <path> [--connection-id <cin>] [--q <text>] [--offset-chars <n>] [--limit-chars <n>] [--before-chars <n>] [--after-chars <n>] [--format json|table]
-  ${binName} read search <provider-url> <query> [--connection-id <cin>] [--streams a,b] [--mode lexical|semantic|hybrid] [--limit <n>] [--format json|jsonl|table]
-  ${binName} read aggregate <provider-url> <stream> --metric <metric> [--field <field>] [--connection-id <cin>] [--group-by <field> | --group-by-time <field> --granularity <unit>] [--limit <n>] [--format json|table]`;
+  ${binName} read schema <provider-url> [--view compact] [--stream <name>] [--instance-id <handle>] [--cache-root <dir>] [--format json|table]
+  ${binName} read streams <provider-url> [--instance-id <handle>] [--cache-root <dir>] [--format json|table]
+  ${binName} read query-records <provider-url> <stream> [--instance-id <handle>] [--limit <n>] [--cursor <cursor>] [--fields a,b] [--sort <spec>] [--count none|estimated|exact] [--filter-json <json>] [--format json|jsonl|table]
+  ${binName} read fetch <provider-url> <stream> <record-id> [--instance-id <handle>] [--fields a,b] [--format json|table]
+  ${binName} read field-window <provider-url> <stream> <record-id> --field <path> [--instance-id <handle>] [--q <text>] [--offset-chars <n>] [--limit-chars <n>] [--before-chars <n>] [--after-chars <n>] [--format json|table]
+  ${binName} read search <provider-url> <query> [--instance-id <handle>] [--streams a,b] [--mode lexical|semantic|hybrid] [--limit <n>] [--format json|jsonl|table]
+  ${binName} read aggregate <provider-url> <stream> --metric <metric> [--field <field>] [--instance-id <handle>] [--group-by <field> | --group-by-time <field> --granularity <unit>] [--limit <n>] [--format json|table]
+
+  --connection-id and --connector-instance-id are deprecated aliases for the public --instance-id handle.`;
 }
 
 export async function runRead(
@@ -43,6 +45,13 @@ export async function runRead(
   }
 
   const { flags, positionals } = parseArgs(rest);
+  const instanceId = resolveInstanceId(flags, rest);
+  for (const name of INSTANCE_SELECTOR_FLAGS) {
+    delete flags[name];
+  }
+  if (instanceId !== undefined) {
+    flags["instance-id"] = instanceId;
+  }
   const providerUrl = requirePositional(positionals, 0, "provider-url");
   let credential: { access_token: string };
   let normalizedProviderUrl: string;
@@ -74,6 +83,7 @@ interface ReadRequest {
 
 type QueryValue = string | number | boolean | string[] | undefined;
 type QueryRecord = Record<string, QueryValue>;
+const INSTANCE_SELECTOR_FLAGS = ["instance-id", "connection-id", "connector-instance-id"] as const;
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one request builder per read subcommand, dispatched by a flat if-chain on `command`; splitting would scatter each subcommand's query-param mapping across files for no reduction in real complexity.
 export function buildReadRequest(
@@ -90,14 +100,17 @@ export function buildReadRequest(
   if (command === "schema") {
     return {
       method: "GET",
-      url: buildUrl(origin, "/v1/schema", pickQuery(flags, ["connector-id", "connection-id", "stream", "view"])),
+      url: buildUrl(origin, "/v1/schema", {
+        ...pickQuery(flags, ["connector-id", "stream", "view"]),
+        ...instanceQuery(flags),
+      }),
     };
   }
 
   if (command === "streams") {
     return {
       method: "GET",
-      url: buildUrl(origin, "/v1/streams", pickQuery(flags, ["connection-id", "connector-instance-id"])),
+      url: buildUrl(origin, "/v1/streams", instanceQuery(flags)),
     };
   }
 
@@ -105,8 +118,6 @@ export function buildReadRequest(
     const stream = requirePositional(positionals, 0, "stream");
     const query: QueryRecord = {
       ...pickQuery(flags, [
-        "connection-id",
-        "connector-instance-id",
         "cursor",
         "limit",
         "order",
@@ -114,6 +125,7 @@ export function buildReadRequest(
         "count",
         "changes-since",
       ]),
+      ...instanceQuery(flags),
       ...csvQuery(flags, "fields"),
       ...jsonFilterQuery(flags),
     };
@@ -124,7 +136,7 @@ export function buildReadRequest(
     const stream = requirePositional(positionals, 0, "stream");
     const recordId = requirePositional(positionals, 1, "record-id");
     const query: QueryRecord = {
-      ...pickQuery(flags, ["connection-id", "connector-instance-id"]),
+      ...instanceQuery(flags),
       ...csvQuery(flags, "fields"),
     };
     return {
@@ -140,7 +152,6 @@ export function buildReadRequest(
       throw new PdppUsageError("Missing required flag: --field");
     }
     const query = pickQuery(flags, [
-      "connection-id",
       "field",
       "cursor",
       "offset-chars",
@@ -149,6 +160,7 @@ export function buildReadRequest(
       "before-chars",
       "after-chars",
     ]);
+    Object.assign(query, instanceQuery(flags));
     return {
       method: "GET",
       url: buildUrl(
@@ -165,7 +177,8 @@ export function buildReadRequest(
     const path = SEARCH_MODE_PATHS[mode ?? ""] ?? "/v1/search";
     const query: QueryRecord = {
       q: queryText,
-      ...pickQuery(flags, ["connection-id", "connector-instance-id", "cursor", "limit"]),
+      ...pickQuery(flags, ["cursor", "limit"]),
+      ...instanceQuery(flags),
       ...csvQuery(flags, "streams"),
     };
     return { method: "GET", url: buildUrl(origin, path, query) };
@@ -180,14 +193,13 @@ export function buildReadRequest(
       throw new PdppUsageError("Use only one of --group-by or --group-by-time.");
     }
     const query: QueryRecord = pickQuery(flags, [
-      "connection-id",
-      "connector-instance-id",
       "field",
       "granularity",
       "limit",
       "metric",
       "time-zone",
     ]);
+    Object.assign(query, instanceQuery(flags));
     if (flags["group-by"]) {
       query.group_by = flags["group-by"];
     }
@@ -277,6 +289,68 @@ function pickQuery(flags: ParsedFlags, names: string[]): QueryRecord {
     query[name.replaceAll("-", "_")] = value;
   }
   return query;
+}
+
+function instanceQuery(flags: ParsedFlags): QueryRecord {
+  const instanceId = resolveInstanceId(flags);
+  return instanceId === undefined ? {} : { instance_id: instanceId };
+}
+
+function resolveInstanceId(flags: ParsedFlags, argv: string[] = []): string | undefined {
+  const selectors: unknown[] = [];
+  const commandLineSelectors = readInstanceSelectorArgs(argv);
+  if (commandLineSelectors.length) {
+    selectors.push(...commandLineSelectors);
+  } else {
+    for (const name of INSTANCE_SELECTOR_FLAGS) {
+      if (Object.hasOwn(flags, name)) {
+        selectors.push((flags as Record<string, unknown>)[name]);
+      }
+    }
+  }
+
+  const values = selectors.map((value) => {
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new PdppUsageError("Instance selector flags require a non-empty string handle.");
+    }
+    return value;
+  });
+  if (values.some((value) => value !== values[0])) {
+    throw new PdppUsageError(
+      "Use only one instance handle across --instance-id, --connection-id, and --connector-instance-id."
+    );
+  }
+  return values[0];
+}
+
+function readInstanceSelectorArgs(argv: string[]): unknown[] {
+  const values: unknown[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--") {
+      break;
+    }
+    if (arg === undefined || !arg.startsWith("--")) {
+      continue;
+    }
+    const equalsIndex = arg.indexOf("=");
+    const name = arg.slice(2, equalsIndex === -1 ? undefined : equalsIndex);
+    if (!(INSTANCE_SELECTOR_FLAGS as readonly string[]).includes(name)) {
+      continue;
+    }
+    if (equalsIndex !== -1) {
+      values.push(arg.slice(equalsIndex + 1));
+      continue;
+    }
+    const next = argv[index + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      values.push(next);
+      index += 1;
+    } else {
+      values.push(true);
+    }
+  }
+  return values;
 }
 
 function csvQuery(flags: ParsedFlags, name: string): QueryRecord {

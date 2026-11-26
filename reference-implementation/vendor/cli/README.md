@@ -5,13 +5,20 @@ Command-line tools for PDPP providers.
 ## Status
 
 This package is the public npm home for the `pdpp` command. The CLI
-supports four command namespaces:
+supports five command namespaces:
 
 - **`pdpp connect <provider-url>`** — delegated access: discovers provider
   metadata, self-registers a public client when the AS advertises dynamic
   registration, asks the owner to approve scoped access in the browser, and
   stores scoped client credentials in the project-local `.pdpp/` cache without
   asking for an owner bearer token.
+
+- **`pdpp read {schema|streams|query-records|fetch|field-window|search|aggregate}`** —
+  grant-scoped reads using the cached `pdpp connect` client credential. Pass
+  `--instance-id <handle>` to select an instance. The value is an opaque public
+  handle and is sent as the `instance_id` request parameter. The deprecated
+  `--connection-id` and `--connector-instance-id` flags remain aliases for that
+  same public handle.
 
 - **`pdpp owner-agent <onboard|status|control|connectors|setup|revoke>`** — trusted owner-agent
   onboarding for a local assistant the operator has authorized to act on their behalf.

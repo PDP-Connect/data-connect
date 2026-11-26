@@ -135,12 +135,12 @@ Default to filtered queries over full-table scans. If `/v1/schema` declares a fi
 
 The same canonical read loop is available through the CLI when shell commands
 are easier than hand-writing HTTP. Use the compact schema first, then narrow by
-stream and `connection_id` before requesting full detail or records:
+stream and the grant's public `instance_id` before requesting full detail or records:
 
 ```bash
 pdpp read schema "$RS_URL" --view compact
-pdpp read schema "$RS_URL" --view compact --stream messages --connection-id cin_...
-pdpp read query-records "$RS_URL" messages --connection-id cin_... --limit 10 --fields id,sent_at,text
+pdpp read schema "$RS_URL" --view compact --stream messages --instance-id inst_v1_...
+pdpp read query-records "$RS_URL" messages --instance-id inst_v1_... --limit 10 --fields id,sent_at,text
 ```
 
 ### 8. Optional: MCP adapter over the same scoped token
