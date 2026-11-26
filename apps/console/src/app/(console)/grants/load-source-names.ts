@@ -25,7 +25,7 @@ export async function loadSourceNames(): Promise<Map<string, string>> {
   const seen = new Set<string>();
   try {
     do {
-      const page = await listConnectorSummaries({ profile: "identity_inventory", limit: 100, cursor });
+      const page = await listConnectorSummaries({ sourcesVisibility: true, limit: 100, cursor });
       rows.push(...page.data);
       if (!page.has_more) {
         return finish();

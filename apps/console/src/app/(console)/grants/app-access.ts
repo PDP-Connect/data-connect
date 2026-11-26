@@ -8,6 +8,7 @@ import {
   type SourceDisplayInput,
 } from "@pdpp/display";
 import { connectionDisplayName } from "../lib/connection-display-name.ts";
+import { mergeAppAccessSources } from "pdpp-reference-implementation/app-access";
 import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
@@ -193,6 +194,27 @@ export function groupGrantAccessByApp(
       [...sourceNames.keys()].every((id) =>
         current.some((row) => row.source.connection_id === id || row.connection_ids?.includes(id))
       );
+    if (sourceNames.size) {
+      const expanded = app.sourceAccess.flatMap(row => {
+        const ids = row.all_accounts ? (row.connection_ids ?? []).filter(id => sourceNames.has(id)) : [];
+        if (!ids.length) { return [row]; }
+        return ids.map(id => ({ ...row, all_accounts: false, connection_ids: [id], source: { ...row.source, connection_id: id } }));
+      });
+      let rows = mergeAppAccessSources(expanded.filter(row=>app.state !== "reading" || row.in_force)).map(row => ({...row, name: sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source"}));
+      if (!app.readsAllSources) {
+        for (const wide of app.sourceAccess.filter(row => row.all_accounts && (app.state !== "reading" || row.in_force))) {
+          const ids = (wide.connection_ids ?? []).filter(id => sourceNames.has(id));
+          if (ids.length < 2) { continue; }
+          const accounts = rows.filter(row => ids.includes(row.source.connection_id || ""));
+          const [combined] = mergeAppAccessSources(accounts.map(row => ({...row, source: {...wide.source, connection_id: null}})));
+          if (!combined) { continue; }
+          rows = rows.filter(row => !ids.includes(row.source.connection_id || ""));
+          rows.push({...combined, all_accounts: true, connection_ids: ids, name: `All ${appSourceName(wide.source)} accounts`});
+        }
+      }
+      app.sourceAccess = rows;
+      app.sources = rows.filter(row => app.state !== "reading" || row.in_force).map(row=>row.name);
+    }
     app.since = visible.map((row) => row.first_issued_at).sort()[0] || null;
     app.lastRead =
       visible

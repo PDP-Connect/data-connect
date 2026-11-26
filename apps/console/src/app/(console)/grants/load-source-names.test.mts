@@ -8,7 +8,8 @@ let duplicateLabels = false;
 const cursors: (string | undefined)[] = [];
 mock.module("../lib/ref-client.ts", {
   namedExports: {
-    listConnectorSummaries: async ({ cursor }: { cursor?: string }) => {
+    listConnectorSummaries: async ({ cursor, sourcesVisibility }: { cursor?: string; sourcesVisibility?: boolean }) => {
+      assert.equal(sourcesVisibility, true);
       cursors.push(cursor);
       if (fail && cursor) {
         throw new Error("inventory unavailable");

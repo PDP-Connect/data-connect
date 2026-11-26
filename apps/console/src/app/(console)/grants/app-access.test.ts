@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import test from "node:test";
+import { appSourceCount } from "./unused-apps.ts";
 import type { AppAccess as Registration } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp, UNKNOWN_APP_NAME } from "./app-access.ts";
 
@@ -123,4 +124,36 @@ test("the app summary and detail count the same connection rows even when labels
   const app = groupGrantAccessByApp(registrations)[0]!;
   assert.equal(app.sources.length, app.sourceAccess.filter((source) => source.in_force).length);
   assert.equal(app.sources.length, 2);
+});
+
+test("all-data access has one row per inventory source including service-wide duplicates", () => {
+  const row = registration(); const [base]=row.sources; assert.ok(base);
+  row.sources=[base,{...base,source:{...base.source,connection_id:null},all_accounts:true,connection_ids:["mail","other"],kinds:["threads"]},{...base,source:{...base.source,connection_id:"other"}}];
+  const [app]=groupGrantAccessByApp([row],Date.now(),[],new Map([["mail","Gmail work"],["other","Gmail personal"]]));
+  assert.equal(app?.readsAllSources,true);
+  assert.equal(app?.sourceAccess.length,2);
+  assert.equal(app?.sources.length,2);
+  assert.ok(app?.sourceAccess.every(source=>!source.all_accounts));
+});
+test("service-wide access replaces accounts and only says all with several visible accounts", () => {
+  const row=registration();const [base]=row.sources; assert.ok(base);
+  row.sources=[base,{...base,source:{...base.source,connection_id:null},all_accounts:true,connection_ids:["mail","other"],kinds:["threads"]}];
+  const names=new Map([["mail","Gmail work"],["other","Gmail personal"],["outside","Spotify"]]);
+  const [app]=groupGrantAccessByApp([row],Date.now(),[],names);
+  assert.equal(app?.sourceAccess.length,1);
+  assert.ok(app);assert.equal(appSourceCount(app),2);
+  assert.equal(app?.sourceAccess[0]?.name,"All Gmail accounts");
+  names.delete("other");
+  const [single]=groupGrantAccessByApp([row],Date.now(),[],names);
+  assert.equal(single?.sourceAccess.length,1);
+  assert.equal(single?.sourceAccess[0]?.name,"Gmail work");
+});
+
+test("stopped service-wide access never widens an active single-account permission",()=>{
+ const row=registration();const [base]=row.sources;assert.ok(base);
+ row.sources=[base,{...base,in_force:false,kinds:["threads"],source:{...base.source,connection_id:null},all_accounts:true,connection_ids:["mail","other"],active_grant_ids:[]}];
+ const [app]=groupGrantAccessByApp([row],Date.now(),[],new Map([["mail","Gmail work"],["other","Gmail personal"],["outside","Spotify"]]));
+ assert.ok(app);const current=app.sourceAccess.filter(source=>source.in_force);
+ assert.equal(current.length,1);assert.equal(current[0]?.source.connection_id,"mail");
+ assert.deepEqual(current[0]?.kinds,["messages"]);
 });
