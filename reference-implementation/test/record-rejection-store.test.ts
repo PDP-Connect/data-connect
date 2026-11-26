@@ -120,24 +120,6 @@ function now() {
   return new Date().toISOString();
 }
 
-// The store lists by (created_at ASC, receipt_id ASC) (list-first-page.sql, list-after-cursor.sql).
-// Receipts written in the same millisecond tie on created_at and receipt_id is random, so insertion
-// order is not part of the contract. This derives the order the store promises from the stored rows,
-// comparing as SQLite does (BINARY collation).
-function sqliteListOrder(receiptIds: readonly string[]): string[] {
-  const rows = receiptIds.map((receiptId) => {
-    const row = getDb()
-      .prepare("SELECT created_at FROM record_rejections WHERE receipt_id = ?")
-      .get<{ created_at: string }>(receiptId);
-    assert.ok(row, `expected a stored receipt for ${receiptId}`);
-    return { createdAt: row.created_at, receiptId };
-  });
-  const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-  return rows
-    .sort((a, b) => compare(a.createdAt, b.createdAt) || compare(a.receiptId, b.receiptId))
-    .map((row) => row.receiptId);
-}
-
 function seedSqliteConnection({
   connectorId = "test_connector",
   connectorInstanceId = "cin_test",
@@ -512,20 +494,93 @@ test("SQLite record rejection list narrows to a run inside the owner and connect
       ownerSubjectId: "owner_a",
       ...extra,
     });
+  // Pin created_at so the list order is A < B < A2 whatever the clock did: B sits between the two run_a
+  // receipts, so a page that loses the run filter after the cursor returns B.
+  const pinCreatedAt = (receiptId: string, createdAt: string) =>
+    getDb().prepare("UPDATE record_rejections SET created_at = ? WHERE receipt_id = ?").run(createdAt, receiptId);
+  pinCreatedAt(receiptA.receiptId, "2026-01-01T00:00:01.000Z");
+  pinCreatedAt(receiptB.receiptId, "2026-01-01T00:00:02.000Z");
+  pinCreatedAt(receiptA2.receiptId, "2026-01-01T00:00:03.000Z");
 
-  assert.equal((await list({})).items.length, 3, "no run filter lists the whole connection");
-  const runAOrder = sqliteListOrder([receiptA.receiptId, receiptA2.receiptId]);
-  assert.deepEqual(ids(await list({ runId: "run_a" })), runAOrder);
+  assert.deepEqual(
+    ids(await list({})),
+    [receiptA.receiptId, receiptB.receiptId, receiptA2.receiptId],
+    "no run filter lists the whole connection"
+  );
+  assert.deepEqual(ids(await list({ runId: "run_a" })), [receiptA.receiptId, receiptA2.receiptId]);
   assert.deepEqual(ids(await list({ runId: "run_c" })), [receiptA.receiptId], "matches the latest run too");
   assert.deepEqual(ids(await list({ runId: "run_b" })), [receiptB.receiptId]);
   assert.deepEqual(ids(await list({ runId: "run_nobody" })), []);
   assert.deepEqual(ids(await list({ runId: "run_a_other_owner" })), [], "another owner's run is not visible");
 
   const firstPage = await list({ limit: 1, runId: "run_a" });
-  assert.deepEqual(ids(firstPage), [runAOrder[0]]);
+  assert.deepEqual(ids(firstPage), [receiptA.receiptId]);
   assert.ok(firstPage.nextCursor, "a second matching receipt remains");
   const secondPage = await list({ cursor: firstPage.nextCursor, limit: 1, runId: "run_a" });
-  assert.deepEqual(ids(secondPage), [runAOrder[1]], "the cursor keeps the run filter");
+  assert.deepEqual(ids(secondPage), [receiptA2.receiptId], "the cursor keeps the run filter");
+  assert.equal(secondPage.nextCursor, null);
+
+  // Each scope condition on its own: same connection with another owner, and the owner's other connection.
+  const asOwnerB = (extra: { cursor?: string | null; limit?: number }) =>
+    store.list({ connectorInstanceId: "cin_test", limit: 10, ownerSubjectId: "owner_b", ...extra });
+  assert.deepEqual(ids(await asOwnerB({})), [], "another owner does not see this connection");
+  const wholeConnectionFirstPage = await list({ limit: 1 });
+  assert.ok(wholeConnectionFirstPage.nextCursor);
+  assert.deepEqual(
+    ids(await asOwnerB({ cursor: wholeConnectionFirstPage.nextCursor })),
+    [],
+    "another owner does not see this connection after a cursor"
+  );
+  const otherConnection = (extra: { cursor?: string | null }) =>
+    store.list({ connectorInstanceId: "cin_other", limit: 10, ownerSubjectId: "owner_a", ...extra });
+  assert.deepEqual(ids(await otherConnection({})), [], "the owner's other connection has no receipts");
+  assert.deepEqual(
+    ids(await otherConnection({ cursor: wholeConnectionFirstPage.nextCursor })),
+    [],
+    "the owner's other connection has no receipts after a cursor"
+  );
+});
+
+test("SQLite record rejection list breaks created_at ties by receipt_id, across a cursor", async () => {
+  initDb();
+  seedSqliteConnection({ runId: "run_a" });
+  const store = createRecordRejectionStore();
+  const reject = (inputIndex: number, rawLine: string) =>
+    store.insertOrReplay({
+      connectorId: "test_connector",
+      connectorInstanceId: "cin_test",
+      inputIndex,
+      ownerSubjectId: "owner_a",
+      rawLine,
+      reasonCode: "invalid_record_identity",
+      runId: "run_a",
+      stream: "items",
+    });
+  const first = await reject(0, '{"id":"tie_1"}');
+  const second = await reject(1, '{"id":"tie_2"}');
+  getDb()
+    .prepare("UPDATE record_rejections SET created_at = '2026-01-01T00:00:01.000Z' WHERE receipt_id IN (?, ?)")
+    .run(first.receiptId, second.receiptId);
+  const [low, high] = [first.receiptId, second.receiptId].sort();
+  const list = (extra: { cursor?: string | null; limit?: number }) =>
+    store.list({ connectorInstanceId: "cin_test", limit: 10, ownerSubjectId: "owner_a", ...extra });
+
+  assert.deepEqual(
+    (await list({})).items.map((item) => item.receiptId),
+    [low, high]
+  );
+  const firstPage = await list({ limit: 1 });
+  assert.deepEqual(
+    firstPage.items.map((item) => item.receiptId),
+    [low]
+  );
+  assert.ok(firstPage.nextCursor);
+  const secondPage = await list({ cursor: firstPage.nextCursor, limit: 1 });
+  assert.deepEqual(
+    secondPage.items.map((item) => item.receiptId),
+    [high],
+    "the cursor resumes at the tied receipt with the larger receipt_id"
+  );
   assert.equal(secondPage.nextCursor, null);
 });
 
