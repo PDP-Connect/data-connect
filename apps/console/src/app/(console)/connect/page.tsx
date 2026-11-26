@@ -9,7 +9,7 @@ import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
-import { type CimdClientDocument, type GrantSummary, listCimdClientDocuments, listGrants } from "../lib/ref-client.ts";
+import { type CimdClientDocument, type AppAccess, listCimdClientDocuments, listAppAccess } from "../lib/ref-client.ts";
 import { AppAccessList } from "../grants/app-access-list.tsx";
 import { groupGrantAccessByApp } from "../grants/app-access.ts";
 import { revokeGrantAccessAction } from "../grants/[grantId]/revoke-action.ts";
@@ -250,28 +250,13 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
   const params = await searchParams;
   let origin: string;
   let identities: CimdClientDocument[] = [];
-  let grants: GrantSummary[] = [];
+  let registrations: AppAccess[] = [];
   let grantsHaveMore = false;
   let grantsUnavailable = false;
   if (process.env.NODE_ENV !== "production" && (params.demo === "atlas" || params.demo === "empty")) {
     origin = "https://pdpp.example.test";
     if (params.demo === "atlas") {
-      grants = [
-        {
-          client: { client_id: "https://chatgpt.example/client", client_name: "ChatGPT", registration_mode: null },
-          client_id: "https://chatgpt.example/client",
-          connector_id: "spotify",
-          event_count: 2,
-          failure: null,
-          first_at: "2026-11-24T12:00:00.000Z",
-          grant_id: "demo-chatgpt-spotify",
-          kinds: ["tracks"],
-          last_at: "2026-11-25T12:00:00.000Z",
-          object: "grant_summary",
-          source: { id: "spotify", kind: "connector" },
-          status: "issued",
-        },
-      ];
+      registrations = (await (await import("../grants/grants-demo-data.ts")).createAppAccessDemoDataSource().listAppAccess()).data;
       identities = [
         {
           client_id: "https://pdpp.example.test/oauth/clients/cli-demo",
@@ -291,11 +276,11 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
       const [resolvedOrigin, resolvedIdentities, resolvedGrants] = await Promise.all([
         getReferencePublicOrigin(),
         listCimdClientDocuments(),
-        listGrants({ limit: 50 }).catch(() => null),
+        listAppAccess().catch(() => null),
       ]);
       origin = resolvedOrigin;
       identities = resolvedIdentities.data;
-      grants = resolvedGrants?.data ?? [];
+      registrations = resolvedGrants?.data ?? [];
       grantsHaveMore = resolvedGrants?.has_more ?? false;
       grantsUnavailable = resolvedGrants === null;
     } catch (err) {
@@ -415,7 +400,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
 
       <Section title="Connected apps">
         {grantsUnavailable ? <p className="py-4 text-[13px] text-muted-foreground">Connected apps could not be loaded. <Link className="text-primary underline-offset-2 hover:underline" href="/connect">Try again</Link>.</p> : <AppAccessList
-          apps={groupGrantAccessByApp(grants.filter((grant) => grant.status === "active" || grant.status === "issued"))}
+          apps={groupGrantAccessByApp(registrations)}
           canRemove={!grantsHaveMore}
           removeAction={revokeGrantAccessAction}
           returnTo="/connect"

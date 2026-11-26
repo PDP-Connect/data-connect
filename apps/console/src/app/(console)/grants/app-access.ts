@@ -1,31 +1,26 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatConnectorKeyForDisplay, formatRelative, formatSourceForDisplay, grantRowLabel } from "@pdpp/display";
+import { formatConnectorKeyForDisplay, formatRelative, formatSourceForDisplay } from "@pdpp/display";
 import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
-  /** Active access outside any package; removed one by one. */
+  clientIds: string[];
   grantIds: string[];
   hrefId: string;
   lastRead: string | null;
   name: string;
-  /** Packages holding active access; removed whole, so the package and its tokens end too. */
+  place: string;
+  verified: boolean;
   packageIds: string[];
   sources: string[];
+  sourceAccess: import("../lib/ref-client.ts").AppAccessSource[];
+  since: string | null;
+  expiresAt: string | null;
   stoppedAt: string | null;
+  stoppedReason: "removed" | "expired" | null;
+  state: "reading" | "stopped";
   status: string | null;
-}
-
-const ACTIVE_STATUSES = new Set(["active", "issued"]);
-
-function statusWord(status: string): string | null {
-  if (ACTIVE_STATUSES.has(status)) return null;
-  if (status === "revoked") return "Removed";
-  if (status === "denied") return "Not allowed";
-  if (status === "failed") return "Failed";
-  if (status === "pending") return "Waiting";
-  return "Status not available";
 }
 
 export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[0] | null | undefined): string | null {
@@ -67,67 +62,64 @@ export function appNamesByClientId(
  * trusted name (`chatgpt.com.example.io`).
  */
 /** The one name every page uses for an app that did not give a usable name. */
-export const UNKNOWN_APP_NAME = "An app";
+export const UNKNOWN_APP_NAME = "An app that gave no name";
 
 export function pendingApprovalAppName(clientName: string | null | undefined): string {
   return clientName?.trim() || UNKNOWN_APP_NAME;
 }
 
-export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAccess[] {
-  const groups = new Map<string, { app: AppAccess; statuses: string[] }>();
-  const names = appNamesByClientId(grants);
-  for (const grant of grants) {
-    const key = grant.client_id || grant.grant_id;
-    const isActive = ACTIVE_STATUSES.has(grant.status);
-    let group = groups.get(key);
-    if (!group) {
-      group = {
-        app: {
-          grantIds: [],
-          hrefId: grant.grant_id,
-          lastRead: null,
-          name: names.get(key) || UNKNOWN_APP_NAME,
-          packageIds: [],
-          sources: [],
-          stoppedAt: null,
-          status: null,
-        },
-        statuses: [],
-      };
-      groups.set(key, group);
+/** Complete registrations only: access comes from permissions, never event outcomes. */
+export function groupGrantAccessByApp(registrations: readonly import("../lib/ref-client.ts").AppAccess[], now = Date.now()): AppAccess[] {
+  const groups = new Map<string, AppAccess>();
+  for (const registration of registrations) {
+    const name = registration.client_name.trim();
+    const place = registration.returns_to_this_computer ? "this computer" : registration.return_host || "no address given";
+    const key = name || registration.return_host || registration.returns_to_this_computer
+      ? JSON.stringify([name, place]) : registration.client_id;
+    let app = groups.get(key);
+    if (!app) {
+      app = { clientIds: [], grantIds: [], hrefId: "", lastRead: null, name: name || (place === "no address given" ? UNKNOWN_APP_NAME : place), place,
+        verified: true, packageIds: [], sources: [], sourceAccess: [], since: null, expiresAt: null,
+        stoppedAt: null, stoppedReason: null, state: "stopped", status: "Removed" };
+      groups.set(key, app);
     }
-    if (isActive) {
-      const packageId = grant.grant_package_id;
-      if (packageId) {
-        if (!group.app.packageIds.includes(packageId)) group.app.packageIds.push(packageId);
-      } else {
-        group.app.grantIds.push(grant.grant_id);
+    app.clientIds.push(registration.client_id);
+    app.verified &&= registration.domain_control_verified;
+    for (const row of registration.sources) {
+      const inForce = row.in_force && (!row.expires_at || Date.parse(row.expires_at) > now);
+      const identity = JSON.stringify(row.source);
+      const previous = app.sourceAccess.find((item) => JSON.stringify(item.source) === identity);
+      if (!previous) app.sourceAccess.push({ ...row, in_force: inForce, kinds: [...row.kinds], grant_ids: [...row.grant_ids], active_grant_ids: inForce ? [...row.active_grant_ids] : [], package_ids: [...row.package_ids] });
+      else {
+        const wasInForce = previous.in_force;
+        previous.in_force ||= inForce;
+        previous.kinds = [...new Set([...previous.kinds, ...row.kinds])];
+        previous.grant_ids = [...new Set([...previous.grant_ids, ...row.grant_ids])];
+        previous.active_grant_ids = [...new Set([...previous.active_grant_ids, ...(inForce ? row.active_grant_ids : [])])];
+        previous.package_ids = [...new Set([...previous.package_ids, ...row.package_ids])];
+        if (row.first_issued_at < previous.first_issued_at) previous.first_issued_at = row.first_issued_at;
+        if (row.last_read_at && (!previous.last_read_at || row.last_read_at > previous.last_read_at)) previous.last_read_at = row.last_read_at;
+        if (row.stopped_at && (!previous.stopped_at || row.stopped_at > previous.stopped_at)) { previous.stopped_at = row.stopped_at; previous.stopped_reason = row.stopped_reason; }
+        if (inForce) previous.expires_at = !wasInForce ? row.expires_at : !previous.expires_at || !row.expires_at ? null : previous.expires_at > row.expires_at ? previous.expires_at : row.expires_at;
       }
-      group.app.hrefId = grant.grant_id;
+      app.grantIds = [...new Set([...app.grantIds, ...row.grant_ids])];
     }
-    if (grant.last_at && (!group.app.lastRead || grant.last_at > group.app.lastRead)) {
-      group.app.lastRead = grant.last_at;
-    }
-    if (grant.status === "revoked" && grant.last_at && (!group.app.stoppedAt || grant.last_at > group.app.stoppedAt)) {
-      group.app.stoppedAt = grant.last_at;
-    }
-    group.statuses.push(grant.status);
-    const source =
-      appSourceName(grant.source) ??
-      (grant.connector_id ? formatConnectorKeyForDisplay(grant.connector_id) : null) ??
-      grantRowLabel(grant);
-    if (isActive && source && !group.app.sources.includes(source)) group.app.sources.push(source);
   }
-
-  return [...groups.values()]
-    .map(({ app, statuses }) => {
-      app.status = statuses.some((status) => ACTIVE_STATUSES.has(status))
-        ? null
-        : statusWord(statuses[0] ?? "");
-      if (!statuses.every((status) => status === "revoked")) app.stoppedAt = null;
-      return app;
-    })
-    .sort((left, right) => left.name.localeCompare(right.name));
+  for (const app of groups.values()) {
+    const current = app.sourceAccess.filter((source) => source.in_force);
+    app.hrefId = app.grantIds[0] || app.clientIds[0] || "";
+    app.state = current.length ? "reading" : "stopped";
+    app.status = current.length ? null : "Removed";
+    const visible = current.length ? current : app.sourceAccess;
+    app.sources = [...new Set(visible.map((row) => appSourceName(row.source) || "Data source"))];
+    app.since = visible.map((row) => row.first_issued_at).sort()[0] || null;
+    app.lastRead = visible.flatMap((row) => row.last_read_at ? [row.last_read_at] : []).sort().at(-1) || null;
+    app.expiresAt = current.length && current.every((row) => row.expires_at) ? current.map((row) => row.expires_at as string).sort().at(-1) || null : null;
+    const stopped = app.sourceAccess.filter((row) => row.stopped_at).sort((a, b) => (b.stopped_at || "").localeCompare(a.stopped_at || ""))[0];
+    app.stoppedAt = stopped?.stopped_at || null;
+    app.stoppedReason = stopped?.stopped_reason || (app.sourceAccess.some((row) => row.expires_at && Date.parse(row.expires_at) <= now) ? "expired" : "removed");
+  }
+  return [...groups.values()].sort((a, b) => (b.lastRead || "").localeCompare(a.lastRead || "") || a.name.localeCompare(b.name));
 }
 
 export function splitAppAccessGroups(apps: readonly AppAccess[]): {

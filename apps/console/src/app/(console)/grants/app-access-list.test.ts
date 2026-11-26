@@ -22,6 +22,7 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 
 test("app rows name the data they can read and offer a separate actions menu", () => {
   const html = render([{
+    clientIds: [], place: "chatgpt.com", verified: false, sourceAccess: [], since: null, expiresAt: null, stoppedReason: "removed", state: "reading",
     grantIds: ["access-1"],
     hrefId: "access-1",
     lastRead: "2026-11-25T12:00:00.000Z",
@@ -46,6 +47,7 @@ test("empty app list uses one plain sentence", () => {
 
 test("removed app rows do not say the app can still read data", () => {
   const html = render([{
+    clientIds: [], place: "chatgpt.com", verified: false, sourceAccess: [], since: null, expiresAt: null, stoppedReason: "removed", state: "reading",
     grantIds: [],
     hrefId: "access-removed",
     lastRead: null,

@@ -21,6 +21,7 @@ import {
   getGrantTimeline,
   type ListResponse,
   listGrants,
+  listAppAccess,
   listPendingApprovals,
   type PendingApproval,
 } from "../lib/ref-client.ts";
@@ -100,7 +101,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     }
   }
 
-  const apps = groupGrantAccessByApp(result.data);
+  const apps = groupGrantAccessByApp((demoMode ? await (await import("./grants-demo-data.ts")).createAppAccessDemoDataSource().listAppAccess() : await listAppAccess()).data);
   const appGroups = splitAppAccessGroups(apps);
   const clientNames = appNamesByClientId(result.data);
   const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, clientNames.get(grant.client_id) || UNKNOWN_APP_NAME] as const] : [])).entries()];

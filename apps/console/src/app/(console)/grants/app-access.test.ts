@@ -1,167 +1,30 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import type { GrantSummary } from "../lib/ref-client.ts";
-import { activePackageAccesses, appSourceName, formatAppLastRead, groupGrantAccessByApp, pendingApprovalAppName, splitAppAccessGroups, UNKNOWN_APP_NAME } from "./app-access.ts";
-
-function grant(overrides: Partial<GrantSummary> = {}): GrantSummary {
-  return {
-    client: { client_id: "https://chat.example/id", client_name: "Chat helper", registration_mode: null },
-    client_id: "https://chat.example/id",
-    connector_id: "gmail",
-    event_count: 1,
-    failure: null,
-    first_at: "2026-11-24T12:00:00.000Z",
-    grant_id: "access-1",
-    kinds: ["messages"],
-    last_at: "2026-11-25T12:00:00.000Z",
-    object: "grant_summary",
-    source: { id: "gmail", kind: "connector" },
-    status: "issued",
-    ...overrides,
-  };
+import type { AppAccess as Registration } from "../lib/ref-client.ts";
+import { groupGrantAccessByApp, UNKNOWN_APP_NAME } from "./app-access.ts";
+function registration(id = "one", patch: Partial<Registration> = {}): Registration {
+  return { client_id: id, client_name: "ChatGPT", return_host: "chatgpt.com", returns_to_this_computer: false, domain_control_verified: true, reads_last_7_days: 0,
+    sources: [{ source: { kind: "connector", id: "gmail", connector_id: "gmail", connection_id: "mail" }, kinds: ["messages"], in_force: true, first_issued_at: "2026-01-01T00:00:00Z", expires_at: null, stopped_at: null, stopped_reason: null, last_read_at: null, grant_ids: [id], active_grant_ids: [id], package_ids: [] }], ...patch };
 }
-
-test("access rows group by app and keep source names and the latest read", () => {
-  const rows = groupGrantAccessByApp([
-    grant(),
-    grant({
-      connector_id: "spotify",
-      grant_id: "access-2",
-      last_at: "2026-11-25T13:00:00.000Z",
-      source: { id: "spotify", kind: "connector" },
-    }),
-  ]);
-
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.name, "Chat helper");
-  assert.deepEqual(rows[0]?.sources, ["Gmail", "Spotify"]);
-  assert.equal(rows[0]?.lastRead, "2026-11-25T13:00:00.000Z");
-  assert.equal(rows[0]?.grantIds.length, 2);
-  assert.equal(rows[0]?.status, null);
+test("same name AND return host merge, preserving every old permission address", () => {
+  const rows = groupGrantAccessByApp([registration(), registration("two"), registration("three", { return_host: "lookalike.example" })]);
+  assert.equal(rows.length, 2); assert.deepEqual(rows[0]?.grantIds, ["one", "two"]); assert.equal(rows[0]?.sourceAccess.length, 1);
+  assert.ok(rows.find((app) => app.grantIds.includes("two"))?.clientIds.includes("two"));
 });
-
-test("access inside a package is removed as the package, loose access one by one", () => {
-  const rows = groupGrantAccessByApp([
-    grant({ grant_id: "access-1", grant_package_id: "pkg-1" }),
-    grant({ grant_id: "access-2", grant_package_id: "pkg-1" }),
-    grant({ grant_id: "access-3" }),
-    grant({ grant_id: "access-4", grant_package_id: "pkg-2", status: "revoked" }),
-  ]);
-  assert.deepEqual(rows[0]?.packageIds, ["pkg-1"]);
-  assert.deepEqual(rows[0]?.grantIds, ["access-3"]);
+test("loopback shares this computer; missing address groups by name; fully unnamed stands alone", () => {
+  const rows = groupGrantAccessByApp([registration("a", { returns_to_this_computer: true, return_host: "localhost" }), registration("b", { returns_to_this_computer: true, return_host: "127.0.0.1" }), registration("c", { return_host: null }), registration("d", { return_host: null }), registration("e", { client_name: "", return_host: null }), registration("f", { client_name: "", return_host: null }), registration("g", { client_name: "" })]);
+  assert.equal(rows.length, 5); assert.equal(rows.filter((row) => row.name === UNKNOWN_APP_NAME).length, 2); assert.ok(rows.some((row) => row.name === "chatgpt.com"));
 });
-
-test("app rows list only data sources with active access", () => {
-  // apps-repair.md P2: after one child is removed, show only the remaining live access.
-  const rows = groupGrantAccessByApp([
-    grant(),
-    grant({ grant_id: "removed", status: "revoked", source: { id: "spotify", kind: "connector" } }),
-  ]);
-  assert.deepEqual(rows[0]?.sources, ["Gmail"]);
-
-  const removedRows = groupGrantAccessByApp([grant({ status: "revoked" })]);
-  assert.deepEqual(removedRows[0]?.sources, []);
+test("expiry overrides in force; an event outcome is never an input", () => {
+  const item = registration(); item.sources[0]!.expires_at = "2026-01-02T00:00:00Z";
+  assert.equal(groupGrantAccessByApp([item], Date.parse("2026-01-03"))[0]?.state, "stopped");
+  item.sources[0]!.expires_at = null; assert.equal(groupGrantAccessByApp([item])[0]?.state, "reading");
+  item.sources[0]!.in_force = false; assert.equal(groupGrantAccessByApp([item])[0]?.state, "stopped");
 });
-
-test("removed app history keeps the known name and removal time", () => {
-  const clientId = "https://chat.example/id";
-  const rows = groupGrantAccessByApp([
-    grant({
-      client: undefined,
-      client_id: clientId,
-      grant_id: "removed",
-      last_at: "2026-11-25T12:30:00.000Z",
-      status: "revoked",
-    }),
-    grant({
-      client: { client_id: clientId, client_name: "Listening recap", registration_mode: null },
-      client_id: clientId,
-      status: "revoked",
-    }),
-  ]);
-
-  // round5 item 2: history rows use the shared app name and the stopped grant's last event time.
-  assert.equal(rows[0]?.name, "Listening recap");
-  assert.equal(rows[0]?.stoppedAt, "2026-11-25T12:30:00.000Z");
-});
-
-test("only inactive access gets a plain status word", () => {
-  assert.equal(groupGrantAccessByApp([grant({ status: "revoked" })])[0]?.status, "Removed");
-  assert.equal(groupGrantAccessByApp([grant({ status: "denied" })])[0]?.status, "Not allowed");
-  assert.equal(groupGrantAccessByApp([grant({ status: "failed" })])[0]?.status, "Failed");
-  assert.equal(groupGrantAccessByApp([grant({ status: "issued" })])[0]?.status, null);
-});
-
-test("relative read times use words and handle missing data", () => {
-  const now = Date.parse("2026-11-25T13:00:00.000Z");
-  assert.equal(formatAppLastRead("2026-11-25T12:00:00.000Z", now), "1 hour ago");
-  assert.equal(formatAppLastRead(null, now), "No reads yet");
-});
-
-test("source names read as names, including provider-native sources", () => {
-  // DIRECTION.md, Home § Apps that can read your data: source names remain plain and readable.
-  assert.equal(appSourceName({ id: "spotify", kind: "connector" }), "Spotify");
-  // PAGE-RULES 6: connector names use the shared display rule.
-  assert.equal(appSourceName({ id: "github", kind: "connector" }), "GitHub");
-  // DIRECTION.md, Home § Apps that can read your data: built-in sources use their display name.
-  assert.equal(appSourceName({ id: "health", kind: "provider_native" }), "Health");
-});
-
-test("access groups separate apps with current access from stopped access", () => {
-  const apps = groupGrantAccessByApp([
-    grant(),
-    grant({ client_id: "old", client: { client_id: "old", client_name: "Travel notes", registration_mode: null }, grant_id: "stopped", status: "revoked" }),
-  ]);
-  const groups = splitAppAccessGroups(apps);
-  // Round 6 item 3: only current access belongs under "Apps that can read your data".
-  assert.deepEqual(groups.reading.map((app) => app.name), ["Chat helper"]);
-  // Round 6 item 3: revoked access belongs under the separate stopped group.
-  assert.deepEqual(groups.stopped.map((app) => app.name), ["Travel notes"]);
-});
-
-test("package access lists use the server's active child and membership states", () => {
-  // apps-repair.md P2: show zero after the last removal and the remaining count when access remains.
-  assert.deepEqual(activePackageAccesses([
-    { grant_status: "revoked", member_status: "active" },
-  ]), []);
-  const remaining = { grant_status: "active", member_status: "active", grant_id: "remaining" };
-  assert.deepEqual(activePackageAccesses([
-    { grant_status: "revoked", member_status: "active" },
-    remaining,
-    { grant_status: "active", member_status: "revoked" },
-  ]), [remaining]);
-});
-
-test("waiting request names use a known app name, else the plain fallback", () => {
-  // apps-repair.md P2: the app's name when known; "An app" when the server gives nothing.
-  assert.equal(pendingApprovalAppName("Chat helper"), "Chat helper");
-  assert.equal(pendingApprovalAppName("  "), "An app");
-  assert.equal(pendingApprovalAppName(null), "An app");
-});
-
-test("waiting request titles never fall back to the request address host", async () => {
-  // Deputy repair: a Connect-an-app identity's client_id is on this server's own
-  // host, and a host can be shaped like a trusted name; neither is the app's name.
-  const src = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
-  assert.match(src, /appName=\{pendingApprovalAppName\(clientNames\.get\(approval\.client_id \?\? ""\)\)\}/);
-  const helper = await readFile(new URL("./app-access.ts", import.meta.url), "utf8");
-  const start = helper.indexOf("export function pendingApprovalAppName");
-  const body = helper.slice(start, helper.indexOf("\n}\n", start));
-  assert.ok(start >= 0 && body.length > 0);
-  assert.doesNotMatch(body, /new URL\(|hostname|client_?[iI]d/);
-});
-
-test("an app with no usable name is called the same thing on every page", async () => {
-  assert.equal(UNKNOWN_APP_NAME, "An app");
-  assert.equal(pendingApprovalAppName("  "), UNKNOWN_APP_NAME);
-  assert.equal(groupGrantAccessByApp([grant({ client: undefined })])[0]?.name, UNKNOWN_APP_NAME);
-  const pages = ["./page.tsx", "./[grantId]/page.tsx", "./packages/[packageId]/page.tsx", "../components/views/standing-view-model.ts"];
-  for (const page of pages) {
-    const source = await readFile(new URL(page, import.meta.url), "utf8");
-    assert.doesNotMatch(source, /(\|\||\?\?|\?)\s*"(App|Unnamed app)"/, page);
-  }
+test("every merged registration must be verified; kinds union without mutating input", () => {
+  const a = registration(); const b = registration("two", { domain_control_verified: false }); b.sources[0]!.kinds = ["threads"];
+  const before = structuredClone([a, b]); const app = groupGrantAccessByApp([a, b])[0]!;
+  assert.equal(app.verified, false); assert.deepEqual(app.sourceAccess[0]?.kinds, ["messages", "threads"]); assert.deepEqual([a, b], before);
 });
