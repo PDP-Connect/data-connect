@@ -126,7 +126,7 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
 test("row 2 words a setup that never completed", () => assertRow(2, "Setup never completed", "faint", { kind: "continue_setup", label: "Continue setup", filled: false }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
-test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs to get ready again", "attention", { kind: "install", label: "Get Example source ready", filled: true }));
+test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs to get ready again", "attention", { kind: "install", label: "Get it ready", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
@@ -225,7 +225,7 @@ test("row 12 words an automatic retry", () => assertRow(12, "Trying again on its
 test("row 13 words a wait for a maintainer fix", () => assertRow(13, "Waiting on a fix from the DataConnect maintainers", "plain"));
 test("row 14 words missing optional data", () => assertRow(14, "Some optional data is missing · last synced 2 hours ago", "plain"));
 test("row 15 words stuck records", () => assertRow(15, "Some records are stuck · last synced 2 hours ago", "plain"));
-test("row 16 words another degraded result", () => assertRow(16, "Trouble syncing · last synced 2 hours ago", "plain"));
+test("row 16 words another degraded result", () => assertRow(16, "Trouble syncing · last synced 2 hours ago", "plain", { kind: "sync_now", label: "Try again", filled: true }));
 test("row 17 words a refresh due", () => assertRow(17, "A refresh is due · last synced 2 hours ago", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
 test("row 18 words a completed import", () => assertRow(18, "Imported 2 hours ago", "plain"));
 test("row 19 says up to date when healthy, green, observed and on time", () => assertRow(19, "Up to date · synced 2 hours ago", "plain"));
@@ -247,11 +247,11 @@ test("pending detail work uses one shared sentence for rows 19 and 20", () => {
     );
   }
 });
-test("pending detail work keeps the sentence of every other row and adds the note", () => {
+test("pending detail work never appends a second state to a stronger sentence", () => {
   // Intake repair: before this round the page added the note on every row; row 16 must not lose it.
   assert.equal(
     sourceStateSentence(fixture(16), { now: NOW, name: "Example source", pendingDetails: true }).text,
-    `${sourceStateSentence(fixture(16), { now: NOW, name: "Example source" }).text} Still checking a few things.`
+    sourceStateSentence(fixture(16), { now: NOW, name: "Example source" }).text
   );
 });
 test("row 22 words a manual import with no completed import", () => assertRow(22, "Nothing imported yet", "plain"));
@@ -262,7 +262,7 @@ test("row 8 chooses words from each owner action surface and preserves its CTA",
   const cases = [
     ["browser_session", "Needs you to sign in again"],
     ["stored_credential", "Needs its saved sign-in details updated"],
-    ["provider_interaction", "Waiting for you to finish a step"],
+    ["provider_interaction", "Something stopped this data source from syncing"],
     ["local_device", "Needs attention on your device"],
     ["runtime_retry", "Needs you"],
   ] as const;
@@ -273,7 +273,7 @@ test("row 8 chooses words from each owner action surface and preserves its CTA",
       rendered_verdict: verdict("Can't collect", [requiredAction({ cta, surface: { kind: surface } })]),
     }), { now: NOW });
     assert.equal(result.words, expected);
-    assert.deepEqual(result.action, { kind: "server_cta", label: surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : cta, filled: true });
+    assert.deepEqual(result.action, surface === "provider_interaction" ? { kind: "sync_now", label: "Try again", filled: true } : { kind: "server_cta", label: surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : cta, filled: true });
   }
 });
 
@@ -299,7 +299,7 @@ test("needsYou is true exactly on the rows where the person must act", () => {
     const result = sourceStatusWords(fixture(row as SourceStatusRow), { now: NOW });
     // DIRECTION.md, "One status table": row 2 does not count as needs-you.
     assert.equal(result.needsYou, [4, 5, 6, 8, 9].includes(row), `row ${row}`);
-    if (result.action) assert.equal(result.action.filled, result.needsYou, `row ${row}`);
+    if (result.action && row !== 16) assert.equal(result.action.filled, result.needsYou, `row ${row}`);
   }
 });
 

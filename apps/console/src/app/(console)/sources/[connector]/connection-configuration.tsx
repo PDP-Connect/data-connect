@@ -9,6 +9,7 @@ import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState, useTransition } from "react";
 import { confirmConfigAction, proposeConfigAction } from "./config-actions.ts";
+import { summarizeSettingList } from "./setting-value-summary.ts";
 import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 import {
   buildCurrentSettings,
@@ -121,7 +122,7 @@ function ConfigEditor({
   const fieldErrors = useMemo(() => validateDraft(schema, draft), [schema, draft]);
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
   const proposal = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
-  const pending = proposal?.revision === dismissed ? null : proposal;
+  const pending = proposal?.revision === dismissed || (proposal?.origin === "migration" || (proposal?.origin === "agent" && proposal.source_of_change.startsWith("migration:") && !proposal.set_by.startsWith("app:"))) ? null : proposal;
 
   const resetToSummary = useCallback(() => {
     setStep("edit");
@@ -234,7 +235,7 @@ function ConfigEditor({
       ) : null}
 
       {pending ? (
-        <PendingProposal isPending={isPending} onConfirm={onConfirm} onDecline={() => { setDismissed(pending.revision); setPersisted(null); }} revision={pending} schema={schema} />
+        <PendingProposal isPending={isPending} onConfirm={onConfirm} onDecline={() => { setDismissed(pending.revision); setPersisted(null); }} revision={pending} activeRevision={config.active_revision} schema={schema} />
       ) : null}
 
       {step === "summary" ? (
@@ -395,7 +396,7 @@ function OptionControl({
   value: ConfigValue;
 }) {
   const label = optionLabel(option.option_key);
-  const gate = confirmationReason(option);
+
   const controlId = `config-${option.option_key}`;
   return (
     <div className="flex flex-col gap-1">
@@ -416,7 +417,7 @@ function OptionControl({
           {option.minimum ?? "any"}–{option.maximum ?? "any"}
         </p>
       ) : null}
-      {gate ? <p className="pdpp-caption text-muted-foreground/70">{gate}</p> : null}
+
       {error ? <p className="pdpp-caption text-destructive">{error}</p> : null}
     </div>
   );
@@ -609,8 +610,10 @@ function PendingProposal({
   onConfirm,
   onDecline,
   revision,
+  activeRevision,
   schema,
 }: {
+  activeRevision: ConfigRevisionWire | null;
   isPending: boolean;
   onConfirm: (revision: number) => void;
   onDecline: () => void;
@@ -633,14 +636,14 @@ function PendingProposal({
             const option = byKey.get(key);
             const raw = revision.config[key];
             return (
-              <div className="flex flex-wrap items-baseline justify-between gap-2" key={key}>
+              <div className="flex flex-wrap items-baseline gap-2" key={key}>
                 <dt className="pdpp-caption text-foreground">{optionLabel(key)}</dt>
-                <dd className="pdpp-caption text-foreground">{option ? formatWireValue(option, raw) : String(raw)}</dd>
+                <dd className="pdpp-caption text-foreground">{option ? <>{formatWireValue(option, activeRevision?.config[key] ?? option.default)} → {formatWireValue(option, raw)}</> : "This setting changed."}</dd>
               </div>
             );
           })}
       </dl>
-      <p className="pdpp-caption text-muted-foreground">{revision.origin === "owner" ? "You" : describeAgentActor(revision.set_by)} gave this reason: “{revision.source_of_change}”</p>
+      <p className="pdpp-caption text-muted-foreground">{revision.origin === "owner" ? "You" : revision.set_by.startsWith("app:") ? revision.set_by.slice(4) : "DataConnect"} asked to change this:</p>
       <div className="flex gap-2">
         <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
           {isPending ? "Confirming…" : "Confirm"}
@@ -717,7 +720,7 @@ function formatWireValue(option: ConfigOptionWire, raw: unknown): string {
     return raw === true ? "On" : "Off";
   }
   if (Array.isArray(raw)) {
-    return raw.length === 0 ? "None selected" : (raw as readonly string[]).join(", ");
+    return summarizeSettingList(option.option_key, raw);
   }
   return raw === "" ? "Not set" : String(raw);
 }

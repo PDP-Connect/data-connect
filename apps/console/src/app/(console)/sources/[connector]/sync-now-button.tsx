@@ -205,6 +205,7 @@ export function SyncNowButton({
             displayName={displayName}
             onInstalled={() => setNotInstalledKey(null)}
             routeId={syncToastScopeId}
+            showSentence
             variant="inline"
           />
         </div>

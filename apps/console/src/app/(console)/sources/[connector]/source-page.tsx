@@ -843,7 +843,7 @@ function ConnectorPageView({
   } else if (partial && markedMissing && [19, 20, 21].includes(sourceStatus.row)) {
     const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
     stateSentence = { text: `Synced${when ? ` ${when}` : ""}. Some of it didn't come.`, slot: null };
-  } else if (([14, 15, 16].includes(sourceStatus.row) && !markedMissing) || (partial && !markedMissing && [19, 20, 21].includes(sourceStatus.row))) {
+  } else if (([14, 15].includes(sourceStatus.row) && !markedMissing) || (partial && !markedMissing && [19, 20, 21].includes(sourceStatus.row))) {
     stateSentence = { text: `${displayName} synced, but DataConnect could not copy some of it.`, slot: null };
   } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
     stateSentence = { text: `Something stopped ${displayName} from syncing.`, slot: null };
@@ -859,7 +859,7 @@ function ConnectorPageView({
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
           </DeviceSteps> : <ConnectorHeaderActions
             browserSessionRepairHref={browserSessionRepairHref}
-            canStartSync={canStartSyncFromSummary(source)}
+            canStartSync={!archived && canStartSyncFromSummary(source)}
             connectionId={connectorInstanceId}
             connectorId={connectorId}
             credentialUpdateHref={credentialUpdateHref}
@@ -872,7 +872,7 @@ function ConnectorPageView({
             routeConnectionId={connectionId}
             sourceInstances={sourceInstances}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
-            statusAction={pageStatusAction}
+            statusAction={archived ? null : pageStatusAction}
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
@@ -925,7 +925,7 @@ function ConnectorPageView({
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
             <CredentialRepairLinks
               revoked={revoked}
-              setupFailed={setupFailed}
+              setupFailed={setupFailed || archived}
               storedCredentialUpdateHref={credentialUpdateHref}
               hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
             />
@@ -970,7 +970,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
         ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : `${count ? `${count}. ` : ""}Some could not be copied.`
         : count;
       const newest = recordCount === 0 ? null : recordDateLabel(stream.last_updated);
-      const cause = gap?.message;
+      const cause = gap ? "DataConnect could not copy this." : null;
       return <li key={stream.name}>
         <Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
           <span className="flex min-w-0 flex-col gap-1">
@@ -985,7 +985,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
       <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
       <DataList ariaLabel="Didn't come">{missing.map((stream) => {
         const relevant = gaps.filter((gap) => gap.stream === stream.name);
-        const message = [...new Set(relevant.map((gap) => gap.message?.trim() || "DataConnect could not copy this."))].join(" ");
+        const message = [...new Set(relevant.map(() => "DataConnect could not copy this."))].join(" ");
         return <li className="flex flex-col gap-1 px-3 py-3" key={stream.name}>
           <span className="text-foreground">{label(stream.name)}</span>
           <span className="pdpp-caption text-muted-foreground">{message}{relevant.some((gap) => gap.recovery_hint?.retryable === true) ? ` It will try again the next time DataConnect checks ${displayName}.` : ""}</span>

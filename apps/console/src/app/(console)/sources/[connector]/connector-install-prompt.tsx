@@ -14,6 +14,7 @@ interface Props {
   connectorKey: string;
   displayName: string;
   actionLabel?: string;
+  showSentence?: boolean;
   /** Route id of this source page, so the action revalidates it. */
   routeId: string;
   /**
@@ -32,7 +33,7 @@ type Feedback = { message: string; rawDetails?: string; tone: "error" | "success
  * action that fixes it. Installing is the owner's decision, so nothing runs
  * until the button is pressed; afterwards the page re-reads its state.
  */
-export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName, onInstalled, routeId, variant }: Props) {
+export function ConnectorInstallPrompt({ actionLabel, showSentence = false, connectorKey, displayName, onInstalled, routeId, variant }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -63,7 +64,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
       data-testid={notice ? "connector-not-installed-notice" : "connector-not-installed-inline"}
       role={notice ? "status" : undefined}
     >
-      {notice ? <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
+      {notice || showSentence ? <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
         {`DataConnect needs to get ${displayName} ready again.`}
       </p> : null}
       {notice ? (
@@ -78,7 +79,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
           type="button"
           variant="default"
         >
-          {isPending ? "Getting ready…" : actionLabel ?? `Get ${displayName} ready`}
+          {isPending ? "Getting ready…" : actionLabel ?? "Get it ready"}
         </IcButton>
         {feedback ? (
           <div

@@ -66,6 +66,7 @@ function requiredAction(overrides: Partial<RefRequiredAction> = {}): RefRequired
     kind: "reauth",
     satisfied_when: { kind: "credential_present_and_unrejected" },
     surface: { kind: "provider_interaction" },
+    target: { kind: "sync", run_id: "run-waiting" },
     terminal: false,
     urgency: "now",
     ...overrides,

@@ -136,12 +136,12 @@ function lifecycleRow(
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null };
   if (projection.renderedStatus.kind === "setup_failed") {
     return sourceNeverConnected(source)
-      ? { row: 2, words: `${source.display_name} was never connected.`, tone: "faint", action: action("continue_setup", "Try again", false) }
+      ? { row: 2, words: `${source.display_name} was never connected.`, tone: "faint", action: action("continue_setup", "Try again", true) }
       : { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };
   if (source.connector_implementation?.state === "not_installed") {
-    return { row: 4, words: "Needs to get ready again", tone: "attention", action: action("install", `Get ${source.connector_display_name ?? source.display_name} ready`, true) };
+    return { row: 4, words: "Needs to get ready again", tone: "attention", action: action("install", "Get it ready", true) };
   }
 
   switch (source.terminal_setup_disposition) {
@@ -189,7 +189,8 @@ function lifecycleRow(
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
     const surface = requiredAction?.surface?.kind;
-    const words = surface === "browser_session"
+    const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
+    const words = unknownStep ? "Something stopped this data source from syncing" : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
@@ -202,7 +203,7 @@ function lifecycleRow(
       row: 8,
       words,
       tone: "attention",
-      action: requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: unknownStep ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {
@@ -270,7 +271,7 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
       : label === "Some records stuck"
         ? "Some records are stuck"
         : "Trouble syncing";
-    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: withWhen(base), tone: "plain", action: null };
+    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null };
   }
   if (resolver === "refresh_due") {
     return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) };
@@ -308,7 +309,7 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
 
 export function sourceStatusWords(source: RefConnectorSummary, options: SourceStatusOptions): SourceStatusWords {
   const matched = matchSourceStatus(source, options);
-  return { ...matched, needsYou: NEEDS_YOU_ROWS.has(matched.row) };
+  return { ...matched, needsYou: NEEDS_YOU_ROWS.has(matched.row) && matched.action !== null && !(matched.row === 8 && (matched.action.kind === "sync_now" || (ownerAction(source)?.surface?.kind === "local_device" && !ownerAction(source)?.remediation?.commands.length))) };
 }
 
 export function isUpToDateRow(row: SourceStatusRow): boolean {
@@ -335,7 +336,7 @@ const PENDING_DETAILS_SENTENCE = "Still checking a few things.";
 export function sourceStateSentence(source: RefConnectorSummary, options: SourceStateSentenceOptions): SourceStateSentence {
   const { text, slot = null } = matchStateSentence(source, options);
   // Rows 19-20 replace their sentence; every other row keeps it and adds the pending note.
-  const pending = options.pendingDetails && !text.endsWith(PENDING_DETAILS_SENTENCE) ? ` ${PENDING_DETAILS_SENTENCE}` : "";
+  const pending = options.pendingDetails && [19, 20].includes(matchSourceStatus(source, options).row) && !text.endsWith(PENDING_DETAILS_SENTENCE) ? ` ${PENDING_DETAILS_SENTENCE}` : "";
   return { text: `${text}${pending}`, slot };
 }
 
@@ -353,7 +354,7 @@ function matchStateSentence(
   }
 
   switch (status.row) {
-    case 1: return { text: "Archived. It no longer syncs." };
+    case 1: return { text: "Archived. It no longer syncs. Your records are kept." };
     case 2: return { text: sourceNeverConnected(source) ? `${options.name} was never connected.` : "Setup was never completed." };
     case 3: return { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" };
     case 4: return { text: `DataConnect needs to get ${options.name} ready again.` };
@@ -367,7 +368,7 @@ function matchStateSentence(
         : surface === "stored_credential"
           ? `${options.name} needs its saved sign-in details updated.`
           : surface === "provider_interaction"
-            ? `${options.name} is waiting for you to finish a step.`
+            ? (!ownerAction(source)?.target || ownerAction(source)?.cta === "Complete the requested action" ? `Something stopped ${options.name} from syncing.` : `${options.name} is waiting for you to finish a step.`)
             : surface === "local_device"
               ? `The computer that holds this data${options.deviceName ? ` (${options.deviceName})` : ""} could not send${typeof options.unsentRecords === "number" ? ` ${options.unsentRecords.toLocaleString()} records` : " some records"}.`
               : `${options.name} needs you.`;
@@ -410,6 +411,7 @@ function matchStateSentence(
     case 14:
     case 15:
     case 16: {
+      if (status.row === 16) return { text: `Something stopped ${options.name} from syncing.` };
       const base = `${wordsWithoutWhen()}.`;
       const retry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";
       return { text: `${base}${retry}${when ? ` Last synced ${when}.` : ""}` };

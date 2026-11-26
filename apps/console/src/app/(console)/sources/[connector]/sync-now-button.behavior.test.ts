@@ -115,7 +115,7 @@ test("a connector_not_installed refusal reads as plain copy with an Install acti
     assert.ok(prompt, "the inline install prompt renders after the refusal");
     assert.match(prompt.textContent ?? "", /DataConnect needs to get Chase ready again\./);
     assert.doesNotMatch(container.textContent ?? "", /reference server rejected|reference fixture|verified install/);
-    button(container, "Get Chase ready");
+    button(container, "Get it ready");
     assert.equal(installCalls.length, 0, "nothing installs until the owner presses Install");
   });
 });
@@ -127,7 +127,7 @@ test("Install calls the owner install action with the connector key and shows a 
     await act(async () => button(container, "Refresh now").click());
 
     installResult = { message: "no verified update target for chase.", ok: false };
-    await act(async () => button(container, "Get Chase ready").click());
+    await act(async () => button(container, "Get it ready").click());
     assert.deepEqual(installCalls, [{ connectorKey: "chase", routeId: "cin_chase" }]);
     const feedback = container.querySelector('[data-testid="connector-install-feedback"]');
     assert.equal(feedback?.querySelector("p")?.textContent, "This could not be done. Try again.");
@@ -135,7 +135,7 @@ test("Install calls the owner install action with the connector key and shows a 
     assert.equal(refreshCalls, 0, "a failed install does not pretend the state changed");
 
     installResult = { ok: true };
-    await act(async () => button(container, "Get Chase ready").click());
+    await act(async () => button(container, "Get it ready").click());
     assert.equal(installCalls.length, 2);
     assert.equal(refreshCalls, 1, "a successful install re-reads the page state");
     assert.equal(

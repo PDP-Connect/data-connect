@@ -243,7 +243,7 @@ test("practice states cover partial copies, missing kinds, settings, accounts an
   const cases = [
     ["partly-more-coming", /24 so far\. More at the next sync\./],
     ["partly-some-lost", /24 records\. Some could not be copied\./],
-    ["didnt-come", /Didn't come[\s\S]*Northwind could not send these messages\./],
+    ["didnt-come", /Didn't come[\s\S]*DataConnect could not copy this\./],
     ["settings-choices", /Settings[\s\S]*How many days of messages to copy\./],
     ["settings-question", /Awaiting your confirmation/],
     ["other-accounts", /Also connected: Northwind \(work\)/],
@@ -363,7 +363,7 @@ test("settings show one explanation per choice, a narrow number, and only useful
   assert.ok(![...settings.querySelectorAll("button")].some((node) => node.textContent === "Cancel"));
   assert.match(settings.querySelector('input[type="number"]')?.className ?? "", /!w-28/);
   const pending = (await renderDemo("settings-question")).window.document.querySelector("#configuration");
-  assert.match(pending?.textContent ?? "", /You gave this reason/);
+  assert.match(pending?.textContent ?? "", /You asked to change this/);
   assert.ok([...pending?.querySelectorAll("button") ?? []].some((node) => node.textContent === "Don't change"));
 });
 
@@ -372,4 +372,27 @@ test("the unmeasured-completeness practice state uses the shared plain sentence 
   const document = (await renderDemo("unmeasured-completeness")).window.document;
   assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /DataConnect can't yet tell whether it got everything/);
   assert.ok([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "Sync now"));
+});
+
+
+test("real-data shapes never expose raw errors or actionless waiting states", async () => {
+  const raw = await renderDemo("raw-error");
+  assert.doesNotMatch(visibleOutsideDetails(raw), /offset=|refusing_to_advance|machine_failure/);
+  assert.match(visibleOutsideDetails(raw), /DataConnect could not copy this/);
+  const waiting = await renderDemo("waiting-unknown");
+  assert.match(visibleOutsideDetails(waiting), /Something stopped Northwind from syncing/);
+  assert.ok([...waiting.window.document.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
+  const archive = await renderDemo("archive-leftover");
+  assert.doesNotMatch(visibleOutsideDetails(archive), /Sync now|Update sign-in details|Still checking/);
+  const strong = await renderDemo("strong-state-pending");
+  assert.doesNotMatch(strong.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /Still checking/);
+});
+
+test("pending settings summarize codes and hide machine changes", async () => {
+  const machine = await renderDemo("settings-machine-change");
+  assert.doesNotMatch(visibleOutsideDetails(machine), /Awaiting your confirmation|migration:|C000/);
+  const app = await renderDemo("settings-long-list");
+  assert.match(visibleOutsideDetails(app), /250 channels/);
+  assert.doesNotMatch(visibleOutsideDetails(app), /C000|migration:/);
+  assert.match(visibleOutsideDetails(app), /Sample app asked to change this/);
 });

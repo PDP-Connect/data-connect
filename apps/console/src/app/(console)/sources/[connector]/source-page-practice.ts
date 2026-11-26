@@ -11,6 +11,7 @@ import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
   "apps-some", "apps-none",
+  "raw-error", "settings-machine-change", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
 	"unknown-count",
   "atlas",
@@ -48,7 +49,7 @@ export function buildSourcePracticeModel(
 	const match = state.match(/^status-(\d{1,2})(?:-([a-z-]+))?$/u);
 	const row = Number(
 		match?.[1] ??
-			(state === "pending-details" ? 20 : state === "atlas" ? 16 : 19),
+			(state === "pending-details" ? 20 : state === "waiting-unknown" ? 8 : state === "trouble-unknown" ? 16 : state === "strong-state-pending" ? 13 : state === "archive-leftover" ? 1 : state === "atlas" ? 16 : 19),
 	) as SourceStatusRow;
 	let model = buildRecoveryDemoModel(
 		row,
@@ -113,12 +114,12 @@ export function buildSourcePracticeModel(
 				}),
 			),
 		};
-	if (state.startsWith("partly-") || state === "didnt-come") {
+	if (state.startsWith("partly-") || state === "didnt-come" || state === "raw-error") {
 		const entry = {
 			checkpoint: "committed" as const,
-			collected: state === "didnt-come" ? 0 : 24,
+			collected: ["didnt-come", "raw-error"].includes(state) ? 0 : 24,
 			considered: 27,
-			coverage_condition: "retryable_gap" as const,
+			coverage_condition: state === "partly-some-lost" ? "terminal_gap" as const : "retryable_gap" as const,
 			covered: 24,
 			forward_disposition:
 				state === "partly-some-lost"
@@ -140,7 +141,7 @@ export function buildSourcePracticeModel(
 					kind: "missing",
 					reason: "unavailable",
 					stream: "messages",
-					message: "Northwind could not send these messages.",
+					message: state === "raw-error" ? "offset=480: refusing_to_advance_cursor; " + "machine_failure_".repeat(30) : "Northwind could not send these messages.",
 					recovery_hint: { retryable: state !== "partly-some-lost" },
 				},
 			],
@@ -201,6 +202,32 @@ export function buildSourcePracticeModel(
 		};
 		model.configRevisions = state === "settings-question" ? [revision] : [];
 	}
+
+  if (state === "waiting-unknown") {
+    const action = { ...buildRecoveryDemoModel(8).connectionPrimaryAction!, surface: { kind: "provider_interaction" as const }, cta: "Complete the requested action", target: undefined };
+    model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "needs_owner" }, rendered_verdict: { ...model.source.rendered_verdict!, required_actions: [action] } };
+    model.connectionPrimaryAction = action;
+  }
+  if (state === "trouble-unknown") model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "system_degraded" }, rendered_verdict: { ...model.source.rendered_verdict!, pill: { label: "Can't collect", tone: "red" } } };
+  if (state === "strong-state-pending" || state === "archive-leftover") {
+    model.connectionHealth = { ...model.connectionHealth!, detail_gap_backlog: { ...buildRecoveryDemoModel(16, true).connectionHealth!.detail_gap_backlog!, pending: 3 } };
+    if (state === "strong-state-pending") model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "blocked_maintainer" } };
+    else model.source = { ...model.source, source_visibility: "archived", source_binding_kind: "historical_archive" };
+  }
+  if (state === "records-zero-one") model.streams = model.streams.map((stream, i) => ({ ...stream, record_count: i === 0 ? 1 : 0, count_state: i === 0 ? "known" : "known_zero" }));
+  if (state === "measurement-shortfall") model.source = { ...model.source, collection_report: [{ stream: "messages", collected: 0, considered: 100, covered: "unknown", checkpoint: "unknown", coverage_condition: "unknown", forward_disposition: "unmeasured", skipped: null, pending_detail_gaps: 0 }] };
+  if (state === "bookkeeping-kinds") {
+    model.streams = [...model.streams, { name: "coverage_diagnostics", object: "stream", record_count: 0, count_state: "known_zero", last_updated: null }];
+    model.manifest = { ...model.manifest, streams: [...model.manifest.streams ?? [], { name: "coverage_diagnostics", display: { label: "Copy checks" }, description: "Copy checks" }] };
+  }
+  if (state === "long-account-name") model.source = { ...model.source, display_name: "Northwind - a deliberately long account name" };
+  if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: "Northwind" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
+  if (state === "settings-machine-change" || state === "settings-long-list") {
+    const base = buildSourcePracticeModel("settings-question")!;
+    const revision = { ...base.configRevisions[0]!, origin: "agent" as const, set_by: state === "settings-machine-change" ? "migration" : "app:Sample app", source_of_change: "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
+    model.configuration = { ...base.configuration!, options_schema: { ...base.configuration!.options_schema!, options: [{ ...base.configuration!.options_schema!.options[0]!, option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
+    model.configRevisions = [revision];
+  }
 	if (state.startsWith("dialog-"))
 		model.initialDialog =
 			state === "dialog-reset"
