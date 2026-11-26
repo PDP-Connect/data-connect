@@ -42,3 +42,12 @@ test("Add Source marks existing accounts from the shared exact reader, even when
   assert.match(sharedReader, TOLERATES_REFUSAL_RE);
   assert.match(sharedReader, RETURNS_PARTIAL_SOURCE_ROWS_RE);
 });
+
+// Any other failure (for example the package registry cannot be reached) lands in the segment's error
+// boundary. It must keep the page's frame: navigation, title and breadcrumb, not a bare sentence.
+test("Add Source's error boundary keeps the shell and the page header around the failed state", async () => {
+  const src = await readFile(`${HERE}error.tsx`, "utf8");
+  assert.match(src, /<RecordroomShellWithPalette>/);
+  assert.match(src, /<AddSourceHeader \/>/);
+  assert.match(src, /ADD_SOURCE_COPY\.loadFailed/);
+});

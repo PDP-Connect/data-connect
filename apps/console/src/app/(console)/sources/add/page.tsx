@@ -1,11 +1,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { readAddSourceCatalog } from "./add-source-catalog-read.ts";
+import { AddSourceHeader } from "./add-source-header.tsx";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
 import { ADD_SOURCE_COPY, buildAddSourceList } from "./add-source-list-model.ts";
 import { AddSourceList, AddSourceLoadFailed } from "./add-source-list.tsx";
@@ -16,20 +15,6 @@ export const dynamic = "force-dynamic";
 interface PageParams {
   error?: string;
   source_q?: string;
-}
-
-function AddSourceHeader() {
-  return (
-    <PageHeader
-      breadcrumbs={[
-        { href: dashboardRoutes.section.overview, label: "Home" },
-        { href: dashboardRoutes.section.records, label: "Data sources" },
-        { label: ADD_SOURCE_COPY.heading },
-      ]}
-      description={ADD_SOURCE_COPY.lead}
-      title={ADD_SOURCE_COPY.heading}
-    />
-  );
 }
 
 export default async function AddSourcePage({ searchParams }: { searchParams: Promise<PageParams> }) {
