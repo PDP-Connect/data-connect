@@ -20,7 +20,7 @@ test("the served service worker is the transpile of its source", () => {
 test("every text a person can read in the source is in the served file", () => {
 	const served = read("pdpp-dashboard-sw.js");
 	for (const [, text] of read("pdpp-dashboard-sw.ts").matchAll(/"((?:DataConnect|Open DataConnect|This is a test)[^"]*)"/g)) {
-		assert.ok(served.includes(text ?? ""), text);
+		assert.ok(served.includes(String(text)), String(text));
 	}
 	assert.ok(!served.includes("PDPP action needed"));
 });
