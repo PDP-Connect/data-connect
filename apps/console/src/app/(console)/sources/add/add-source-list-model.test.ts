@@ -3,9 +3,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import type { ConnectorInstallCatalogEntry } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
-import { connectorLookupKey } from "../../lib/connector-install-presentation.ts";
+import { buildConnectorInstallLifecycleByConnector, connectorLookupKey } from "../../lib/connector-install-presentation.ts";
 import { buildAddSourceList, isConnectableEntry, searchAddSourceList } from "./add-source-list-model.ts";
 import { ALL_ENTRIES, amazon, appleHealth, chase, claudeCode, installed, notInstalled, whoop, ynab } from "./add-flow-fixtures.ts";
 
@@ -78,6 +79,50 @@ test("a service whose package the host cannot run is not listed", () => {
 // Design "Rows with no way to connect": a service with no package and not registered is not listed.
 test("a service with no package and no registration is not listed", () => {
   assert.equal(isConnectableEntry({ ...chase, registrationStatus: undefined }, { catalog: null, installed: null }, false), false);
+});
+
+test("fresh Core lists local collectors whose setup proof is judged after package installation", () => {
+  // Latest signed catalog entries, normalized by Core; a fresh image has no
+  // registered manifests, templates, or installed packages to supply proof yet.
+  const packages: ConnectorInstallCatalogEntry[] = [
+    {
+      connector_key: "claude-code",
+      display_name: "Claude Code",
+      digest: "sha256:13687c6441cede6b6a50169f9d66c28878bdb1212c694c4152896612453f5d68",
+      version: "0.3.30",
+    },
+    {
+      connector_key: "codex",
+      display_name: "OpenAI Codex CLI",
+      digest: "sha256:6df59e78fcfd79cef46c0b3ef512a7bc3c921cf9536cabb647893e7ca131437e",
+      version: "0.3.15",
+    },
+  ].map((entry) => ({
+    ...entry,
+    bindings: { filesystem: { required: true } },
+    catalog_connector_id: `https://registry.pdpp.dev/connectors/${entry.connector_key}`,
+    connector_id: entry.connector_key,
+    latest: true,
+    tier: "supported",
+  }));
+  const catalog = buildOwnerConnectorCatalog([], [], packages);
+  const lifecycle = buildConnectorInstallLifecycleByConnector(packages, []);
+  assert.deepEqual(catalog.map((entry) => entry.disposition), ["local_collector_unproven", "local_collector_unproven"]);
+  const model = buildAddSourceList({
+    catalog,
+    catalogTransientlyUnavailable: false,
+    existingConnectionIds: {},
+    lifecycleFor: (entry) => lifecycle[entry.connectorKey] ?? null,
+  });
+  assert.deepEqual(model.rows.map((row) => row.connectorKey), ["claude-code", "codex"]);
+  for (const entry of catalog) {
+    const state = lifecycle[entry.connectorKey]!;
+    assert.equal(isConnectableEntry({ ...entry, registrationStatus: "registered" }, state, false), false);
+    assert.equal(isConnectableEntry(entry, {
+      ...state,
+      catalog: { ...state.catalog!, bindings: { filesystem: { available: false } } },
+    }, false), false);
+  }
 });
 
 test("every row links to its own connect page, with no install step in the link", () => {

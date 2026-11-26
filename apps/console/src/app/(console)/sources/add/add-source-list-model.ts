@@ -45,7 +45,7 @@ export function addSourceHref(connectorKey: string): string {
 
 /**
  * Whether the server lets a person connect this service here. Both facts must
- * hold: the setup path exists for the entry's kind and tier, and the install
+ * hold: setup is available now or after installing its package, and the install
  * state does not block it (no package to get, or a host that cannot run it).
  */
 export function isConnectableEntry(
@@ -53,13 +53,16 @@ export function isConnectableEntry(
   lifecycle: ConnectorInstallLifecycle | null,
   catalogTransientlyUnavailable: boolean
 ): boolean {
-  if (sourceSetupAction(entry) === null) {
+  const card = sourceSetupCardModel(entry, lifecycle, catalogTransientlyUnavailable);
+  // A fresh local collector gets its setup proof from the installed package.
+  // Use the card's install eligibility without admitting other setup-less kinds.
+  if (sourceSetupAction(entry) === null && !(entry.disposition === "local_collector_unproven" && !card.noSetupPath)) {
     return false;
   }
   if (!catalogTransientlyUnavailable && isUninstallableCatalogEntry(entry, lifecycle)) {
     return false;
   }
-  return !sourceSetupCardModel(entry, lifecycle, catalogTransientlyUnavailable).unavailable;
+  return !card.unavailable;
 }
 
 /** The page of a data source the person already has (also where "You already have ..." links). */
