@@ -783,6 +783,36 @@ test("a descriptor read outside the reviewed sites is a data load", () => {
   );
 });
 
+test("a reviewed host BLOB descriptor read is runtime data, not an RI policy resource", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const file = join(dir, "synthetic-host-blob-spool.ts");
+    writeFileSync(
+      file,
+      [
+        'import { readSync } from "node:fs";',
+        "function readVerifiedSpoolBlob(fd: number, bytes: Buffer, offset: number) {",
+        "  const read = readSync(fd, bytes, offset, Math.min(READ_CHUNK_BYTES, bytes.length - offset), null);",
+        "  return JSON.parse(bytes.subarray(0, read).toString(\"utf8\"));",
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFileDataLoads(
+      file,
+      "reference-implementation/runtime/host-blob-spool.ts",
+      repoRoot
+    );
+    assert.deepEqual(
+      violations,
+      [],
+      `the exact reviewed runtime BLOB read must not be classified as an RI policy-resource load: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("falsifiability: parameter-indirection does NOT cross-resolve two unrelated same-named parameters in different functions", () => {
   withSyntheticProductionFile(
     "synthetic-helper-indirection-ambiguity-load.ts",
