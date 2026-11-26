@@ -8,8 +8,14 @@ export function CopyAddress({ address, command = false }: { address: string; com
   return (
     <>
       <div className="flex min-w-0 items-center gap-3 rounded-md border border-border p-3">
-        <code data-command={command || undefined} className="min-w-0 flex-1 whitespace-pre-wrap break-all">{address}</code>
-        <IcButton aria-label={command ? (copied ? "Command copied" : "Copy command") : undefined} onClick={() => void copy()} variant="ghost">
+        <code className="min-w-0 flex-1 whitespace-pre-wrap break-all" data-command={command || undefined}>
+          {address}
+        </code>
+        <IcButton
+          aria-label={command ? (copied ? "Command copied" : "Copy command") : undefined}
+          onClick={() => void copy()}
+          variant="ghost"
+        >
           {copied ? "Copied" : "Copy"}
         </IcButton>
       </div>

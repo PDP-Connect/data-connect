@@ -1,8 +1,8 @@
 "use client";
+import { useRouter } from "next/navigation";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import type { AppAccessSourceIdentity } from "../../lib/ref-client.ts";
 import { removeAppAction } from "../remove-app-action.ts";
 export function useAppRemoval(
@@ -23,16 +23,23 @@ export function useAppRemoval(
     setError(null);
     const result = practice
       ? { ok: true, message: null }
-      : await removeAppAction({ client_ids: clientIds, ...(source ? { source } : {}) });
+      : await removeAppAction({ client_ids: clientIds, ...(source ? { source } : {}) }).catch(() => ({
+          ok: false,
+          message: "Access could not be removed. Try again.",
+        }));
     setBusy(false);
     if (!result.ok) {
       setError({ source: key, message: result.message || "Access could not be removed. Try again." });
-      if (!practice) router.refresh();
+      if (!practice) {
+        router.refresh();
+      }
       return;
     }
     setQuestion(null);
     setRemoved((previous) => [...previous, key]);
-    if (!practice) router.refresh();
+    if (!practice) {
+      router.refresh();
+    }
   }
   return { question, setQuestion, error, removed, busy, remove };
 }

@@ -14,10 +14,7 @@ const STREAM_FACTS_FILE = `${HERE}[connector]/stream-collection-facts.tsx`;
 
 // DIRECTION.md, “Data sources /sources”: every screen uses one list, and each row opens its data source page.
 test("the sources page renders one list and no selected-source panel", async () => {
-  const [view, css] = await Promise.all([
-    readFile(VIEW_FILE, "utf8"),
-    readFile(CSS_FILE, "utf8"),
-  ]);
+  const [view, css] = await Promise.all([readFile(VIEW_FILE, "utf8"), readFile(CSS_FILE, "utf8")]);
   assert.match(view, /aria-label="Data sources"[\s\S]*<ul className="rr-s-list">/);
   assert.match(view, /className="rr-s-row__link" href=\{instance\.detailHref\}/);
   assert.doesNotMatch(view, /SourcePassport|rr-s-passport|Streams on this source/);
@@ -42,9 +39,15 @@ test("phone rows keep identity, status, and action while hiding records and sche
   // Lead decision (list-pictures 7): the narrow layout follows the list's own width; the menu sits on the
   // name line and the action goes beneath the status, aligned with the text.
   // DIRECTION.md, “Data sources /sources”: phone rows show the status below identity and hide other columns.
-  assert.match(css, /@container rr-s-list \(max-width:\s*880px\)[\s\S]*?\.rr-s-row__link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(
+    css,
+    /@container rr-s-list \(max-width:\s*880px\)[\s\S]*?\.rr-s-row__link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/
+  );
   assert.match(css, /\.rr-s-menu-trigger\s*\{\s*grid-column:\s*2;\s*grid-row:\s*1;/);
-  assert.match(css, /\.rr-s-row__action,\s*\.rr-s-row__action-form\s*\{\s*grid-column:\s*1;\s*grid-row:\s*2;[^}]*margin-left:\s*46px/);
+  assert.match(
+    css,
+    /\.rr-s-row__action,\s*\.rr-s-row__action-form\s*\{\s*grid-column:\s*1;\s*grid-row:\s*2;[^}]*margin-left:\s*46px/
+  );
   assert.match(css, /\.rr-s-row__records,\s*\.rr-s-row__schedule\s*\{\s*display:\s*none/);
   // DIRECTION.md, “Data sources /sources”: status aligns beneath the data source name.
   assert.match(css, /\.rr-s-row__status\s*\{\s*margin-left:\s*46px/);
@@ -53,16 +56,16 @@ test("phone rows keep identity, status, and action while hiding records and sche
 // DIRECTION.md, “Data sources /sources”: row state changes the words, not the row geometry.
 test("status tone does not add row-specific geometry or a selected-source rail", async () => {
   const css = await readFile(CSS_FILE, "utf8");
-  assert.doesNotMatch(css, /\.rr-s-row(?:__status)?(?:\[data-[^\]]+\]|\.[a-z-]+)\s*\{[^}]*?(?:margin|width|border-radius)\s*:/i);
+  assert.doesNotMatch(
+    css,
+    /\.rr-s-row(?:__status)?(?:\[data-[^\]]+\]|\.[a-z-]+)\s*\{[^}]*?(?:margin|width|border-radius)\s*:/i
+  );
   assert.doesNotMatch(css, /\.rr-s-row\.is-on|\.rr-s-row__link\.is-on/);
 });
 
 // DIRECTION.md, “One data source”: per-kind counts and collection facts stay on the source page.
 test("the source page keeps the moved per-kind list and its collection facts", async () => {
-  const [page, facts] = await Promise.all([
-    readFile(SOURCE_PAGE_FILE, "utf8"),
-    readFile(STREAM_FACTS_FILE, "utf8"),
-  ]);
+  const [page, facts] = await Promise.all([readFile(SOURCE_PAGE_FILE, "utf8"), readFile(STREAM_FACTS_FILE, "utf8")]);
   // detail-page-2 decision 6: the title alone; coverage facts are a plain line inside folded Details, not a chip.
   assert.match(page, /title="What is here"/);
   assert.match(page, /knownStreamRecordCount\(stream\)/);
@@ -87,6 +90,9 @@ test("duplicate sources are not collapsed out of the list", async () => {
 // DIRECTION.md, “Data sources /sources”: the status action owns the row action; other labels open the safe detail address.
 test("server CTA row actions keep their label without inventing a run", async () => {
   const view = await readFile(VIEW_FILE, "utf8");
-  assert.match(view, /primaryVerdictAction\.kind === "refresh_now" \|\| instance\.primaryVerdictAction\.kind === "retry_gap"/);
+  assert.match(
+    view,
+    /primaryVerdictAction\.kind === "refresh_now" \|\| instance\.primaryVerdictAction\.kind === "retry_gap"/
+  );
   assert.match(view, /<Link className=\{`\$\{buttonVariants\([\s\S]*?href=\{instance\.detailHref\}/);
 });

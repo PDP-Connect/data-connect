@@ -38,6 +38,6 @@ export const assistantInstructions = [
 
 /** Matches the existing technical setup command; quote the address for a shell. */
 export function claudeCodeCommand(origin: string): string {
- const address = `${origin.replace(/\/+$/, "")}/mcp`;
- return `claude mcp add --transport http pdpp '${address.replaceAll("'", "'\\''")}'`;
+  const address = `${origin.replace(/\/+$/, "")}/mcp`;
+  return `claude mcp add --transport http pdpp '${address.replaceAll("'", "'\\''")}'`;
 }

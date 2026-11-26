@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { buttonVariants } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import type { AppAccess } from "../../grants/app-access.ts";
@@ -16,7 +17,9 @@ export async function SourceApps({ connectionId }: { connectionId: string }) {
 }
 export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; connectionId: string }) {
   const allowed = apps.flatMap((app) => {
-    const sources = app.sourceAccess.filter((row) => row.in_force && row.source.connection_id === connectionId);
+    const sources = app.sourceAccess.filter(
+      (row) => row.in_force && (row.source.connection_id === connectionId || row.connection_ids?.includes(connectionId))
+    );
     return sources.length ? [{ app, since: sources.map((row) => row.first_issued_at).sort()[0] }] : [];
   });
   return (
@@ -28,7 +31,9 @@ export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; conn
               <Link href={`/grants/${encodeURIComponent(app.hrefId)}`}>{app.name}</Link>
               <span className="ml-3 text-[13px] text-muted-foreground">
                 {app.place}
-                {since ? ` · since ${new Date(since).toLocaleDateString("en-US")}` : ""}
+                {since
+                  ? ` · since ${new Date(since).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`
+                  : ""}
               </span>
             </li>
           ))}
@@ -36,7 +41,9 @@ export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; conn
       ) : (
         <>
           <p>No app can read this yet.</p>
-          <Link href="/connect">Connect an app</Link>
+          <Link className={buttonVariants()} href="/connect">
+            Connect an app
+          </Link>
         </>
       )}
     </Section>

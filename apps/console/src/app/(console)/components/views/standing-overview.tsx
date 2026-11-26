@@ -20,7 +20,7 @@ const FILLED_BUTTON = buttonVariants({
 // the box itself is the emphasis. DIRECTION.md, Values: buttons use the stronger line.
 const OUTLINED_BUTTON = cn(
   buttonVariants({ size: "default", variant: "outline" }),
-  "h-[30px] rounded-[6px] border-border-strong px-2.5 text-[13px] dark:border-border-strong",
+  "h-[30px] rounded-[6px] border-border-strong px-2.5 text-[13px] dark:border-border-strong"
 );
 
 const SECTION_LABEL = "text-[13px] font-medium text-muted-foreground";
@@ -79,12 +79,12 @@ function PageHeading({
       {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
       <Text
         as="h1"
-        className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]"
+        className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]"
       >
         {data.title}
       </Text>
       {showSubtitle && data.subtitle ? (
-        <Text as="p" className="mt-2 text-[13px] tabular-nums text-muted-foreground">
+        <Text as="p" className="mt-2 text-[13px] text-muted-foreground tabular-nums">
           {data.subtitle}
         </Text>
       ) : null}
@@ -121,7 +121,7 @@ function NeedLines({ need }: { need: HomeNeedRow }) {
   if (need.kind === "approval") {
     return (
       <>
-        <Text as="p" className="text-[15px] leading-5 text-foreground">
+        <Text as="p" className="text-[15px] text-foreground leading-5">
           <strong className="font-medium">{need.name}</strong> is asking to read your data
         </Text>
         {need.detail ? (
@@ -137,7 +137,7 @@ function NeedLines({ need }: { need: HomeNeedRow }) {
   // and, only when there is one, the sync time in faint text.
   return (
     <>
-      <Text as="p" className="truncate text-[15px] font-medium leading-5 text-foreground">
+      <Text as="p" className="truncate font-medium text-[15px] text-foreground leading-5">
         {need.name}
       </Text>
       {need.status && need.source ? (
@@ -179,7 +179,9 @@ function NeedRow({ need }: { need: HomeNeedRow }) {
 }
 
 function NeedsBlock({ data }: { data: HomeData }) {
-  if (!data.needsVisible) return null;
+  if (!data.needsVisible) {
+    return null;
+  }
 
   return (
     <section aria-labelledby="home-needs-heading" className="mb-8">
@@ -195,12 +197,12 @@ function NeedsBlock({ data }: { data: HomeData }) {
           </div>
         ) : null}
         {data.needsError ? (
-          <div className={data.needs.length > 0 ? "border-t border-border/70 px-3 py-3" : "px-3 py-3"}>
+          <div className={data.needs.length > 0 ? "border-border/70 border-t px-3 py-3" : "px-3 py-3"}>
             <ReadFailure href={data.reloadHref} />
           </div>
         ) : null}
         {data.needsMore ? (
-          <div className={data.needs.length > 0 ? "border-t border-border/70 px-3 py-3" : "px-3 py-3"}>
+          <div className={data.needs.length > 0 ? "border-border/70 border-t px-3 py-3" : "px-3 py-3"}>
             <Link
               className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               href={data.allAppsHref}
@@ -217,13 +219,13 @@ function NeedsBlock({ data }: { data: HomeData }) {
 function DataSourceRow({ source }: { source: HomeSourceRow }) {
   return (
     <Link
-      className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="flex min-w-0 items-center justify-between gap-3 border-border/70 border-b py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       href={source.href}
     >
       <span className="flex min-w-0 items-center gap-3">
         <LogoTile iconId={source.source.connector_id} name={source.name} />
         <span className="min-w-0">
-          <Text as="span" className="block truncate text-[15px] font-medium text-foreground">
+          <Text as="span" className="block truncate font-medium text-[15px] text-foreground">
             {source.name}
           </Text>
           <span
@@ -275,16 +277,16 @@ function DataSourcesBlock({ data }: { data: HomeData }) {
         </Text>
       ) : null}
       {data.sourceTotalLink ? (
-        <div className="border-t border-border/70 py-3">
+        <div className="border-border/70 border-t py-3">
           <Link
-            className="text-[13px] tabular-nums text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="text-[13px] text-primary tabular-nums underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             href={data.sourcesHref}
           >
             {data.sourceTotalLink}
           </Link>
         </div>
       ) : data.showMoreSources ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-border/70 border-t py-3">
           <Text as="p" className={`${SECOND_LINE} tabular-nums`}>
             Showing {data.shownSourceCount.toLocaleString("en-US")} of your data sources.
           </Text>
@@ -303,11 +305,16 @@ function DataSourcesBlock({ data }: { data: HomeData }) {
 function AppRow({ app }: { app: HomeData["apps"][number] }) {
   return (
     <Link
-      className="block border-b border-border/70 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="block border-border/70 border-b py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       href={app.href}
     >
-      <Text as="span" className="text-[15px]">{app.name}</Text>
-      <Text as="span" className={SECOND_LINE}> · {app.lastRead ? <>Last read {app.lastRead}</> : "Has not read anything yet"}</Text>
+      <Text as="span" className="text-[15px]">
+        {app.name}
+      </Text>
+      <Text as="span" className={SECOND_LINE}>
+        {" "}
+        · {app.lastRead ? <>Last read {app.lastRead}</> : "Has not read anything yet"}
+      </Text>
     </Link>
   );
 }
@@ -336,10 +343,7 @@ function AppsBlock({ data }: { data: HomeData }) {
               All access tokens
             </Link>
           ) : null}
-          <Link
-            className={FILLED_BUTTON}
-            href={data.appsHref}
-          >
+          <Link className={FILLED_BUTTON} href={data.appsHref}>
             Connect an app
           </Link>
         </div>
@@ -348,7 +352,11 @@ function AppsBlock({ data }: { data: HomeData }) {
       {data.apps.slice(0, 3).map((app) => (
         <AppRow app={app} key={app.id} />
       ))}
-      {data.apps.length > 3 ? <Link className={`${SECOND_LINE} block py-3`} href={data.allAppsHref}>and {data.apps.length - 3} more</Link> : null}
+      {data.apps.length > 3 ? (
+        <Link className={`${SECOND_LINE} block py-3`} href={data.allAppsHref}>
+          and {data.apps.length - 3} more
+        </Link>
+      ) : null}
       {data.activeTokenCount > 0 ? (
         // Lead decision (home-pictures 7): a quiet line under the apps, not set like an app name.
         <Link
@@ -381,11 +389,11 @@ function FirstRun({ data, notice }: { data: HomeData; notice?: string }) {
       </div>
       <Text
         as="h1"
-        className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]"
+        className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]"
       >
         {data.title}
       </Text>
-      <Text as="p" className="mt-3 max-w-xl text-[16px] leading-6 text-foreground">
+      <Text as="p" className="mt-3 max-w-xl text-[16px] text-foreground leading-6">
         DataConnect keeps a copy of your own data on a computer you choose and shows how current it is. Later you choose
         which apps and assistants may read it.
       </Text>
@@ -398,7 +406,9 @@ function FirstRun({ data, notice }: { data: HomeData; notice?: string }) {
 }
 
 export function StandingOverview({ data, notice }: { data: HomeData; notice?: string }) {
-  if (data.firstRun) return <FirstRun data={data} notice={notice} />;
+  if (data.firstRun) {
+    return <FirstRun data={data} notice={notice} />;
+  }
 
   return (
     <div className="mx-auto max-w-6xl pb-8">

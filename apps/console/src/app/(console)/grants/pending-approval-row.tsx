@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
-import { useState } from "react";
 import Link from "next/link";
+import { useState } from "react";
 import type { PendingApproval } from "../lib/ref-client.ts";
 import { appSourceName } from "./app-access.ts";
 
@@ -29,13 +29,28 @@ export function PendingApprovalRow({
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">
-        <p className="text-[15px] font-medium text-foreground">{appName}{requests.length > 1 ? ` is waiting for your answer · ${requests.length} requests` : ""}</p>
+        <p className="font-medium text-[15px] text-foreground">
+          {appName}
+          {requests.length > 1 ? ` is waiting for your answer · ${requests.length} requests` : ""}
+        </p>
         {place ? <p className="text-[13px] text-muted-foreground">{place}</p> : null}
         <p className="mt-1 text-[13px] text-muted-foreground">
-          {approval.grant_preview?.source ? `Wants to read ${appSourceName(approval.grant_preview.source)}` : "Wants to read your data"}
+          {approval.grant_preview?.source
+            ? `Wants to read ${appSourceName(approval.grant_preview.source)}`
+            : "Wants to read your data"}
         </p>
         <IcTimestamp value={approval.created_at} />
-        {requests.length > 1 ? requests.slice(1).map((request,index) => <Link className="ml-3 text-primary" key={request.approval_id} href={reviewHref || `/grants/approvals/${encodeURIComponent(request.approval_id)}`}>Review request {index+2}</Link>) : null}
+        {requests.length > 1
+          ? requests.slice(1).map((request, index) => (
+              <Link
+                className="ml-3 text-primary"
+                href={reviewHref || `/grants/approvals/${encodeURIComponent(request.approval_id)}`}
+                key={request.approval_id}
+              >
+                Review request {index + 2}
+              </Link>
+            ))
+          : null}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         <Link
@@ -44,21 +59,37 @@ export function PendingApprovalRow({
         >
           Review
         </Link>
-        {!confirming ? <IcButton variant="ghost" onClick={() => setConfirming(true)}>Don't allow</IcButton> : <div role="alertdialog" aria-label={`Don't allow ${appName}?`}>
-          <div className="mt-2 rounded-md border border-border-strong p-3">
-            <p className="pdpp-caption text-foreground">
-              Don't allow {appName}? It will not get access to your data.
-            </p>
-            <form action={denyAction} className="mt-3">
-              <input name="requests" type="hidden" value={JSON.stringify(requests.map(request=>({approvalId:request.approval_id,kind:request.kind})))} />
-              <input name="kind" type="hidden" value={approval.kind} />
-              <input name="approval_id" type="hidden" value={approval.approval_id} />
-              <input name="deny_confirmation" type="hidden" value="yes" />
-              <IcButton size="sm" type="submit" variant="destructive">Don't allow</IcButton>
-              <IcButton variant="ghost" type="button" onClick={() => setConfirming(false)}>Cancel</IcButton>
-            </form>
+        {confirming ? (
+          <div aria-label={`Don't allow ${appName}?`} role="alertdialog">
+            <div className="mt-2 rounded-md border border-border-strong p-3">
+              <p className="pdpp-caption text-foreground">
+                Don't allow {appName}? It will not get access to your data.
+              </p>
+              <form action={denyAction} className="mt-3">
+                <input
+                  name="requests"
+                  type="hidden"
+                  value={JSON.stringify(
+                    requests.map((request) => ({ approvalId: request.approval_id, kind: request.kind }))
+                  )}
+                />
+                <input name="kind" type="hidden" value={approval.kind} />
+                <input name="approval_id" type="hidden" value={approval.approval_id} />
+                <input name="deny_confirmation" type="hidden" value="yes" />
+                <IcButton size="sm" type="submit" variant="destructive">
+                  Don't allow
+                </IcButton>
+                <IcButton onClick={() => setConfirming(false)} type="button" variant="ghost">
+                  Cancel
+                </IcButton>
+              </form>
+            </div>
           </div>
-        </div>}
+        ) : (
+          <IcButton onClick={() => setConfirming(true)} variant="ghost">
+            Don't allow
+          </IcButton>
+        )}
       </div>
     </div>
   );

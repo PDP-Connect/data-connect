@@ -74,7 +74,7 @@ const model = await buildHostedMcpConsentChallengeModel(
     projectBindingForWire: () => ({ display_name: "Spotify - owner", connection_id: "account" }),
   },
   {},
-  null,
+  null
 );
 
 afterEach(cleanup);
@@ -82,7 +82,11 @@ after(() => dom.window.close());
 
 function assertPlainCopy(original) {
   const root = original.cloneNode(true);
-  for (const details of root.querySelectorAll("details")) if (details.querySelector("summary")?.textContent === "Technical details") details.remove();
+  for (const details of root.querySelectorAll("details")) {
+    if (details.querySelector("summary")?.textContent === "Technical details") {
+      details.remove();
+    }
+  }
   const copy = [root.textContent ?? ""];
   for (const element of root.querySelectorAll("[aria-label], [placeholder], [title]")) {
     copy.push(element.getAttribute("aria-label") ?? "");
@@ -100,7 +104,13 @@ test("verified state uses one trust line and plain consumer actions", () => {
   const verifiedModel = structuredClone(model);
   verifiedModel.client.trust = "domain";
   verifiedModel.client.domain = "spotify.example";
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: verifiedModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model: verifiedModel,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.ok(view.getByRole("heading", { name: `${verifiedModel.client.name} wants to read your data` }));
   assert.ok(view.getByText("Anything you leave unticked stays private."));
   assert.ok(view.getByText("Verified"));
@@ -115,7 +125,13 @@ test("not verified state names the website without a trust chip", () => {
   const unverifiedModel = structuredClone(model);
   unverifiedModel.client.trust = "unverified";
   unverifiedModel.client.domain = "spotify.example";
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: unverifiedModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model: unverifiedModel,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.ok(view.getByText("not verified"));
   assertPlainCopy(view.container);
 });
@@ -124,7 +140,13 @@ test("domain proof does not say the website is unverified", () => {
   const domainModel = structuredClone(model);
   domainModel.client.trust = "domain";
   domainModel.client.domain = "spotify.example";
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: domainModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model: domainModel,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.match(view.container.textContent ?? "", /spotify\.example/);
   assert.doesNotMatch(view.container.textContent ?? "", /not verified/i);
   assertPlainCopy(view.container);
@@ -144,7 +166,13 @@ test("many-source state keeps search and filters the source rows", () => {
       selected: false,
     })),
   }));
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: manyModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model: manyModel,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 1" }));
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 2" }));
   // Consent brief: the count names every selected data source before the decisions.
@@ -166,12 +194,14 @@ test("the demo model provides stable normal, trust, and many-source render state
   assert.equal(unverified.client.trust, "unverified");
   assert.equal(many.sources.length, 12);
   for (const demoModel of [normal, verified, unverified, many]) {
-    const view = render(createElement(ConsentScreen, {
-      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
-      demoOnly: true,
-      model: demoModel,
-      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
-    }));
+    const view = render(
+      createElement(ConsentScreen, {
+        acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+        demoOnly: true,
+        model: demoModel,
+        rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+      })
+    );
     assertPlainCopy(view.container);
   }
 });
@@ -186,12 +216,20 @@ test("production ignores every consent demo query", () => {
 test("demo decisions never call a server action", () => {
   let accepted = false;
   let rejected = false;
-  const view = render(createElement(ConsentScreen, {
-    acceptAction: async () => { accepted = true; return { ok: true, redirectUrl: "" }; },
-    demoOnly: true,
-    model: buildConsentDemoModel("normal"),
-    rejectAction: async () => { rejected = true; return { ok: true, redirectUrl: "" }; },
-  }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => {
+        accepted = true;
+        return { ok: true, redirectUrl: "" };
+      },
+      demoOnly: true,
+      model: buildConsentDemoModel("normal"),
+      rejectAction: async () => {
+        rejected = true;
+        return { ok: true, redirectUrl: "" };
+      },
+    })
+  );
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Spotify" }));
   fireEvent.click(view.getByRole("button", { name: "Allow" }));
   fireEvent.click(view.getByRole("button", { name: "Don't allow" }));
@@ -208,7 +246,14 @@ test("expired state gives one plain next step", () => {
 
 test("load-error state offers a retry and plain next step", () => {
   let retried = false;
-  const view = render(createElement(ConsentUnavailable, { kind: "error", onRetry: () => { retried = true; } }));
+  const view = render(
+    createElement(ConsentUnavailable, {
+      kind: "error",
+      onRetry: () => {
+        retried = true;
+      },
+    })
+  );
   assert.ok(view.getByRole("heading", { name: "This request couldn’t be loaded." }));
   assert.doesNotMatch(view.container.textContent ?? "", /ChatGPT/);
   fireEvent.click(view.getByRole("button", { name: "Try again" }));
@@ -228,7 +273,11 @@ test("normal state renders Spotify's declared record label and description", asy
 
 test("the screen marks itself hydrated only once effects run", async () => {
   const { renderToString } = await import("react-dom/server");
-  const props = { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model, rejectAction: async () => ({ ok: true, redirectUrl: "" }) };
+  const props = {
+    acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+    model,
+    rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+  };
   assert.match(renderToString(createElement(ConsentScreen, props)), /data-hydrated="false"/);
   const view = render(createElement(ConsentScreen, props));
   assert.equal(view.container.querySelector("[data-hydrated]")?.getAttribute("data-hydrated"), "true");
@@ -254,9 +303,7 @@ test("field titles label controls without exposing raw names", async () => {
     fireEvent(source.closest("details"), new dom.window.Event("toggle"));
   });
   const stream = titledModel.sources[0].streams[0];
-  const panel = view
-    .getByRole("checkbox", { name: `Share ${stream.label} from Spotify` })
-    .parentElement;
+  const panel = view.getByRole("checkbox", { name: `Share ${stream.label} from Spotify` }).parentElement;
   await act(async () => {
     fireEvent.click(within(panel).getByRole("button", { name: "Limit what it sees" }));
   });
@@ -287,9 +334,7 @@ async function journey() {
     fireEvent(sourceDetails, new dom.window.Event("toggle"));
   });
   const saved = model.sources[0].streams.find((stream) => stream.name === "saved_tracks");
-  const panel = view
-    .getByRole("checkbox", { name: `Share ${saved.label} from Spotify` })
-    .parentElement;
+  const panel = view.getByRole("checkbox", { name: `Share ${saved.label} from Spotify` }).parentElement;
   await act(async () => {
     fireEvent.click(within(panel).getByRole("button", { name: "Limit what it sees" }));
   });
@@ -319,7 +364,7 @@ test("bulk dates apply only to selected time-capable streams and resolve against
   for (const stream of model.sources[0].streams) {
     assert.deepEqual(
       decision.streamRanges[stream.id],
-      stream.timePhrase ? { since: "2026-03-01", until: "2026-03-31" } : undefined,
+      stream.timePhrase ? { since: "2026-03-01", until: "2026-03-31" } : undefined
     );
     const declaration = manifest.streams.find((candidate) => candidate.name === stream.name);
     const result = resolveStreamScopeSelection(declaration, decision.streamRanges[stream.id] ?? {});
@@ -370,10 +415,18 @@ test("connector marks use resolved connector identity without changing consent s
   assert.equal(source.connectorId, manifest.connector_id);
   assert.equal(source.id, "spotify:account");
   assert.equal(source.selectionValue, "source");
-  const view = render(createElement(ConsentScreen, {
-    connectorIndex: {}, model, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }),
-  }));
-  assert.ok(view.container.querySelector(".pdpp-connector-icon svg"), "the connector mark should not depend on an optional manifest icon");
+  const view = render(
+    createElement(ConsentScreen, {
+      connectorIndex: {},
+      model,
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
+  assert.ok(
+    view.container.querySelector(".pdpp-connector-icon svg"),
+    "the connector mark should not depend on an optional manifest icon"
+  );
 });
 
 test("older consent models without connector provenance keep the genuine fallback", () => {
@@ -382,11 +435,20 @@ test("older consent models without connector provenance keep the genuine fallbac
     delete source.connectorId;
     source.icon = null;
   }
-  const view = render(createElement(ConsentScreen, {
-    connectorIndex: {}, model: legacy, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }),
-  }));
+  const view = render(
+    createElement(ConsentScreen, {
+      connectorIndex: {},
+      model: legacy,
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.ok(view.container.querySelector(".pdpp-connector-icon .pdpp-monogram"));
-  assert.equal(view.container.querySelector(".pdpp-connector-icon svg"), null, "do not infer a brand from a source ID or account name");
+  assert.equal(
+    view.container.querySelector(".pdpp-connector-icon svg"),
+    null,
+    "do not infer a brand from a source ID or account name"
+  );
 });
 
 const whiteGlyph = '<svg viewBox="0 0 24 24"><path fill="#ffffff" d="M3 3h18v18H3z"/></svg>';
@@ -408,14 +470,18 @@ function buildModelFor(connectorManifest) {
       projectBindingForWire: () => ({ display_name: "Spotify - owner", connection_id: "account" }),
     },
     {},
-    null,
+    null
   );
 }
 
 function renderModel(consentModel) {
-  return render(createElement(ConsentScreen, {
-    model: consentModel, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }),
-  }));
+  return render(
+    createElement(ConsentScreen, {
+      model: consentModel,
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
 }
 
 test("a white-glyph connector mark keeps its declared brand background on the consent screen", async () => {
@@ -429,7 +495,7 @@ test("a white-glyph connector mark keeps its declared brand background on the co
   assert.equal(
     dom.window.getComputedStyle(tile).backgroundColor,
     "rgb(29, 185, 84)",
-    "a white glyph needs the connector's declared brand background to be visible",
+    "a white glyph needs the connector's declared brand background to be visible"
   );
 });
 
@@ -440,7 +506,7 @@ for (const [label, value] of [
   ["a color the glyph cannot contrast against", "white"],
   ["a CSS function", "rgb(0 0 0 / 0)"],
   ["a declaration break-out", "#fff; background-image: url(//x/y)"],
-  ["a number", 0xffffff],
+  ["a number", 0xff_ff_ff],
   ["an empty string", ""],
 ]) {
   test(`an invalid brand background (${label}) falls back to the default tile`, async () => {
@@ -458,7 +524,7 @@ for (const [label, value] of [
     assert.ok(tile?.classList.contains("bg-foreground"), "the glyph is filled with the text colour");
     assert.ok(
       tileStyle.includes(encodeURIComponent('d="M3 3h18v18H3z"')),
-      "the glyph still renders, as the manifest's own glyph",
+      "the glyph still renders, as the manifest's own glyph"
     );
     assert.equal(tile.style.backgroundColor, "", "no inline background: the invalid brand colour is not applied");
     assert.doesNotMatch(tileStyle, /\/\/x\/y|background-image/, "nothing from the rejected value reaches the tile");
@@ -479,13 +545,23 @@ test("a brand background without a manifest glyph is not applied to the resolved
   assert.equal(noGlyphModel.sources[0].icon, null, "the background only travels with a manifest glyph");
   const tile = renderModel(noGlyphModel).container.querySelector(".pdpp-connector-icon");
   assert.ok(tile?.querySelector("svg"), "the resolved identity mark still renders");
-  assert.notEqual(tile.style.backgroundColor, "rgb(29, 185, 84)", "the mark keeps its own background, not the manifest's");
+  assert.notEqual(
+    tile.style.backgroundColor,
+    "rgb(29, 185, 84)",
+    "the mark keeps its own background, not the manifest's"
+  );
 });
 
 test("the screen signs as DataConnect and shows the end date as plain text with Change", () => {
   // Lead review of the consent pictures: DataConnect mark instead of "Secured by
   // PDPP"; the access end date reads as second text, its controls behind "Change".
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.ok(view.getByText("DataConnect"));
   assert.ok(view.container.querySelector('img[src="/icon"]'));
   assert.equal(view.container.querySelector('a[href="https://pdpp.dev"]'), null);
@@ -494,45 +570,65 @@ test("the screen signs as DataConnect and shows the end date as plain text with 
   assertPlainCopy(view.container);
 });
 
-for (const button of ["Allow", "Don't allow"]) test(`a successful ${button} follows its own returned redirect`, async () => {
-  const originalWindow = globalThis.window;
-  let destination = null;
-  globalThis.window = new Proxy(originalWindow, {
-    get(target, property) {
-      if (property === "location") return { replace: (url) => { destination = url; } };
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-  try {
-    const view = render(createElement(ConsentScreen, {
-      acceptAction: async () => ({ ok: true, redirectUrl: "https://app.example/return?code=allowed" }),
-      model,
-      rejectAction: async () => ({ ok: true, redirectUrl: "https://app.example/return?error=access_denied" }),
-    }));
-    fireEvent.click(view.getByRole("checkbox", { name: "Share data from Spotify" }));
-    await act(async () => {
-      fireEvent.click(view.getByRole("button", { name: button }));
+for (const button of ["Allow", "Don't allow"]) {
+  test(`a successful ${button} follows its own returned redirect`, async () => {
+    const originalWindow = globalThis.window;
+    let destination = null;
+    globalThis.window = new Proxy(originalWindow, {
+      get(target, property) {
+        if (property === "location") {
+          return {
+            replace: (url) => {
+              destination = url;
+            },
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
     });
-    assert.equal(
-      destination,
-      button === "Allow" ? "https://app.example/return?code=allowed" : "https://app.example/return?error=access_denied",
-    );
-  } finally {
-    cleanup();
-    globalThis.window = originalWindow;
-  }
-});
+    try {
+      const view = render(
+        createElement(ConsentScreen, {
+          acceptAction: async () => ({ ok: true, redirectUrl: "https://app.example/return?code=allowed" }),
+          model,
+          rejectAction: async () => ({ ok: true, redirectUrl: "https://app.example/return?error=access_denied" }),
+        })
+      );
+      fireEvent.click(view.getByRole("checkbox", { name: "Share data from Spotify" }));
+      await act(async () => {
+        fireEvent.click(view.getByRole("button", { name: button }));
+      });
+      assert.equal(
+        destination,
+        button === "Allow"
+          ? "https://app.example/return?code=allowed"
+          : "https://app.example/return?error=access_denied"
+      );
+    } finally {
+      cleanup();
+      globalThis.window = originalWindow;
+    }
+  });
+}
 
 test("a failed decision gives a plain next step and leaves both decisions usable", async () => {
   let accepted = 0;
   let rejected = 0;
   const failure = { ok: false, message: "Choose an end date in the future." };
-  const view = render(createElement(ConsentScreen, {
-    acceptAction: async () => { accepted++; return failure; },
-    model,
-    rejectAction: async () => { rejected++; return failure; },
-  }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => {
+        accepted++;
+        return failure;
+      },
+      model,
+      rejectAction: async () => {
+        rejected++;
+        return failure;
+      },
+    })
+  );
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Spotify" }));
   await act(async () => {
     fireEvent.click(view.getByRole("button", { name: "Allow" }));
@@ -551,7 +647,13 @@ test("a failed decision gives a plain next step and leaves both decisions usable
 test("no connected data sources says to connect one, then return to the app", () => {
   const empty = structuredClone(model);
   empty.sources = [];
-  const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: empty, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      model: empty,
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.ok(view.getByText(/You have no data sources yet/));
   assert.equal(view.queryByRole("button", { name: "Allow" }), null);
 });
@@ -559,48 +661,105 @@ test("no connected data sources says to connect one, then return to the app", ()
 test("Everything below posts the same decision as ticking each data source", async () => {
   async function decide(bulk) {
     let posted;
-    const view = render(createElement(ConsentScreen, { model: buildConsentDemoModel("normal"), acceptAction: async (decision) => { posted = decision; return { ok: false, message: "Saved for comparison" }; }, rejectAction: async () => ({ ok: false, message: "unused" }) }));
-    if (bulk) fireEvent.click(view.getByRole("checkbox", { name: "Everything below" }));
-    else for (const name of ["Spotify", "Gmail"]) fireEvent.click(view.getByRole("checkbox", { name: `Share data from ${name}` }));
+    const view = render(
+      createElement(ConsentScreen, {
+        model: buildConsentDemoModel("normal"),
+        acceptAction: async (decision) => {
+          posted = decision;
+          return { ok: false, message: "Saved for comparison" };
+        },
+        rejectAction: async () => ({ ok: false, message: "unused" }),
+      })
+    );
+    if (bulk) {
+      fireEvent.click(view.getByRole("checkbox", { name: "Everything below" }));
+    } else {
+      for (const name of ["Spotify", "Gmail"]) {
+        fireEvent.click(view.getByRole("checkbox", { name: `Share data from ${name}` }));
+      }
+    }
     await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
-    cleanup(); return posted;
+    cleanup();
+    return posted;
   }
   assert.deepEqual(await decide(true), await decide(false));
 });
 
 test("operator registration alone cannot borrow the domain-control mark", () => {
   const registered = buildConsentDemoModel("normal");
-  registered.client.trust = "verified"; registered.client.domain = "app.example";
-  const view = render(createElement(ConsentScreen, { model: registered, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
-  assert.equal(view.queryByText("Verified"), null); assert.ok(view.getByText("not verified"));
+  registered.client.trust = "verified";
+  registered.client.domain = "app.example";
+  const view = render(
+    createElement(ConsentScreen, {
+      model: registered,
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
+  assert.equal(view.queryByText("Verified"), null);
+  assert.ok(view.getByText("not verified"));
 });
 test("a missing retention promise is omitted instead of attributed to the app", () => {
   const missing = buildConsentDemoModel("normal");
   missing.retention = `${missing.client.name} did not say how long it keeps the data it receives.`;
-  const view = render(createElement(ConsentScreen, { model: missing, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  const view = render(
+    createElement(ConsentScreen, {
+      model: missing,
+      acceptAction: async () => ({ ok: true, redirectUrl: "" }),
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
   assert.equal(view.queryByText(/It says it keeps what it reads/), null);
 });
 
-test("no data sources keeps denial and add-source actions without duration or a tick prompt", async()=>{
- const empty=buildConsentDemoModel("empty");let denied=0;
- const view=render(createElement(ConsentScreen,{model:empty,acceptAction:async()=>assert.fail("cannot allow empty data"),rejectAction:async()=>{denied++;return {ok:true,redirectUrl:""};}}));
- assert.equal(view.queryByRole("button",{name:"Allow"}),null);
- assert.equal(view.queryByRole("heading",{name:"How long"}),null);
- assert.equal(view.queryByText("Tick at least one data source."),null);
- assert.ok(view.getByRole("link",{name:"Add a data source"}).className.includes("pdpp-btn"));
- await act(async()=>fireEvent.click(view.getByRole("button",{name:"Don't allow"})));
- assert.equal(denied,1);
- assert.ok(view.getByText("DataConnect"));
+test("no data sources keeps denial and add-source actions without duration or a tick prompt", async () => {
+  const empty = buildConsentDemoModel("empty");
+  let denied = 0;
+  const view = render(
+    createElement(ConsentScreen, {
+      model: empty,
+      acceptAction: async () => assert.fail("cannot allow empty data"),
+      rejectAction: async () => {
+        denied++;
+        return { ok: true, redirectUrl: "" };
+      },
+    })
+  );
+  assert.equal(view.queryByRole("button", { name: "Allow" }), null);
+  assert.equal(view.queryByRole("heading", { name: "How long" }), null);
+  assert.equal(view.queryByText("Tick at least one data source."), null);
+  assert.ok(view.getByRole("link", { name: "Add a data source" }).className.includes("pdpp-btn"));
+  await act(async () => fireEvent.click(view.getByRole("button", { name: "Don't allow" })));
+  assert.equal(denied, 1);
+  assert.ok(view.getByText("DataConnect"));
 });
-test("Limit what it sees hides narrowing until pressed and preserves the decision for unchanged ticks",async()=>{
- const sample=structuredClone(model); sample.sources=sample.sources.slice(0,1);sample.sources[0].streams=sample.sources[0].streams.slice(0,1);sample.sources[0].streams[0].selected=true; sample.sources[0].streams[0].fields=[{name:"id",required:true,label:"Record identifier"},{name:"title",required:false,label:"Title"}]; const decisions=[];
- const view=render(createElement(ConsentScreen,{model:sample,openKinds:true,acceptAction:async value=>{decisions.push(value);return {ok:false,message:"Try again."};},rejectAction:async()=>({ok:true,redirectUrl:""})}));
- const controls=view.getAllByRole("button",{name:"Limit what it sees"});
- assert.equal(view.queryByText("Choose fields to share"),null);
- await act(async()=>fireEvent.click(view.getByRole("button",{name:"Allow"})));
- await act(async()=>fireEvent.click(controls[0]));
- assert.ok(view.getByText("Choose fields to share"));
- assert.equal(view.queryByText("Record identifier"),null);
- await act(async()=>fireEvent.click(view.getByRole("button",{name:"Allow"})));
- assert.equal(JSON.stringify(decisions[0]),JSON.stringify(decisions[1]));
+test("Limit what it sees hides narrowing until pressed and preserves the decision for unchanged ticks", async () => {
+  const sample = structuredClone(model);
+  sample.sources = sample.sources.slice(0, 1);
+  sample.sources[0].streams = sample.sources[0].streams.slice(0, 1);
+  sample.sources[0].streams[0].selected = true;
+  sample.sources[0].streams[0].fields = [
+    { name: "id", required: true, label: "Record identifier" },
+    { name: "title", required: false, label: "Title" },
+  ];
+  const decisions = [];
+  const view = render(
+    createElement(ConsentScreen, {
+      model: sample,
+      openKinds: true,
+      acceptAction: async (value) => {
+        decisions.push(value);
+        return { ok: false, message: "Try again." };
+      },
+      rejectAction: async () => ({ ok: true, redirectUrl: "" }),
+    })
+  );
+  const controls = view.getAllByRole("button", { name: "Limit what it sees" });
+  assert.equal(view.queryByText("Choose fields to share"), null);
+  await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
+  await act(async () => fireEvent.click(controls[0]));
+  assert.ok(view.getByText("Choose fields to share"));
+  assert.equal(view.queryByText("Record identifier"), null);
+  await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
+  assert.equal(JSON.stringify(decisions[0]), JSON.stringify(decisions[1]));
 });

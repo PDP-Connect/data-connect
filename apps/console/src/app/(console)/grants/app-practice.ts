@@ -1,9 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { mergeAppAccessSources } from "pdpp-reference-implementation/app-access";
 import type { AppAccess, PendingApproval } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp } from "./app-access.ts";
 import { buildAppAccessDemoData } from "./grants-demo-data.ts";
 export const APP_PRACTICE_STATES = [
+  "app-fifty-six",
+  "forty-eight",
+  "service-one",
+  "service-three",
   "empty",
   "one",
   "five",
@@ -54,23 +59,25 @@ export function buildAppPractice(demo: string) {
     return { registrations, apps: groupGrantAccessByApp(registrations), approvals: [] };
   }
   const now = Date.now();
-  const at = (days: number) => new Date(now + days * 86400000).toISOString();
+  const at = (days: number) => new Date(now + days * 86_400_000).toISOString();
   const count =
     demo === "empty"
       ? 0
-      : demo === "forty"
-        ? 40
-        : demo === "five"
-          ? 5
-          : demo === "stopped-twelve"
-            ? 13
-            : demo === "stopped-three"
-              ? 4
-              : demo === "thirty"
-                ? 30
-                : demo === "same-name" || demo === "several"
-                  ? 2
-                  : 1;
+      : demo === "forty-eight"
+        ? 48
+        : demo === "forty"
+          ? 40
+          : demo === "five"
+            ? 5
+            : demo === "stopped-twelve"
+              ? 13
+              : demo === "stopped-three"
+                ? 4
+                : demo === "thirty"
+                  ? 30
+                  : demo === "same-name" || demo === "several"
+                    ? 2
+                    : 1;
   const data: AppAccess[] = Array.from({ length: count }, (_, index) => {
     const product = demo === "thirty" || demo === "same-name" ? 0 : index < 4 ? index : 3;
     const stopped =
@@ -80,7 +87,8 @@ export function buildAppPractice(demo: string) {
     const suffix = index === 0 ? "" : `-${index}`;
     return {
       client_id: `practice-${index}`,
-      client_name: demo === "unnamed" ? "" : names[product] || "Northwind Notes",
+      client_name:
+        demo === "unnamed" ? "" : demo === "no-address" ? "Northwind Notes" : names[product] || "Northwind Notes",
       return_host:
         demo === "no-address"
           ? null
@@ -90,7 +98,7 @@ export function buildAppPractice(demo: string) {
               ? `notes.team${index}.northwind.example`
               : hosts[product] || null,
       returns_to_this_computer: product === 2,
-      domain_control_verified: demo !== "app-unverified" && demo !== "same-name",
+      domain_control_verified: !["app-unverified", "same-name", "no-address"].includes(demo),
       reads_last_7_days: demo === "app-never-read" ? 0 : 2,
       sources: Array.from({ length: many }, (_, sourceIndex) => {
         const service = services[sourceIndex] || "gmail";
@@ -108,7 +116,14 @@ export function buildAppPractice(demo: string) {
           expires_at: ended ? at(-1) : demo === "ending" || demo === "app-end" ? at(3) : null,
           stopped_at: stopped ? at(-index - 1) : null,
           stopped_reason: stopped ? (ended ? ("expired" as const) : ("removed" as const)) : null,
-          last_read_at: demo === "app-never-read" ? null : at(-1 / 24),
+          last_read_at:
+            demo === "app-never-read" || (demo === "forty-eight" && index >= 36)
+              ? null
+              : stopped
+                ? at(-index - 2)
+                : demo === "forty-eight" && index >= 14
+                  ? at(-40 - index)
+                  : at(-(index + 1) / 24),
           grant_ids: [id],
           active_grant_ids: stopped ? [] : [id],
           package_ids: [],
@@ -116,8 +131,46 @@ export function buildAppPractice(demo: string) {
       }),
     };
   });
+  if (demo === "app-fifty-six") {
+    const template = data[0]!.sources[0]!;
+    const rows = Array.from({ length: 56 }, (_, index) => {
+      const source = index % 45;
+      const id = `practice-access${index ? `-${index}` : ""}`;
+      return {
+        ...template,
+        source: { ...template.source, connection_id: `practice-source-${source}` },
+        kinds: [index >= 45 ? "threads" : "messages"],
+        grant_ids: [id],
+        active_grant_ids: [id],
+      };
+    });
+    data[0]!.sources = mergeAppAccessSources(rows);
+  }
+  if (demo === "service-one" || demo === "service-three") {
+    const template = data[0]!.sources[0]!;
+    const count = demo === "service-one" ? 1 : 3;
+    const connections = Array.from({ length: count }, (_, index) => ({
+      connector_id: "gmail",
+      connector_instance_id: `practice-gmail-${index}`,
+    }));
+    const rows = [
+      { ...template, source: { ...template.source, connection_id: "practice-gmail-0" } },
+      {
+        ...template,
+        source: { ...template.source, connection_id: null },
+        grant_ids: ["practice-service"],
+        active_grant_ids: ["practice-service"],
+        kinds: ["labels"],
+      },
+    ];
+    data[0]!.sources = mergeAppAccessSources(rows, connections);
+  }
   const pendingCount = demo === "waiting-three" ? 3 : demo === "waiting-one" || demo === "app-waiting" ? 1 : 0;
-  if (demo === "app-waiting") for (const row of data) row.sources = [];
+  if (demo === "app-waiting") {
+    for (const row of data) {
+      row.sources = [];
+    }
+  }
   const approvals: PendingApproval[] = Array.from({ length: pendingCount }, (_, index) => ({
     object: "approval",
     approval_id: `practice-request-${index}`,
@@ -130,8 +183,35 @@ export function buildAppPractice(demo: string) {
       streams: [{ name: "records" }],
     },
   }));
-  const apps = groupGrantAccessByApp(data, now, approvals);
-  if (demo === "app-never-read") for (const app of apps) { app.neverRead = true; for (const source of app.sourceAccess) source.neverRead = true; }
+  const sourceNames = new Map(
+    ["app-fifty-six", "service-one", "service-three"].includes(demo)
+      ? data.flatMap((app) =>
+          app.sources.flatMap((row) =>
+            row.source.connection_id
+              ? [
+                  [
+                    row.source.connection_id,
+                    demo === "app-fifty-six"
+                      ? `Practice data source ${Number(row.source.connection_id.split("-").at(-1)) + 1}`
+                      : demo.startsWith("service-")
+                        ? "Gmail personal"
+                        : "",
+                  ] as [string, string],
+                ]
+              : []
+          )
+        )
+      : []
+  );
+  const apps = groupGrantAccessByApp(data, now, approvals, sourceNames);
+  if (demo === "app-never-read") {
+    for (const app of apps) {
+      app.neverRead = true;
+      for (const source of app.sourceAccess) {
+        source.neverRead = true;
+      }
+    }
+  }
   // A pending registration has no past permission to show as stopped.
   return {
     registrations: data,

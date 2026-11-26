@@ -31,7 +31,8 @@
  * icons, and two distinct date axes (grant validity vs per-stream data range).
  */
 
-import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, IcInput, Monogram } from "@pdpp/brand-react";
+import { Button } from "@pdpp/operator-ui/ui/button";
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import styles from "./consent-screen.module.css";
@@ -43,7 +44,6 @@ import type {
   ConsentStreamModel,
 } from "./consent-screen-model.ts";
 import { clientPublishedLinks, sourceAccountLabel } from "./consent-screen-model.ts";
-
 
 interface SelectionState {
   [sourceId: string]: {
@@ -95,16 +95,25 @@ function todayPlusDays(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-const HUMAN_DATE_FMT = new Intl.DateTimeFormat("en-US", { day: "numeric", month: "short", timeZone: "UTC", year: "numeric" });
+const HUMAN_DATE_FMT = new Intl.DateTimeFormat("en-US", {
+  day: "numeric",
+  month: "short",
+  timeZone: "UTC",
+  year: "numeric",
+});
 
 // One human format ("Dec 1, 2026") everywhere a date renders as text, so it
 // never disagrees with the picker's own browser-native display next to it.
 // The <input type="date"> element's `value` stays ISO — that's the HTML
 // date-input contract, not a rendering choice.
 function humanDate(iso: string): string {
-  if (!iso) return "";
+  if (!iso) {
+    return "";
+  }
   const [year, month, day] = iso.split("-").map(Number);
-  if (!year || !month || !day) return iso;
+  if (!(year && month && day)) {
+    return iso;
+  }
   return HUMAN_DATE_FMT.format(new Date(Date.UTC(year, month - 1, day)));
 }
 
@@ -171,7 +180,9 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
         sourceHasSelection = true;
       }
     }
-    if (sourceHasSelection) selectedSourceCount += 1;
+    if (sourceHasSelection) {
+      selectedSourceCount += 1;
+    }
   }
   return { selectedSourceCount, selectedStreamCount, totalStreamCount };
 }
@@ -186,7 +197,7 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
       {client.logo ? (
         <img alt="" className={styles.clientLogo} src={client.logo} />
       ) : (
-        <span className="pdpp-monogram" data-initials={client.monogram} />
+        <Monogram name={client.name} tinted />
       )}
       <div className={styles.consentHeaderContent}>
         <div className={styles.consentHeaderTitle}>
@@ -195,9 +206,13 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
         <div className={styles.trustLine}>
           <span>{client.returnTo}</span>
           {verified ? <span className={styles.verified}>Verified</span> : <span>not verified</span>}
-
         </div>
-        {!verified ? <p className="pdpp-body text-attention">DataConnect could not confirm who runs this app. Allow it only if you started this yourself, in {client.returnTo || "the app"}.</p> : null}
+        {verified ? null : (
+          <p className="pdpp-body text-attention">
+            DataConnect could not confirm who runs this app. Allow it only if you started this yourself, in{" "}
+            {client.returnTo || "the app"}.
+          </p>
+        )}
       </div>
     </header>
   );
@@ -236,11 +251,26 @@ function StreamRow({
 
   return (
     <div className={styles.streamRow}>
-      <input aria-label={`Share ${stream.label} from ${source.name}`} checked={selected} onChange={onToggle} type="checkbox" />
+      <input
+        aria-label={`Share ${stream.label} from ${source.name}`}
+        checked={selected}
+        onChange={onToggle}
+        type="checkbox"
+      />
       <div className={styles.streamContent}>
         <span className="pdpp-body">{stream.label}</span>
         <span className="pdpp-caption">{plainCopy(stream.sentence)}</span>
-        {selected ? <button type="button" className="text-sm text-muted-foreground underline" aria-expanded={limiting} onClick={() => setLimiting(value => !value)}>Limit what it sees</button> : null}
+        {selected ? (
+          <Button
+            aria-expanded={limiting}
+            onClick={() => setLimiting((value) => !value)}
+            size="sm"
+            type="button"
+            variant="link"
+          >
+            Limit what it sees
+          </Button>
+        ) : null}
         {selected && limiting && (
           <div className={styles.narrow}>
             <p className={styles.narrowSummary}>
@@ -248,7 +278,7 @@ function StreamRow({
                 stream,
                 stream.fields.length > 0 ? stream.fields.filter((field) => selectedFields[field.name]).length : null
               )}{" "}
-                {stream.fields.length > 0 && <span className={styles.narrowChange}>Change</span>}
+              {stream.fields.length > 0 && <span className={styles.narrowChange}>Change</span>}
             </p>
             <div className={styles.narrowBody}>
               {stream.fields.length > 0 ? (
@@ -256,27 +286,33 @@ function StreamRow({
                   <legend className={`pdpp-caption ${styles.fieldPanelLegend}`}>
                     <span>Choose fields to share</span>
                     <span className={styles.fieldBulkActions}>
-                      <button className={styles.fieldBulkAction} onClick={onSelectAll} type="button">Select all</button>
+                      <button className={styles.fieldBulkAction} onClick={onSelectAll} type="button">
+                        Select all
+                      </button>
                       <span aria-hidden="true">·</span>
-                      <button className={styles.fieldBulkAction} onClick={onSelectNone} type="button">Select none</button>
+                      <button className={styles.fieldBulkAction} onClick={onSelectNone} type="button">
+                        Select none
+                      </button>
                     </span>
                   </legend>
                   <p className="pdpp-caption">Each record’s id is always included.</p>
-                  {stream.fields.filter(field => !(field.required && field.name === "id")).map((field) => (
-                    <label className={styles.fieldOption} key={field.name}>
-                      <input
-                        checked={Boolean(selectedFields[field.name])}
-                        disabled={field.required}
-                        onChange={(event) => onToggleField(field.name, event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span>
-                        <span className="pdpp-caption">{plainCopy(field.label || humanFieldName(field.name))}</span>
-                        {field.required && <span className={styles.fieldRequired}>Always included</span>}
-                        {field.description && <span className="pdpp-caption">{plainCopy(field.description)}</span>}
-                      </span>
-                    </label>
-                  ))}
+                  {stream.fields
+                    .filter((field) => !(field.required && field.name === "id"))
+                    .map((field) => (
+                      <label className={styles.fieldOption} key={field.name}>
+                        <input
+                          checked={Boolean(selectedFields[field.name])}
+                          disabled={field.required}
+                          onChange={(event) => onToggleField(field.name, event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>
+                          <span className="pdpp-caption">{plainCopy(field.label || humanFieldName(field.name))}</span>
+                          {field.required && <span className={styles.fieldRequired}>Always included</span>}
+                          {field.description && <span className="pdpp-caption">{plainCopy(field.description)}</span>}
+                        </span>
+                      </label>
+                    ))}
                 </fieldset>
               ) : (
                 <p className="pdpp-caption">
@@ -287,16 +323,18 @@ function StreamRow({
               )}
               {stream.timePhrase ? (
                 <div className={styles.streamRange}>
-                  {range.since || range.until ? <span className="pdpp-caption">{dataRangeSummary(stream,range)}</span> : null}
-                  
+                  {range.since || range.until ? (
+                    <span className="pdpp-caption">{dataRangeSummary(stream, range)}</span>
+                  ) : null}
+
                   <label className="pdpp-caption" htmlFor={sinceInputId}>
                     from
                   </label>
                   <IcInput
                     aria-label={`${stream.timePhrase} since`}
+                    className={styles.dateInput}
                     id={sinceInputId}
                     onChange={(e) => setRange(source.id, stream.name, "since", e.target.value)}
-                    className={styles.dateInput}
                     type="date"
                     value={range.since}
                   />
@@ -305,9 +343,9 @@ function StreamRow({
                   </label>
                   <IcInput
                     aria-label={`${stream.timePhrase} until`}
+                    className={styles.dateInput}
                     id={untilInputId}
                     onChange={(e) => setRange(source.id, stream.name, "until", e.target.value)}
-                    className={styles.dateInput}
                     type="date"
                     value={range.until}
                   />
@@ -403,7 +441,9 @@ function SourceRow({
             className={styles.sourceLabel}
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
-              if (event.key === " " || event.key === "Enter") event.stopPropagation();
+              if (event.key === " " || event.key === "Enter") {
+                event.stopPropagation();
+              }
             }}
           >
             <input
@@ -411,7 +451,9 @@ function SourceRow({
               checked={allSelected}
               onChange={(e) => onToggleSource(e.target.checked)}
               ref={(el) => {
-                if (el) el.indeterminate = selected.length > 0 && !allSelected;
+                if (el) {
+                  el.indeterminate = selected.length > 0 && !allSelected;
+                }
               }}
               type="checkbox"
             />
@@ -428,10 +470,10 @@ function SourceRow({
           <StreamRow
             applyRangeToAllSelected={applyRangeToAllSelected}
             key={stream.name}
-            onToggle={() => onToggleStream(stream.name)}
-            onToggleField={(fieldName, checked) => onToggleField(stream.id, fieldName, checked)}
             onSelectAll={() => onSelectAll(stream.id)}
             onSelectNone={() => onSelectNone(stream.id)}
+            onToggle={() => onToggleStream(stream.name)}
+            onToggleField={(fieldName, checked) => onToggleField(stream.id, fieldName, checked)}
             ranges={ranges}
             selected={Boolean(selection[source.id]?.[stream.name])}
             selectedFields={fieldSelection[stream.id] ?? {}}
@@ -461,7 +503,9 @@ export function ConsentUnavailable({
       <h1 className="pdpp-display">
         {kind === "expired"
           ? "This request has run out."
-          : kind === "answered" ? "You already answered this request." : "This request couldn’t be loaded."}
+          : kind === "answered"
+            ? "You already answered this request."
+            : "This request couldn’t be loaded."}
       </h1>
       {kind === "expired" ? <p>Go back to the app and connect again.</p> : null}
       {kind === "answered" ? <a href="/grants">See your apps</a> : null}
@@ -504,7 +548,9 @@ export function ConsentScreen({
     const preset = model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId);
     return preset?.days ? todayPlusDays(preset.days) : "";
   });
-  const [noEndDate, setNoEndDate] = useState(model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId)?.days === null);
+  const [noEndDate, setNoEndDate] = useState(
+    model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId)?.days === null
+  );
   const [activeChipDays, setActiveChipDays] = useState<number | null>(() => {
     const preset = model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId);
     return preset?.days ?? null;
@@ -522,7 +568,9 @@ export function ConsentScreen({
 
   const query = search.trim().toLowerCase();
   const visibleSources = useMemo(() => {
-    if (!query) return model.sources;
+    if (!query) {
+      return model.sources;
+    }
     return model.sources.filter((source) => {
       const text = [source.name, source.account, ...source.streams.map((s) => `${s.label} ${s.name}`)]
         .join(" ")
@@ -540,7 +588,9 @@ export function ConsentScreen({
 
   function toggleSource(sourceId: string, checked: boolean) {
     const source = model.sources.find((s) => s.id === sourceId);
-    if (!source) return;
+    if (!source) {
+      return;
+    }
     setSelection((prev) => ({
       ...prev,
       [sourceId]: Object.fromEntries(source.streams.map((s) => [s.name, checked])),
@@ -556,7 +606,9 @@ export function ConsentScreen({
 
   function selectFields(streamId: string, selectAll: boolean) {
     const stream = model.sources.flatMap((source) => source.streams).find((candidate) => candidate.id === streamId);
-    if (!stream) return;
+    if (!stream) {
+      return;
+    }
     setFieldSelection((prev) => ({
       ...prev,
       [streamId]: Object.fromEntries(stream.fields.map((field) => [field.name, selectAll || field.required])),
@@ -676,7 +728,9 @@ export function ConsentScreen({
   }
 
   async function submit(action: "accept" | "reject") {
-    if (demoOnly) return;
+    if (demoOnly) {
+      return;
+    }
     setSubmitState("submitting");
     setSubmitError(null);
     try {
@@ -691,7 +745,9 @@ export function ConsentScreen({
       // consumed challenge out of history — going Back must not re-present a
       // decision the owner has already made.
       setCompleted(action);
-      if (result.redirectUrl) window.location.replace(result.redirectUrl);
+      if (result.redirectUrl) {
+        window.location.replace(result.redirectUrl);
+      }
     } catch {
       setSubmitState("failed");
       setSubmitError(`This request could not be completed. Go back to ${model.client.name} and try again.`);
@@ -702,61 +758,112 @@ export function ConsentScreen({
   const busy = submitState === "submitting";
   const policyLinks = clientPublishedLinks(model.client.policyLinks);
 
-  if (completed) return <ConsentFinished appName={model.client.name} allowed={completed === "accept"} />;
+  if (completed) {
+    return <ConsentFinished allowed={completed === "accept"} appName={model.client.name} />;
+  }
 
   return (
     <div className={styles.page} data-hydrated={hydrated ? "true" : "false"}>
       <DataConnectMark host={dataConnectHost} />
       <ConsentHeader client={model.client} />
-      {model.purpose.description ? <p className="pdpp-body">It says it will: {plainCopy(model.purpose.description)}</p> : null}
-      {model.retention && !model.retention.includes("did not say how long") ? <p className="pdpp-body">It says it keeps what it reads: {plainCopy(model.retention)}</p> : null}
+      {model.purpose.description ? (
+        <p className="pdpp-body">It says it will: {plainCopy(model.purpose.description)}</p>
+      ) : null}
+      {model.retention && !model.retention.includes("did not say how long") ? (
+        <p className="pdpp-body">It says it keeps what it reads: {plainCopy(model.retention)}</p>
+      ) : null}
       <div className={styles.grid}>
         <div className={styles.body}>
-          {model.sources.length > 6 ? <section key="duration"><h2 className="pdpp-title">How long</h2>
-            <GrantExpiryControls activeChipDays={activeChipDays} expiry={expiry} options={model.grantExpiry.options} noEndDate={noEndDate} setActiveChipDays={setActiveChipDays} setExpiry={setExpiry} setNoEndDate={setNoEndDate} />
-            <p className="pdpp-caption">{endsText()}</p>
-          </section> : null}
+          {model.sources.length > 6 ? (
+            <section key="duration">
+              <h2 className="pdpp-title">How long</h2>
+              <GrantExpiryControls
+                activeChipDays={activeChipDays}
+                expiry={expiry}
+                noEndDate={noEndDate}
+                options={model.grantExpiry.options}
+                setActiveChipDays={setActiveChipDays}
+                setExpiry={setExpiry}
+                setNoEndDate={setNoEndDate}
+              />
+              <p className="pdpp-caption">{endsText()}</p>
+            </section>
+          ) : null}
           <section aria-labelledby="records-heading" className={styles.recordsSection}>
-            <h2 className="pdpp-title" id="records-heading">Choose what it can read</h2>
+            <h2 className="pdpp-title" id="records-heading">
+              Choose what it can read
+            </h2>
             <p className={`pdpp-caption ${styles.recordsHint}`}>Anything you leave unticked stays private.</p>
             {model.sources.length === 0 ? (
               <div className={styles.searchEmpty}>
-                <p>You have no data sources yet, so there is nothing to share.</p><a className={buttonVariants()} href="/sources/add">Add a data source</a>
+                <p>You have no data sources yet, so there is nothing to share.</p>
+                <a className={buttonVariants()} href="/sources/add">
+                  Add a data source
+                </a>
               </div>
             ) : (
               <>
-                {model.sources.length > 8 ? <><div className={styles.searchRow}>
-                  <IcInput
-                    aria-label="Find a data source"
-                    onChange={(e) => {
-                      setSearch(e.target.value);
-                      setActiveIndex(-1);
-                    }}
-                    onKeyDown={onSearchKeyDown}
-                    placeholder="Find a data source"
-                    type="search"
-                    value={search}
-                  />
-                  {search && (
-                    <button
-                      aria-label="Clear search"
-                      className={styles.searchClear}
-                      onClick={() => {
-                        setSearch("");
-                        setActiveIndex(-1);
+                {model.sources.length > 8 ? (
+                  <>
+                    <div className={styles.searchRow}>
+                      <IcInput
+                        aria-label="Find a data source"
+                        onChange={(e) => {
+                          setSearch(e.target.value);
+                          setActiveIndex(-1);
+                        }}
+                        onKeyDown={onSearchKeyDown}
+                        placeholder="Find a data source"
+                        type="search"
+                        value={search}
+                      />
+                      {search && (
+                        <button
+                          aria-label="Clear search"
+                          className={styles.searchClear}
+                          onClick={() => {
+                            setSearch("");
+                            setActiveIndex(-1);
+                          }}
+                          type="button"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                    <div className={styles.searchCount}>
+                      {query
+                        ? `${visibleSources.length} of ${model.sources.length} data sources match`
+                        : `${visibleSources.length} data source${visibleSources.length === 1 ? "" : "s"}`}
+                    </div>
+                  </>
+                ) : null}
+                {model.sources.length > 1 ? (
+                  <label className={styles.sourceLabel}>
+                    <input
+                      aria-label="Everything below"
+                      checked={counts.selectedStreamCount === counts.totalStreamCount}
+                      onChange={(event) =>
+                        setSelection(
+                          Object.fromEntries(
+                            model.sources.map((source) => [
+                              source.id,
+                              Object.fromEntries(source.streams.map((stream) => [stream.name, event.target.checked])),
+                            ])
+                          )
+                        )
+                      }
+                      ref={(element) => {
+                        if (element) {
+                          element.indeterminate =
+                            counts.selectedStreamCount > 0 && counts.selectedStreamCount < counts.totalStreamCount;
+                        }
                       }}
-                      type="button"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-                <div className={styles.searchCount}>
-                  {query
-                    ? `${visibleSources.length} of ${model.sources.length} data sources match`
-                    : `${visibleSources.length} data source${visibleSources.length === 1 ? "" : "s"}`}
-                </div></> : null}
-                {model.sources.length > 1 ? <label className={styles.sourceLabel}><input aria-label="Everything below" type="checkbox" checked={counts.selectedStreamCount === counts.totalStreamCount} ref={(element) => { if (element) element.indeterminate = counts.selectedStreamCount > 0 && counts.selectedStreamCount < counts.totalStreamCount; }} onChange={(event) => setSelection(Object.fromEntries(model.sources.map((source) => [source.id, Object.fromEntries(source.streams.map((stream) => [stream.name, event.target.checked]))])))} />Everything below</label> : null}
+                      type="checkbox"
+                    />
+                    Everything below
+                  </label>
+                ) : null}
                 {visibleSources.length === 0 && (
                   <div className={styles.searchEmpty}>
                     No data sources match &ldquo;{search}&rdquo;. Clear the search to see everything.
@@ -771,15 +878,15 @@ export function ConsentScreen({
                       applyRangeToAllSelected={applyRangeToAllSelected}
                       fieldSelection={fieldSelection}
                       hidden={isHidden}
+                      initiallyOpen={openKinds}
                       key={source.id}
-                      onToggleSource={(checked) => toggleSource(source.id, checked)}
-                      onToggleField={toggleField}
                       onSelectAll={(streamId) => selectFields(streamId, true)}
                       onSelectNone={(streamId) => selectFields(streamId, false)}
+                      onToggleField={toggleField}
+                      onToggleSource={(checked) => toggleSource(source.id, checked)}
                       onToggleStream={(streamName) => toggleStream(source.id, streamName)}
                       ranges={ranges}
                       searching={Boolean(query)}
-                      initiallyOpen={openKinds}
                       selection={selection}
                       setRange={setRange}
                       source={source}
@@ -789,42 +896,68 @@ export function ConsentScreen({
               </>
             )}
           </section>
-          {model.sources.length > 0 && model.sources.length <= 6 ? <section key="duration"><h2 className="pdpp-title">How long</h2>
-            <GrantExpiryControls activeChipDays={activeChipDays} expiry={expiry} options={model.grantExpiry.options} noEndDate={noEndDate} setActiveChipDays={setActiveChipDays} setExpiry={setExpiry} setNoEndDate={setNoEndDate} />
-            <p className="pdpp-caption">{endsText()}</p>
-          </section> : null}
-
+          {model.sources.length > 0 && model.sources.length <= 6 ? (
+            <section key="duration">
+              <h2 className="pdpp-title">How long</h2>
+              <GrantExpiryControls
+                activeChipDays={activeChipDays}
+                expiry={expiry}
+                noEndDate={noEndDate}
+                options={model.grantExpiry.options}
+                setActiveChipDays={setActiveChipDays}
+                setExpiry={setExpiry}
+                setNoEndDate={setNoEndDate}
+              />
+              <p className="pdpp-caption">{endsText()}</p>
+            </section>
+          ) : null}
         </div>
 
         <aside aria-label="Your choice" className={styles.rail}>
-          <div className={styles.decisionDock}>{model.sources.length > 0 ? <p className={styles.decisionSummary} aria-live="polite">
-            {counts.selectedStreamCount === 0 ? (
-              "Tick at least one data source."
-            ) : (
-              <>{model.client.name} will be able to read {counts.selectedSourceCount} data source{counts.selectedSourceCount === 1 ? "" : "s"} {noEndDate ? "until you remove it" : `until ${humanDate(expiry)}`}.</>
+          <div className={styles.decisionDock}>
+            {model.sources.length > 0 ? (
+              <p aria-live="polite" className={styles.decisionSummary}>
+                {counts.selectedStreamCount === 0 ? (
+                  "Tick at least one data source."
+                ) : (
+                  <>
+                    {model.client.name} will be able to read {counts.selectedSourceCount} data source
+                    {counts.selectedSourceCount === 1 ? "" : "s"}{" "}
+                    {noEndDate ? "until you remove it" : `until ${humanDate(expiry)}`}.
+                  </>
+                )}
+              </p>
+            ) : null}
+            {submitError && (
+              <p className={styles.submitError} role="alert">
+                {submitError}
+              </p>
             )}
-          </p> : null}
-          {submitError && (
-            <p className={styles.submitError} role="alert">
-              {submitError}
-            </p>
-          )}
-          <div className={styles.railActions}>
-            {model.sources.length > 0 ? <>
-            <IcButton
-              className={styles.decisionButton}
-              disabled={busy || nothingChosen}
-              onClick={() => submit("accept")}
-              type="button"
-              variant="default"
-            >
-              {busy ? "Working…" : "Allow"}
-            </IcButton>
-            </> : null}
-            <IcButton className={styles.decisionButton} disabled={busy} onClick={() => submit("reject")} type="button" variant="ghost">
-              Don&apos;t allow
-            </IcButton>
-          </div></div>
+            <div className={styles.railActions}>
+              {model.sources.length > 0 ? (
+                <>
+                  <IcButton
+                    className={styles.decisionButton}
+                    disabled={busy || nothingChosen}
+                    onClick={() => submit("accept")}
+                    type="button"
+                    variant="default"
+                  >
+                    {busy ? "Working…" : "Allow"}
+                  </IcButton>
+                </>
+              ) : null}
+              <IcButton
+                className={styles.decisionButton}
+                disabled={busy}
+                onClick={() => submit("reject")}
+                type="button"
+                variant="ghost"
+              >
+                Don&apos;t allow
+              </IcButton>
+            </div>
+          </div>
           <p className="pdpp-caption">You can remove this at any time in DataConnect, under Apps.</p>
           {model.client.returnTo ? <p className="pdpp-caption">You’ll go back to {model.client.returnTo}.</p> : null}
           <div className={styles.policyLinks}>
@@ -838,8 +971,10 @@ export function ConsentScreen({
           </div>
         </aside>
       </div>
-      <details className={styles.requestDetails}><summary>Technical details</summary><pre className="overflow-x-auto">{JSON.stringify(model, null, 2)}</pre></details>
-
+      <details className={styles.requestDetails}>
+        <summary>Technical details</summary>
+        <pre className="overflow-x-auto">{JSON.stringify(model, null, 2)}</pre>
+      </details>
     </div>
   );
 }
@@ -867,13 +1002,47 @@ function GrantExpiryControls({
   // Quick-fill chips come from the server's own bounded option set, so the
   // page cannot offer a duration the accept route would reject. The bare date
   // input still accepts any date the server's bounds allow.
-  return <div className={styles.grantExpiryRow}>{options.map((option) => <button className={styles.chip} key={option.id} type="button" aria-pressed={option.days === null ? noEndDate : !noEndDate && activeChipDays === option.days} onClick={() => { setNoEndDate(option.days === null); setActiveChipDays(option.days); if (option.days !== null) setExpiry(todayPlusDays(option.days)); }}>{option.days === null ? "Until I remove it" : option.label}</button>)}</div>;
+  return (
+    <div className={styles.grantExpiryRow}>
+      {options.map((option) => (
+        <button
+          aria-pressed={option.days === null ? noEndDate : !noEndDate && activeChipDays === option.days}
+          className={styles.chip}
+          key={option.id}
+          onClick={() => {
+            setNoEndDate(option.days === null);
+            setActiveChipDays(option.days);
+            if (option.days !== null) {
+              setExpiry(todayPlusDays(option.days));
+            }
+          }}
+          type="button"
+        >
+          {option.days === null ? "Until I remove it" : option.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function ConsentFinished({ appName, allowed }: { appName: string; allowed: boolean }) {
-  return <main className={styles.page}><DataConnectMark /><h1 className="pdpp-display">{allowed ? `Done. ${appName} can now read what you chose.` : `${appName} was not given access.`}</h1><p>{allowed ? `You can close this page and go back to ${appName}.` : "You can close this page."}</p></main>;
+  return (
+    <main className={styles.page}>
+      <DataConnectMark />
+      <h1 className="pdpp-display">
+        {allowed ? `Done. ${appName} can now read what you chose.` : `${appName} was not given access.`}
+      </h1>
+      <p>{allowed ? `You can close this page and go back to ${appName}.` : "You can close this page."}</p>
+    </main>
+  );
 }
 
-function DataConnectMark({host}: {host?: string}) {
- return <div className={styles.railFooter}><img alt="" height={20} width={20} src="/icon" /><span>DataConnect</span>{host ? <span className="pdpp-caption">{host}</span> : null}</div>;
+function DataConnectMark({ host }: { host?: string }) {
+  return (
+    <div className={styles.railFooter}>
+      <img alt="" height={20} src="/icon" width={20} />
+      <span>DataConnect</span>
+      {host ? <span className="pdpp-caption">{host}</span> : null}
+    </div>
+  );
 }

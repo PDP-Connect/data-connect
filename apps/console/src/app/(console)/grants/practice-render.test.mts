@@ -1,19 +1,20 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
-import { test, mock } from "node:test";
+import { mock, test } from "node:test";
+import { JSDOM } from "jsdom";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { JSDOM } from "jsdom";
-import { APP_PRACTICE_STATES, buildAppPractice } from "./app-practice.ts";
-import { AppAccessList } from "./app-access-list.tsx";
-import { ConnectView } from "../connect/connect-page.tsx";
 import {
+  ConsentFinished,
   ConsentScreen,
   ConsentUnavailable,
-  ConsentFinished,
 } from "../../../components/consent-screen/consent-screen-client.tsx";
 import { buildConsentDemoModel } from "../../../components/consent-screen/consent-screen-demo.ts";
+import { ConnectView } from "../connect/connect-page.tsx";
+import { AppAccessList } from "./app-access-list.tsx";
+import { APP_PRACTICE_STATES, buildAppPractice } from "./app-practice.ts";
+
 mock.module("next/navigation", { namedExports: { useRouter: () => ({ refresh() {} }) } });
 mock.module("./remove-app-action.ts", { namedExports: { removeAppAction: async () => ({ ok: true, message: null }) } });
 mock.module("../lib/ref-client.ts", { namedExports: { listAppAccess: async () => ({ data: [] }) } });
@@ -23,13 +24,19 @@ Object.assign(globalThis, { React });
 const action = async () => ({ ok: true as const, redirectUrl: "" });
 function plain(element: React.ReactElement) {
   const dom = new JSDOM(renderToStaticMarkup(element));
-  for (const node of dom.window.document.querySelectorAll("details"))
-    if (node.querySelector("summary")?.textContent === "Technical details") node.remove();
-  for (const command of dom.window.document.querySelectorAll("code")) command.remove();
+  for (const node of dom.window.document.querySelectorAll("details")) {
+    if (node.querySelector("summary")?.textContent === "Technical details") {
+      node.remove();
+    }
+  }
+  for (const command of dom.window.document.querySelectorAll("code")) {
+    command.remove();
+  }
   const text = dom.window.document.body.textContent
     ?.replaceAll("Technical details", "")
     .replaceAll("Add custom MCP server", "")
-    .replaceAll("Add custom connector", "").replaceAll("“/mcp”", "");
+    .replaceAll("Add custom connector", "")
+    .replaceAll("“/mcp”", "");
   dom.window.close();
   assert.doesNotMatch(
     text || "",
@@ -38,23 +45,34 @@ function plain(element: React.ReactElement) {
   assert.doesNotMatch(text || "", /Status not available|Not shown|An app(?! that gave no name)/);
   return text || "";
 }
-for (const state of APP_PRACTICE_STATES)
+for (const state of APP_PRACTICE_STATES) {
   test(`plain, consistent app practice: ${state}`, () => {
     const { apps } = buildAppPractice(state);
     plain(React.createElement(AppAccessList, { apps: apps.filter((app) => app.state === "reading") }));
     const app = state === "app-waiting" ? apps.find((row) => row.state === "waiting") : apps[0];
-    if (app) plain(React.createElement(AppPage, { app, demo: state }));
+    if (app) {
+      plain(React.createElement(AppPage, { app, demo: state }));
+    }
     if (state === "thirty") {
       assert.equal(apps.length, 1);
       assert.equal(apps[0]?.clientIds.length, 30);
       assert.equal(apps[0]?.grantIds.length, 60);
     }
-    if (state === "forty") assert.equal(apps.length, 40);
-  if (state === "five") assert.equal(apps.length, 5);
-  if (state === "expired") assert.equal(app?.state, "stopped");
-    if (state === "app-twelve") assert.equal(app?.sourceAccess.length, 12);
+    if (state === "forty") {
+      assert.equal(apps.length, 40);
+    }
+    if (state === "five") {
+      assert.equal(apps.length, 5);
+    }
+    if (state === "expired") {
+      assert.equal(app?.state, "stopped");
+    }
+    if (state === "app-twelve") {
+      assert.equal(app?.sourceAccess.length, 12);
+    }
   });
-for (const state of ["normal", "many", "one", "some", "verified", "not-verified", "empty", "kinds-open"] as const)
+}
+for (const state of ["normal", "many", "one", "some", "verified", "not-verified", "empty", "kinds-open"] as const) {
   test(`plain approval practice: ${state}`, () => {
     const model = buildConsentDemoModel(state);
     plain(
@@ -66,17 +84,22 @@ for (const state of ["normal", "many", "one", "some", "verified", "not-verified"
         openKinds: state === "kinds-open",
       })
     );
-    if (state === "empty") assert.equal(model.sources.length, 0);
+    if (state === "empty") {
+      assert.equal(model.sources.length, 0);
+    }
   });
-for (const kind of ["expired", "error", "answered"] as const)
+}
+for (const kind of ["expired", "error", "answered"] as const) {
   test(`plain unavailable practice: ${kind}`, () => {
     plain(React.createElement(ConsentUnavailable, { kind }));
   });
-for (const allowed of [true, false])
+}
+for (const allowed of [true, false]) {
   test(`plain answered practice: ${allowed}`, () => {
     plain(React.createElement(ConsentFinished, { appName: "ChatGPT", allowed }));
   });
-for (const state of ["empty", "local", "one", "several"])
+}
+for (const state of ["empty", "local", "one", "several"]) {
   test(`plain Connect practice: ${state}`, () => {
     plain(
       React.createElement(ConnectView, {
@@ -85,10 +108,48 @@ for (const state of ["empty", "local", "one", "several"])
       })
     );
   });
+}
 
-for (const allowed of [true, false]) test(`source app section matches the exact connection: ${allowed}`, () => {
-  const apps = buildAppPractice("one").apps;
-  const text = plain(React.createElement(SourceAppsList, { apps, connectionId: allowed ? "practice-gmail" : "other-account" }));
-  if (allowed) { assert.match(text, /ChatGPT/); assert.match(text, /since/); }
-  else assert.match(text, /No app can read this yet/);
+for (const allowed of [true, false]) {
+  test(`source app section matches the exact connection: ${allowed}`, () => {
+    const apps = buildAppPractice("one").apps;
+    const text = plain(
+      React.createElement(SourceAppsList, { apps, connectionId: allowed ? "practice-gmail" : "other-account" })
+    );
+    if (allowed) {
+      assert.match(text, /ChatGPT/);
+      assert.match(text, /since/);
+    } else {
+      assert.match(text, /No app can read this yet/);
+    }
+  });
+}
+
+test("the real-shaped practice has 56 permissions and exactly 45 source rows everywhere", () => {
+  const { apps } = buildAppPractice("app-fifty-six");
+  const app = apps[0]!;
+  assert.equal(app.grantIds.length, 56);
+  assert.equal(app.sources.length, 45);
+  assert.equal(app.sourceAccess.length, 45);
+  assert.equal(
+    (renderToStaticMarkup(React.createElement(AppPage, { app, demo: "app-fifty-six" })).match(/<li /g) || []).length,
+    45
+  );
+});
+test("the real-shaped app list has 34 unused apps including 12 that never read", () => {
+  const { apps } = buildAppPractice("forty-eight");
+  assert.equal(apps.length, 48);
+  assert.equal(apps.filter((app) => !app.lastRead).length, 12);
+  assert.equal(
+    apps.filter((app) => !app.lastRead || Date.parse(app.lastRead) < Date.now() - 30 * 86_400_000).length,
+    34
+  );
+});
+test("service-only practice folds into one account and stays an all-accounts row with three", () => {
+  const one = buildAppPractice("service-one").apps[0]!;
+  const three = buildAppPractice("service-three").apps[0]!;
+  assert.equal(one.sources.length, 1);
+  assert.equal(one.sourceAccess[0]!.active_grant_ids.length, 2);
+  assert.equal(three.sources.length, 2);
+  assert.ok(three.sources.includes("All Gmail accounts"));
 });

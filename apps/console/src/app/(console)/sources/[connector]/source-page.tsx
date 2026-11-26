@@ -11,10 +11,8 @@ import {
   formatConnectorKeyForDisplay,
   formatConnectorNameForDisplay,
   formatRelative,
-  humanizeFieldLabel,
   isFallbackConnectionLabel,
   isSetupFailedSource,
-  streamDisplayLabel,
 } from "@pdpp/display";
 import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
 import { classifyKnownGaps, normalizeKnownGaps } from "../../lib/run-gaps.ts";

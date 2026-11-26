@@ -14,7 +14,7 @@ export { existingSourcesByConnectorCatalog, getConnectorInstallSnapshot };
  */
 export const UPDATES_READ_DEADLINE_MS = 3000;
 
-function withinDeadline<T>(read: Promise<T>, deadlineMs: number): Promise<T> {
+export function withinDeadline<T>(read: Promise<T>, deadlineMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -29,10 +29,18 @@ function withinDeadline<T>(read: Promise<T>, deadlineMs: number): Promise<T> {
 export async function readConnectorUpdates({ deadlineMs = UPDATES_READ_DEADLINE_MS }: { deadlineMs?: number } = {}) {
   const snapshot = await withinDeadline(getConnectorInstallSnapshot(), deadlineMs);
   const connectorIds = snapshot
-    ? [...new Set([
-        ...snapshot.catalog.flatMap((entry) => [entry.connector_id, entry.connector_key, entry.catalog_connector_id]),
-        ...snapshot.status.map((entry) => entry.connector_id),
-      ].filter((value): value is string => Boolean(value)))]
+    ? [
+        ...new Set(
+          [
+            ...snapshot.catalog.flatMap((entry) => [
+              entry.connector_id,
+              entry.connector_key,
+              entry.catalog_connector_id,
+            ]),
+            ...snapshot.status.map((entry) => entry.connector_id),
+          ].filter((value): value is string => Boolean(value))
+        ),
+      ]
     : [];
   const existingSources = await existingSourcesByConnectorCatalog(connectorIds);
   return { existingSources, snapshot };

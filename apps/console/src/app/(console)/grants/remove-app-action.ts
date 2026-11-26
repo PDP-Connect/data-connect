@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { revalidatePath } from "next/cache";
 import { requireDashboardAccess } from "../lib/dashboard-access.ts";
-import { removeAppAccess, type RemoveAppAccessInput } from "../lib/ref-client.ts";
+import { type RemoveAppAccessInput, removeAppAccess } from "../lib/ref-client.ts";
 export async function removeAppAction(input: RemoveAppAccessInput) {
   await requireDashboardAccess("/grants");
   try {

@@ -1,38 +1,53 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatRelative, formatConnectorNameForDisplay, humanizeFieldLabel, type SourceDisplayInput } from "@pdpp/display";
+import {
+  formatConnectorNameForDisplay,
+  formatRelative,
+  humanizeFieldLabel,
+  type SourceDisplayInput,
+} from "@pdpp/display";
 import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
   clientIds: string[];
+  expiresAt: string | null;
   grantIds: string[];
   hrefId: string;
   lastRead: string | null;
-  neverRead?: boolean;
   name: string;
-  place: string;
-  verified: boolean;
+  neverRead?: boolean;
   packageIds: string[];
-  sources: string[];
-  sourceAccess: (import("../lib/ref-client.ts").AppAccessSource & { name?: string; kindNames?: string[]; neverRead?: boolean })[];
+  pendingId?: string;
+  place: string;
   readsAllSources?: boolean;
   showPlace?: boolean;
   since: string | null;
-  expiresAt: string | null;
+  sourceAccess: (import("../lib/ref-client.ts").AppAccessSource & {
+    name?: string;
+    kindNames?: string[];
+    neverRead?: boolean;
+  })[];
+  sources: string[];
+  state: "reading" | "stopped" | "waiting";
+  status: string | null;
   stoppedAt: string | null;
   stoppedReason: "removed" | "expired" | null;
-  state: "reading" | "stopped" | "waiting";
-  pendingId?: string;
-  status: string | null;
+  verified: boolean;
 }
 
 export function appSourceName(source: SourceDisplayInput | null | undefined): string | null {
-  if (!source) return null;
+  if (!source) {
+    return null;
+  }
   const connectorId = source.connector_id ?? source.id;
   const service = formatConnectorNameForDisplay({ connectorId });
-  return connectionDisplayName(null, service === service.toLowerCase() ? humanizeFieldLabel(service) : service, connectorId);
+  return connectionDisplayName(
+    null,
+    service === service.toLowerCase() ? humanizeFieldLabel(service) : service,
+    connectorId
+  );
 }
 
 export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(
@@ -49,11 +64,15 @@ export function appNamesByClientId(
   const names = new Map<string, string>();
   for (const grant of grants) {
     const name = grant.client?.client_name?.trim();
-    if (grant.client_id && name) names.set(grant.client_id, name);
+    if (grant.client_id && name) {
+      names.set(grant.client_id, name);
+    }
   }
   for (const client of clients) {
     const name = client.client_name?.trim();
-    if (name && !names.has(client.client_id)) names.set(client.client_id, name);
+    if (name && !names.has(client.client_id)) {
+      names.set(client.client_id, name);
+    }
   }
   return names;
 }
@@ -86,7 +105,8 @@ export function groupGrantAccessByApp(
       ? "this computer"
       : registration.return_host || "no address given";
     const key =
-      registration.client_name_source !== "client_id" && (name || registration.return_host || registration.returns_to_this_computer)
+      registration.client_name_source !== "client_id" &&
+      (name || registration.return_host || registration.returns_to_this_computer)
         ? JSON.stringify([name, place])
         : registration.client_id;
     let app = groups.get(key);
@@ -117,17 +137,7 @@ export function groupGrantAccessByApp(
       const inForce = row.in_force && (!row.expires_at || Date.parse(row.expires_at) > now);
       const identity = JSON.stringify(row.source);
       const previous = app.sourceAccess.find((item) => JSON.stringify(item.source) === identity);
-      if (!previous)
-        app.sourceAccess.push({
-          ...row,
-          name: row.all_accounts ? `All ${appSourceName(row.source)} accounts` : sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source",
-          in_force: inForce,
-          kinds: [...row.kinds],
-          grant_ids: [...row.grant_ids],
-          active_grant_ids: inForce ? [...row.active_grant_ids] : [],
-          package_ids: [...row.package_ids],
-        });
-      else {
+      if (previous) {
         const wasInForce = previous.in_force;
         previous.in_force ||= inForce;
         previous.kinds = [...new Set([...previous.kinds, ...row.kinds])];
@@ -136,21 +146,37 @@ export function groupGrantAccessByApp(
           ...new Set([...previous.active_grant_ids, ...(inForce ? row.active_grant_ids : [])]),
         ];
         previous.package_ids = [...new Set([...previous.package_ids, ...row.package_ids])];
-        if (row.first_issued_at < previous.first_issued_at) previous.first_issued_at = row.first_issued_at;
-        if (row.last_read_at && (!previous.last_read_at || row.last_read_at > previous.last_read_at))
+        if (row.first_issued_at < previous.first_issued_at) {
+          previous.first_issued_at = row.first_issued_at;
+        }
+        if (row.last_read_at && (!previous.last_read_at || row.last_read_at > previous.last_read_at)) {
           previous.last_read_at = row.last_read_at;
+        }
         if (row.stopped_at && (!previous.stopped_at || row.stopped_at > previous.stopped_at)) {
           previous.stopped_at = row.stopped_at;
           previous.stopped_reason = row.stopped_reason;
         }
-        if (inForce)
-          previous.expires_at = !wasInForce
-            ? row.expires_at
-            : !previous.expires_at || !row.expires_at
-              ? null
-              : previous.expires_at > row.expires_at
+        if (inForce) {
+          previous.expires_at = wasInForce
+            ? previous.expires_at && row.expires_at
+              ? previous.expires_at > row.expires_at
                 ? previous.expires_at
-                : row.expires_at;
+                : row.expires_at
+              : null
+            : row.expires_at;
+        }
+      } else {
+        app.sourceAccess.push({
+          ...row,
+          name: row.all_accounts
+            ? `All ${appSourceName(row.source)} accounts`
+            : sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source",
+          in_force: inForce,
+          kinds: [...row.kinds],
+          grant_ids: [...row.grant_ids],
+          active_grant_ids: inForce ? [...row.active_grant_ids] : [],
+          package_ids: [...row.package_ids],
+        });
       }
       app.grantIds = [...new Set([...app.grantIds, ...row.grant_ids])];
     }
@@ -164,7 +190,9 @@ export function groupGrantAccessByApp(
     app.sources = visible.map((row) => row.name || appSourceName(row.source) || "Data source");
     app.readsAllSources =
       sourceNames.size > 0 &&
-      [...sourceNames.keys()].every((id) => current.some((row) => row.source.connection_id === id || row.connection_ids?.includes(id)));
+      [...sourceNames.keys()].every((id) =>
+        current.some((row) => row.source.connection_id === id || row.connection_ids?.includes(id))
+      );
     app.since = visible.map((row) => row.first_issued_at).sort()[0] || null;
     app.lastRead =
       visible
@@ -186,7 +214,9 @@ export function groupGrantAccessByApp(
       stopped?.stopped_reason ||
       (app.sourceAccess.some((row) => row.expires_at && Date.parse(row.expires_at) <= now) ? "expired" : "removed");
   }
-  for (const app of groups.values()) app.showPlace = [...groups.values()].some((other) => other !== app && other.name === app.name);
+  for (const app of groups.values()) {
+    app.showPlace = [...groups.values()].some((other) => other !== app && other.name === app.name);
+  }
   const waiting = pending.map((request): AppAccess => {
     const known = [...groups.values()].find((app) => app.clientIds.includes(request.client_id || ""));
     return {
@@ -218,7 +248,9 @@ export function groupGrantAccessByApp(
 }
 
 export function formatAppLastRead(value: string | null, now = Date.now()): string {
-  if (!value) return "Has not read anything yet";
+  if (!value) {
+    return "Has not read anything yet";
+  }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, now);
 }

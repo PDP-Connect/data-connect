@@ -1,16 +1,18 @@
 "use client";
+import { buttonVariants, IcButton } from "@pdpp/brand-react";
+import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { buttonVariants, IcButton } from "@pdpp/brand-react";
-import { Section, PageHeader } from "@pdpp/operator-ui/components/primitives";
-import { isOwnerRecordKind, sourceRecordLabel } from "../../lib/source-record-label.ts";
+import { Button } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
-import { appSourceName, formatAppLastRead, type AppAccess } from "../app-access.ts";
-import { useAppRemoval } from "./use-app-removal.ts";
+import { isOwnerRecordKind, sourceRecordLabel } from "../../lib/source-record-label.ts";
+import { type AppAccess, appSourceName, formatAppLastRead } from "../app-access.ts";
 import { RecentReading } from "./recent-reading.tsx";
+import { useAppRemoval } from "./use-app-removal.ts";
+
 const date = (value: string) =>
-  new Date(value).toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
+  new Date(value).toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 export function AppPage({
   app,
   demo,
@@ -33,14 +35,14 @@ export function AppPage({
   const reading = app.state === "reading" && !removal.removed.includes("all");
   const question = (key: string, title: string, sentence: string, submit: () => void, label: string) =>
     removal.question === key ? (
-      <div className="my-3 rounded-md border border-border p-3" role="alertdialog" aria-label={title}>
+      <div aria-label={title} className="my-3 rounded-md border border-border p-3" role="alertdialog">
         <p>{title}</p>
         <p className="text-[13px] text-muted-foreground">{sentence}</p>
         <div className="mt-3 flex gap-2">
-          <IcButton variant="destructive" disabled={removal.busy} onClick={submit}>
+          <IcButton disabled={removal.busy} onClick={submit} variant="destructive">
             {label}
           </IcButton>
-          <IcButton variant="ghost" onClick={() => removal.setQuestion(null)}>
+          <IcButton onClick={() => removal.setQuestion(null)} variant="ghost">
             Cancel
           </IcButton>
         </div>
@@ -50,33 +52,44 @@ export function AppPage({
     <>
       <Link href="/grants">Apps</Link>
       <PageHeader
-        title={app.name}
         actions={
           reading ? (
             <div className="flex flex-col items-start gap-2">
-              <IcButton variant="destructive" onClick={() => removal.setQuestion("all")}>Remove access</IcButton>
-              {removal.error?.source === "all" ? <div role="alert" className="text-destructive"><p>Access could not be removed.</p><IcButton variant="ghost" disabled={removal.busy} onClick={() => void removal.remove("all")}>Try again</IcButton><Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>What went wrong</Link></div> : null}
+              <IcButton onClick={() => removal.setQuestion("all")} variant="destructive">
+                Remove access
+              </IcButton>
+              {removal.error?.source === "all" ? (
+                <div className="text-destructive" role="alert">
+                  <p>Access could not be removed.</p>
+                  <IcButton disabled={removal.busy} onClick={() => void removal.remove("all")} variant="ghost">
+                    Try again
+                  </IcButton>
+                  <Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>
+                    What went wrong
+                  </Link>
+                </div>
+              ) : null}
             </div>
           ) : app.state === "waiting" ? (
-            <Link className={buttonVariants()}
-              href={
-                demo ? "/consent?demo=one" : `/grants/approvals/${encodeURIComponent(app.pendingId || app.hrefId)}`
-              }
+            <Link
+              className={buttonVariants()}
+              href={demo ? "/consent?demo=one" : `/grants/approvals/${encodeURIComponent(app.pendingId || app.hrefId)}`}
             >
               Review
             </Link>
           ) : undefined
         }
+        title={app.name}
       />
       <p className="text-[13px] text-muted-foreground">
         {app.place === "no address given" ? "" : app.place}
-        {!app.verified ? `${app.place === "no address given" ? "" : " · "}not verified` : ""}
+        {app.verified ? "" : `${app.place === "no address given" ? "" : " · "}not verified`}
       </p>
-      {!app.verified ? (
+      {app.verified ? null : (
         <p className="text-[13px] text-muted-foreground">
           DataConnect could not confirm who runs this app. Remove its access if you don’t recognise it.
         </p>
-      ) : null}
+      )}
       {app.state === "waiting" ? (
         <>
           <p>{app.name} is waiting for your answer.</p>
@@ -109,7 +122,7 @@ export function AppPage({
         () => void removal.remove("all"),
         "Remove access"
       )}
-      {app.state !== "waiting" ? (
+      {app.state === "waiting" ? null : (
         <Section className="mt-8" title={reading ? "What it can read" : "What it could read"}>
           <ul className="divide-y divide-border">
             {app.sourceAccess
@@ -117,7 +130,8 @@ export function AppPage({
               .map((source) => {
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";
-                const kinds = source.kindNames ?? source.kinds.filter(isOwnerRecordKind).map(name => sourceRecordLabel(name));
+                const kinds =
+                  source.kindNames ?? source.kinds.filter(isOwnerRecordKind).map((name) => sourceRecordLabel(name));
                 const canRead = reading && !removal.removed.includes(key);
                 return (
                   <li className="py-4" key={key}>
@@ -126,7 +140,11 @@ export function AppPage({
                         <ConnectorMark connectorId={source.source.connector_id || source.source.id} name={name} />
                         <div>
                           <Link
-                            href={source.source.connection_id ? `/sources/${encodeURIComponent(source.source.connection_id)}` : "/sources"}
+                            href={
+                              source.source.connection_id
+                                ? `/sources/${encodeURIComponent(source.source.connection_id)}`
+                                : "/sources"
+                            }
                           >
                             {name}
                           </Link>
@@ -135,18 +153,22 @@ export function AppPage({
                               ? `${kinds.slice(0, 3).join(", ")} and ${kinds.length - 3} more`
                               : kinds.join(", ")}
                           </p>
-                          {source.first_issued_at.slice(0, 10) !== app.since?.slice(0, 10) ? (
+                          {source.first_issued_at.slice(0, 10) === app.since?.slice(0, 10) ? null : (
                             <p className="text-[13px] text-muted-foreground">since {date(source.first_issued_at)}</p>
-                          ) : null}
+                          )}
                           <p className="text-[13px] text-muted-foreground">
                             {source.last_read_at
                               ? `Last read ${formatAppLastRead(source.last_read_at)}`
-                              : source.neverRead ? "Has not read anything yet" : ""}
+                              : source.neverRead
+                                ? "Has not read anything yet"
+                                : ""}
                           </p>
                         </div>
                       </div>
                       {canRead ? (
-                        <button className="text-sm text-muted-foreground hover:text-foreground" type="button" onClick={() => removal.setQuestion(key)}>Remove</button>
+                        <Button onClick={() => removal.setQuestion(key)} size="sm" variant="link">
+                          Remove
+                        </Button>
                       ) : null}
                     </div>
                     {question(
@@ -156,13 +178,27 @@ export function AppPage({
                       () => void removal.remove(key, source.source),
                       "Stop"
                     )}
-                    {removal.error?.source === key ? <div role="alert" className="text-destructive"><p>Access could not be removed.</p><IcButton variant="ghost" disabled={removal.busy} onClick={() => void removal.remove(key, source.source)}>Try again</IcButton><Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>What went wrong</Link></div> : null}
+                    {removal.error?.source === key ? (
+                      <div className="text-destructive" role="alert">
+                        <p>Access could not be removed.</p>
+                        <IcButton
+                          disabled={removal.busy}
+                          onClick={() => void removal.remove(key, source.source)}
+                          variant="ghost"
+                        >
+                          Try again
+                        </IcButton>
+                        <Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>
+                          What went wrong
+                        </Link>
+                      </div>
+                    ) : null}
                   </li>
                 );
               })}
           </ul>
         </Section>
-      ) : null}
+      )}
       {recent ? <RecentReading {...recent} demo={demo} /> : null}
       <Link
         className="mt-6 inline-block text-[13px] text-muted-foreground"

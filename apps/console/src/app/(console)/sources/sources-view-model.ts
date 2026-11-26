@@ -42,7 +42,7 @@ import {
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { formatStreamCollectionFacts, indexCollectionReportByStream } from "../lib/collection-report.ts";
 import { isConnectorNotInstalled } from "../lib/connector-implementation.ts";
-import { connectionDisplayName } from "../lib/connection-display-name.ts";
+import { connectionDisplayName, connectionNameDisambiguators } from "../lib/connection-display-name.ts";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import type { FormattedNextAction } from "../lib/next-action.ts";
 import type {
@@ -707,10 +707,8 @@ export function toSourceInstanceView(
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
   const sourceStreamNames = streamNamesForSource(summary, collectionFactsByStream, streamRecordsByStream);
 
-  const baseDisplayName = connectionDisplayName(
-    summary.display_name,
-    summary.connector_display_name,
-    connectorId
+  const displayName = connectionDisplayName(
+    summary.display_name, summary.connector_display_name, connectorId, options.fallbackDisambiguator
   );
   const hasFallbackLabel = isFallbackConnectionLabel({
     connectorId,
@@ -723,9 +721,6 @@ export function toSourceInstanceView(
     name: summary.connector_display_name,
   });
 
-  const displayName = options.fallbackDisambiguator
-    ? `${baseDisplayName} · ${options.fallbackDisambiguator}`
-    : baseDisplayName;
   const listKind = listKindForDisplayName(displayName, kind);
   let accountLine: string;
   if (hasFallbackLabel) {
@@ -971,40 +966,16 @@ export function toSourcesView(
   const now = options.now ?? new Date();
   const viewOptions = { ...options, now };
   const visibleSummaries = summaries;
-  const fallbackCountByConnector = new Map<string, number>();
-  for (const summary of visibleSummaries) {
-    if (
-      isFallbackConnectionLabel({
-        connectorId: summary.connector_id,
-        displayName: summary.display_name,
-        name: summary.connector_display_name,
-      })
-    ) {
-      fallbackCountByConnector.set(summary.connector_id, (fallbackCountByConnector.get(summary.connector_id) ?? 0) + 1);
-    }
-  }
-  const fallbackOrdinalByConnector = new Map<string, number>();
-  return visibleSummaries.map((summary) => {
-    const isAmbiguousFallback =
-      (fallbackCountByConnector.get(summary.connector_id) ?? 0) > 1 &&
-      isFallbackConnectionLabel({
-        connectorId: summary.connector_id,
-        displayName: summary.display_name,
-        name: summary.connector_display_name,
-      });
-    if (!isAmbiguousFallback) {
-      return toSourceInstanceView(summary, viewOptions);
-    }
-    const ordinal = (fallbackOrdinalByConnector.get(summary.connector_id) ?? 0) + 1;
-    fallbackOrdinalByConnector.set(summary.connector_id, ordinal);
-    return toSourceInstanceView(summary, { ...viewOptions, fallbackDisambiguator: `account ${ordinal}` });
-  });
+  const disambiguators = connectionNameDisambiguators(visibleSummaries);
+  return visibleSummaries.map(summary => toSourceInstanceView(summary, {
+    ...viewOptions, fallbackDisambiguator: disambiguators.get(summary.connection_id),
+  }));
 }
 
 export function orderSourcesForList(instances: readonly SourceInstanceView[]): SourceInstanceView[] {
   return [...instances].sort((a, b) => {
     const priority = (instance: SourceInstanceView) =>
-      instance.statusWords.row >= 4 && instance.statusWords.row <= 9 ? 0 : instance.statusWords.row === 11 ? 1 : 2;
+      instance.statusWords.tone === "attention" ? 0 : instance.statusWords.row === 11 ? 1 : 2;
     return priority(a) - priority(b) || a.displayName.localeCompare(b.displayName);
   });
 }
