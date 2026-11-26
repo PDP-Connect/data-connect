@@ -30,7 +30,7 @@ test("Add Source renders a fixed deterministic read failure before it reaches Ne
 // Design "Page 1" (list of connectable services): the transient busy state keeps the list honest.
 test("Add Source passes the transient package-catalog state to the list model", async () => {
   const src = await readFile(CATALOG_READ_FILE, "utf8");
-  assert.match(src, /catalogTransientlyUnavailable: installSnapshot\?\.catalogUnavailableReason === "transient_busy"/);
+  assert.match(src, /catalogTransientlyUnavailable: installSnapshot\?\.catalogUnavailableReason !== undefined/);
 });
 
 test("Add Source marks existing accounts from the shared exact reader, even when the lookup was refused part way", async () => {

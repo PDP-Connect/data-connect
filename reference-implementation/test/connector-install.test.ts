@@ -25,6 +25,7 @@ import test from "node:test";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 
 import {
+  type ConnectorCatalogSnapshot,
   type ConnectorCatalogEntry,
   ConnectorInstallTimeoutError,
   createConfigLimitedFetch,
@@ -2175,6 +2176,292 @@ test("owner catalog route returns the verified catalog projection", async () => 
         version: "1.0.0",
       },
     ],
+    fresh: true,
     object: "connector_install_catalog",
   });
+});
+
+test("the catalog route says whether the list is fresh and when it was fetched", async () => {
+  type RegisteredHandler = (req: object, res: { json: (value: unknown) => unknown }) => Promise<void>;
+  const routes = new Map<string, RegisteredHandler>();
+  const app = {
+    get(path: string, ...args: unknown[]) {
+      routes.set(`GET ${path}`, args.at(-1) as RegisteredHandler);
+      return this;
+    },
+    post() {
+      return this;
+    },
+  };
+  mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
+    handleError: () => assert.fail("unexpected error"),
+    pdppError: () => assert.fail("unexpected error"),
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      inspectSelected: async () => ({ status: "none" }),
+      catalog: async () => assert.fail("the view is read instead"),
+      catalogView: async () => ({ entries: [entry], fetchedAt: "2026-11-20T10:00:00.000Z", fresh: false }),
+      install: async () => assert.fail("should not install"),
+      uninstall: async () => assert.fail("should not uninstall"),
+      status: async () => [],
+      update: async () => assert.fail("should not update"),
+    },
+  });
+  let body: { fetched_at?: string; fresh?: boolean } | undefined;
+  await routes.get("GET /v1/owner/connector-install/catalog")?.(
+    {},
+    {
+      json(value: unknown) {
+        body = value as typeof body;
+        return this;
+      },
+    }
+  );
+  assert.equal(body?.fresh, false);
+  assert.equal(body?.fetched_at, "2026-11-20T10:00:00.000Z");
+});
+
+test("an install or update that cannot reach the registry says so in plain words", async () => {
+  type Handler = (req: { body?: Record<string, unknown> }, res: { json: (v: unknown) => unknown; status: (v: number) => unknown }) => Promise<void>;
+  const posts = new Map<string, Handler>();
+  const gets = new Map<string, Handler>();
+  const app = {
+    get(path: string, ...args: unknown[]) {
+      gets.set(path, args.at(-1) as Handler);
+      return this;
+    },
+    post(path: string, ...args: unknown[]) {
+      posts.set(path, args.at(-1) as Handler);
+      return this;
+    },
+  };
+  const offline = Object.assign(new Error("Failed to fetch ghcr.io/x: fetch failed"), {
+    name: "OciRegistryError",
+    reason: "unverifiable",
+  });
+  const sent: Array<{ status: number; code: string; message: string }> = [];
+  mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
+    handleError: () => assert.fail("an unreachable registry is not a generic failure"),
+    pdppError: (_res: unknown, status: number, code: string, message: string) => {
+      sent.push({ code, message, status });
+    },
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      inspectSelected: async () => ({ status: "none" }),
+      catalog: async () => {
+        throw offline;
+      },
+      install: async () => {
+        throw offline;
+      },
+      uninstall: async () => assert.fail("should not uninstall"),
+      status: async () => [],
+      update: async () => {
+        throw offline;
+      },
+    },
+  } as never);
+  const res = { json: () => undefined, status: () => res };
+  await posts.get("/v1/owner/connector-install/install")?.({ body: { connector_id: "github", digest } }, res);
+  await posts.get("/v1/owner/connector-install/update")?.({ body: { connector_id: "github" } }, res);
+  await gets.get("/v1/owner/connector-install/catalog")?.({ body: {} }, res);
+  assert.deepEqual(
+    sent.map((item) => [item.status, item.code]),
+    [[503, "registry_unreachable"], [503, "registry_unreachable"], [503, "registry_unreachable"]]
+  );
+  assert.equal(
+    sent[0]?.message,
+    "Adding this service needs an internet connection. Try again when this computer is online."
+  );
+  assert.doesNotMatch(sent[0]?.message ?? "", /ghcr|fetch failed|OCI/);
+});
+
+function offlineCatalogService(
+  dataDir: string,
+  loader: (context?: { bounded: boolean }) => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>,
+  extra: { catalogFallbackWaitMs?: number; catalogRetryQuietMs?: number } = {}
+) {
+  return createConnectorInstallService({
+    catalogLoader: loader,
+    dataDir,
+    registerManifest: () => Promise.resolve(),
+    store: createFileConnectorInstallStore(dataDir),
+    ...extra,
+  });
+}
+
+test("a kept catalog is served as not fresh when the registry cannot be reached", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let online = true;
+    const contexts: Array<{ bounded: boolean } | undefined> = [];
+    const service = offlineCatalogService(dataDir, async (context) => {
+      contexts.push(context);
+      if (!online) throw new TypeError("fetch failed");
+      return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+    });
+    const first = await service.catalogView?.();
+    assert.equal(first?.fresh, true);
+    assert.equal(contexts[0]?.bounded, false);
+    online = false;
+    const second = await service.catalogView?.();
+    assert.equal(second?.fresh, false);
+    assert.equal(second?.fetchedAt, first?.fetchedAt);
+    assert.deepEqual(second?.entries, [entry]);
+    assert.equal(contexts[1]?.bounded, true);
+    assert.deepEqual(await service.catalog(), [entry]);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a pinned-core reach failure falls back, a pinned-core verification failure does not", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let failure: Error | null = null;
+    const service = offlineCatalogService(dataDir, async () => {
+      if (failure) throw failure;
+      return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+    }, { catalogRetryQuietMs: 0 });
+    await service.catalogView?.();
+    const registryError = (message: string, reason: string) =>
+      Object.assign(new Error(message), { name: "OciRegistryError", reason });
+    failure = registryError("Failed to fetch ghcr.io/x: fetch failed", "unverifiable");
+    assert.equal((await service.catalogView?.())?.fresh, false);
+    for (const reason of ["tampered", "misidentified", "unsigned", "stale-catalog", "invalid-catalog"]) {
+      failure = registryError("rejected", reason);
+      await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), /rejected/);
+    }
+    failure = new Error("Catalog rollback refused by high-water mark.");
+    await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), RE_ROLLBACK);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("with no kept catalog an unreachable registry still fails, with the full retry ladder", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    const contexts: Array<{ bounded: boolean } | undefined> = [];
+    const service = offlineCatalogService(dataDir, async (context) => {
+      contexts.push(context);
+      throw new TypeError("fetch failed");
+    });
+    await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), /fetch failed/);
+    assert.equal(contexts[0]?.bounded, false);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a registry that does not answer in time falls back to the kept catalog", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let hang = false;
+    const service = offlineCatalogService(
+      dataDir,
+      async () => (hang ? new Promise(() => undefined) : { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" }),
+      { catalogFallbackWaitMs: 30 }
+    );
+    await service.catalogView?.();
+    hang = true;
+    assert.equal((await service.catalogView?.())?.fresh, false);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("after a failed refresh the kept catalog is served at once until the quiet period ends", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let online = true;
+    let calls = 0;
+    const loader = async () => {
+      calls += 1;
+      if (!online) throw new TypeError("fetch failed");
+      return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+    };
+    const quiet = offlineCatalogService(dataDir, loader, { catalogRetryQuietMs: 60_000 });
+    await quiet.catalogView?.();
+    online = false;
+    assert.equal((await quiet.catalogView?.())?.fresh, false);
+    assert.equal((await quiet.catalogView?.())?.fresh, false);
+    assert.equal(calls, 2, "a second read inside the quiet period must not contact the registry");
+    online = true;
+    const retrying = offlineCatalogService(dataDir, loader, { catalogRetryQuietMs: 0 });
+    online = false;
+    await retrying.catalogView?.();
+    online = true;
+    assert.equal((await retrying.catalogView?.())?.fresh, true);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a kept catalog older than the high-water mark is never served", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    let online = true;
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        if (!online) throw new TypeError("fetch failed");
+        return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+      },
+      catalogRetryQuietMs: 60_000,
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    await service.catalogView?.();
+    online = false;
+    assert.equal((await service.catalogView?.())?.fresh, false);
+    // A newer catalog was accepted elsewhere (shared store) or the process stopped
+    // between recording the mark and keeping the list: the kept list is now a rollback.
+    await store.setCatalogHighWater("2026-11-02T00:00:00Z");
+    await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), /fetch failed/);
+    const restarted = offlineCatalogService(dataDir, async () => {
+      throw new TypeError("fetch failed");
+    });
+    await assert.rejects(() => restarted.catalogView?.() ?? Promise.resolve(), /fetch failed/);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a kept catalog never lowers the high-water mark and a fresh fetch replaces it", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    let next: ConnectorCatalogSnapshot | Error = { entries: [entry], generatedAt: "2026-11-02T00:00:00Z" };
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      catalogRetryQuietMs: 0,
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    await service.catalogView?.();
+    assert.equal(await store.getCatalogHighWater(), "2026-11-02T00:00:00Z");
+    next = new TypeError("fetch failed");
+    await service.catalogView?.();
+    assert.equal(await store.getCatalogHighWater(), "2026-11-02T00:00:00Z");
+    next = { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+    await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), RE_ROLLBACK);
+    assert.equal(await store.getCatalogHighWater(), "2026-11-02T00:00:00Z");
+    const replacement = { ...entry, version: "1.1.0", digest: `sha256:${"c".repeat(64)}` };
+    next = { entries: [replacement], generatedAt: "2026-11-03T00:00:00Z" };
+    assert.equal((await service.catalogView?.())?.fresh, true);
+    next = new TypeError("fetch failed");
+    assert.deepEqual((await service.catalogView?.())?.entries, [replacement]);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
 });

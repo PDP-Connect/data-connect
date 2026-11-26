@@ -132,6 +132,13 @@ export const ADD_SOURCE_COPY = {
   searchPlaceholder: "Search for a service",
 } as const;
 
+/** The one quiet line above a list that is the kept copy; `shownAt` is already in the person's local time. */
+export function notFreshCopy(shownAt: string | null): string {
+  return shownAt === null
+    ? "Couldn't check for new services."
+    : `Couldn't check for new services. Showing the list from ${shownAt}.`;
+}
+
 export function cannotAddCopy(name: string): string {
   return `${name} can't be added yet.`;
 }

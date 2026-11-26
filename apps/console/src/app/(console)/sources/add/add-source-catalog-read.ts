@@ -11,6 +11,8 @@ import { readInstalledSourceCatalog } from "./installed-source-catalog.ts";
 
 export interface AddSourceCatalogRead {
   readonly catalog: readonly ConnectorCatalogEntry[];
+  /** Set when the list is the server's kept copy; `fetchedAt` is null when there is no copy time. */
+  readonly catalogNotFresh: { readonly fetchedAt: string | null } | null;
   readonly catalogTransientlyUnavailable: boolean;
   /** Number of accounts the person already has, by connector key. Empty when that read failed. */
   readonly existingConnectionCounts: Readonly<Record<string, number>>;
@@ -44,7 +46,8 @@ export async function readAddSourceCatalog({ withAccounts = true }: { withAccoun
     : null;
   return {
     catalog,
-    catalogTransientlyUnavailable: installSnapshot?.catalogUnavailableReason === "transient_busy",
+    catalogNotFresh: installSnapshot?.catalogNotFresh ?? null,
+    catalogTransientlyUnavailable: installSnapshot?.catalogUnavailableReason !== undefined,
     existingConnectionCounts: Object.fromEntries(
       Object.entries(existing?.byConnector ?? {}).map(([key, links]) => [key, links.length])
     ),
