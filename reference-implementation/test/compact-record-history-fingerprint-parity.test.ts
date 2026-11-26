@@ -945,6 +945,133 @@ if (canonicalRecordFingerprint) {
     }
   });
 
+  const ADDITIONAL_SHIPPED_POLICY_FIXTURES: readonly [string, string, Record<string, unknown>][] = [
+    ["anthropic", "account_plan", { id: "account_plan", plan_type: "pro" }],
+    ["anthropic-live", "account_plan", { id: "account_plan", plan_type: "team" }],
+    ["anthropic-live", "usage_limits", { id: "limits-1", kind: "model", percent_used: 0.42 }],
+    ["chatgpt", "account_plan", { id: "account_plan", is_default: true, plan_type: "plus" }],
+    ["chatgpt", "account_profile", { country: "US", geography_source: "account_profile", id: "profile" }],
+    ["chatgpt", "usage_summary", { activity_basis: "conversation_timestamps", active_days: 4, id: "usage-summary" }],
+    [
+      "claude-code",
+      "usage",
+      {
+        currency: "USD",
+        daily_activity: [],
+        daily_model_tokens: [],
+        hour_counts: {},
+        id: "usage",
+        models: [],
+        source: "local_usage_json",
+        total_cost_usd_cents: 0,
+      },
+    ],
+    [
+      "heb",
+      "order_items",
+      {
+        fetched_at: "2026-06-01T10:00:00Z",
+        id: "item-1",
+        name: "Milk",
+        order_date: "2026-05-31",
+        order_id: "order-1",
+      },
+    ],
+    [
+      "reddit",
+      "comments",
+      { body: "A comment", created_utc: "2026-05-01T12:00:00Z", fetched_at: "2026-06-01T10:00:00Z", id: "t1_comment" },
+    ],
+    [
+      "reddit",
+      "downvoted",
+      {
+        created_utc: "2026-05-02T12:00:00Z",
+        fetched_at: "2026-06-01T10:00:00Z",
+        id: "t3_downvoted",
+        is_post: true,
+        kind: "post",
+      },
+    ],
+    [
+      "reddit",
+      "hidden",
+      {
+        created_utc: "2026-05-03T12:00:00Z",
+        fetched_at: "2026-06-01T10:00:00Z",
+        id: "t3_hidden",
+        is_post: true,
+        kind: "post",
+      },
+    ],
+    [
+      "reddit",
+      "saved",
+      {
+        created_utc: "2026-05-04T12:00:00Z",
+        fetched_at: "2026-06-01T10:00:00Z",
+        id: "t3_saved",
+        is_post: true,
+        kind: "post",
+      },
+    ],
+    [
+      "reddit",
+      "submitted",
+      { created_utc: "2026-05-05T12:00:00Z", fetched_at: "2026-06-01T10:00:00Z", id: "t3_submitted", title: "A submitted post" },
+    ],
+    [
+      "reddit",
+      "upvoted",
+      {
+        created_utc: "2026-05-06T12:00:00Z",
+        fetched_at: "2026-06-01T10:00:00Z",
+        id: "t3_upvoted",
+        is_post: true,
+        kind: "post",
+      },
+    ],
+    [
+      "slack",
+      "dm_read_states",
+      { channel_id: "D123", fetched_at: "2026-06-01T10:00:00Z", id: "D123", unread_count: 2 },
+    ],
+    ["slack-browser", "files", { id: "F123", mimetype: "image/png", title: "diagram.png" }],
+    ["slack-browser", "users", { display_name: "Example User", id: "U123" }],
+    [
+      "slack-browser",
+      "workspace",
+      { fetched_at: "2026-06-01T10:00:00Z", id: "T123", name: "Example Workspace" },
+    ],
+    [
+      "ynab",
+      "month_categories",
+      {
+        budget_id: "budget-1",
+        budgeted: 4000,
+        category_id: "category-1",
+        category_name: "Groceries",
+        id: "month-category-1",
+        month: "2026-05-01",
+      },
+    ],
+    ["ynab", "payees", { budget_id: "budget-1", id: "payee-1", name: "Market" }],
+  ];
+
+  test("parity: representative payloads for additional shipped manifest policies", () => {
+    for (const [connector, stream, payload] of ADDITIONAL_SHIPPED_POLICY_FIXTURES) {
+      const policy = findPolicy(connector, stream);
+      assert.ok(policy, `${connector}/${stream} policy must exist`);
+      for (const excludedKey of policy.excludeKeys) {
+        assert.ok(
+          Object.hasOwn(payload, excludedKey),
+          `${connector}/${stream} fixture must include excluded key ${excludedKey}`
+        );
+      }
+      expectParity(payload, policy.excludeKeys, `${connector}/${stream}`);
+    }
+  });
+
   test("every registered policy has a parity-checked fixture above", () => {
     // Static guard: if a new policy is added without a parity fixture,
     // this assertion fails and points at the gap.
@@ -970,6 +1097,26 @@ if (canonicalRecordFingerprint) {
       "amazon/orders",
       "chatgpt/custom_instructions",
       "chatgpt/shared_conversations",
+      "anthropic/account_plan",
+      "anthropic-live/account_plan",
+      "anthropic-live/usage_limits",
+      "chatgpt/account_plan",
+      "chatgpt/account_profile",
+      "chatgpt/usage_summary",
+      "claude-code/usage",
+      "heb/order_items",
+      "reddit/comments",
+      "reddit/downvoted",
+      "reddit/hidden",
+      "reddit/saved",
+      "reddit/submitted",
+      "reddit/upvoted",
+      "slack/dm_read_states",
+      "slack-browser/files",
+      "slack-browser/users",
+      "slack-browser/workspace",
+      "ynab/month_categories",
+      "ynab/payees",
       // exact stable-JSON identity family (codex)
       "codex/messages",
       "codex/function_calls",
