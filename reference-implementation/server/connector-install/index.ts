@@ -118,6 +118,13 @@ export interface ConnectorCatalogView {
  */
 export const CATALOG_FALLBACK_WAIT_MS = 12_000;
 
+/**
+ * After a refresh fails to reach the registry, serve the kept catalog at once
+ * for this long instead of waiting again on every read (the clients above
+ * refresh on a schedule, not on every page view).
+ */
+export const CATALOG_RETRY_QUIET_MS = 60_000;
+
 const CATALOG_SNAPSHOT_FILE = "connector-catalog-snapshot.json";
 
 interface InstallerCore {
@@ -1009,6 +1016,8 @@ export function createConnectorInstallService(options: {
   }) => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>;
   /** Test seam for CATALOG_FALLBACK_WAIT_MS. */
   readonly catalogFallbackWaitMs?: number;
+  /** Test seam for CATALOG_RETRY_QUIET_MS. */
+  readonly catalogRetryQuietMs?: number;
   /** Test seam; production always delegates OCI verification to the pinned core. */
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
@@ -1040,11 +1049,16 @@ export function createConnectorInstallService(options: {
   let catalogRefresh: Promise<ConnectorCatalogView> | undefined;
   const snapshotPath = join(dataDir, CATALOG_SNAPSHOT_FILE);
   const fallbackWaitMs = options.catalogFallbackWaitMs ?? CATALOG_FALLBACK_WAIT_MS;
+  const retryQuietMs = options.catalogRetryQuietMs ?? CATALOG_RETRY_QUIET_MS;
+  let quietUntil = 0;
   const loadCatalog = async (): Promise<ConnectorCatalogView> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
       const previousHighWater = await store.getCatalogHighWater();
       const kept = readCatalogSnapshotFile(snapshotPath);
+      if (kept && Date.now() < quietUntil) {
+        return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
+      }
       let loaded: readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot;
       try {
         loaded = await withinCatalogWait(
@@ -1058,6 +1072,7 @@ export function createConnectorInstallService(options: {
         // Only "could not reach the registry" falls back. A verification
         // failure (signature, rollback, shape) must still fail.
         if (kept && isRegistryUnreachable(error)) {
+          quietUntil = Date.now() + retryQuietMs;
           return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
         }
         throw error;

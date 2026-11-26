@@ -2283,7 +2283,7 @@ test("an install or update that cannot reach the registry says so in plain words
 function offlineCatalogService(
   dataDir: string,
   loader: (context?: { bounded: boolean }) => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>,
-  extra: { catalogFallbackWaitMs?: number } = {}
+  extra: { catalogFallbackWaitMs?: number; catalogRetryQuietMs?: number } = {}
 ) {
   return createConnectorInstallService({
     catalogLoader: loader,
@@ -2326,7 +2326,7 @@ test("a pinned-core reach failure falls back, a pinned-core verification failure
     const service = offlineCatalogService(dataDir, async () => {
       if (failure) throw failure;
       return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
-    });
+    }, { catalogRetryQuietMs: 0 });
     await service.catalogView?.();
     const registryError = (message: string, reason: string) =>
       Object.assign(new Error(message), { name: "OciRegistryError", reason });
@@ -2375,6 +2375,33 @@ test("a registry that does not answer in time falls back to the kept catalog", a
   }
 });
 
+test("after a failed refresh the kept catalog is served at once until the quiet period ends", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let online = true;
+    let calls = 0;
+    const loader = async () => {
+      calls += 1;
+      if (!online) throw new TypeError("fetch failed");
+      return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+    };
+    const quiet = offlineCatalogService(dataDir, loader, { catalogRetryQuietMs: 60_000 });
+    await quiet.catalogView?.();
+    online = false;
+    assert.equal((await quiet.catalogView?.())?.fresh, false);
+    assert.equal((await quiet.catalogView?.())?.fresh, false);
+    assert.equal(calls, 2, "a second read inside the quiet period must not contact the registry");
+    online = true;
+    const retrying = offlineCatalogService(dataDir, loader, { catalogRetryQuietMs: 0 });
+    online = false;
+    await retrying.catalogView?.();
+    online = true;
+    assert.equal((await retrying.catalogView?.())?.fresh, true);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a kept catalog never lowers the high-water mark and a fresh fetch replaces it", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
   try {
@@ -2385,6 +2412,7 @@ test("a kept catalog never lowers the high-water mark and a fresh fetch replaces
         if (next instanceof Error) throw next;
         return next;
       },
+      catalogRetryQuietMs: 0,
       dataDir,
       registerManifest: () => Promise.resolve(),
       store,

@@ -34,6 +34,8 @@ The response also carries `fresh` (boolean) and, when known, `fetched_at`
 list is the last verified catalog kept on this computer, fetched at
 `fetched_at`. Only a failure to reach the registry falls back; a verification
 failure still fails, and a kept list never lowers the rollback high-water mark.
+With a kept list, one refresh waits at most 12 seconds before the kept list is
+served, and after a failed refresh the kept list is served at once for 60 seconds.
 With no kept list the route answers 503 `registry_unreachable`. Install and
 update answer the same 503 when the download cannot reach the registry.
 
