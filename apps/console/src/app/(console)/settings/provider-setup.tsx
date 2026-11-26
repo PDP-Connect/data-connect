@@ -535,7 +535,8 @@ export function ProviderSetup({
     return url
   }
   async function guarded(run: () => Promise<void>) {
-    if (!isCurrentWay()) return
+    if (!isCurrentWay() || changing.current) return
+    changing.current = true
     ++readEpoch.current
     setBusy(true)
     setNotice(null)
@@ -544,6 +545,7 @@ export function ProviderSetup({
     } catch (failure) {
       setNotice(toDisplayError(failure, "action", reservation.providerLabel).message)
     } finally {
+      changing.current = false
       setBusy(false)
     }
   }

@@ -1311,6 +1311,41 @@ test("two same-tick provider Cancel clicks send one cancel", async () => {
   }
 });
 
+test("same-tick provider Sign in and Cancel share one pending action", async () => {
+  for (const first of ["sign-in", "cancel"] as const) {
+    const handoff = deferred<Result>();
+    const cancellation = deferred<Result>();
+    const calls: Call[] = [];
+    await withProviderSetup(providerBrowserStep(), async (url, body) => {
+      calls.push({ url, body });
+      return url.endsWith("/handoff") ? handoff.promise : cancellation.promise;
+    }, async container => {
+      const buttons = [...container.querySelectorAll("button")];
+      const signIn = buttons.find(button => button.textContent === "Sign in to Tunnel service");
+      const cancel = buttons.find(button => button.textContent === "Cancel setup");
+      assert.ok(signIn);
+      assert.ok(cancel);
+      try {
+        await act(async () => {
+          if (first === "sign-in") { signIn.click(); cancel.click(); }
+          else { cancel.click(); signIn.click(); }
+        });
+        assert.equal(calls.length, 1, "only the first action starts in the same turn");
+        await act(async () => {
+          (first === "sign-in" ? cancellation : handoff).resolve(fail("service_unreachable"));
+        });
+        assert.equal(signIn.disabled, true, "settling the other action cannot release the owner");
+        assert.equal(cancel.disabled, true, "Cancel stays disabled until the owner settles");
+      } finally {
+        await act(async () => {
+          handoff.resolve(fail("service_unreachable"));
+          cancellation.resolve(fail("service_unreachable"));
+        });
+      }
+    });
+  }
+});
+
 test("provider support copy reports failure", async () => {
   // A pending browser sign-in whose handoff fails offers its fixed support details.
   await withProviderSetup(providerBrowserStep(), async () => fail("setup_action_unavailable"), async container => {
@@ -1319,8 +1354,19 @@ test("provider support copy reports failure", async () => {
     await act(async () => signIn.click());
     const copy = [...container.querySelectorAll("button")].find(button => button.textContent === "Copy details for support");
     assert.ok(copy, "the failed handoff offers support details");
-    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: () => Promise.reject(new Error("clipboard denied")) } } });
-    await act(async () => copy.click());
-    assert.ok([...container.querySelectorAll('[role="status"]')].some(status => /Couldn't copy to the clipboard/.test(status.textContent ?? "")));
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    try {
+      for (const [navigator, failure] of [
+        [{ clipboard: { writeText: () => Promise.reject(new Error("clipboard denied")) } }, /Couldn't copy to the clipboard/],
+        [{}, /Clipboard unavailable/],
+      ] as const) {
+        Object.defineProperty(globalThis, "navigator", { configurable: true, value: navigator });
+        await act(async () => copy.click());
+        assert.ok([...container.querySelectorAll('[role="status"]')].some(status => failure.test(status.textContent ?? "")));
+      }
+    } finally {
+      if (navigatorDescriptor) Object.defineProperty(globalThis, "navigator", navigatorDescriptor);
+      else Reflect.deleteProperty(globalThis, "navigator");
+    }
   });
 });
