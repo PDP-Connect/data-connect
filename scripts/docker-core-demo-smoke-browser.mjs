@@ -80,7 +80,12 @@ try {
   await page.waitForURL("**/sources");
   await page.getByRole("link", { name: /Add a data source/ }).click();
   await page.waitForURL("**/sources/add");
-  await page.getByTestId("add-source-list").first().waitFor({ state: "visible" });
+  try {
+    await page.getByTestId("add-source-list").first().waitFor({ state: "visible" });
+  } catch (error) {
+    const text = await page.locator("main").innerText().catch(() => "main text unavailable");
+    throw new Error(`Add-source list did not become visible; page=${text.slice(0, 900)}`, { cause: error });
+  }
   const documentId = await page.evaluate(() => {
     window.__coreSmokeDocumentId = crypto.randomUUID();
     return window.__coreSmokeDocumentId;
