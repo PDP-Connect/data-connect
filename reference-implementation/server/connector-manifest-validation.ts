@@ -1076,7 +1076,6 @@ export function validateManifestSensitivity(manifest: Record<string, unknown>, c
 // ---------------------------------------------------------------------------
 
 const MANIFEST_ICON_ALLOWED_KEYS = new Set(["kind", "svg", "color"]);
-const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
 // `icon.svg` is untrusted markup that reaches the DOM through
 // dangerouslySetInnerHTML. The console renders it only when `sanitizeSvg` accepts it,
