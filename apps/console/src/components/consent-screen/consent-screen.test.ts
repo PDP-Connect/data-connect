@@ -137,7 +137,7 @@ test("the digest covers the client identity the screen displayed", () => {
 
 test("the consent screen uses the real @pdpp/brand-react component modules", () => {
   assert.match(CLIENT_SOURCE, /from ["']@pdpp\/brand-react["']/);
-  for (const component of ["ConnectorIcon", "Endorse", "IcButton", "IcInput"]) {
+  for (const component of ["Endorse", "IcButton", "IcInput"]) {
     assert.ok(new RegExp(`\\b${component}\\b`).test(CLIENT_SOURCE), `must use the real ${component}`);
   }
   assert.match(CLIENT_SOURCE, /className="pdpp-sheet"/, "Terms box must use the real neutral sheet surface");
@@ -154,11 +154,10 @@ test("the consent screen carries the console's own theme control", () => {
   assert.match(CLIENT_SOURCE, /<ThemeToggle \/>/, "must render the toggle");
 });
 
-test("connector icons come from the manifest, never a page-local asset directory", () => {
-  // ConnectorIcon renders the manifest's own `icon` declaration and falls back
-  // to its Monogram. A connector-id -> file map anywhere would mean a
-  // connector the console has never heard of renders worse than one it has.
-  assert.match(CLIENT_SOURCE, /<ConnectorIcon icon=\{source\.icon \?\? null\}/, "icon must come from the source model");
+test("connector marks use shared display resolution and explicit connector provenance", () => {
+  assert.match(CLIENT_SOURCE, /import \{ ConnectorMark \} from "@\/app\/\(console\)\/components\/connector-mark\.tsx"/);
+  assert.match(CLIENT_SOURCE, /<ConnectorMark connectorId=\{source\.connectorId \?\? ""\} icon=\{source\.icon \?\? null\}/);
+  assert.doesNotMatch(CLIENT_SOURCE, /connectorId=\{source\.id\}/, "Core source identity is not connector identity");
   assert.doesNotMatch(CLIENT_SOURCE, /readFileSync|\.svg["']/, "must not read icon assets from disk");
   assert.equal(existsSync(join(COMPONENT_DIR, "icons")), false, "no page-local icon directory may exist");
 });

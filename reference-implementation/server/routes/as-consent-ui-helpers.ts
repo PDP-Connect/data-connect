@@ -758,6 +758,8 @@ export interface HostedMcpConsentChallengeModel {
   readonly reviewDigest: string;
   readonly sources: ReadonlyArray<{
     readonly account: string;
+    /** Display provenance only; grant selection still uses the opaque values below. */
+    readonly connectorId: string;
     /** Manifest-declared brand glyph, passed straight to ConnectorIcon; null renders its Monogram. */
     readonly icon: { readonly color: string | null; readonly kind: string | null; readonly svg: string | null } | null;
     readonly id: string;
@@ -898,6 +900,7 @@ export async function buildHostedMcpConsentChallengeModel(
       // separately, so using it as a fallback would display two conflicting
       // "data types" facts on the same collapsed row.
       account: row.connectionName ?? "",
+      connectorId: row.connectorId,
       icon: icons.get(row.connectorId) ?? null,
       id: row.sourceKey,
       name: row.connectorTypeLabel,

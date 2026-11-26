@@ -226,3 +226,27 @@ test("cleared dates and dates on deselected streams are omitted", async () => {
   fireEvent.click(view.getByRole("checkbox", { name: `Share ${saved.label} from Spotify` }));
   assert.deepEqual((await submit()).streamRanges, {});
 });
+
+test("connector marks use resolved connector identity without changing consent selection", async () => {
+  const source = model.sources[0];
+  assert.equal(source.connectorId, manifest.connector_id);
+  assert.equal(source.id, "spotify:account");
+  assert.equal(source.selectionValue, "source");
+  const view = render(createElement(ConsentScreen, {
+    connectorIndex: {}, model, acceptAction: async () => "", rejectAction: async () => "",
+  }));
+  assert.ok(view.container.querySelector(".pdpp-connector-icon svg"), "the connector mark should not depend on an optional manifest icon");
+});
+
+test("older consent models without connector provenance keep the genuine fallback", () => {
+  const legacy = structuredClone(model);
+  for (const source of legacy.sources) {
+    delete source.connectorId;
+    source.icon = null;
+  }
+  const view = render(createElement(ConsentScreen, {
+    connectorIndex: {}, model: legacy, acceptAction: async () => "", rejectAction: async () => "",
+  }));
+  assert.ok(view.container.querySelector(".pdpp-connector-icon .pdpp-monogram"));
+  assert.equal(view.container.querySelector(".pdpp-connector-icon svg"), null, "do not infer a brand from a source ID or account name");
+});

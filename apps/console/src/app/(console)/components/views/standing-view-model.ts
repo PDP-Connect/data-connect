@@ -187,6 +187,7 @@ export interface LatelyView {
 }
 
 export interface AttentionRowView {
+  connectorId?: string;
   href: string;
   id: string;
   what: string;
@@ -937,6 +938,7 @@ function sourceWorkRow(item: SourceWorkItem, hrefs: StandingHrefs): AttentionRow
     what = `${item.label} ${item.statusLabel}`;
   }
   return {
+    connectorId: item.connectorKey,
     href: hrefs.connection(item.routeId),
     id: item.id,
     what,

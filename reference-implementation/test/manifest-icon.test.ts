@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { validateManifestIcon } from "../server/connector-manifest-validation.ts";
 import { startServer } from "../server/index.ts";
+import { sanitizeSvg } from "../vendor/brand-react/src/sanitize-svg.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -149,7 +150,7 @@ test("manifest icon.svg containing a script tag is rejected", async () => {
     assert.equal(status, 400);
     assert.ok(hasErrorBody(body));
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /disallowed element: script/u);
+    assert.match(body.error.message, /icon\.svg must be one bare <svg> element/u);
   });
 });
 
@@ -164,7 +165,7 @@ test("manifest icon.svg with an event-handler attribute is rejected", async () =
     assert.equal(status, 400);
     assert.ok(hasErrorBody(body));
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /disallowed attribute: onload/u);
+    assert.match(body.error.message, /icon\.svg must be one bare <svg> element/u);
   });
 });
 
@@ -176,11 +177,8 @@ test("manifest icon.svg not wrapped in a bare <svg> element is rejected", async 
     );
     assert.equal(status, 400);
     assert.ok(hasErrorBody(body));
-    // <div> is rejected as a disallowed element before the bare-<svg>-root
-    // check ever runs — a stronger rejection than the old denylist's, which
-    // only checked the root shape.
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /disallowed element: div/u);
+    assert.match(body.error.message, /icon\.svg must be one bare <svg> element/u);
   });
 });
 
@@ -193,7 +191,7 @@ test("manifest icon.svg whose root is not <svg> is rejected even when every elem
     assert.equal(status, 400);
     assert.ok(hasErrorBody(body));
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /bare <svg>/u);
+    assert.match(body.error.message, /icon\.svg must be one bare <svg> element/u);
   });
 });
 
@@ -329,3 +327,51 @@ test("validateManifestIcon: allowlist rejects disallowed elements/attributes/val
     validateManifestIcon({ icon: { kind: "inline_svg", svg: STEAM_SHAPED_SVG } }, "invalid_request")
   );
 });
+
+// ---------------------------------------------------------------------------
+// One allowlist. The console renders a manifest icon only if sanitizeSvg
+// (vendor/brand-react, the function behind validatedConnectorIcon) accepts it.
+// The server must therefore accept exactly what that function accepts: an icon
+// the server stores but the console drops silently shows a monogram, and an
+// icon the server rejects but the console would render is a second list to
+// keep in step. Every row below was decided differently by the two old lists.
+// ---------------------------------------------------------------------------
+
+const VERDICT_CASES: ReadonlyArray<{ name: string; svg: string }> = [
+  {
+    name: "root with role and aria-hidden",
+    svg: '<svg role="img" aria-hidden="true" viewBox="0 0 24 24"><path d="M0 0z"/></svg>',
+  },
+  { name: "<defs> wrapper", svg: '<svg viewBox="0 0 24 24"><defs><path d="M0 0z"/></defs></svg>' },
+  { name: "duplicate attribute", svg: '<svg viewBox="0 0 24 24"><path d="M0 0z" d="M1 1z"/></svg>' },
+  { name: "character reference in a value", svg: '<svg viewBox="0 0 24 24"><path d="M0 0z" fill="&#35;fff"/></svg>' },
+  { name: "backslash escape in a value", svg: '<svg viewBox="0 0 24 24"><path d="M0 0z" fill="\\23fff"/></svg>' },
+  { name: "unclosed group", svg: '<svg viewBox="0 0 24 24"><g><path d="M0 0z"/></svg>' },
+  { name: "stray closing tag", svg: '<svg viewBox="0 0 24 24"></g><path d="M0 0z"/></svg>' },
+  { name: "mismatched closing tag", svg: '<svg viewBox="0 0 24 24"><g><path d="M0 0z"/></svg></g>' },
+  { name: "two roots", svg: '<svg><path d="M0 0z"/></svg><svg><path d="M0 0z"/></svg>' },
+  { name: "text after the root", svg: '<svg viewBox="0 0 24 24"><path d="M0 0z"/></svg>trailing' },
+  { name: "title caption", svg: '<svg viewBox="0 0 24 24"><title>Mark</title><path d="M0 0z"/></svg>' },
+  { name: "single-quoted attributes", svg: "<svg viewBox='0 0 24 24'><path d='M0 0z'/></svg>" },
+  { name: "closing tag with attributes", svg: '<svg viewBox="0 0 24 24"><g><path d="M0 0z"/></g fill="red"></svg>' },
+  { name: "self-closing root", svg: '<svg viewBox="0 0 24 24"/>' },
+  { name: "url() in a value", svg: '<svg viewBox="0 0 24 24"><path d="M0 0z" fill="url(#a)"/></svg>' },
+  { name: "mixed-case element and attribute names", svg: '<SVG ViewBox="0 0 24 24"><PATH D="M0 0z"/></SVG>' },
+  ...XSS_VECTORS,
+];
+
+function serverAccepts(svg: string): boolean {
+  try {
+    validateManifestIcon({ icon: { kind: "inline_svg", svg } }, "invalid_request");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+for (const { name, svg } of VERDICT_CASES) {
+  test(`server validator and console sanitizer give one verdict: ${name}`, () => {
+    const console = sanitizeSvg(svg) !== null;
+    assert.equal(serverAccepts(svg), console, `console sanitizer ${console ? "accepts" : "rejects"} this SVG`);
+  });
+}
