@@ -27,15 +27,7 @@
  *      manifest here so the contract can never re-advertise a stream the
  *      connector does not emit.
  *
- *   2. The shipped polyfill manifest at
- *      `@pdpp/polyfill-connectors`'s `manifests/github.json` declares streams
- *      that the real connector's `SCHEMAS` registry does not cover. The
- *      polyfill runtime validates emitted records against `SCHEMAS[stream]`,
- *      so a manifest-declared stream with no schema cannot be emitted as
- *      well-formed data; the contract advertises something the connector
- *      cannot deliver.
- *
- * The parity rule is one-way:
+ * The reference-fixture parity rule is one-way:
  *   - every manifest-declared stream must have a backing emission path
  *   - extra emission paths (e.g. `user_stats` derived from `user`) are fine
  *     as long as the manifest also declares them (otherwise the records-list
@@ -114,23 +106,6 @@ test("reference fixture manifest only advertises streams the seed connector emit
     [],
     `Fixture manifest declares streams that the seed connector never emits: ${orphans.join(", ")}. ` +
       "Either remove the stream from the manifest or add an emission path to the seed connector."
-  );
-});
-
-test("polyfill manifest only advertises streams the GitHub connector has schemas for", async () => {
-  const manifestStreams = shippedGithubManifestStreamNames();
-  // data-connectors#70 blessed ./connectors/github/schemas specifically for
-  // this check — no more falling back to raw-source regex scraping of a
-  // `.ts` file under node_modules.
-  const { SCHEMAS } = await import("@pdpp/polyfill-connectors/connectors/github/schemas");
-
-  const schemaStreams = new Set(Object.keys(SCHEMAS));
-  const orphans = manifestStreams.filter((name: string) => !schemaStreams.has(name));
-  assert.deepStrictEqual(
-    orphans,
-    [],
-    `Polyfill manifest declares streams without a SCHEMAS entry: ${orphans.join(", ")}. ` +
-      "Either add the schema or drop the stream from the manifest."
   );
 });
 

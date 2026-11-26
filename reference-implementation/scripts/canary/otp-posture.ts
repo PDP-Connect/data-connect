@@ -53,20 +53,8 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-/**
- * Location of the connector manifests: the installed `@pdpp/polyfill-connectors`
- * package's own `manifests/` directory, resolved via the package's
- * `./manifests` export so the harness never drifts from that package's
- * on-disk layout.
- */
-const MANIFEST_DIR = join(
-  dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
-  "..",
-  "manifests"
-);
+import { join } from "node:path";
+import { readShippedManifests } from "../../test/helpers/shipped-manifests.ts";
 
 /**
  * The CLOSED, RI-OWNED set of interaction postures a canary may trigger.
@@ -146,7 +134,23 @@ function provesNonOtpPosture(manifestJson: string): boolean {
  * Exported for tests, which drive it against a fixture directory; production
  * callers use {@link OTP_DENYLISTED_CONNECTORS}, computed once at load.
  */
-export function deriveOtpDenylist(manifestDir: string = MANIFEST_DIR): readonly string[] {
+export function deriveOtpDenylist(manifestDir?: string): readonly string[] {
+  if (manifestDir === undefined) {
+    let manifests;
+    try {
+      manifests = readShippedManifests();
+    } catch (error) {
+      throw new Error(
+        "canary OTP guard: cannot read the shipped connector snapshot, so no connector can prove a non-OTP posture. Refusing to derive a permissive denylist.",
+        { cause: error }
+      );
+    }
+    return manifests
+      .filter((entry) => !provesNonOtpPosture(JSON.stringify(entry.manifest)))
+      .map((entry) => entry.file.slice(0, -".json".length))
+      .sort((left, right) => left.localeCompare(right));
+  }
+
   let entries: readonly string[];
   try {
     entries = readdirSync(manifestDir);

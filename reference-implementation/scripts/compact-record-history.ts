@@ -124,7 +124,7 @@ import {
   connectorInstanceLockWaitMs,
 } from "../server/connector-instance-write-coordinator.ts";
 import { canonicalConnectorKeyFromManifest, REGISTRY_CONNECTOR_PREFIX } from "../server/connector-key.ts";
-import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
+import { readShippedManifests } from "../test/helpers/shipped-manifests.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
@@ -142,10 +142,8 @@ const { Pool } = pg;
  * `reference-implementation/test/ri-zero-connector-knowledge-conformance.test.ts`).
  *
  * This script reads every manifest under both available manifest sets
- * (the optional polyfill runtime's `readPolyfillManifests()`,
- * `reference-implementation/manifests/` — the sanctioned pattern for RI tooling
- * that needs the full manifest set rather than one connector at a time via the
- * runtime installed-connector catalog) and
+ * (the pinned shipped-manifest snapshot and
+ * `reference-implementation/fixtures/seed-manifests/`) and
  * builds `COMPACTION_POLICIES` GENERICALLY from whichever streams declare a
  * `compaction_fingerprint` field — this script contains no connector-name
  * branch anywhere. `compaction_fingerprint.exclude_keys` (and the optional
@@ -182,24 +180,19 @@ export interface ManifestLike {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
 
-/** Every manifest the `@pdpp/polyfill-connectors` package ships, parsed. This
- * package owns that manifest set — this reference-implementation tool must
- * not walk its `manifests/` directory itself, so it goes through the
- * package's own `readPolyfillManifests()` export instead of `node:fs`
- * directly. A failure reading the package's manifest set is treated the same
- * as "no polyfill manifests" (this mirrors the scanner's own
- * manifest-derivation posture — a broken/unreadable manifest set simply
- * contributes no policy, it does not crash the tool). */
-function readPolyfillConnectorsManifests(): ManifestLike[] {
+/** Every manifest in the pinned shipped-manifest snapshot, parsed. A failure
+ * reading the snapshot contributes no policy, matching the existing
+ * manifest-derivation posture for RI tooling. */
+function readShippedConnectorManifests(): ManifestLike[] {
   try {
-    return readPolyfillManifests().map((entry) => entry.manifest as ManifestLike);
+    return readShippedManifests().map((entry) => entry.manifest as ManifestLike);
   } catch {
     return [];
   }
 }
 
 /** Every `*.json` manifest directly under `reference-implementation/
- * fixtures/seed-manifests/`, parsed. Same posture as {@link readPolyfillConnectorsManifests}. */
+ * fixtures/seed-manifests/`, parsed. Same posture as {@link readShippedConnectorManifests}. */
 function readReferenceImplementationManifests(): ManifestLike[] {
   const referenceImplementationManifestsDir = resolve(riRoot, "fixtures", "seed-manifests");
   const out: ManifestLike[] = [];
@@ -221,7 +214,7 @@ function readReferenceImplementationManifests(): ManifestLike[] {
 
 /** Every shipped manifest across both roots, parsed. */
 function readAllManifests(): ManifestLike[] {
-  return [...readPolyfillConnectorsManifests(), ...readReferenceImplementationManifests()];
+  return [...readShippedConnectorManifests(), ...readReferenceImplementationManifests()];
 }
 
 /** Build a `CompactionPolicy` from one manifest's connector key and one of
