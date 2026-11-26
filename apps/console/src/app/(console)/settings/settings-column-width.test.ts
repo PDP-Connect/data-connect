@@ -20,3 +20,12 @@ test("no fixed or minimum width on the Settings column", () => {
 	const widths = column.split(/\s+/).filter((name) => /^(min-w|w)-/.test(name) && name !== "min-w-0" && name !== "w-full");
 	assert.deepEqual(widths, []);
 });
+
+// The shared button is `whitespace-nowrap shrink-0`. Inside the pairing row's own grid, a
+// long label then set that grid's column to the label's full width (389 px at 390).
+test("the pairing toggle can wrap its long label on a phone", () => {
+	const pairing = readFileSync(new URL("./desktop-pairing-setting.tsx", import.meta.url), "utf8");
+	const toggle = /<Button aria-expanded=\{expanded\} className="([^"]*)"/.exec(pairing)?.[1] ?? "";
+	const classes = toggle.split(/\s+/);
+	for (const name of ["whitespace-normal", "min-w-0", "h-auto"]) assert.ok(classes.includes(name), `${name} missing from: ${toggle}`);
+});
