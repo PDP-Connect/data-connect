@@ -25,6 +25,7 @@ import {
   createConnectorInstallService,
   createFileConnectorInstallStore,
 } from "../server/connector-install/index.ts";
+import { getConnectorActivation } from "../server/connector-install/activation-authority.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
@@ -277,6 +278,55 @@ async function withDataDir(run: (dataDir: string) => Promise<void>): Promise<voi
 
 const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> }> = [
   {
+    name: "a verified move without incoming history retains ownership of the moved-from identity",
+    run: (backend) => withDataDir(async (dataDir) => {
+      await seedLegacyConnector(backend);
+      const declared = versionWith("1.0.0", DECLARED_SOURCE);
+      const { service } = serviceFor(dataDir, [declared]);
+      await service.install(KEY, declared.entry.digest);
+      await assert.rejects(() => registerConnector({ ...profileFor("1.0.0"), connector_key: "third-key", connector_id: "third-key", source: { id: LEGACY_SOURCE } }), /already owned/);
+      assert.equal((await retained()).id, DECLARED_SOURCE);
+    }),
+  },
+  {
+    name: "legacy activation rehydration preserves moved source history and ownership",
+    run: (backend) =>
+      withDataDir(async (dataDir) => {
+        await seedLegacyConnector(backend);
+        const declared = versionWith("1.0.0", DECLARED_SOURCE);
+        const { service, store } = serviceFor(dataDir, [declared]);
+        await service.install(KEY, declared.entry.digest);
+        const installed = await store.getActive(KEY);
+        assert.ok(installed);
+        await execute(
+          backend,
+          "INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES($1, $2, $3)",
+          "INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES(?, ?, ?)",
+          [KEY, JSON.stringify(installed), new Date().toISOString()]
+        );
+
+        const activation = await getConnectorActivation(KEY);
+        assert.equal(activation?.state, "active");
+        const declaration = activation?.canonicalManifest.source_declaration as
+          | { extensions?: Record<string, { legacy_source_ids?: string[] }> }
+          | undefined;
+        assert.deepEqual(
+          declaration?.extensions?.["https://pdpp.dev/profile/collection"]?.legacy_source_ids,
+          [LEGACY_SOURCE]
+        );
+        await assert.rejects(
+          () =>
+            registerConnector({
+              ...profileFor("1.0.0"),
+              connector_key: "third-key",
+              connector_id: "third-key",
+              source: { id: LEGACY_SOURCE },
+            }),
+          /already owned/
+        );
+      }),
+  },
+  {
     name: "a matching declared legacy id moves retained data to the explicit current source",
     run: async (backend) => {
       await seedLegacyConnector(backend);
@@ -296,6 +346,13 @@ const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> 
         await service.install(KEY, declared.entry.digest);
         assert.equal((await retained()).id, DECLARED_SOURCE);
         assert.notEqual((await retained()).publisher, LEGACY_PUBLISHER);
+        const movedManifest = (await getConnectorManifest(KEY)) as {
+          source_declaration?: { extensions?: Record<string, { legacy_source_ids?: string[] }> };
+        } | null;
+        assert.deepEqual(
+          movedManifest?.source_declaration?.extensions?.["https://pdpp.dev/profile/collection"]?.legacy_source_ids,
+          [LEGACY_SOURCE]
+        );
         assert.deepEqual(await readReferences(backend), {
           grant: DECLARED_SOURCE,
           handle: DECLARED_SOURCE,
@@ -306,6 +363,13 @@ const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> 
         // Reinstalling the same package is not a second move.
         await service.install(KEY, declared.entry.digest);
         assert.equal((await retained()).id, DECLARED_SOURCE);
+        const reinstalledManifest = (await getConnectorManifest(KEY)) as {
+          source_declaration?: { extensions?: Record<string, { legacy_source_ids?: string[] }> };
+        } | null;
+        assert.deepEqual(
+          reinstalledManifest?.source_declaration?.extensions?.["https://pdpp.dev/profile/collection"]?.legacy_source_ids,
+          [LEGACY_SOURCE]
+        );
 
         // The moved identity is now a published declaration, so a later rebinding is refused.
         const rebinding = versionWith("1.1.0", OTHER_SOURCE);
