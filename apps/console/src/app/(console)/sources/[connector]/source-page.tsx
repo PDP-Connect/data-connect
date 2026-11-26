@@ -1,3 +1,4 @@
+import { sourceRecordCount, sourceStreamRecordCount } from "../../lib/source-record-count.ts";
 import { sourceRecordLabel, isOwnerRecordKind } from "../../lib/source-record-label.ts";
 import { SourceApps, SourceAppsList } from "./source-apps.tsx";
 import { groupGrantAccessByApp } from "../../grants/app-access.ts";
@@ -20,7 +21,7 @@ import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { buildBreakdownLabel } from "@pdpp/operator-ui/lib/source-storage";
-import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../../lib/total-records-label.ts";
+import { formatTotalRecordsLabel } from "../../lib/total-records-label.ts";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
 import Link from "next/link";
 import { Suspense } from "react";
@@ -31,7 +32,6 @@ import {
   manualUploadSetupFromManifest,
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
-import { knownStreamRecordCount } from "../../lib/stream-evidence-state.ts";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
@@ -389,6 +389,7 @@ function streamsFromConnectorSummary(summary: RefConnectorSummary): StreamSummar
       // (count_state: "unobserved"/"stale"/"unknown") — never coerced to a
       // fabricated 0 either.
       record_count: record ? record.record_count : null,
+      retained_record_count: record?.retained_record_count,
     });
   };
 
@@ -851,7 +852,8 @@ function ConnectorPageView({
   } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
     stateSentence = { text: `Something stopped ${serviceName} from syncing.`, slot: null };
   }
-  const visibleTotal = isTotalRecordsAuthoritative(source.total_records_state) ? `${source.total_records.toLocaleString()} record${source.total_records === 1 ? "" : "s"}` : undefined;
+  const recordTotal = sourceRecordCount(source);
+  const visibleTotal = recordTotal.count === null ? undefined : `${recordTotal.count.toLocaleString()} record${recordTotal.count === 1 ? "" : "s"}`;
 
   return (
     <RecordroomShellWithPalette>
@@ -901,6 +903,7 @@ function ConnectorPageView({
       </Suspense>
       {!neverConnected ? <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         <SourceRecords model={model} />
+        {recordTotal.conflicting ? <p className="pdpp-body mt-3 text-muted-foreground">DataConnect can't yet tell whether it got everything.</p> : null}
         {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>Add another export</Link>
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
@@ -956,8 +959,8 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
   const streams = model.streams.filter(stream => isOwnerRecordKind(stream.name));
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const label = (name: string) => sourceRecordLabel(name, manifest.streams as StreamManifestEntry[]);
-  const missing = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
-  const empty = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && !missing.includes(stream));
+  const missing = streams.filter((stream) => sourceStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
+  const empty = streams.filter((stream) => sourceStreamRecordCount(stream) === 0 && !missing.includes(stream));
   const present = streams.filter((stream) => !missing.includes(stream) && !empty.includes(stream));
   return <>
     {present.length ? <DataList>{present.map((stream) => {
@@ -966,7 +969,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
       const partial = Boolean(gap) || Boolean(report && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(report.coverage_condition));
       const more = report ? report.forward_disposition === "resumable" : gap?.recovery_hint?.retryable === true;
       const lost = report?.coverage_condition === "terminal_gap" && report.forward_disposition === "terminal";
-      const recordCount = knownStreamRecordCount(stream);
+      const recordCount = sourceStreamRecordCount(stream);
       const count = recordCount === null ? null : `${recordCount.toLocaleString()} record${recordCount === 1 ? "" : "s"}`;
       const sentence = partial
         ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : lost ? `${count ? `${count}. ` : ""}Some could not be copied.` : count

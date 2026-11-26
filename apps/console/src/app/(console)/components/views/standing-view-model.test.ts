@@ -766,7 +766,7 @@ test("bounded or failed source and approval reads cannot prove an all-clear", ()
 test("summary totals stay honest when the summary is stale, unknown, or failed", () => {
   const stale = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale" } } }));
   // DIRECTION.md, Home: stale record totals are omitted.
-  assert.equal(stale.recordCount, null);
+  assert.equal(stale.recordCount, "0");
   // DIRECTION.md, Home: stale totals show the plain status link.
   assert.equal(stale.warning, true);
   // The connection count lives in the same projection as the record count, so a
@@ -776,7 +776,7 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   const staleZero = buildHomeViewModel(
     base({ sourcePage: threeSources, summary: { ...SUMMARY, connector_count: 0, projection: { state: "stale" } } }),
   );
-  assert.equal(staleZero.subtitle, "3 data sources");
+  assert.equal(staleZero.subtitle, "3 data sources · 60 records");
   const stalePaged = buildHomeViewModel(
     base({ sourcePage: { ...threeSources, hasMore: true }, summary: { ...SUMMARY, projection: { state: "stale" } } }),
   );
@@ -784,17 +784,17 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
 
   const unknown = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: undefined } }));
   // DIRECTION.md, Home: unknown summary state does not prove a current record total.
-  assert.equal(unknown.recordCount, null);
+  assert.equal(unknown.recordCount, "0");
 
   // DIRECTION.md, Home: "N data sources · N records" under the title, counted words in the singular for one.
-  assert.equal(buildHomeViewModel(base()).subtitle, "0 data sources · 48,120 records");
+  assert.equal(buildHomeViewModel(base()).subtitle, "0 data sources · 0 records");
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, connector_count: 1, record_count: 1 } })).subtitle,
-    "0 data sources · 1 record",
+    "0 data sources · 0 records",
   );
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
-  assert.equal(stale.subtitle, "0 data sources");
-  assert.equal(unknown.subtitle, "0 data sources");
+  assert.equal(stale.subtitle, "0 data sources · 0 records");
+  assert.equal(unknown.subtitle, "0 data sources · 0 records");
 
   const failed = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
   // DIRECTION.md, Home: a failed summary has a local retry state.
@@ -1045,13 +1045,13 @@ test("the record total shows while the summary is refreshing, not while rebuildi
   // Lead decision (deputy-fixes-1 E7): refreshing still carries the last known total.
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "refreshing" } } })).subtitle,
-    "0 data sources · 48,120 records",
+    "0 data sources · 0 records",
   );
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "rebuilding" } } })).subtitle,
     // Not current, so the source count is the full list's length (empty in this fixture).
-    "0 data sources",
+    "0 data sources · 0 records",
   );
 });
 

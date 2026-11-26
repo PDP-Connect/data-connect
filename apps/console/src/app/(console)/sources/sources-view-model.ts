@@ -1,3 +1,4 @@
+import { sourceRecordCount } from "../lib/source-record-count.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -591,9 +592,10 @@ function streamNamesForSource(
  * centralized `formatTotalRecordsLabel` primitive as every other renderer.
  */
 function formatSourceListFacts(summary: RefConnectorSummary, streamCountOverride: number | null = null): string {
-  const recordCount = Number.isFinite(summary.total_records) ? Math.max(0, Math.floor(summary.total_records)) : 0;
+  const projected = sourceRecordCount(summary);
+  const recordCount = projected.count ?? summary.total_records;
   const recordNoun = recordCount === 1 ? "record" : "records";
-  const recordsLabel = formatTotalRecordsLabel(recordCount, summary.total_records_state, recordNoun);
+  const recordsLabel = formatTotalRecordsLabel(recordCount, projected.state, recordNoun);
   const streamCountRaw = streamCountOverride ?? summary.stream_count ?? summary.streams.length;
   const streamCount = Number.isFinite(streamCountRaw) ? Math.max(0, Math.floor(streamCountRaw)) : 0;
   const streamNoun = streamCount === 1 ? "stream" : "streams";
@@ -828,10 +830,10 @@ export function toSourceInstanceView(
     status,
     statusWords: sourceStatusWords(summary, { now: options.now ?? new Date() }),
     scheduleLabel: formatSourceRowSchedule(summary.schedule),
-    recordsLabel: formatSourceRowRecords(summary.total_records, summary.total_records_state),
+    recordsLabel: formatSourceRowRecords(sourceRecordCount(summary).count ?? 0, sourceRecordCount(summary).state),
     streams,
-    totalRecords: summary.total_records,
-    totalRecordsState: summary.total_records_state,
+    totalRecords: sourceRecordCount(summary).count ?? 0,
+    totalRecordsState: sourceRecordCount(summary).state,
   };
 }
 

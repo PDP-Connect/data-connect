@@ -1,3 +1,4 @@
+import { sourceRecordCount } from "../../lib/source-record-count.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -340,14 +341,13 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
 
   // A refreshing summary still carries the last known total; rebuilding,
   // stale, failed or unknown states do not.
-  const recordState = input.summary?.projection?.state;
-  const summaryCurrent = !input.summaryFailed && (recordState === "fresh" || recordState === "refreshing");
   // The server counts connections in the same projection as records, so a
   // stale summary can say 0 while the full source list shows three. Without a
   // current summary, count the source list when it was read in full.
   const dataSourceTotal = sourceReadComplete ? preparedSources.length : null;
   const dataSourceCount = dataSourceTotal === null ? null : number(dataSourceTotal);
-  const recordTotal = summaryCurrent ? (input.summary?.record_count ?? null) : null;
+  const sourceCounts = preparedSources.map(({ source }) => sourceRecordCount(source).count);
+  const recordTotal = sourceReadComplete && sourceCounts.every((count) => count !== null) ? sourceCounts.reduce<number>((sum, count) => sum + (count ?? 0), 0) : null;
   const subtitle =
     [
       dataSourceTotal === null ? null : counted(dataSourceTotal, "data source", "data sources"),

@@ -42,6 +42,7 @@ import { aggregateStreamRecordCounts } from "./stream-record-count-aggregate.ts"
 import { verifyDashboardSession } from "./verify-session.ts";
 
 export interface StreamSummary {
+  retained_record_count?: number | null;
   count_state?: "known" | "known_zero" | "unobserved" | "stale" | "unknown";
   /**
    * Orthogonal declaration/count state pair (`reconcile-active-summary-evidence`
