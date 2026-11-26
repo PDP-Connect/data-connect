@@ -45,24 +45,24 @@ test("same failed-sync evidence gives every current surface the history cause an
     const list=toSourceInstanceView(shared).statusWords;
     const homeModel=buildHomeViewModel({approvals:[],approvalsFailed:false,approvalsHaveMore:false,grants:[],grantsFailed:false,grantsHaveMore:false,ownerClients:[],ownerClientsFailed:false,ownerClientsHaveMore:false,sourcePage:{kind:"ok",hasMore:false,sources:[shared]},summary:null,summaryFailed:false,traces:[],tracesFailed:false,tracesHaveMore:false,now:new Date(),reloadHref:"/",hrefs:{addSource:"/sources/add",connect:"/connect",deployment:"/deployment",deploymentTokens:"/deployment/tokens",grant:(id)=>`/grants/${id}`,grants:"/grants",source:(id)=>`/sources/${id}`,sources:"/sources"}});
     const home=(homeModel.dataSources[0] ?? homeModel.needs[0])!.status!;
-    if(label === "Sign in again") assert.equal(homeModel.needs[0]?.actionLabel,label);
+    if(label === "Sign in again") { assert.equal(homeModel.needs[0]?.actionLabel,label); }
     for(const status of [list,home]) {assert.equal(status.words,sentence);assert.equal(status.action?.label ?? null,label);}
     assert.equal(words.words,sentence);assert.equal(words.action?.label ?? null,label);
   }
 });
 test("day counts describe copied records, including singular and zero",()=>{
-  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days")throw Error("mode");
+  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days") { throw Error("mode"); }
   const base=fixture.history.data[0]!;
   assert.match(syncDaySentence({...base,records:1},"Northwind"),/copied 1 record(?:$| ·)/);
   assert.match(syncDaySentence({...base,records:0},"Northwind"),/Nothing to copy/);
-  assert.doesNotMatch(syncDaySentence({...base,records:58000},"Northwind"),/new/);
+  assert.doesNotMatch(syncDaySentence({...base,records:58_000},"Northwind"),/new/);
 });
 
 test("earlier healthy sources collapse and missing kinds remain visible",async()=>{
   const React=await import("react");(globalThis as typeof globalThis & {React:typeof React}).React=React;
   const {renderToStaticMarkup}=await import("react-dom/server");
   const {SyncHistoryDays}=await import("../syncs/daily-syncs-view.tsx");
-  const model=syncPractice("mixed",0);if(model.history.mode!=="days")throw Error("mode");
+  const model=syncPractice("mixed",0);if(model.history.mode!=="days") { throw Error("mode"); }
   const rows=model.history.data.map(row=>({...row,day:"2026-08-13"}));
   rows[0]={...rows[0]!,missing:[{stream:"messages",retryable:false}]};
   const html=renderToStaticMarkup(<SyncHistoryDays rows={rows} sources={model.sources} offset={0} />);
@@ -71,8 +71,8 @@ test("earlier healthy sources collapse and missing kinds remain visible",async()
 });
 
 test("consecutive discovery lines roll into one, with record reads first",async()=>{
-  const {groupReadLines}=await import("../audit/day/read-day-view.tsx");
-  const {readPractice}=await import("./practice.ts");const history=readPractice("kinds");if(history.mode!=="reads")throw Error("mode");
+  const {groupReadLines}=await import("../audit/day/read-day-rows.tsx");
+  const {readPractice}=await import("./practice.ts");const history=readPractice("kinds");if(history.mode!=="reads") { throw Error("mode"); }
   const schema=history.data.find(row=>row.shape==="schema")!;
   const rolled=groupReadLines(Array.from({length:35},(_,index)=>({...schema,id:`discovery-${index}`})));
   assert.equal(rolled.length,1);assert.equal(rolled[0]?.occurrences,35);
@@ -82,9 +82,9 @@ test("consecutive discovery lines roll into one, with record reads first",async(
 test("practice summary and day use the same copied counts and outcome totals",async()=>{
   const {syncDayPractice}=await import("./practice.ts");
   for(const state of ["mixed","recopied","expired-sign-in","missing-kind"]) {
-    const summary=syncPractice(state,0);if(summary.history.mode!=="days")throw Error("mode");
+    const summary=syncPractice(state,0);if(summary.history.mode!=="days") { throw Error("mode"); }
     for(const row of summary.history.data) {
-      const day=syncDayPractice("history-day",0,Date.now(),row.connection_id,state);if(day.mode!=="syncs")throw Error("mode");
+      const day=syncDayPractice("history-day",0,Date.now(),row.connection_id,state);if(day.mode!=="syncs") { throw Error("mode"); }
       assert.equal(day.data.length,row.ran);assert.equal(day.data.reduce((n,sync)=>n+sync.records,0),row.records);
       assert.equal(day.data.filter(sync=>sync.outcome==="failed").length,row.failed);
     }
@@ -94,12 +94,12 @@ test("practice app reads agree with activity and denied apps have no reads that 
   const {appPractice,readPractice}=await import("./practice.ts");
   for(const state of ["mixed","seven-fifty"]) {
     const summary=appPractice(state,0);const day=readPractice(state==="mixed"?"history-reads":"seven-fifty");
-    if(summary.mode!=="days"||day.mode!=="reads")throw Error("mode");
+    if(summary.mode!=="days"||day.mode!=="reads") { throw Error("mode"); }
     const row=summary.data.find(row=>row.client_id==="practice-app-0")!;
     const reads=day.data.filter(read=>!["schema","stream_list"].includes(read.shape ?? ""));
     assert.equal(reads.length,row.reads);
-    for(const source of row.sources)assert.equal(reads.filter(read=>read.connection_id===source.connection_id).length,source.reads);
-    for(const denied of summary.changes.filter(row=>row.change==="not_allowed"))assert.equal(summary.data.some(row=>row.client_id===denied.client_id && row.day===denied.day),false);
+    for(const source of row.sources) { assert.equal(reads.filter(read=>read.connection_id===source.connection_id).length,source.reads); }
+    for(const denied of summary.changes.filter(row=>row.change==="not_allowed")) { assert.equal(summary.data.some(row=>row.client_id===denied.client_id && row.day===denied.day),false); }
   }
 });
 test("practice has 110 dates, 59 reading apps and a real console sign-in that is excluded",async()=>{
@@ -107,7 +107,7 @@ test("practice has 110 dates, 59 reading apps and a real console sign-in that is
   const sync=syncPractice("hundred-ten",0);assert.equal(new Set(sync.history.data.map(row=>"day" in row?row.day:"")).size,110);
   assert.equal(practiceHistoryApps("fifty-nine").filter(app=>app.state==="reading").length,59);
   const raw=appPractice("console-sign-ins",0);const shown=practiceAppHistory("console-sign-ins",0).history;
-  if(raw.mode!=="days"||shown.mode!=="days")throw Error("mode");
+  if(raw.mode!=="days"||shown.mode!=="days") { throw Error("mode"); }
   assert.equal(raw.changes.length,shown.changes.length+1);
 });
 
@@ -118,4 +118,14 @@ test("current owner steps and maintenance blocks take precedence over failed-syn
     assert.notEqual(sourceStatusWords(shared,{now:new Date()}).words,"Northwind asked for a new sign-in.");
     assert.notEqual(sourceStateSentence(shared,{now:new Date(),name:"Northwind"}).text,"Northwind asked for a new sign-in.");
   }
+});
+
+test("large practice record totals and automatic triggers agree with the day",async()=>{
+ const {readPractice,appPractice}=await import("./practice.ts");
+ const day=readPractice("seven-fifty");const summary=appPractice("seven-fifty",0);
+ if(day.mode!=="reads" || summary.mode!=="days") { throw Error("fixture"); }
+ const reads=day.data.filter(row=>row.shape==="record_list");
+ assert.equal(reads.reduce((sum,row)=>sum+(row.records ?? 0),0),summary.data[0]!.sources[0]!.records);
+ const {oneSyncPractice}=await import("../syncs/[runId]/one-sync-model.ts");
+ assert.equal(oneSyncPractice("could-not-start").trigger,"scheduled");
 });

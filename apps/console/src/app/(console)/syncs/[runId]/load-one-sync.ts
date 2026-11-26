@@ -20,7 +20,7 @@ export async function loadOneSync(id: string, params: Record<string,string | und
     if(params.demo==="history-sync") {
       const history=syncDayPractice("history-day",offset,practiceNow(params.day,offset),params.connection_id,params.fixture);
       const row=history.mode==="syncs" ? history.data.find(row=>row.id===id) : null;
-      if(row){const sources=historyPracticeSources();Object.assign(model,{id,name:sourceName(sources,row.connection_id,row.connector_id),connector:row.connector_id,connection:row.connection_id,at:row.at,started:row.started_at,completed:row.completed_at,outcome:row.outcome,total:row.records,kinds:null,cause:row.cause,evidence:row.evidence,missing:row.missing?.map(gap=>({name:historyKindName(sources,row.connection_id,gap.stream),canRetry:gap.retryable})) ?? []});}
+      if(row){const sources=historyPracticeSources();Object.assign(model,{id,name:sourceName(sources,row.connection_id,row.connector_id),connector:row.connector_id,connection:row.connection_id,at:row.at,started:row.started_at,completed:row.completed_at,outcome:row.outcome,trigger:row.trigger,total:row.records,kinds:null,cause:row.cause,evidence:row.evidence,missing:row.missing?.map(gap=>({name:historyKindName(sources,row.connection_id,gap.stream),canRetry:gap.retryable})) ?? []});}
     }
     return {model,offset};
   }
@@ -30,7 +30,7 @@ export async function loadOneSync(id: string, params: Record<string,string | und
     loadHistorySources(),
   ]);
   const persisted = history.mode === "syncs" ? history.data[0] : null;
-  if (!status && !timeline && !persisted) return { model: null, offset };
+  if (!((status || timeline ) || persisted)) { return { model: null, offset }; }
   const events = timeline?.events ?? [];
   const connection = status?.connector_instance_id ?? persisted?.connection_id ?? resolveRunConnectionId(status, events);
   const connector = status?.connector_id ?? persisted?.connector_id ?? events.find(event => event.source?.connector_id)?.source?.connector_id ?? "";
