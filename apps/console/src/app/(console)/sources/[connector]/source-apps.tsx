@@ -32,7 +32,7 @@ export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; conn
               <span className="ml-3 text-[13px] text-muted-foreground">
                 {app.place}
                 {since
-                  ? ` · since ${new Date(since).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`
+                  ? ` · since ${new Date(since).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}`
                   : ""}
               </span>
             </li>

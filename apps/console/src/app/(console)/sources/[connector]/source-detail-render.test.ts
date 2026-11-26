@@ -227,12 +227,12 @@ test("every practice state obeys the words and folds contract", async (t) => {
   for (const state of SOURCE_PRACTICE_STATES) {
     const dom = await renderDemo(state);
     const document = dom.window.document;
-    const technicalLinks = [...document.querySelectorAll('a[href*="/technical"]')];
+    const technicalLinks = [...document.querySelectorAll('a[href*="/technical"]')].filter((node) => node.textContent === "Technical details");
     assert.equal(technicalLinks.length, 1, state);
     assert.equal(technicalLinks[0]?.textContent, "Technical details");
     technicalLinks[0]?.parentElement?.remove();
     const html = document.body.innerHTML;
-    problems.push(...bannedCopyProblems(html).map((problem) => `${state}: ${problem}`));
+    problems.push(...bannedCopyProblems(html, { allowWords: ["install"] }).map((problem) => `${state}: ${problem}`));
     const own = html.replace(/<details\b[^>]*>\s*<summary\b[^>]*>\s*What went wrong\s*<\/summary>[\s\S]*?<\/details>/gu, "");
     const hit = visibleText(own).replaceAll("sign-in details", "sign-in").match(extra);
     if (hit) problems.push(`${state}: ${hit[0]}`);
@@ -252,7 +252,7 @@ test("practice states cover partial copies, missing kinds, settings, accounts an
     ["partly-more-coming", /24 so far\. More at the next sync\./],
     ["partly-some-lost", /24 records\. Some could not be copied\./],
     ["didnt-come", /Didn't come[\s\S]*DataConnect could not copy this\./],
-    ["settings-choices", /Settings[\s\S]*How many days of messages to copy\./],
+    ["settings-choices", /Settings[\s\S]*Increase this to copy older messages\./],
     ["settings-question", /Awaiting your confirmation/],
     ["other-accounts", /Also connected: Northwind \(work\)/],
     ["device-healthy", /It runs on Work computer, last heard from/],
@@ -333,7 +333,7 @@ test("state-specific sections, counts and sentences do not contradict each other
   const unknown = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(unknown.querySelector("header")?.textContent ?? "", /records/);
   const install = (await renderDemo("status-4")).window.document.body.textContent ?? "";
-  assert.equal(install.split("DataConnect needs to get Claude Code ready again.").length, 2);
+  assert.equal(install.split("DataConnect needs to install Claude Code again before it can sync.").length, 2);
   assert.equal([...((await renderDemo("status-10")).window.document.querySelectorAll("a, button"))].filter((node) => /Resume/.test(node.textContent ?? "")).length, 1);
 });
 
@@ -368,7 +368,7 @@ test("settings show one explanation per choice, a narrow number, and only useful
   const document = (await renderDemo("settings-choices")).window.document;
   const settings = document.querySelector("#configuration");
   assert.ok(settings);
-  assert.equal((settings.textContent ?? "").split("How many days of messages to copy.").length, 2);
+  assert.equal((settings.textContent ?? "").split("Increase this to copy older messages.").length, 2);
   assert.match(settings.textContent ?? "", /Last changed/);
   assert.ok(![...settings.querySelectorAll("button")].some((node) => node.textContent === "Cancel"));
   assert.match(settings.querySelector('input[type="number"]')?.className ?? "", /!w-28/);

@@ -65,7 +65,7 @@ export function ConnectorInstallPrompt({ actionLabel, showSentence = false, conn
       role={notice ? "status" : undefined}
     >
       {notice || showSentence ? <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
-        {`DataConnect needs to get ${displayName} ready again.`}
+        {`DataConnect needs to install ${displayName} again before it can sync.`}
       </p> : null}
       {notice ? (
         <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Your records stay.</p>
@@ -79,7 +79,7 @@ export function ConnectorInstallPrompt({ actionLabel, showSentence = false, conn
           type="button"
           variant="default"
         >
-          {isPending ? "Getting ready…" : actionLabel ?? "Get it ready"}
+          {isPending ? "Installing…" : actionLabel ?? "Install again"}
         </IcButton>
         {feedback ? (
           <div

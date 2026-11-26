@@ -59,6 +59,7 @@ import {
   type DeviceSourceInstance,
   getConnectorSchedule,
   listDeviceExporterSourceInstances,
+  listDeviceExporters,
   type RefAcquisitionBatchSummary,
   type RefAcquisitionCoverageSummary,
   type RefCollectionReportEntry,
@@ -666,9 +667,10 @@ async function loadConnectorDiagnostics(
 
   // Diagnostics evidence. Each branch is independently failable so a
   // device-exporter outage cannot suppress schedule data, and vice versa.
-  const [scheduleResult, sourcesResult] = await Promise.allSettled([
+  const [scheduleResult, sourcesResult, devicesResult] = await Promise.allSettled([
     getConnectorSchedule(connectorId, { connectorInstanceId: connectorInstanceId ?? undefined }),
     listDeviceExporterSourceInstances({ connector_instance_id: connectorInstanceId ?? undefined }),
+    listDeviceExporters(),
   ]);
   if (scheduleResult.status === "fulfilled") {
     schedule = scheduleResult.value;
@@ -676,7 +678,8 @@ async function loadConnectorDiagnostics(
     scheduleError = errorMessage(scheduleResult.reason);
   }
   if (sourcesResult.status === "fulfilled") {
-    sourceInstances = sourcesResult.value.data.filter((s) => s.connector_id === connectorId);
+    const devices = devicesResult.status === "fulfilled" ? devicesResult.value.data : [];
+    sourceInstances = sourcesResult.value.data.filter((s) => s.connector_id === connectorId).map((source) => ({ ...source, device_display_name: devices.find((device) => device.device_id === source.device_id)?.display_name ?? null }));
   } else {
     sourceInstancesError = errorMessage(sourcesResult.reason);
   }
@@ -768,7 +771,7 @@ function ConnectorPageView({
     source,
   } = model;
   const displayName = connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id);
-  const serviceName = source.connector_display_name ?? manifest.display_name ?? manifest.name ?? formatConnectorKeyForDisplay(connectorId);
+  const serviceName = canonicalConnectorKey(connectorId) === "google-maps" ? "Google Maps" : source.connector_display_name ?? manifest.display_name ?? manifest.name ?? formatConnectorKeyForDisplay(connectorId);
   const { running } = resolveActiveRunNavigation({
     overview,
     scheduleActiveRunId,
@@ -830,7 +833,7 @@ function ConnectorPageView({
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
+  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, deviceName: sourceInstances[0]?.device_display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
   const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? canStartSyncFromSummary(source) ? { kind: "sync_now" as const, label: "Try again", filled: true } : null : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
   const devicePending = sourceInstances[0]?.records_pending ?? overview.localDeviceProgress?.records_pending;
   const hasDeviceLocalRemediation = !archived && devicePending !== 0 && (primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict) || (source.source_kind === "local_device" && sourceStatus.row === 8));
@@ -840,7 +843,7 @@ function ConnectorPageView({
   const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)));
   if (hasDeviceLocalRemediation) {
     const device = sourceInstances[0];
-    const deviceName = device?.display_name ?? device?.local_binding_name;
+    const deviceName = device?.device_display_name ?? device?.local_binding_name;
     const pending = device?.records_pending ?? overview.localDeviceProgress?.records_pending;
     stateSentence = { text: deviceStepsAvailable ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.` : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${serviceName}.`, slot: null };
   } else if (!archived && running) {
@@ -941,6 +944,7 @@ function ConnectorPageView({
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
               displayName={displayName}
+              serviceName={serviceName}
               initialDialog={model.initialDialog}
               error={dangerError}
               message={dangerMessage ? "Done." : undefined}
@@ -961,7 +965,8 @@ function SourceManage({ neverConnected, children }: { neverConnected: boolean; c
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
   const { connectionId, source, manifest } = model;
-  const streams = model.streams.filter(stream => isOwnerRecordKind(stream.name));
+  const streams = model.streams.filter(stream => isOwnerRecordKind(stream.name, canonicalConnectorKey(model.connectorId)));
+  const technicalKinds = model.streams.length - streams.length;
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const label = (name: string) => sourceRecordLabel(name, manifest.streams as StreamManifestEntry[]);
   const missing = streams.filter((stream) => sourceStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
@@ -989,6 +994,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
         </Link>
       </li>;
     })}</DataList> : null}
+    {technicalKinds > 0 ? <p className="pdpp-body mt-3 text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical`}>and {technicalKinds} technical {technicalKinds === 1 ? "kind" : "kinds"}</Link></p> : null}
     {empty.length ? <p className="pdpp-body mt-3 text-muted-foreground">Nothing in: {empty.slice(0, 3).map((stream) => label(stream.name)).join(", ")}{empty.length > 3 ? ` and ${empty.length - 3} more` : ""}.</p> : null}
     {missing.length ? <>
       <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
@@ -1923,7 +1929,7 @@ export function ScheduleSummary({ displayName, schedule, scheduleError, sourceIn
   const text = disconnected ? "Not checked while disconnected." : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
   const next = !disconnected && !paused && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
-  const deviceName = device?.display_name ?? device?.local_binding_name;
+  const deviceName = device?.device_display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);
   return <Section title="Schedule" action={disconnected ? undefined : <Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
     {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}

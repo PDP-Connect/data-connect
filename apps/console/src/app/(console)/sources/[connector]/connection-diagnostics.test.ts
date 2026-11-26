@@ -524,7 +524,7 @@ const REMEDIATION_THREADS_HOST_LABELS =
   /OutboxStallRemediationPanel[\s\S]{0,220}hostLabels=\{boundHostLabels\(recoverySourceInstances\)\}/;
 const REMEDIATION_HOST_TESTID = /data-testid="diagnostics-outbox-remediation-host"/;
 const REMEDIATION_NAMES_BOUND_DEVICE = /Bound device/;
-const BOUND_HOST_LABELS_PREFERS_DISPLAY_NAME = /source\.display_name \?\? source\.local_binding_name/;
+const BOUND_HOST_LABELS_PREFERS_DISPLAY_NAME = /source\.device_display_name \?\? source\.local_binding_name/;
 const SOURCE_ERROR_RENDERS_MESSAGE = /Last error: \{formatSourceLastError\(source\.last_error\)\}/;
 const SOURCE_ERROR_FORMATTER_PICKS_MESSAGE = /pick\("message"\) \?\? pick\("reason"\)/;
 const BOUND_HOST_LABELS_NO_DEVICE_ID = /device_id/;

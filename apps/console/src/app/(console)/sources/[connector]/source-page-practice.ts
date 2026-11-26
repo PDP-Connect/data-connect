@@ -110,6 +110,7 @@ function buildPracticeModel(
 				(device) => ({
 					...device,
 					display_name: "Work computer",
+          device_display_name: "Work computer",
 					last_heartbeat_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
 				}),
 			),

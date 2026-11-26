@@ -138,7 +138,7 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
 test("row 2 words a setup that never completed", () => assertRow(2, "Example source was never connected.", "faint", { kind: "continue_setup", label: "Set up again", filled: true }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
-test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs to get ready again", "attention", { kind: "install", label: "Get it ready", filled: true }));
+test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs installing again", "attention", { kind: "install", label: "Install again", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
@@ -237,7 +237,7 @@ test("row 12 words an automatic retry", () => assertRow(12, "Trying again on its
 test("row 13 words a wait for a maintainer fix", () => assertRow(13, "Waiting on a fix from the DataConnect maintainers", "plain"));
 test("row 14 words missing optional data", () => assertRow(14, "Some optional data is missing · last synced 2 hours ago", "plain"));
 test("row 15 words stuck records", () => assertRow(15, "Some records are stuck · last synced 2 hours ago", "plain"));
-test("row 16 words another degraded result", () => assertRow(16, "Trouble syncing · last synced 2 hours ago", "plain", { kind: "sync_now", label: "Try again", filled: true }));
+test("row 16 words another degraded result", () => assertRow(16, "Something stopped Example source from syncing.", "plain", { kind: "sync_now", label: "Try again", filled: true }));
 test("row 17 words a refresh due", () => assertRow(17, "A refresh is due · last synced 2 hours ago", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
 test("row 18 words a completed import", () => assertRow(18, "Imported 2 hours ago", "plain"));
 test("row 19 says up to date when healthy, green, observed and on time", () => assertRow(19, "Up to date · synced 2 hours ago", "plain"));
@@ -247,7 +247,7 @@ test("the unchecked pill belongs to row 21, not the row 20 fixture", () => {
   assert.equal(fixture(20).rendered_verdict?.pill.label, "Healthy");
   assert.equal(fixture(21).rendered_verdict?.pill.label, "Collected, not independently checked");
   // DIRECTION.md row 21: use plain words instead of the banned word "gaps".
-  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect has not checked for missing records.");
+  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect has not compared this with Example source yet.");
 });
 
 test("pending detail work uses one shared sentence for rows 19 and 20", () => {
@@ -372,11 +372,11 @@ test("first matching row wins for overlapping evidence", () => {
 });
 
 test("relative time and old dates have the required human forms and omit missing time", () => {
-  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-24T12:05:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Trouble syncing · last synced just now");
-  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-24T10:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Trouble syncing · last synced 2 hours ago");
-  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-23T12:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Trouble syncing · last synced yesterday");
-  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-12T12:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Trouble syncing · last synced 12 Nov");
-  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: null }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Trouble syncing");
+  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-24T12:05:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Something stopped Example source from syncing.");
+  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-24T10:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Something stopped Example source from syncing.");
+  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-23T12:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Something stopped Example source from syncing.");
+  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: "2026-11-12T12:00:00Z" }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Something stopped Example source from syncing.");
+  assert.equal(sourceStatusWords(source({ connection_health: health({ last_success_at: null }), owner_state: { ...healthyState, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }), { now: NOW }).words, "Something stopped Example source from syncing.");
 });
 
 test("source page sentences use the same row and named slots for page-owned facts", () => {

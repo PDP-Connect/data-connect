@@ -465,7 +465,7 @@ function RenderedVerdictSummary({ verdict }: { verdict: RefRenderedVerdict }) {
 function boundHostLabels(sourceInstances: readonly DeviceSourceInstance[]): string[] {
   const labels: string[] = [];
   for (const source of sourceInstances) {
-    const label = source.display_name ?? source.local_binding_name;
+    const label = source.device_display_name ?? source.local_binding_name;
     if (typeof label === "string" && label.length > 0 && !labels.includes(label)) {
       labels.push(label);
     }
@@ -835,7 +835,7 @@ function SourceInstanceDiagnostics({ source }: { source: DeviceSourceInstance })
     <li className="px-3 py-2">
       <div className="flex flex-col gap-0.5">
         <span className="pdpp-caption font-mono text-foreground">
-          {source.display_name ?? source.local_binding_name}
+          {source.device_display_name ?? source.local_binding_name}
         </span>
         <span className="pdpp-caption text-muted-foreground tabular-nums">
           Source {source.source_instance_id}

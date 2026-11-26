@@ -13,7 +13,7 @@ import type {
   RefConnectorSummary,
   TraceSummary,
 } from "../../lib/ref-client.ts";
-import { connectionDisplayName } from "../../lib/connection-display-name.ts";
+import { connectionDisplayName, connectionNameDisambiguators } from "../../lib/connection-display-name.ts";
 import { isUpToDateRow, type SourceStatusWords, sourceStatusWords } from "../../lib/source-status-words.ts";
 
 
@@ -183,11 +183,12 @@ function lastSuccessfulSync(source: RefConnectorSummary): string | null {
 }
 
 function prepareSources(sources: readonly RefConnectorSummary[], now: Date, hrefs: HomeHrefs): PreparedSource[] {
+  const disambiguators = connectionNameDisambiguators(sources);
   return sources.map((source) => ({
     actionSurface: sourceActionSurface(source),
     href: hrefs.source(source.connection_id),
     id: source.connection_id,
-    name: connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id),
+    name: connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id, disambiguators.get(source.connection_id)),
     sortAt: sourceSortTime(source),
     source,
     status: sourceStatusWords(source, { now }),

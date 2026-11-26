@@ -18,6 +18,7 @@ interface Props {
 	activeRunId?: string | null;
 	connectionId: string | null;
 	displayName: string;
+  serviceName?: string;
 	error?: string;
 	message?: string;
 	setupFailed?: boolean;
@@ -39,6 +40,7 @@ export function ConnectionDangerZone({
 	activeRunId = null,
 	connectionId,
 	displayName,
+  serviceName = displayName,
 	error,
 	message,
 	setupFailed = false,
@@ -60,6 +62,7 @@ export function ConnectionDangerZone({
 						<ResetSourceForm
 							connectionId={connectionId}
 							displayName={displayName}
+              serviceName={serviceName}
 							initialOpen={initialDialog === "reset"}
 						/>
 					)}
@@ -70,6 +73,7 @@ export function ConnectionDangerZone({
 								<RevokeForm
 									connectionId={connectionId}
 									displayName={displayName}
+              serviceName={serviceName}
 									initialOpen={initialDialog === "disconnect"}
 								/>
 							)}
@@ -78,6 +82,7 @@ export function ConnectionDangerZone({
 								activeRunId={activeRunId}
 								connectionId={connectionId}
 								displayName={displayName}
+              serviceName={serviceName}
 								initialOpen={initialDialog === "delete"}
 							/>
 						</div>
@@ -161,10 +166,12 @@ function QuestionButtons({ children, onCancel }: { children: ReactNode; onCancel
 function ResetSourceForm({
 	connectionId,
 	displayName,
+  serviceName = displayName,
 	initialOpen,
 }: {
 	connectionId: string;
 	displayName: string;
+  serviceName?: string;
 	initialOpen: boolean;
 }) {
 	const router = useRouter();
@@ -175,7 +182,7 @@ function ResetSourceForm({
 	} | null>(null);
 	const [isPending, startTransition] = useTransition();
 	const label = "Copy everything again";
-	const sentence = sourceRemovalCopy.reset(displayName);
+	const sentence = sourceRemovalCopy.reset(serviceName);
 	return (
 		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
 			{open ? (
@@ -219,15 +226,17 @@ function ResetSourceForm({
 function RevokeForm({
 	connectionId,
 	displayName,
+  serviceName = displayName,
 	initialOpen,
 }: {
 	connectionId: string;
 	displayName: string;
+  serviceName?: string;
 	initialOpen: boolean;
 }) {
 	const [open, setOpen] = useState(initialOpen);
 	const label = "Disconnect and keep the records";
-	const sentence = sourceRemovalCopy.disconnect(displayName);
+	const sentence = sourceRemovalCopy.disconnect(serviceName);
 	return (
 		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
 			{open ? (
@@ -254,19 +263,21 @@ function DeleteForm({
 	activeRunId,
 	connectionId,
 	displayName,
+  serviceName = displayName,
 	initialOpen,
 }: {
 	neverConnected: boolean;
   activeRunId: string | null;
 	connectionId: string;
 	displayName: string;
+  serviceName?: string;
 	initialOpen: boolean;
 }) {
 	const [open, setOpen] = useState(initialOpen);
 	const [typed, setTyped] = useState("");
 	const confirmed = neverConnected || typed === displayName;
 	const label = neverConnected ? "Delete it" : "Delete and erase the records";
-	const sentence = neverConnected ? `Takes ${displayName} off your list. There is nothing to erase.` : sourceRemovalCopy.delete(displayName);
+	const sentence = neverConnected ? `Takes ${displayName} off your list. There is nothing to erase.` : sourceRemovalCopy.delete(serviceName);
 	const close = () => {
 		setOpen(false);
 		setTyped("");

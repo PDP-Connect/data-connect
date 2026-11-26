@@ -2384,6 +2384,7 @@ export type DeviceSourceInstanceHeartbeatHealth =
   | "unknown";
 
 export interface DeviceSourceInstance {
+  device_display_name?: string | null;
   accepted_record_count?: number;
   connector_id: string;
   connector_instance_id?: string | null;

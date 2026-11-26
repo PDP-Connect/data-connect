@@ -140,7 +140,7 @@ function lifecycleRow(
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };
   if (source.connector_implementation?.state === "not_installed") {
-    return { row: 4, words: "Needs to get ready again", tone: "attention", action: action("install", "Get it ready", true) };
+    return { row: 4, words: "Needs installing again", tone: "attention", action: action("install", "Install again", true) };
   }
 
   switch (source.terminal_setup_disposition) {
@@ -192,7 +192,8 @@ function lifecycleRow(
       return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null };
     }
     const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
-    const words = unknownStep ? "Something stopped this data source from syncing" : surface === "browser_session"
+    const devicePending = source.local_device_progress?.records_pending;
+    const words = surface === "local_device" && typeof devicePending === "number" && devicePending > 0 ? `The computer that holds this data could not send ${devicePending.toLocaleString()} records.` : unknownStep ? "Something stopped this data source from syncing" : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
@@ -277,8 +278,8 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
       ? "Some optional data is missing"
       : label === "Some records stuck"
         ? "Some records are stuck"
-        : "Trouble syncing";
-    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null };
+        : `Something stopped ${source.connector_display_name || source.display_name} from syncing.`;
+    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: base.startsWith("Something stopped") ? base : withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null };
   }
   if (resolver === "refresh_due") {
     return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) };
@@ -364,7 +365,7 @@ function matchStateSentence(
     case 1: return { text: "Archived. It no longer syncs. Your records are kept." };
     case 2: return { text: sourceNeverConnected(source) ? `${options.name} was never connected.` : "Setup was never completed." };
     case 3: return { text: "Disconnected. Your records stay." };
-    case 4: return { text: `DataConnect needs to get ${options.name} ready again.` };
+    case 4: return { text: `DataConnect needs to install ${options.name} again before it can sync.` };
     case 5: return { text: `The first copy of ${options.name} may not be complete.`, slot: "what_you_can_do" };
     case 6: return { text: "First sync found no records.", slot: "what_you_can_do" };
     case 7: return { text: "No records found.", slot: "what_you_can_do" };
@@ -425,7 +426,7 @@ function matchStateSentence(
       const retry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";
       return { text: `${base}${retry}${when ? ` Last synced ${when}.` : ""}` };
     }
-    case 17: return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}${source.schedule?.effective_mode === "manual" ? " This one syncs only when you ask." : ""}` };
+    case 17: return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}` };
     case 18: return { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.` };
     case 19: {
       return { text: `Up to date.${when ? ` Synced ${when}.` : ""}` };
@@ -434,11 +435,11 @@ function matchStateSentence(
       const lateness = source.connection_health.lateness?.state;
       const late = lateness === "late" || lateness === "overdue" ? " The next sync is late." : "";
       const unchecked = source.owner_state?.posture === "frozen-since-last-run"
-        ? " DataConnect has not checked this against the source."
+        ? ` DataConnect has not compared this with ${options.name} yet.`
         : "";
       return { text: `Synced${when ? ` ${when}` : ""}.${late}${unchecked}` };
     }
-    case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked for missing records.` };
+    case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${options.name} yet.` };
     case 22: return { text: source.source_kind === "manual" ? "Nothing imported yet. Add an export to copy your records." : `${status.words}.` };
     case 23: {
       const label = source.rendered_verdict?.pill.label;
@@ -446,9 +447,9 @@ function matchStateSentence(
         return { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.` };
       }
       if (label === "Needs refresh") {
-        return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}${source.schedule?.effective_mode === "manual" ? " This one syncs only when you ask." : ""}` };
+        return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}` };
       }
-      if (label === "Not measured") return { text: lastSuccessfulSync(source) ? `Synced${when ? ` ${when}` : ""}. DataConnect has not checked for missing records.` : "Not synced yet." };
+      if (label === "Not measured") return { text: lastSuccessfulSync(source) ? `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${options.name} yet.` : "Not synced yet." };
       if (label === "Collected, not independently checked") return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked this against the source.` };
       if (label === "Missing optional data" || label === "Some records stuck" || label === "Missing data" || label === "Can't collect") {
         const willRetry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";

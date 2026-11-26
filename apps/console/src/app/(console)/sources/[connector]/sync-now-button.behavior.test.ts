@@ -113,9 +113,9 @@ test("a connector_not_installed refusal reads as plain copy with an Install acti
     await act(async () => button(container, "Refresh now").click());
     const prompt = container.querySelector('[data-testid="connector-not-installed-inline"]');
     assert.ok(prompt, "the inline install prompt renders after the refusal");
-    assert.match(prompt.textContent ?? "", /DataConnect needs to get Chase ready again\./);
+    assert.match(prompt.textContent ?? "", /DataConnect needs to install Chase again before it can sync\./);
     assert.doesNotMatch(container.textContent ?? "", /reference server rejected|reference fixture|verified install/);
-    button(container, "Get it ready");
+    button(container, "Install again");
     assert.equal(installCalls.length, 0, "nothing installs until the owner presses Install");
   });
 });
@@ -127,7 +127,7 @@ test("Install calls the owner install action with the connector key and shows a 
     await act(async () => button(container, "Refresh now").click());
 
     installResult = { message: "no verified update target for chase.", ok: false };
-    await act(async () => button(container, "Get it ready").click());
+    await act(async () => button(container, "Install again").click());
     assert.deepEqual(installCalls, [{ connectorKey: "chase", routeId: "cin_chase" }]);
     const feedback = container.querySelector('[data-testid="connector-install-feedback"]');
     assert.equal(feedback?.querySelector("p")?.textContent, "This could not be done. Try again.");
@@ -135,7 +135,7 @@ test("Install calls the owner install action with the connector key and shows a 
     assert.equal(refreshCalls, 0, "a failed install does not pretend the state changed");
 
     installResult = { ok: true };
-    await act(async () => button(container, "Get it ready").click());
+    await act(async () => button(container, "Install again").click());
     assert.equal(installCalls.length, 2);
     assert.equal(refreshCalls, 1, "a successful install re-reads the page state");
     assert.equal(

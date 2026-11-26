@@ -134,7 +134,8 @@ export function optionLabel(optionKey: string): string {
     CLAUDE_CODE_PROJECT_EXCLUDE: "Projects to leave out",
     CLAUDE_CODE_PROJECT_INCLUDE: "Projects to copy",
   };
-  if (labels[optionKey]) return labels[optionKey];
+  const knownLabel = labels[optionKey.toUpperCase()];
+  if (knownLabel) return knownLabel;
   let base = optionKey;
   let unit: string | null = null;
   for (const [suffix, rendered] of UNIT_SUFFIXES) {

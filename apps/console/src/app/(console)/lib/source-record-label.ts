@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { humanizeFieldLabel, type StreamManifestEntry, streamDisplayLabel } from "@pdpp/display";
 /** Owner record lists exclude the connector's copy bookkeeping. */
-export function isOwnerRecordKind(name: string): boolean {
-  return !["backup_inventory", "cache_inventory", "coverage_diagnostics"].includes(name);
+const BOOKKEEPING_KINDS = new Set(["backup_inventory", "cache_inventory", "coverage_diagnostics", "config_inventory", "context_mode", "session_index"]);
+export function isOwnerRecordKind(name: string, connectorId: string): boolean;
+export function isOwnerRecordKind(name: string): boolean;
+export function isOwnerRecordKind(name: string, connectorId?: string): boolean {
+  return !BOOKKEEPING_KINDS.has(name) && !(connectorId === "claude-code" && name === "attachments");
 }
 export function sourceRecordLabel(name: string, streams: readonly StreamManifestEntry[] = []): string {
   const entry = streams.find((stream) => stream.name === name);

@@ -400,7 +400,7 @@ function OptionControl({
           <ValueControl controlId={controlId} onChange={onChange} option={option} value={value} />
         </label>
       )}
-      <p className="pdpp-body text-muted-foreground">{option.description}</p>
+      <p className="pdpp-body text-muted-foreground">{optionExplanation(option)}</p>
       {error ? <p className="pdpp-body text-destructive">{error}</p> : null}
     </div>
   );
@@ -729,4 +729,20 @@ function groupRows(rows: ReturnType<typeof buildCurrentSettings>) {
 
 export function ConnectionSettingsHistory({ config, revisions }: Pick<Props, "config" | "revisions">) {
   return <Section title="Settings history"><HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={config.options_schema} /></Section>;
+}
+
+function optionExplanation(option: ConfigOptionWire): string {
+  const explanations: Record<string, string> = {
+    HISTORY_DAYS: "Increase this to copy older messages.",
+    LOOKBACK_DAYS: "Increase this to copy older records.",
+    CHANNELS: "Copy messages from the channels you choose.",
+    CHANNEL_ALLOWLIST: "Copy messages from the channels you choose.",
+    CLAUDE_CODE_PROJECT_EXCLUDE: "Leave out projects whose folder names contain these words.",
+    CLAUDE_CODE_PROJECT_INCLUDE: "Copy only projects whose folder names contain these words; leave empty to copy all projects.",
+    CHANNEL_TYPES: "Copy only the types of channels you choose.",
+    MEMBER_ONLY: "Copy only channels you have joined.",
+    SKIP_FILES: "Leave files out of the copy.",
+    RECLAIM_UPLOADS: "Include files sent in messages.",
+  };
+  return explanations[option.option_key.toUpperCase()] ?? "Choose the value to use when this data source syncs.";
 }
