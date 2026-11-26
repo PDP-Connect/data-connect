@@ -49,6 +49,7 @@ test("read pagination merges consecutive lines across the page boundary",async()
   Object.assign(globalThis,{document:dom.window.document,window:dom.window,HTMLElement:dom.window.HTMLElement,Element:dom.window.Element});const root=createRoot(document.getElementById("root") as HTMLElement);
   try {
     await act(async()=>root.render(<ReadDayPager rows={fixture.data.slice(0,50)} discovery={[]} sources={[]} offset={0} nextCursor="next" loadMore={async()=>({rows:fixture.data.slice(50,100),next:null})} />));
+    assert.ok(!document.body.textContent?.includes("50 times"),"an unfinished page must not present its partial quantity as the day total");
     await act(async()=>document.querySelector("button")?.click());
     assert.equal(document.querySelectorAll("li").length,1);assert.ok(document.body.textContent?.includes("100 times"));
   } finally {await act(async()=>root.unmount());Object.assign(globalThis,previous);dom.window.close();}

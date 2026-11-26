@@ -21,5 +21,5 @@ export async function loadReadDay(params: Record<string,string | undefined>) {
   const start=practice ? Number(params.cursor ?? 0) : 0;
   const rows = practice ? dataRows.slice(start,start+50) : dataRows;
   const more = history.has_more || start+rows.length < dataRows.length;
-  return { pageKey:JSON.stringify([app.hrefId,day,params.connection_id ?? ""]),app,day,offset,rows,sources,discovery,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/audit/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
+  return { startsAtBeginning:!params.cursor,pageKey:JSON.stringify([app.hrefId,day,params.connection_id ?? ""]),app,day,offset,rows,sources,discovery,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/audit/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
 }
