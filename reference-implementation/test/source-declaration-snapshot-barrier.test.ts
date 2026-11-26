@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -355,6 +356,7 @@ test("source declaration snapshot survives same-version replacement and deletion
     const manifestWithPreset = structuredClone(registeredManifest);
     manifestWithPreset.source_declaration = {
       ...retained.source_declaration_snapshot.declaration,
+      publisher: { id: FIXTURE_PUBLISHER },
       selection_presets: [
         { id: "artists-basic", label: "Basic artists", streams: [{ name: "top_artists", view: "basic" }] },
       ],
@@ -610,14 +612,14 @@ test("provider-native grant snapshots its trusted declaration and binds its loca
       kind: "provider_native",
     });
     assert.deepEqual(pending.source_declaration_snapshot.declaration.publisher, {
-      id: "https://pdpp.dev/reference-implementation",
+      id: (nativeManifest.source_declaration as { publisher: { id: string } }).publisher.id,
     });
     assert.equal(pending.source_declaration_snapshot.accepted_revision_reference, undefined);
     assert.deepEqual(pending.source_declaration_snapshot.resource_authority, {
       status: "local_operator_provisioned",
     });
     assert.deepEqual(pending.source_declaration_snapshot.publisher_attribution, {
-      id: "https://pdpp.dev/reference-implementation",
+      id: (nativeManifest.source_declaration as { publisher: { id: string } }).publisher.id,
       status: "unverified",
     });
 
@@ -791,6 +793,7 @@ test("grant approval requires an existing unambiguous instance while staging clo
     const declarationProbe = JSON.parse(declarationProbeRow.params_json) as PendingPayload;
     compoundManifest.source_declaration = {
       ...declarationProbe.source_declaration_snapshot.declaration,
+      publisher: { id: FIXTURE_PUBLISHER },
       streams: declarationProbe.source_declaration_snapshot.declaration.streams.map((stream) =>
         stream.name === "top_artists" ? { ...stream, primary_key: ["id", "name"] } : stream
       ),

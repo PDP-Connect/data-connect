@@ -3,7 +3,7 @@
 
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../../server/source-declaration-legacy-collection.ts";
 
-const FIXTURE_PUBLISHER = "https://publishers.pdpp.test/fixtures";
+export const FIXTURE_PUBLISHER = "https://publishers.pdpp.test/fixtures";
 
 /**
  * Test-only. Gives a fixture manifest an explicit, validated source declaration computed from its own
@@ -25,6 +25,14 @@ export function withFixtureSourceDeclaration<T extends object>(manifest: T, opti
       sourceId: options.sourceId ?? `https://fixtures.pdpp.test/sources/${slug}`,
     }),
   } as T;
+}
+
+/** Rebuild explicit fixture input from a stored projection without impersonating its publisher. */
+export function withFixturePublisher(manifest: Record<string, unknown>): Record<string, unknown> {
+  const declaration = manifest.source_declaration as { source?: { id?: unknown } } | undefined;
+  const sourceId = declaration?.source?.id;
+  if (typeof sourceId !== "string") throw new Error("Stored fixture manifest must retain its source identity");
+  return withFixtureSourceDeclaration(manifest, { sourceId });
 }
 
 const NON_SLUG_CHARACTER = /[^a-z0-9._-]/;

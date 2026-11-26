@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { withFixturePublisher } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1300,7 +1301,7 @@ function createDriver({
       };
     },
     async registerManifest(manifest, options = {}) {
-      await registerConnector(manifest as Record<string, unknown>, options);
+      await registerConnector(withFixturePublisher(manifest as Record<string, unknown>), options);
     },
     restoreSemanticBackend: () => configureSemanticBackend(semanticBackend),
     async semantic(instanceId, key) {

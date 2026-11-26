@@ -13,7 +13,7 @@
     },
     "declaration_version": "reference.native-config.northstar-hr.v1",
     "publisher": {
-      "id": "https://pdpp.dev/reference-implementation"
+      "id": "https://publishers.pdpp.test/fixtures"
     },
     "display": {
       "name": "Northstar HR"
