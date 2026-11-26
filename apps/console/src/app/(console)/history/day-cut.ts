@@ -9,15 +9,15 @@ export function personDay(at: string | number, offset: number): string {
   return new Date((typeof at === "number" ? at : Date.parse(at)) + offset * 60_000).toISOString().slice(0,10);
 }
 export function dayLabel(day: string, offset: number, now = Date.now()): string {
-  if (day === personDay(now, offset)) return "Today";
-  if (day === personDay(now - 86_400_000, offset)) return "Yesterday";
+  if (day === personDay(now, offset)) { return "Today"; }
+  if (day === personDay(now - 86_400_000, offset)) { return "Yesterday"; }
   return new Date(`${day}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 }
 export function clockLabel(at: string, offset: number): string {
   return new Date(Date.parse(at) + offset * 60_000).toISOString().slice(11,16);
 }
 export function historyTime(at: string | null, offset: number, now = Date.now()): string {
-  if (!at) return "";
+  if (!at) { return ""; }
   if (personDay(at, offset) === personDay(now, offset)) {
     const minutes = Math.max(0, Math.floor((now-Date.parse(at))/60_000));
     return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} minute${minutes === 1 ? "" : "s"} ago` : clockLabel(at,offset);
@@ -32,11 +32,11 @@ export function visibleDays(rows: { day: string }[], count: number): string[] {
 }
 export function historyDayCount(value?: string): number {
   const count = Number(value);
-  return Number.isInteger(count) && count >= 7 && count <= 10000 ? count : 7;
+  return Number.isInteger(count) && count >= 7 && count <= 10_000 ? count : 7;
 }
 export function historyHref(path: string, params: Record<string,string | undefined>, patch: Record<string,string | undefined>): string {
   const query = new URLSearchParams();
-  for (const [key,value] of Object.entries({ ...params, ...patch })) if (value) query.set(key,value);
+  for (const [key,value] of Object.entries({ ...params, ...patch })) { if (value) { query.set(key,value); } }
   return `${path}${query.size ? `?${query}` : ""}`;
 }
 
@@ -46,9 +46,14 @@ export function sentenceDayLabel(day: string, offset: number): string {
 }
 export function startedAgo(at: string, now = Date.now()): string {
   const minutes = Math.max(0,Math.floor((now-Date.parse(at))/60_000));
-  if (minutes < 1) return "a few seconds ago";
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  if (minutes < 1) { return "a few seconds ago"; }
+  if (minutes < 60) { return `${minutes} minute${minutes === 1 ? "" : "s"} ago`; }
   const hours = Math.floor(minutes/60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  if (hours < 24) { return `${hours} hour${hours === 1 ? "" : "s"} ago`; }
   const days = Math.floor(hours/24); return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/** Absolute dates first use the same day cut as the reader's history. */
+export function personDate(at: string | number, offset: number): string {
+  return new Date(`${personDay(at,offset)}T12:00:00Z`).toLocaleDateString("en-GB", {day:"numeric",month:"short",year:"numeric",timeZone:"UTC"});
 }

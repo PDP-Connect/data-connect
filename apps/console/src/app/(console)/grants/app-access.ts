@@ -12,6 +12,7 @@ import { mergeAppAccessSources } from "pdpp-reference-implementation/app-access"
 import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
+  offset?: number;
   clientIds: string[];
   expiresAt: string | null;
   grantIds: string[];

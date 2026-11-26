@@ -376,7 +376,7 @@ test("dates stay local to the chosen record kind and resolve against its declara
 test("until-only dates are summarized and preserved in the submitted decision", async () => {
   const { panel, submit } = await journey();
   fireEvent.change(within(panel).getByLabelText("added until"), { target: { value: "2026-03-31" } });
-  assert.ok(within(panel).getByText("Data through Mar 31, 2026"));
+  assert.ok(within(panel).getByText("Data through 31 Mar 2026"));
   assert.equal(within(panel).queryByText("All dates"), null);
   const range = (await submit()).streamRanges["spotify:account:saved_tracks"];
   assert.deepEqual(range, { until: "2026-03-31" });

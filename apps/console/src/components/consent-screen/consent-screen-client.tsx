@@ -95,7 +95,7 @@ function todayPlusDays(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-const HUMAN_DATE_FMT = new Intl.DateTimeFormat("en-US", {
+const HUMAN_DATE_FMT = new Intl.DateTimeFormat("en-GB", {
   day: "numeric",
   month: "short",
   timeZone: "UTC",

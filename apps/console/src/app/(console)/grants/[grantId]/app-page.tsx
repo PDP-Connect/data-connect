@@ -8,11 +8,10 @@ import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { isOwnerRecordKind, sourceRecordLabel } from "../../lib/source-record-label.ts";
 import { type AppAccess, appSourceName, formatAppLastRead } from "../app-access.ts";
+import { personDate, personDay } from "../../history/day-cut.ts";
 import { RecentReading } from "./recent-reading.tsx";
 import { useAppRemoval } from "./use-app-removal.ts";
 
-const date = (value: string) =>
-  new Date(value).toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 export function AppPage({
   app,
   demo,
@@ -22,6 +21,8 @@ export function AppPage({
   demo?: string;
   recent?: Parameters<typeof RecentReading>[0];
 }) {
+  const offset = recent?.offset ?? app.offset ?? -new Date().getTimezoneOffset();
+  const date = (value: string) => personDate(value, offset);
   const removal = useAppRemoval(
     app.clientIds,
     Boolean(demo),
@@ -153,7 +154,7 @@ export function AppPage({
                               ? `${kinds.slice(0, 3).join(", ")} and ${kinds.length - 3} more`
                               : kinds.join(", ")}
                           </p>
-                          {source.first_issued_at.slice(0, 10) === app.since?.slice(0, 10) ? null : (
+                          {app.since && personDay(source.first_issued_at,offset) === personDay(app.since as string,offset) ? null : (
                             <p className="text-[13px] text-muted-foreground">since {date(source.first_issued_at)}</p>
                           )}
                           <p className="text-[13px] text-muted-foreground">

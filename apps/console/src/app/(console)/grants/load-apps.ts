@@ -42,5 +42,5 @@ export async function loadApps(demo?: string) {
       .filter((row) => app.state !== "reading" || row.in_force)
       .map((row) => row.name || "Data source");
   }
-  return { apps: apps.map(app => applyAppReading(app, readingHistory.mode === "days" ? readingHistory.data : [])), approvals: approvals.data, readingHistory };
+  return { apps: apps.map(app => applyAppReading({...app, offset}, readingHistory.mode === "days" ? readingHistory.data : [])), approvals: approvals.data, readingHistory };
 }

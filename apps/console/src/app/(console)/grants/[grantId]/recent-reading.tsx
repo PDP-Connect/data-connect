@@ -28,14 +28,7 @@ export function RecentReading({
           <li className="py-3" key={row.day}>
             <Link href={appDayHref(row, demo)}>
               <p>
-                {["Today", "Yesterday"].includes(dayLabel(row.day, offset))
-                  ? dayLabel(row.day, offset)
-                  : new Date(`${row.day}T12:00:00Z`).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                      year: "numeric",
-                      timeZone: "UTC",
-                    })}{" "}
+                {dayLabel(row.day, offset)}{" "}
                 · read your data {row.reads} times
               </p>
               <ReadDayLines row={row} sources={sources} />

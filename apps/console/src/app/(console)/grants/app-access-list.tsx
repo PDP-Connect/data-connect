@@ -3,19 +3,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { IcButton } from "@pdpp/brand-react";
 import Link from "next/link";
+import { personDate } from "../history/day-cut.ts";
 import { useState } from "react";
 import { type AppAccess, formatAppLastRead } from "./app-access.ts";
 export function sourcePhrase(names: readonly string[]) {
   return names.length > 3 ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more` : names.join(", ");
 }
-export function accessEnd(value: string | null, now = Date.now()) {
+export function accessEnd(value: string | null, now = Date.now(), offset = -new Date().getTimezoneOffset()) {
   if (!value) {
     return null;
   }
   const days = Math.ceil((Date.parse(value) - now) / 86_400_000);
   return days > 0 && days <= 7
     ? `access ends in ${days} day${days === 1 ? "" : "s"}`
-    : `access ends ${new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`;
+    : `access ends ${personDate(value, offset)}`;
 }
 export function AppAccessList({
   apps,
@@ -54,7 +55,7 @@ export function AppAccessList({
                   </span>
                   <span className="block text-[13px] text-muted-foreground">
                     {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}` : "Has not read anything yet"}
-                    {app.expiresAt ? ` · ${accessEnd(app.expiresAt)}` : ""}
+                    {app.expiresAt ? ` · ${accessEnd(app.expiresAt, Date.now(), app.offset)}` : ""}
                   </span>
                 </>
               )}
