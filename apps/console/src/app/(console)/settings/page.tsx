@@ -16,19 +16,23 @@ import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
 import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
+import { RemoteAccessPractice } from "./remote-access-practice.tsx"
+import { buildSettingsPractice } from "./settings-practice.ts"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
 }
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> } = {}) {
+  const demo = (await searchParams)?.demo
+  const practice = process.env.NODE_ENV !== "production" && demo ? buildSettingsPractice(demo) : null
   const identity = getProductIdentity()
   // Desktop and vault-recovery settings write command files only the managed
   // desktop host answers; on a server they would do nothing.
-  const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
+  const managedDesktopHost = practice?.managedDesktop ?? (process.env.PDPP_MANAGED_DESKTOP_HOST === "1")
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
-    await Promise.all([
+    practice ? [practice.revealProof, practice.inventory, practice.passwordSource, practice.passwordSet] as const : await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
       loadOwnerSessionInventory(),
       loadOwnerPasswordSource(),
@@ -53,7 +57,7 @@ export default async function SettingsPage() {
           id="remote-access"
           title="Remote access"
         >
-          <RemoteAccessSetting appVersion={identity.version} />
+          {practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}
         </Section>
         <Section title="Sign-in">
           {ownerPasswordSource ? (
