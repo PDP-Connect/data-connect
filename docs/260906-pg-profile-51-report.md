@@ -168,7 +168,7 @@ tail:
 
 The completed profile receipt recorded 1,034 files; that historical receipt
 is unchanged. The template equivalence registry is a different measure:
-162 eligible plus 43 cold-required files, for **205** total. The
+166 eligible plus 43 cold-required files, for **209** total. The
 handle-generation, issuance-cutover, opaque-cursor and search-index repair
 tests remain registered. These counts are recomputed from the merged registry arrays;
 the retired local coverage parser test is no longer listed.

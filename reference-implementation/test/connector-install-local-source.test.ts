@@ -35,6 +35,7 @@ function fixture(
     readonly key?: string
     readonly version?: string
     readonly binding?: string
+    readonly kind?: string
   } = {}
 ): string {
   const root = mkdtempSync(join(process.cwd(), "tmp-local-source-test-"))
@@ -48,9 +49,9 @@ function fixture(
       connector_key: options.key ?? "developer-fixture",
       display_name: "Developer fixture",
       runtime_requirements: options.binding
-        ? { bindings: { [options.binding]: { required: true } } }
+        ? { bindings: { [options.binding]: { required: true, ...(options.kind ? { kind: options.kind } : {}) } } }
         : { bindings: { network: { required: true } } },
-      streams: [{ name: "items" }],
+      streams: [{ name: "items", primary_key: ["id"], schema: { type: "object", properties: { id: { type: "string" } } } }],
       version: options.version ?? "0.1.0",
     })
   )
@@ -69,7 +70,7 @@ test("records parsed fields and the digest of the exact manifest bytes", async (
     connector_id: "https://registry.pdpp.dev/connectors/snapshot-fixture",
     connector_key: "snapshot-fixture",
     display_name: "Snapshot fixture",
-    streams: [{ name: "items" }],
+    streams: [{ name: "items", primary_key: ["id"], schema: { type: "object", properties: { id: { type: "string" } } } }],
     version: "1.2.3",
   }
   const bytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n", "utf8")
@@ -161,8 +162,8 @@ test("local admission rejects unsupported runtime bindings", async () => {
   temporaryRoots.push(dataDir)
   const store = createFileLocalConnectorSourceStore(dataDir)
   await assert.rejects(
-    () => store.add(fixture({ key: "bad-binding", binding: "usb" })),
-    /unsupported runtime binding/
+    () => store.add(fixture({ key: "bad-binding", binding: "usb", kind: "usb" })),
+    /runtime_requirements.bindings.usb.kind must be equal to one of the allowed values/
   )
 })
 
