@@ -3548,7 +3548,8 @@ function sourceIdentityClaims(manifest: Record<string, unknown>): { all: Set<str
   };
 }
 
-export function retainMovedFromIdentity(manifestJson: string, previousManifest: unknown, movedFrom?: string): string {
+/** Retain durable current-id and legacy-membership facts, including when an id is also stated as current. */
+export function retainSourceIdentityFacts(manifestJson: string, previousManifest: unknown, movedFrom?: string): string {
   const manifest = manifestRecordOf(manifestJson);
   const declaration = sourceDeclarationOf(manifest);
   if (!manifest || !declaration) {
@@ -3563,6 +3564,13 @@ export function retainMovedFromIdentity(manifestJson: string, previousManifest: 
   const history = Array.isArray(previousCollection?.legacy_source_ids)
     ? previousCollection.legacy_source_ids.filter((id): id is string => typeof id === "string")
     : [];
+  const incomingClaims = sourceIdentityClaims(manifest);
+  const previousClaims = sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {});
+  // Keep legacy status when an id remains claimed as current; dropped ids still fail publication.
+  const legacyMembershipToRetain = [...previousClaims.legacy].filter((id) =>
+    incomingClaims.all.has(id) && !incomingClaims.legacy.has(id)
+  );
+  history.push(...legacyMembershipToRetain);
   if (movedFrom) {
     history.push(movedFrom);
   }
@@ -3582,10 +3590,15 @@ export function assertRetainedSourceIdentities(
   previousManifest: unknown,
   incomingManifest: Record<string, unknown>
 ): void {
-  const incomingClaims = sourceIdentityClaims(incomingManifest).all;
-  const dropped = [...sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {}).all].filter((id) => !incomingClaims.has(id));
+  const incomingClaims = sourceIdentityClaims(incomingManifest);
+  const previousClaims = sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {});
+  const dropped = [...previousClaims.all].filter((id) => !incomingClaims.all.has(id));
   if (dropped.length > 0) {
     throw invalidConnectorManifest(`Connector update cannot drop previously claimed source identity ${dropped[0]}`);
+  }
+  const clearedLegacy = [...previousClaims.legacy].filter((id) => !incomingClaims.legacy.has(id));
+  if (clearedLegacy.length > 0) {
+    throw invalidConnectorManifest(`Connector update cannot clear previously claimed legacy source identity ${clearedLegacy[0]}`);
   }
 }
 
@@ -3628,7 +3641,7 @@ async function persistManifestAndAdvanceGenerations(
         ])
       ).rows[0]?.manifest;
       const identityMove = retainedSourceIdentityChange(connectorId, previous, manifestJson, identityOptions);
-      const persistedManifestJson = retainMovedFromIdentity(manifestJson, previous, identityMove?.from);
+      const persistedManifestJson = retainSourceIdentityFacts(manifestJson, previous, identityMove?.from);
       assertRetainedSourceIdentities(previous, JSON.parse(persistedManifestJson) as Record<string, unknown>);
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
@@ -3706,7 +3719,7 @@ async function persistManifestAndAdvanceGenerations(
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
     const identityMove = retainedSourceIdentityChange(connectorId, existing?.manifest, manifestJson, identityOptions);
-    const persistedManifestJson = retainMovedFromIdentity(manifestJson, existing?.manifest, identityMove?.from);
+    const persistedManifestJson = retainSourceIdentityFacts(manifestJson, existing?.manifest, identityMove?.from);
     assertRetainedSourceIdentities(existing?.manifest, JSON.parse(persistedManifestJson) as Record<string, unknown>);
     if (identityMove) {
       moveSourceIdentitySqlite(identityMove);
@@ -6023,7 +6036,7 @@ export async function normalizeIncomingConnectorManifest(
       : undefined;
     const { storedManifest } = normalizeConnectorManifestForStorage(incoming, retainedStorageContext(previous));
     // Use the same normalization and durable-history retention as both publication paths.
-    const regenerated = sourceDeclarationOf(retainMovedFromIdentity(JSON.stringify(storedManifest), previous));
+    const regenerated = sourceDeclarationOf(retainSourceIdentityFacts(JSON.stringify(storedManifest), previous));
     if (
       regenerated !== undefined &&
       canonicalManifestJson(JSON.stringify(declaration)) === canonicalManifestJson(JSON.stringify(regenerated))
