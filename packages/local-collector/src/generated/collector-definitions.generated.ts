@@ -37,7 +37,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["sessions", "messages", "attachments", "memory_notes", "skills", "slash_commands", "file_history", "cache_inventory", "coverage_diagnostics", "backup_inventory", "config_inventory"],
+    streams: ["sessions", "messages", "attachments", "memory_notes", "skills", "slash_commands", "usage", "file_history", "cache_inventory", "coverage_diagnostics", "backup_inventory", "config_inventory"],
     time_scopable_streams: ["sessions", "messages", "attachments"],
     source_root_scopable_streams: ["sessions", "messages", "attachments"],
     enforces_source_roots: true,
