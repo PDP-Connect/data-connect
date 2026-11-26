@@ -76,7 +76,7 @@ const REPAIR_CREDENTIAL_ACTION_LINKS_TO_REPAIR =
 // real Resume action that posts to its owner-session server action, and an
 // actively-collecting row gets Pause, so the pause/resume cycle is closed.
 const RESUME_ACTION_POSTS_RESUME = /statusAction\?\.kind === "resume"\) \{\s*return <ResumeConnectionButton/;
-const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused\) && overview\.connectionStatus === "active"/;
+const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused \|\| archived \|\| oneTime\) && overview\.connectionStatus === "active"/;
 const PAUSE_CONNECTION_SECTION_POSTS_PAUSE =
   /function PauseConnectionSection\([\s\S]{0,600}<form action=\{pauseConnectionAction\}>/;
 

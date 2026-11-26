@@ -63,9 +63,9 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
       data-testid={notice ? "connector-not-installed-notice" : "connector-not-installed-inline"}
       role={notice ? "status" : undefined}
     >
-      <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
+      {notice ? <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
         {`DataConnect needs to get ${displayName} ready again.`}
-      </p>
+      </p> : null}
       {notice ? (
         <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Your records stay.</p>
       ) : null}

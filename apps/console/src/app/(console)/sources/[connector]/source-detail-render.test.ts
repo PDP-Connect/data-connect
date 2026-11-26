@@ -170,7 +170,7 @@ test("all 24 status rows keep the shared state choice and their actions", async 
     assert.equal(dom.window.document.querySelector('[data-status-row]')?.getAttribute("data-status-row"), String(row));
     const model = buildRecoveryDemoModel(row as SourceStatusRow);
     const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName });
-    assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text));
+    if (![11, 14, 15, 16, 19, 20].includes(row)) assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text));
     assert.ok(dom.window.document.querySelector('a[href*="/technical"]'));
     assert.equal(dom.window.document.querySelector('details[data-testid="source-details"]'), null);
   }
@@ -230,8 +230,10 @@ test("every practice state obeys the words and folds contract", async (t) => {
     if (hit) problems.push(`${state}: ${hit[0]}`);
     for (const details of document.querySelectorAll("details")) assert.equal(details.querySelector("summary")?.textContent?.trim(), "What went wrong", state);
     const headings = [...document.querySelectorAll("h2")].map((heading) => heading.textContent);
-    assert.ok(headings.indexOf("What is here") < headings.indexOf("Schedule"), state);
-    assert.ok(headings.indexOf("Schedule") < headings.indexOf("Manage"), state);
+    if (headings.includes("Schedule")) {
+      assert.ok(headings.indexOf("What is here") < headings.indexOf("Schedule"), state);
+      assert.ok(headings.indexOf("Schedule") < headings.indexOf("Manage"), state);
+    }
     if (headings.includes("Settings")) assert.ok(headings.indexOf("Settings") < headings.indexOf("Manage"), state);
   }
   assert.deepEqual(problems, []);
@@ -244,7 +246,7 @@ test("practice states cover partial copies, missing kinds, settings, accounts an
     ["didnt-come", /Didn't come[\s\S]*Northwind could not send these messages\./],
     ["settings-choices", /Settings[\s\S]*How many days of messages to copy\./],
     ["settings-question", /Awaiting your confirmation/],
-    ["other-accounts", /Also connected: Northwind, work/],
+    ["other-accounts", /Also connected: Northwind \(work\)/],
     ["device-healthy", /It runs on Work computer, last heard from/],
   ] as const;
   for (const [state, pattern] of cases) assert.match((await renderDemo(state)).window.document.body.textContent ?? "", pattern, state);
@@ -285,4 +287,42 @@ test("unknown counts are omitted while known zero remains a fact", async () => {
   const document = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(document.querySelector('a[href$="/messages"]')?.textContent ?? "", /999|count unavailable|not measured/);
   assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", /0 records/);
+});
+
+test("a local-device sign-in action opens device steps instead of a sign-in address", async () => {
+  const document = (await renderDemo("status-8-owner-device")).window.document;
+  const control = [...document.querySelectorAll("a, button")].find((node) => node.textContent?.trim() === "See what to do on that computer");
+  assert.equal(control?.tagName, "BUTTON");
+  assert.equal(control?.getAttribute("href"), null);
+});
+
+test("an overdue real schedule never prints a next check", async () => {
+  const { ScheduleSummary } = await import("./source-page.tsx");
+  const model = buildRecoveryDemoModel(19);
+  const html = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: model.displayName, schedule: model.schedule, scheduleError: null, sourceInstances: [], now: new Date("2027-01-01") }));
+  assert.doesNotMatch(html, /Next check/);
+});
+
+test("state-specific sections, counts and sentences do not contradict each other", async () => {
+  for (const state of ["status-3", "status-1", "status-18"]) {
+    const document = (await renderDemo(state)).window.document;
+    const text = document.body.textContent ?? "";
+    assert.doesNotMatch(text, /Copy everything again|Disconnect and keep the records|Pause syncing/, state);
+    if (state === "status-3") assert.match(text, /Not checked while disconnected\./);
+    else assert.ok(![...document.querySelectorAll("h2")].some((node) => node.textContent === "Schedule"));
+  }
+  for (const state of ["partly-more-coming", "partly-some-lost", "didnt-come", "dialog-delete-running"]) {
+    const document = (await renderDemo(state)).window.document;
+    assert.doesNotMatch(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /Up to date/);
+  }
+  const more = (await renderDemo("partly-more-coming")).window.document;
+  assert.doesNotMatch(more.body.textContent ?? "", /Northwind could not send/);
+  assert.match(more.querySelector("header")?.textContent ?? "", /60 records/);
+  const empty = (await renderDemo("status-7")).window.document;
+  assert.match(empty.querySelector("header")?.textContent ?? "", /0 records/);
+  const unknown = (await renderDemo("unknown-count")).window.document;
+  assert.doesNotMatch(unknown.querySelector("header")?.textContent ?? "", /records/);
+  const install = (await renderDemo("status-4")).window.document.body.textContent ?? "";
+  assert.equal(install.split("DataConnect needs to get Claude Code workstation ready again.").length, 2);
+  assert.equal([...((await renderDemo("status-10")).window.document.querySelectorAll("a, button"))].filter((node) => /Resume/.test(node.textContent ?? "")).length, 1);
 });

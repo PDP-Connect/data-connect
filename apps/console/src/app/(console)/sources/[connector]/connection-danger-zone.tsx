@@ -21,6 +21,7 @@ interface Props {
 	error?: string;
 	message?: string;
 	setupFailed?: boolean;
+  inactive?: boolean;
 	initialDialog?: "reset" | "disconnect" | "delete";
 }
 
@@ -40,6 +41,7 @@ export function ConnectionDangerZone({
 	error,
 	message,
 	setupFailed = false,
+  inactive = false,
 	initialDialog,
 }: Props) {
 	return (
@@ -52,7 +54,7 @@ export function ConnectionDangerZone({
 			{message ? <ActionFeedback message={message} tone="success" /> : null}
 			{connectionId === null ? null : (
 				<>
-					{setupFailed ? null : (
+					{setupFailed || inactive ? null : (
 						<ResetSourceForm
 							connectionId={connectionId}
 							displayName={displayName}
@@ -62,7 +64,7 @@ export function ConnectionDangerZone({
 					<div className="border-t border-border pt-4">
 						<h3 className="pdpp-eyebrow mb-4">Remove</h3>
 						<div className="flex flex-col gap-5">
-							{setupFailed ? null : (
+							{setupFailed || inactive ? null : (
 								<RevokeForm
 									connectionId={connectionId}
 									displayName={displayName}

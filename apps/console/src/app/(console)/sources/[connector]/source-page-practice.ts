@@ -97,7 +97,7 @@ export function buildSourcePracticeModel(
 	};
 	if (state === "other-accounts")
 		model.otherAccounts = [
-			{ connectionId: "cin_sample_other", displayName: "Northwind, work" },
+			{ connectionId: "cin_sample_other", displayName: "Northwind (work)" },
 		];
 	if (state === "device-healthy")
 		model = {
@@ -107,7 +107,7 @@ export function buildSourcePracticeModel(
 				(device) => ({
 					...device,
 					display_name: "Work computer",
-					last_heartbeat_at: "2026-11-24T11:55:00Z",
+					last_heartbeat_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
 				}),
 			),
 		};
@@ -198,7 +198,9 @@ export function buildSourcePracticeModel(
 				: state === "dialog-disconnect"
 					? "disconnect"
 					: "delete";
-	if (state === "dialog-delete-running")
-		model.activeRunId = "run_sample_active";
+	if (state === "dialog-delete-running") {
+    model.activeRunId = "run_sample_active";
+    model.overview = { ...model.overview, isRunning: true };
+  }
 	return model;
 }

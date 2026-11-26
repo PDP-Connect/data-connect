@@ -749,7 +749,6 @@ function ConnectorPageView({
     connectorInstanceId,
     connectorNotInstalled,
     connectionLabelSeed,
-    headerCount,
     manifest,
     manualUploadHref,
     overview,
@@ -773,7 +772,9 @@ function ConnectorPageView({
   // Pause is offered only on a connection that is actually collecting. A
   // draft/revoked/already-paused row has nothing to pause, and the route would
   // answer `connector_instance_not_active` anyway.
-  const pausable = !(revoked || paused) && overview.connectionStatus === "active";
+  const archived = source.source_visibility === "archived";
+  const oneTime = source.source_kind === "manual" || source.rendered_verdict?.pill.label === "Import complete";
+  const pausable = !(revoked || paused || archived || oneTime) && overview.connectionStatus === "active";
   // Stable rename selector: prefer the explicit instance id, fall back to the
   // connection id. Both address the same connection on the backend route.
   const renameSelector = connectorInstanceId ?? connectionId;
@@ -819,9 +820,28 @@ function ConnectorPageView({
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
-  const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
-  const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
+  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
+  const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? { kind: "sync_now" as const, label: "Try again", filled: true } : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
+  const hasDeviceLocalRemediation = primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
+  const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
+  const partial = source.collection_report?.some((entry) => typeof entry.collected === "number" && typeof entry.considered === "number" && entry.collected < entry.considered) || gaps.length > 0;
+  if (hasDeviceLocalRemediation) {
+    const device = sourceInstances[0];
+    const deviceName = device?.display_name ?? device?.local_binding_name;
+    const pending = device?.records_pending ?? overview.localDeviceProgress?.records_pending;
+    stateSentence = { text: `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.`, slot: null };
+  } else if (running) {
+    stateSentence = { text: "Syncing now.", slot: null };
+  } else if (partial && [19, 20, 21].includes(sourceStatus.row)) {
+    const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
+    stateSentence = { text: `Synced${when ? ` ${when}` : ""}. Some of it didn't come.`, slot: null };
+  } else if ([14, 15, 16].includes(sourceStatus.row) && !partial) {
+    stateSentence = { text: `${displayName} synced, but DataConnect could not copy some of it.`, slot: null };
+  } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
+    stateSentence = { text: `Something stopped ${displayName} from syncing.`, slot: null };
+  }
+  const counts = model.streams.map(knownStreamRecordCount);
+  const visibleTotal = counts.every((count) => count !== null) ? `${counts.reduce((sum, count) => sum + (count ?? 0), 0).toLocaleString()} records` : undefined;
 
   return (
     <RecordroomShellWithPalette>
@@ -848,7 +868,7 @@ function ConnectorPageView({
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
-        count={/not measured/i.test(headerCount) ? undefined : headerCount}
+        count={visibleTotal}
         description={undefined}
         title={
           <span>
@@ -865,7 +885,7 @@ function ConnectorPageView({
 
       {revoked && !setupFailed ? <RevokedConnectionSection revokedAt={overview.revokedAt ?? null} /> : null}
 
-      {!/synced|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="mb-6 text-sm text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
+      {!/synced|syncing|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="mb-6 text-sm text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
       <Suspense fallback={null}>
         <SourceUpdateSlot demoModel={updateDemo} displayName={displayName} updates={updates} version={null} />
       </Suspense>
@@ -876,7 +896,7 @@ function ConnectorPageView({
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
         </div> : null}
       </Section>
-      <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} />
+      {!archived && !oneTime ? <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
       <RecentRunsSection recentRuns={recentRuns} />
           {configuration ? (
             <ConnectionConfiguration
@@ -894,8 +914,6 @@ function ConnectorPageView({
             />
             {scheduleSyncAvailable ? ( <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" /> ) : null}
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
-            {paused && pageStatusAction?.kind === "resume" ? <ResumeConnectionButton connectionId={renameSelector} label="Resume syncing" /> : null}
-            {paused && pageStatusAction?.kind === "repair_credential" && credentialUpdateHref ? <Link className="text-sm text-primary hover:underline" href={credentialUpdateHref}>Resume syncing</Link> : null}
             <CredentialRepairLinks
               revoked={revoked}
               setupFailed={setupFailed}
@@ -911,6 +929,7 @@ function ConnectorPageView({
               error={dangerError}
               message={dangerMessage ? "Done." : undefined}
               setupFailed={setupFailed}
+              inactive={revoked || archived || oneTime}
             />
           </Section>
 
@@ -946,7 +965,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
           <span className="flex min-w-0 flex-col gap-1">
             <span className="pdpp-body text-foreground">{label(stream.name)}</span>
             {sentence || newest ? <span className="pdpp-caption text-muted-foreground">{sentence}{sentence && newest ? " · " : ""}{newest ? `newest ${newest}` : ""}</span> : null}
-            {partial && cause ? <span className="pdpp-caption text-muted-foreground">{cause}</span> : null}
+            {partial && !more && cause ? <span className="pdpp-caption text-muted-foreground">{cause}</span> : null}
           </span>
         </Link>
       </li>;
@@ -1244,7 +1263,7 @@ function ConnectorPrimaryHeaderAction({
   }
   if (statusAction?.kind === "view_device") {
     const device = sourceInstances[0];
-    return device ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link> : null;
+    return device ? <Link className="text-sm text-primary hover:underline" href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link> : null;
   }
   if (statusAction?.kind === "review_setup" || statusAction?.kind === "retry_first_sync" || statusAction?.kind === "review_result") {
     return renderedOwnerAction ? (
@@ -1643,7 +1662,7 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
               >
                 <span className="pdpp-caption flex items-center gap-2">
                   <span>{syncOutcome(r)}</span>
-                  {r.failure_reason === "assistance_timed_out" ? <span>The sign-in was not finished. Start again when you are ready.</span> : null}
+                  {syncFailureSentence(r.failure_reason) ? <span>{syncFailureSentence(r.failure_reason)}</span> : null}
                 </span>
                 <span className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums">
                   <span>{sourceTimeLabel(r.first_at) ?? "Time unavailable"}</span>
@@ -1657,11 +1676,18 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
   );
 }
 
+function syncFailureSentence(reason: string | null): string | null {
+  if (reason === "assistance_timed_out") return "The sign-in was not finished. Start again when you are ready.";
+  if (reason === "local collector outbox has dead-lettered rows") return "The computer that holds this data could not send some records.";
+  if (reason === "credential_invalid" || reason === "credentials_invalid") return "Sign in again to keep syncing.";
+  return null;
+}
+
 function syncOutcome(sync: RunSummary): string {
   if (["succeeded", "completed", "success", "succeeded_with_gaps"].includes(sync.status)) return "Finished";
   if (["cancelled", "canceled", "rejected"].includes(sync.status)) return "Stopped";
   if (["failed", "error"].includes(sync.status)) return "Failed";
-  if (["pending", "started", "in_progress", "running"].includes(sync.status)) return "Running";
+  if (["pending", "started", "in_progress", "running"].includes(sync.status)) return "Syncing now";
   if (["waiting_for_input", "needs_input", "waiting_for_owner"].includes(sync.status)) return "Needs you";
   return "Stopped";
 }
@@ -1861,11 +1887,11 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
   );
 }
 
-function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances }: {
-  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[];
+export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false }: {
+  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean;
 }) {
-  const text = scheduleSentence(displayName, scheduleError ? undefined : schedule);
-  const next = schedule?.enabled && schedule.effective_mode !== "manual" ? sourceTimeLabel(schedule.next_due_at) : null;
+  const text = disconnected ? "Not checked while disconnected." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const next = !disconnected && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
   const deviceName = device?.display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);

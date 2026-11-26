@@ -223,9 +223,9 @@ export function ConnectionRecoverySummary(props: ConnectionRecoverySummaryProps)
 }
 
 export function ConnectionDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">) {
-  if (!connectionHealth) return null;
+  if (!connectionHealth) return <p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p>;
   const remediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);
-  if (!remediation) return null;
+  if (!remediation) return <p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p>;
   return <OutboxStallRemediationPanel
     connectionId={connectionId}
     connectorId={connectorId}
@@ -1059,6 +1059,18 @@ function outboxCauseExplanation(cause: RefActionRemediation["cause"], hostPhrase
   }
 }
 
+function plainCommandCaption(kind: RefActionRemediation["commands"][number]["kind"]): string {
+  switch (kind) {
+    case "local_collector_recover_preview": return "Shows what recovering saved data would do and changes nothing.";
+    case "local_collector_recover_apply": return "Recovers saved data and sends waiting records to DataConnect.";
+    case "local_collector_retry_dead_letters_preview": return "Shows which saved records would be sent again and changes nothing.";
+    case "local_collector_retry_dead_letters_apply": return "Backs up the saved data and marks failed uploads to be sent again.";
+    case "local_collector_run": return "Copies data on this computer and sends waiting records to DataConnect.";
+    case "local_collector_doctor": return "Checks what is blocking this computer and changes nothing.";
+    default: return "Follow this step on the computer that holds the data.";
+  }
+}
+
 function remediationCommandCaption(command: RefActionRemediation["commands"][number]): string {
   switch (command.kind) {
     case "local_collector_recover_preview":
@@ -1157,7 +1169,7 @@ function OutboxStallRemediationPanel({
   // fully resolved by the safe CLI builders).
   const steps: { caption: string; command: string | null; label: string }[] = verdictRemediation
     ? verdictRemediation.commands.map((command) => ({
-        caption: remediationCommandCaption(command),
+        caption: plain ? plainCommandCaption(command.kind) : remediationCommandCaption(command),
         command: substituteCommandTemplate(command.command_template, {
           connectionId,
           connectorId,
@@ -1168,18 +1180,18 @@ function OutboxStallRemediationPanel({
       }))
     : [
         {
-          caption: "See saved upload rows and local upload health.",
+          caption: plain ? "Checks saved uploads on this computer and changes nothing." : "See saved upload rows and local upload health.",
           command: pdppLocalCollectorDoctorCommand(scope),
           label: "1. Diagnose",
         },
         {
-          caption: "Dry run — shows what would be requeued, changes nothing.",
+          caption: plain ? "Shows which saved records would be sent again and changes nothing." : "Dry run — shows what would be requeued, changes nothing.",
           command: pdppLocalCollectorRetryDeadLettersCommand(scope),
           label: "2. Preview the requeue",
         },
         {
           caption:
-            "Marks failed uploads for another attempt after backing up the local database first. The next collector run drains them — it does not ingest on its own.",
+            plain ? "Backs up the saved data and marks failed uploads to be sent again; it does not send them yet." : "Marks failed uploads for another attempt after backing up the local database first. The next collector run drains them — it does not ingest on its own.",
           command: pdppLocalCollectorRetryDeadLettersCommand({ ...scope, apply: true }),
           label: "3. Requeue",
         },
@@ -1222,7 +1234,7 @@ function OutboxStallRemediationPanel({
         {steps.map((step, index) => (
           <li className="flex flex-col gap-0.5" key={step.label}>
             <span className="pdpp-caption font-medium text-foreground">{plain ? `Step ${index + 1}` : step.label}</span>
-            {!plain && step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
+            {step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
             {step.command === null ? (
               // Fail-closed: a placeholder could not be resolved. Never render a
               // broken command with literal <…> that the owner would copy and run.

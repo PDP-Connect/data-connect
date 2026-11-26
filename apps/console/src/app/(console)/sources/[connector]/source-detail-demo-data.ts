@@ -17,8 +17,8 @@ import type { StreamSummary } from "../../lib/rs-client.ts";
 import { type SourceStatusRow, sourceStatusWords } from "../../lib/source-status-words.ts";
 import type { ConnectorPageModel } from "./source-page.tsx";
 
-const DEMO_NOW = new Date("2026-11-24T12:00:00.000Z");
-const DEMO_SUCCESS = "2026-11-24T10:00:00.000Z";
+const DEMO_NOW = new Date();
+const DEMO_SUCCESS = new Date(DEMO_NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
 
 function toRunRef(summary: RefConnectorRunSummary | null) {
   if (!summary) {
@@ -570,7 +570,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
       schedule = statusSchedule("automatic", {
         backoff_applied: true,
         consecutive_failures: 2,
-        next_run_at: "2026-11-24T12:20:00.000Z",
+        next_run_at: new Date(Date.now() + 20 * 60 * 1000).toISOString(),
         reason_class: "retry",
         recommended_health_state: "cooling_off",
       });
@@ -593,7 +593,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
       source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Import complete", tone: "green" } }, source_kind: "manual" };
       break;
     case 19:
-      schedule = statusSchedule("automatic", null, "2026-11-24T16:00:00.000Z");
+      schedule = statusSchedule("automatic", null, new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString());
       source = { ...source, connection_health: { ...source.connection_health, lateness: { state: "on_time" } }, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, schedule };
       break;
     case 20:
@@ -643,6 +643,8 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
 
   return {
     ...model,
+    streams: [6, 7, 22].includes(row) ? model.streams.map((stream) => ({ ...stream, record_count: 0, count_state: "known_zero" as const })) : model.streams,
+    manualUploadHref: row === 18 ? `/connect/manual-upload/claude-code?connection_id=${model.connectionId}` : model.manualUploadHref,
     collectionFactsByStream: visibleFacts,
     connectionHealth: health,
     connectionPrimaryAction: source.rendered_verdict?.required_actions[0] ?? null,
