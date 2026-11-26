@@ -41,7 +41,7 @@ export function AppAccessList({
               href={`/grants/${encodeURIComponent(app.hrefId)}${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}
             >
               <span className="block font-medium text-[15px]">{app.name}</span>
-              {app.place ? <span className="block text-[13px] text-muted-foreground">{app.place}</span> : null}
+              {app.place && app.place !== "no address given" && app.place !== app.name ? <span className="block text-[13px] text-muted-foreground">{app.place}</span> : null}
               {stopped ? (
                 <span className="block text-[13px] text-muted-foreground">
                   {app.stoppedReason === "expired" ? "Ended" : "Removed"}

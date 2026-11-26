@@ -364,7 +364,7 @@ function AppsBlock({ data }: { data: HomeData }) {
           href={data.tokensHref}
         >
           {data.activeTokenCount.toLocaleString("en-US")}{" "}
-          {data.activeTokenCount === 1 ? "access token" : "access tokens"} · can read everything
+          {data.activeTokenCount === 1 ? "sign-in key can" : "sign-in keys can"} read everything
         </Link>
       ) : null}
       {data.appsEmpty ? (

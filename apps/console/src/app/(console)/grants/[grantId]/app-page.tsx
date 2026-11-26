@@ -82,8 +82,8 @@ export function AppPage({
         title={app.name}
       />
       <p className="text-[13px] text-muted-foreground">
-        {app.place === "no address given" ? "" : app.place}
-        {app.verified ? "" : `${app.place === "no address given" ? "" : " · "}not verified`}
+        {!app.place || app.place === "no address given" || app.place === app.name ? "" : app.place}
+        {app.verified ? "" : `${!app.place || app.place === "no address given" || app.place === app.name ? "" : " · "}not verified`}
       </p>
       {app.verified ? null : (
         <p className="text-[13px] text-muted-foreground">

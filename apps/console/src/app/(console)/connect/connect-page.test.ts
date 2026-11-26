@@ -29,7 +29,7 @@ test("local setup explains remote access, wraps the address and supplies a copya
   assert.doesNotMatch(html, NOW_ASK_IT_ANOTHER_APP_X27_RE);
   assert.equal(
     claudeCodeCommand("http://localhost:7663"),
-    "claude mcp add --transport http pdpp 'http://localhost:7663/mcp'"
+    "claude mcp add --transport http dataconnect 'http://localhost:7663/mcp'"
   );
 });
 test("two connected apps use the singular and offer a first question", () => {

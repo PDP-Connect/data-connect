@@ -4,6 +4,7 @@
 
 import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
 import Link from "next/link";
+import { Button } from "@pdpp/operator-ui/ui/button";
 import { useState } from "react";
 import type { PendingApproval } from "../lib/ref-client.ts";
 import { appSourceName } from "./app-access.ts";
@@ -40,21 +41,11 @@ export function PendingApprovalRow({
             : "Wants to read your data"}
         </p>
         <IcTimestamp value={approval.created_at} />
-        {requests.length > 1
-          ? requests.slice(1).map((request, index) => (
-              <Link
-                className="ml-3 text-primary"
-                href={reviewHref || `/grants/approvals/${encodeURIComponent(request.approval_id)}`}
-                key={request.approval_id}
-              >
-                Review request {index + 2}
-              </Link>
-            ))
-          : null}
+        {requests.length > 1 ? <Link className="ml-3 text-primary" href={reviewHref || `/grants/approvals/${encodeURIComponent(requests[1]?.approval_id || approval.approval_id)}`}>{requests.length-1} more requests</Link> : null}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         <Link
-          className={buttonVariants({ size: "sm" })}
+          className={buttonVariants()}
           href={reviewHref || `/grants/approvals/${encodeURIComponent(approval.approval_id)}`}
         >
           Review
@@ -65,7 +56,7 @@ export function PendingApprovalRow({
               <p className="pdpp-caption text-foreground">
                 Don't allow {appName}? It will not get access to your data.
               </p>
-              <form action={denyAction} className="mt-3">
+              <form action={denyAction} className="mt-3 flex flex-wrap gap-2">
                 <input
                   name="requests"
                   type="hidden"
@@ -79,16 +70,16 @@ export function PendingApprovalRow({
                 <IcButton size="sm" type="submit" variant="destructive">
                   Don't allow
                 </IcButton>
-                <IcButton onClick={() => setConfirming(false)} type="button" variant="ghost">
+                <IcButton onClick={() => setConfirming(false)} size="sm" type="button" variant="ghost">
                   Cancel
                 </IcButton>
               </form>
             </div>
           </div>
         ) : (
-          <IcButton onClick={() => setConfirming(true)} variant="ghost">
+          <Button onClick={() => setConfirming(true)} size="sm" type="button" variant="link">
             Don't allow
-          </IcButton>
+          </Button>
         )}
       </div>
     </div>

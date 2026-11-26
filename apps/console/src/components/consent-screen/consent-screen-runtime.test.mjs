@@ -113,8 +113,8 @@ test("verified state uses one trust line and plain consumer actions", () => {
   );
   assert.ok(view.getByRole("heading", { name: `${verifiedModel.client.name} wants to read your data` }));
   assert.ok(view.getByText("Anything you leave unticked stays private."));
-  assert.ok(view.getByText("Verified"));
-  assert.ok(view.getByText("Verified"));
+  assert.equal(view.queryByText("Verified"), null);
+  assert.ok(view.getByText("The name is what the app calls itself."));
   assert.equal(view.queryByRole("button", { name: "What does this mean?" }), null);
   assert.ok(view.getByRole("button", { name: "Allow" }));
   assert.ok(view.getByRole("button", { name: "Don't allow" }));
@@ -354,17 +354,17 @@ async function journey() {
   };
 }
 
-test("bulk dates apply only to selected time-capable streams and resolve against the real declaration", async () => {
+test("dates stay local to the chosen record kind and resolve against its declaration", async () => {
   const { view, panel, submit } = await journey();
   fireEvent.change(within(panel).getByLabelText("added since"), { target: { value: "2026-03-01" } });
   fireEvent.change(within(panel).getByLabelText("added until"), { target: { value: "2026-03-31" } });
-  fireEvent.click(within(panel).getByRole("button", { name: "Apply to all selected kinds of records" }));
+  assert.equal(within(panel).queryByRole("button", { name: "Apply to all selected kinds of records" }), null);
   const decision = await submit();
   assert.deepEqual(decision.streamRanges["spotify:account:saved_tracks"], { since: "2026-03-01", until: "2026-03-31" });
   for (const stream of model.sources[0].streams) {
     assert.deepEqual(
       decision.streamRanges[stream.id],
-      stream.timePhrase ? { since: "2026-03-01", until: "2026-03-31" } : undefined
+      stream.name === "saved_tracks" ? { since: "2026-03-01", until: "2026-03-31" } : undefined
     );
     const declaration = manifest.streams.find((candidate) => candidate.name === stream.name);
     const result = resolveStreamScopeSelection(declaration, decision.streamRanges[stream.id] ?? {});
@@ -490,7 +490,7 @@ test("a white-glyph connector mark keeps its declared brand background on the co
     brand: { background_color: "#1DB954" },
     icon: { kind: "inline_svg", svg: whiteGlyph },
   });
-  const tile = renderModel(whiteGlyphModel).container.querySelector(".pdpp-connector-icon");
+  const tile = renderModel(whiteGlyphModel).container.querySelector("details .pdpp-connector-icon");
   assert.ok(tile?.querySelector("svg path"), "the manifest's glyph renders, not a fallback mark");
   assert.equal(
     dom.window.getComputedStyle(tile).backgroundColor,
@@ -516,7 +516,7 @@ for (const [label, value] of [
       icon: { kind: "inline_svg", svg: whiteGlyph },
     });
     assert.equal(invalidModel.sources[0].icon.backgroundColor, null);
-    const tile = renderModel(invalidModel).container.querySelector(".pdpp-connector-icon");
+    const tile = renderModel(invalidModel).container.querySelector("details .pdpp-connector-icon");
     // Add-page decision 5: a single-colour glyph with no valid brand tile is
     // drawn as a text-colour mask (a white glyph would vanish on the light
     // theme), so the glyph renders as the mask image, not as an inline <svg>.
@@ -543,7 +543,7 @@ test("a short hex brand background is accepted", async () => {
 test("a brand background without a manifest glyph is not applied to the resolved identity mark", async () => {
   const noGlyphModel = await buildModelFor({ ...manifest, brand: { background_color: "#1DB954" }, icon: undefined });
   assert.equal(noGlyphModel.sources[0].icon, null, "the background only travels with a manifest glyph");
-  const tile = renderModel(noGlyphModel).container.querySelector(".pdpp-connector-icon");
+  const tile = renderModel(noGlyphModel).container.querySelector("details .pdpp-connector-icon");
   assert.ok(tile?.querySelector("svg"), "the resolved identity mark still renders");
   assert.notEqual(
     tile.style.backgroundColor,
@@ -758,7 +758,8 @@ test("Limit what it sees hides narrowing until pressed and preserves the decisio
   assert.equal(view.queryByText("Choose fields to share"), null);
   await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
   await act(async () => fireEvent.click(controls[0]));
-  assert.ok(view.getByText("Choose fields to share"));
+  assert.equal(view.queryByText("Choose fields to share"), null);
+  assert.ok(view.getByText("Each record’s id is always included."));
   assert.equal(view.queryByText("Record identifier"), null);
   await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
   assert.equal(JSON.stringify(decisions[0]), JSON.stringify(decisions[1]));

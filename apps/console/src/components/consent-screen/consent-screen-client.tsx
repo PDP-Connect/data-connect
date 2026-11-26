@@ -31,7 +31,7 @@
  * icons, and two distinct date axes (grant validity vs per-stream data range).
  */
 
-import { buttonVariants, IcButton, IcInput, Monogram } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Button } from "@pdpp/operator-ui/ui/button";
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
@@ -117,14 +117,6 @@ function humanDate(iso: string): string {
   return HUMAN_DATE_FMT.format(new Date(Date.UTC(year, month - 1, day)));
 }
 
-function fieldSummary(stream: ConsentStreamModel, selectedFields: number | null): string {
-  if (stream.fieldsTotal === 0) {
-    return "All fields";
-  }
-  return selectedFields === null || selectedFields === stream.fieldsTotal
-    ? `All ${stream.fieldsTotal} fields`
-    : `${selectedFields} of ${stream.fieldsTotal} fields`;
-}
 
 function humanFieldName(name: string): string {
   return name
@@ -197,7 +189,7 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
       {client.logo ? (
         <img alt="" className={styles.clientLogo} src={client.logo} />
       ) : (
-        <Monogram name={client.name} tinted />
+        <ConnectorMark connectorId={client.name} name={client.name} />
       )}
       <div className={styles.consentHeaderContent}>
         <div className={styles.consentHeaderTitle}>
@@ -205,12 +197,12 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
         </div>
         <div className={styles.trustLine}>
           <span>{client.returnTo}</span>
-          {verified ? <span className={styles.verified}>Verified</span> : <span>not verified</span>}
+          {verified ? null : <span>not verified</span>}
         </div>
-        {verified ? null : (
+        {verified ? <p className="pdpp-caption">The name is what the app calls itself.</p> : (
           <p className="pdpp-body text-attention">
-            DataConnect could not confirm who runs this app. Allow it only if you started this yourself, in{" "}
-            {client.returnTo || "the app"}.
+            DataConnect could not confirm who runs this app. Allow it only if you started this from{" "}
+            {client.returnTo || "the app"} yourself.
           </p>
         )}
       </div>
@@ -229,9 +221,7 @@ function StreamRow({
   onToggle,
   ranges,
   setRange,
-  applyRangeToAllSelected,
 }: {
-  applyRangeToAllSelected: (since: string, until: string) => void;
   onToggle: () => void;
   onToggleField: (fieldName: string, checked: boolean) => void;
   onSelectAll: () => void;
@@ -273,18 +263,11 @@ function StreamRow({
         ) : null}
         {selected && limiting && (
           <div className={styles.narrow}>
-            <p className={styles.narrowSummary}>
-              {fieldSummary(
-                stream,
-                stream.fields.length > 0 ? stream.fields.filter((field) => selectedFields[field.name]).length : null
-              )}{" "}
-              {stream.fields.length > 0 && <span className={styles.narrowChange}>Change</span>}
-            </p>
             <div className={styles.narrowBody}>
               {stream.fields.length > 0 ? (
                 <fieldset className={styles.fieldList}>
                   <legend className={`pdpp-caption ${styles.fieldPanelLegend}`}>
-                    <span>Choose fields to share</span>
+                    <span className="sr-only">Fields</span>
                     <span className={styles.fieldBulkActions}>
                       <button className={styles.fieldBulkAction} onClick={onSelectAll} type="button">
                         Select all
@@ -297,7 +280,7 @@ function StreamRow({
                   </legend>
                   <p className="pdpp-caption">Each record’s id is always included.</p>
                   {stream.fields
-                    .filter((field) => !(field.required && field.name === "id"))
+                    .filter((field) => field.name !== "id")
                     .map((field) => (
                       <label className={styles.fieldOption} key={field.name}>
                         <input
@@ -328,7 +311,7 @@ function StreamRow({
                   ) : null}
 
                   <label className="pdpp-caption" htmlFor={sinceInputId}>
-                    from
+                    From
                   </label>
                   <IcInput
                     aria-label={`${stream.timePhrase} since`}
@@ -339,7 +322,7 @@ function StreamRow({
                     value={range.since}
                   />
                   <label className="pdpp-caption" htmlFor={untilInputId}>
-                    to
+                    To
                   </label>
                   <IcInput
                     aria-label={`${stream.timePhrase} until`}
@@ -349,13 +332,6 @@ function StreamRow({
                     type="date"
                     value={range.until}
                   />
-                  <button
-                    className={styles.rangeApplyAll}
-                    onClick={() => applyRangeToAllSelected(range.since, range.until)}
-                    type="button"
-                  >
-                    Apply to all selected kinds of records
-                  </button>
                 </div>
               ) : (
                 <p className={`pdpp-caption ${styles.streamRange}`}>No date range for this kind of record.</p>
@@ -383,10 +359,8 @@ function SourceRow({
   onSelectAll,
   onSelectNone,
   setRange,
-  applyRangeToAllSelected,
 }: {
   active: boolean;
-  applyRangeToAllSelected: (since: string, until: string) => void;
   hidden: boolean;
   onToggleSource: (checked: boolean) => void;
   onToggleStream: (streamName: string) => void;
@@ -468,7 +442,6 @@ function SourceRow({
       <div className={styles.streamList}>
         {source.streams.map((stream) => (
           <StreamRow
-            applyRangeToAllSelected={applyRangeToAllSelected}
             key={stream.name}
             onSelectAll={() => onSelectAll(stream.id)}
             onSelectNone={() => onSelectNone(stream.id)}
@@ -623,20 +596,6 @@ export function ConsentScreen({
     }));
   }
 
-  function applyRangeToAllSelected(since: string, until: string) {
-    setRanges((prev) => {
-      const next = { ...prev };
-      for (const source of model.sources) {
-        for (const stream of source.streams) {
-          if (selection[source.id]?.[stream.name] && stream.timePhrase) {
-            next[stream.id] = { since, until };
-          }
-        }
-      }
-      return next;
-    });
-  }
-
   function onSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -789,11 +748,8 @@ export function ConsentScreen({
               <p className="pdpp-caption">{endsText()}</p>
             </section>
           ) : null}
-          <section aria-labelledby="records-heading" className={styles.recordsSection}>
-            <h2 className="pdpp-title" id="records-heading">
-              Choose what it can read
-            </h2>
-            <p className={`pdpp-caption ${styles.recordsHint}`}>Anything you leave unticked stays private.</p>
+          <section aria-labelledby={model.sources.length ? "records-heading" : undefined} className={styles.recordsSection}>
+            {model.sources.length ? <><h2 className="pdpp-title" id="records-heading">Choose what it can read</h2><p className={`pdpp-caption ${styles.recordsHint}`}>Anything you leave unticked stays private.</p></> : null}
             {model.sources.length === 0 ? (
               <div className={styles.searchEmpty}>
                 <p>You have no data sources yet, so there is nothing to share.</p>
@@ -875,7 +831,6 @@ export function ConsentScreen({
                   return (
                     <SourceRow
                       active={visibleIndex >= 0 && visibleIndex === activeIndex}
-                      applyRangeToAllSelected={applyRangeToAllSelected}
                       fieldSelection={fieldSelection}
                       hidden={isHidden}
                       initiallyOpen={openKinds}
@@ -958,7 +913,7 @@ export function ConsentScreen({
               </IcButton>
             </div>
           </div>
-          <p className="pdpp-caption">You can remove this at any time in DataConnect, under Apps.</p>
+          {model.sources.length ? <p className="pdpp-caption">You can remove this at any time in DataConnect, under Apps.</p> : null}
           {model.client.returnTo ? <p className="pdpp-caption">You’ll go back to {model.client.returnTo}.</p> : null}
           <div className={styles.policyLinks}>
             {policyLinks.length > 0

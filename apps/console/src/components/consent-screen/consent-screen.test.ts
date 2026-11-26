@@ -210,9 +210,10 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
   assert.deepEqual(offenders, [], "every color must reference a design token");
 });
 
-test("address proof controls the verified label", () => {
+test("address proof adds the self-declared-name explanation without a badge", () => {
   assert.match(CLIENT_SOURCE, /client.trust === "domain"/);
-  assert.match(CLIENT_SOURCE, /styles.verified/);
+  assert.ok(!CLIENT_SOURCE.includes(">Verified<"));
+  assert.match(CLIENT_SOURCE, /The name is what the app calls itself/);
 });
 
 test("client metadata links render only when the challenge model supplies them", () => {
@@ -255,7 +256,7 @@ function declaredFields(source: string, interfaceName: string): string[] {
   let depth = 0;
   let end = start;
   for (let i = source.indexOf("{", start); i < source.length; i += 1) {
-    if (source[i] === "{") depth += 1;
+    if (source[i] === "{") { depth += 1; }
     if (source[i] === "}") {
       depth -= 1;
       if (depth === 0) {
@@ -417,7 +418,7 @@ test("the data range is folded into the approval artifact digest", () => {
 
 test("the owner's selected fields are submitted through the declaration-checked narrowing path", () => {
   assert.match(CLIENT_SOURCE, /initialFieldSelection/, "every manifest field starts selected");
-  assert.match(CLIENT_SOURCE, /Choose fields to share/, "Change must reveal a real field list");
+  assert.match(CLIENT_SOURCE, /Each record’s id is always included/, "narrowing keeps the required-id explanation");
   assert.match(CLIENT_SOURCE, /streamFields\[stream\.id\]/, "the decision must keep fields keyed by stable stream id");
   assert.match(ACTIONS_SOURCE, /stream_fields: decision\.streamFields/, "the accept request must carry field selections");
   assert.match(

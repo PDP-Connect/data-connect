@@ -114,6 +114,8 @@ test("merged waiting requests put Cancel and every request in the same question"
     })
   );
   assert.ok(view.getByText(THREE_REQUESTS_RE));
+  assert.ok(view.getByRole("link",{name:"2 more requests"}));
+  assert.equal(view.queryByRole("link",{name:"Review request 2"}),null);
   fireEvent.click(view.getByRole("button", { name: "Don't allow" }));
   const question = view.getByRole("alertdialog");
   assert.ok(question.contains(view.getByRole("button", { name: "Cancel" })));
