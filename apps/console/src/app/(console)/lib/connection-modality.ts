@@ -27,70 +27,15 @@
  * that same plan.
  */
 
-import {
-  BROWSER_BOUND_CONNECTORS as SHARED_BROWSER_BOUND_CONNECTORS,
-  SUPPORTED_BROWSER_COLLECTOR_CONNECTORS as SHARED_SUPPORTED_BROWSER_COLLECTOR_CONNECTORS,
-  SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as SHARED_SUPPORTED_LOCAL_COLLECTOR_CONNECTORS,
-  type SupportedBrowserCollectorConnector,
-  type SupportedLocalCollectorConnector,
-  canonicalConnectorKey as sharedCanonicalConnectorKey,
-  enrollmentKeyForCanonicalKey as sharedEnrollmentKeyForCanonicalKey,
-  isBrowserBoundConnector as sharedIsBrowserBoundConnector,
-  isSupportedBrowserCollectorConnector as sharedIsSupportedBrowserCollectorConnector,
-  isSupportedLocalCollectorConnector as sharedIsSupportedLocalCollectorConnector,
-} from "pdpp-reference-implementation/connection-setup-plan";
-
-/**
- * Connector keys the console can create today via local-collector device
- * enrollment. Mirrors `COLLECTOR_RUN_CONNECTORS` in the enrollment form (which is
- * pinned by `enrollment-form.consistency.test.ts`); `connection-modality.test.ts`
- * asserts the two stay in sync so neither can drift silently.
- */
-export const SUPPORTED_LOCAL_COLLECTOR_CONNECTORS = SHARED_SUPPORTED_LOCAL_COLLECTOR_CONNECTORS;
-
-/**
- * Browser-bound connectors for which the bundled connector/runtime pair is
- * production-ready enough for the console's browser-session setup path. This
- * is derived by the shared planner from the shipped browser-bound manifests
- * and production-ready connector roster; this module carries no provider list.
- */
-export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS = SHARED_SUPPORTED_BROWSER_COLLECTOR_CONNECTORS;
+import { canonicalConnectorKey as sharedCanonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
 
 /**
  * Connector creation modalities the console understands, matching the backend
  * intent route's taxonomy. `local_collector` is the only one-click path the
- * console can complete today; manual browser proof paths are modeled by the
- * supported browser-collector set above, not by flipping this modality.
+ * console can complete today; whether a given connector can use it is a fact
+ * of its manifest, read through the server's owner connector templates.
  */
 export type ConnectionAddModality = "local_collector" | "browser_bound" | "api_network";
-
-/** True when this connector key can be created from the console today. */
-export function isSupportedLocalCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedLocalCollectorConnector {
-  return sharedIsSupportedLocalCollectorConnector(connectorId);
-}
-
-/** True when this browser-bound connector has a supported manual console setup path. */
-export function isSupportedBrowserCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedBrowserCollectorConnector {
-  return sharedIsSupportedBrowserCollectorConnector(connectorId);
-}
-
-/**
- * Connector keys whose manifest declares a `browser` binding — the browser-bound
- * class the backend intent route classifies as `browser_bound`
- * (`classifyConnectorIntentModality`, browser binding wins over a co-present
- * network binding). The console has no manifest `runtime_requirements.bindings`
- * threaded to the records row, so — exactly as this module already does for the
- * supported local-collector set — it enumerates the class by key. The list is
- * pinned against the committed manifests by `connection-modality.test.ts` so it
- * cannot drift from the real connector bindings. This list is for setup and
- * enrollment honesty. Existing connection run controls are governed by the owner
- * run surface and must not categorically suppress browser-bound run-now actions.
- */
-export const BROWSER_BOUND_CONNECTORS = SHARED_BROWSER_BOUND_CONNECTORS;
 
 /**
  * Public canonical bare key for a manifest's (possibly registry-URL-shaped)
@@ -100,31 +45,6 @@ export const BROWSER_BOUND_CONNECTORS = SHARED_BROWSER_BOUND_CONNECTORS;
  */
 export function canonicalConnectorKey(connectorId: string): string {
   return sharedCanonicalConnectorKey(connectorId);
-}
-
-/**
- * Map a canonical bare connector key to the enrollment-form key the supported
- * sets and the device-exporter deep-link expect. Two local-collector slugs
- * diverge today: manifests use `claude-code` and `google-takeout` (hyphen),
- * but the proven enrollment path, `SUPPORTED_LOCAL_COLLECTOR_CONNECTORS`, and
- * the bundled-connector registry (`LOCAL_COLLECTOR_DEFINITIONS`, keyed by
- * `connector_id`) use `claude_code` and `google_takeout` (underscore),
- * mirroring the form's `COLLECTOR_RUN_CONNECTORS` literal. Every other
- * connector's bare key already equals its enrollment key. Keeping this
- * mapping here — next to the supported sets it serves — means the catalog
- * never mints a `?connector=` value the enrollment form would reject.
- */
-export function enrollmentKeyForCanonicalKey(canonicalKey: string): string {
-  return sharedEnrollmentKeyForCanonicalKey(canonicalKey);
-}
-
-/**
- * True when this connector is browser-bound (manifest `browser` binding).
- * Accepts the canonical bare key the row normally receives and the registry-URL
- * fallback form, so a non-canonical id cannot resurrect a false Sync now.
- */
-export function isBrowserBoundConnector(connectorId: string | null | undefined): boolean {
-  return sharedIsBrowserBoundConnector(connectorId);
 }
 
 /**
@@ -143,7 +63,7 @@ const BROWSER_SESSION_BINDING_KINDS = new Set(["browser_collector", "browser_enr
  * connection-scoped `source_binding_kind`), so repair must route to
  * browser/session repair rather than static-secret credential capture. This is
  * the connection-binding-first discriminator; it takes precedence over the
- * connector-level `isBrowserBoundConnector`/static-secret-capability facts.
+ * connector-level browser-binding and static-secret-capability facts.
  */
 export function isBrowserSessionBoundConnection(sourceBindingKind: string | null | undefined): boolean {
   return typeof sourceBindingKind === "string" && BROWSER_SESSION_BINDING_KINDS.has(sourceBindingKind);

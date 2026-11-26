@@ -36,6 +36,7 @@ import { drainConnectorInstanceIndexWork, ingestRecord } from "../server/records
 import { runLexicalSearch } from "../server/search.ts";
 import { configureSemanticBackend, makeStubBackend, runSemanticSearch } from "../server/search-semantic.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "amazon-unification-xsurface";
 const GITHUB_CONNECTOR_ID = "github-unification-xsurface";
@@ -44,63 +45,69 @@ const CANONICAL_ID = "cin_amazon_canonical_xsurface";
 const FRAGMENT_ID = "cin_amazon_fragment_xsurface";
 const GITHUB_ID = "cin_github_unresolved_xsurface";
 
-const amazonManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Amazon (cross-surface test)",
-  manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: { search: { lexical_fields: ["title"], semantic_fields: ["title"] } },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          title: { type: "string" },
+const amazonManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Amazon (cross-surface test)",
+    manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: { search: { lexical_fields: ["title"], semantic_fields: ["title"] } },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            title: { type: "string" },
+          },
+          required: ["id", "title", "received_at"],
+          type: "object",
         },
-        required: ["id", "title", "received_at"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}` }
+);
 
-const githubManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: GITHUB_CONNECTOR_ID,
-  display_name: "GitHub (cross-surface test)",
-  manifest_uri: `https://registry.pdpp.dev/connectors/${GITHUB_CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: { search: { lexical_fields: ["title"], semantic_fields: ["title"] } },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          title: { type: "string" },
+const githubManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: GITHUB_CONNECTOR_ID,
+    display_name: "GitHub (cross-surface test)",
+    manifest_uri: `https://registry.pdpp.dev/connectors/${GITHUB_CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: { search: { lexical_fields: ["title"], semantic_fields: ["title"] } },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            title: { type: "string" },
+          },
+          required: ["id", "title", "received_at"],
+          type: "object",
         },
-        required: ["id", "title", "received_at"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://registry.pdpp.dev/connectors/${GITHUB_CONNECTOR_ID}` }
+);
 
 function target(connectorId: string, instanceId: string) {
   return { connector_id: connectorId, connector_instance_id: instanceId };

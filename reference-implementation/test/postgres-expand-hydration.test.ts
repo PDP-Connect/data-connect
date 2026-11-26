@@ -32,6 +32,7 @@ import {
 } from "../server/postgres-storage.ts";
 import { getRecord as _getRecord, queryRecords as _queryRecords, ingestRecord } from "../server/records.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type ManifestLike = Record<string, unknown>;
 interface ExpandedRelation {
@@ -99,7 +100,7 @@ if (POSTGRES_URL) {
     const childStream = "recently_played";
     const metadataStream = "track_metadata";
 
-    const manifest: ManifestLike = {
+    const manifest: ManifestLike = withFixtureSourceDeclaration({
       capabilities: { human_interaction: [] },
       connector_id: connectorId,
       manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
@@ -180,7 +181,7 @@ if (POSTGRES_URL) {
         },
       ],
       version: "1.0.0",
-    };
+    }, { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` });
 
     const grantWithChild = {
       streams: [

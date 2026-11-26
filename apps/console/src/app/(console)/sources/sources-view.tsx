@@ -394,7 +394,7 @@ function InstanceListItem({
   const inner = (
     <>
       <span className="rr-s-item__identity">
-        <ConnectorMark className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
+        <ConnectorMark connectorId={instance.connectorId} icon={instance.icon} name={instance.displayName} />
         <span className="rr-s-item__name">{instance.displayName}</span>
       </span>
       {/* Keep list rows comparable: connector kind lives in the selected detail

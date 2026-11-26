@@ -14,6 +14,7 @@ import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/own
 import {
   getRunStatus,
   getRunTimeline,
+  listRunRecordRejectionReceipts,
   getStaticSecretSetup,
   type RunStatusEnvelope,
   type SpineEvent,
@@ -34,11 +35,13 @@ import {
   formatRecoveryHint,
   type KnownGap,
   type KnownGapSummary,
+  recoveryHintLabel,
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
+import { RejectedRecordsSection } from "./rejected-records-section.tsx";
 import { projectCredentialInteraction } from "./credential-interaction.ts";
 import {
   describeAssistanceOwnerAction,
@@ -71,10 +74,19 @@ interface LatestProgress {
   total: number | null;
 }
 
-type TimelineSearchParams = Promise<{ cursor?: string | string[] }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[] }>;
 
-function getCursor(searchParams: { cursor?: string | string[] }): string | null {
-  return typeof searchParams.cursor === "string" && searchParams.cursor.length > 0 ? searchParams.cursor : null;
+function getCursor(value: string | string[] | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+// The receipt list pages on its own cursor; keep the timeline page the reader is on.
+function runReceiptsHref(runId: string, timelineCursor: string | null, receiptsCursor: string): string {
+  const query = new URLSearchParams({ receipts_cursor: receiptsCursor });
+  if (timelineCursor) {
+    query.set("cursor", timelineCursor);
+  }
+  return `/syncs/${encodeURIComponent(runId)}?${query.toString()}`;
 }
 
 function runTimelineHref(runId: string, cursor: string): string {
@@ -86,11 +98,13 @@ export default async function RunDetailPage({
   searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: TimelineSearchParams;
+  searchParams: RunPageSearchParams;
 }) {
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
-  const cursor = getCursor(await searchParams);
+  const query = await searchParams;
+  const cursor = getCursor(query.cursor);
+  const receiptsCursor = getCursor(query.receipts_cursor);
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
@@ -140,6 +154,16 @@ export default async function RunDetailPage({
       ? await getStaticSecretSetup(connectorId).catch(() => null)
       : null;
   const latestProgress = getLatestProgress(events);
+  // The server totals the run's rejected and unaccounted records over every
+  // event, so the page only reads them. Receipts are filtered by run on the
+  // server and paged by their own cursor, separate from the timeline's. A run
+  // that reports no rejections has none to list; a failed read renders as an
+  // unavailable list rather than failing the page.
+  const recordOutcomes = runStatus?.record_outcomes ?? null;
+  const rejectionReceipts =
+    connectionId && recordOutcomes?.permanently_rejected !== 0
+      ? await listRunRecordRejectionReceipts(connectionId, runId, receiptsCursor).catch(() => null)
+      : null;
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
   const gapClassification = classifyKnownGaps(terminalKnownGaps.gaps);
@@ -188,24 +212,19 @@ export default async function RunDetailPage({
         interactions={interactions}
         progress={progress}
       />
-      {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
-        <p className="pdpp-caption mb-8 text-muted-foreground">
-          Reconnect this source to sync again:{" "}
-          {sourceHref ? (
-            <Link className="text-foreground underline" href={sourceHref}>
-              {connectorName}
-            </Link>
-          ) : (
-            <span>{connectorName}</span>
-          )}
-        </p>
-      ) : null}
       <KnownGapsSection
         coverageGaps={gapClassification.coverageGaps}
         informationalGaps={gapClassification.informationalGaps}
         protocolViolationCount={gapClassification.protocolViolationGaps.length}
         skipped={summarizeSkippedStreams(events)}
         summary={terminalKnownGaps.summary ?? gapClassification.summary}
+      />
+      <RejectedRecordsSection
+        moreReceiptsHref={
+          rejectionReceipts?.nextCursor ? runReceiptsHref(runId, cursor, rejectionReceipts.nextCursor) : null
+        }
+        outcomes={recordOutcomes}
+        receipts={rejectionReceipts}
       />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />
@@ -218,11 +237,14 @@ export default async function RunDetailPage({
   // Keep the label visible even when this timeline window has no connection id.
   const connectorLabel = (
     <>
-      <ConnectorMark
-        className="mr-2 inline-block size-5 align-[-0.2em]"
-        icon={connectorManifest?.icon}
-        name={connectorName}
-      />
+      {connectorId ? (
+        <ConnectorMark
+          spacing="after"
+          connectorId={connectorId}
+          icon={connectorManifest?.icon}
+          name={connectorName}
+        />
+      ) : null}
       {connectorId}
     </>
   );
@@ -568,10 +590,7 @@ function KnownGapsSection({
                   </>
                 ) : null}
               </div>
-              <div className="pdpp-caption mt-1 text-muted-foreground">
-                recovery: <span className="text-foreground">{formatRecoveryHint(gap)}</span>
-                {gap.message ? ` · ${gap.message}` : ""}
-              </div>
+              <GapRecoveryLine gap={gap} />
               <GapDiagnosticsPanel diagnostics={gap.diagnostics} />
             </li>
           ))}
@@ -710,6 +729,27 @@ function GapDiagnosticsPanel({ diagnostics }: { diagnostics?: Record<string, unk
         {JSON.stringify(diagnostics, null, 2)}
       </pre>
     </details>
+  );
+}
+
+/**
+ * A gap's recovery hint and message. A connector's hint reads as its
+ * suggestion, not an instruction; see `recoveryHintLabel`.
+ */
+function GapRecoveryLine({ gap }: { gap: KnownGap }) {
+  const label = recoveryHintLabel(gap);
+  if (!(label || gap.message)) {
+    return null;
+  }
+  return (
+    <div className="pdpp-caption mt-1 text-muted-foreground">
+      {label ? (
+        <>
+          {label}: <span className="text-foreground">{formatRecoveryHint(gap)}</span>
+        </>
+      ) : null}
+      {gap.message ? `${label ? " · " : ""}${gap.message}` : ""}
+    </div>
   );
 }
 
@@ -1108,9 +1148,6 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
       ];
     }
     if (runStatus?.failure) {
-      if (runStatus.failure.recovery_hint?.action === "refresh_credentials") {
-        return runStatus.failure.message ? [["message", runStatus.failure.message]] : [];
-      }
       return [
         ["reason", runStatus.failure.reason ?? runStatus.terminal_reason ?? "—"],
         ["origin", runStatus.failure.origin ?? "—"],
@@ -1124,11 +1161,16 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
   }
   const failureOrigin = typeof failure.data.failure_origin === "string" ? failure.data.failure_origin : null;
   const failureMessage = typeof failure.data.failure_message === "string" ? failure.data.failure_message : null;
+  // The connector's own error text always stays visible (Collection Profile
+  // 0.2.0, Section 5.11).
+  const connectorMessage =
+    typeof failure.data.connector_error_message === "string" ? failure.data.connector_error_message : null;
   return [
     ["reason", String(failure.data.reason ?? failure.data.failure_reason ?? "—")],
     ["retryable", String(failure.data.connector_error_retryable ?? "—")],
     ...(failureOrigin ? [["origin", failureOrigin] as [string, string]] : []),
     ...(failureMessage ? [["message", failureMessage] as [string, string]] : []),
+    ...(connectorMessage ? [["connector", connectorMessage] as [string, string]] : []),
   ];
 }
 

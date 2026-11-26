@@ -1,7 +1,7 @@
 {
   "lockVersion": "2.0",
   "dependencyFile": "connectors/connector-dependencies.json",
-  "generatedAt": "2026-09-15T19:43:18.976Z",
+  "generatedAt": "2026-11-05T20:25:11.519Z",
   "sourceRepo": "https://github.com/PDP-Connect/data-connectors",
   "sourceTag": "mixed",
   "sourceCommit": "mixed",
@@ -25,10 +25,10 @@
     "wholefoods-playwright": "1.0.0",
     "youtube-playwright": "1.0.0",
     "claude-export-playwright": "2.0.1",
-    "apple-health-pdpp": "0.1.0",
-    "chatgpt-pdpp": "0.1.0",
+    "apple-health-pdpp": "0.1.17",
+    "chatgpt-pdpp": "0.2.5",
     "github-pdpp": "0.5.0",
-    "ynab-pdpp": "0.3.0"
+    "ynab-pdpp": "0.3.26"
   },
   "connectors": [
     {
@@ -38,20 +38,20 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "version": "0.1.0",
-      "resolvedFrom": "0.1.0",
+      "version": "0.1.17",
+      "resolvedFrom": "0.1.17",
       "oci": {
         "registry": "ghcr.io",
         "repository": "pdp-connect/connector/apple-health",
-        "digest": "sha256:1e497ac3d5cbc868f27ddac42e792e9c2da929438ed7e38d24aa8ac84777ad8e",
-        "configDigest": "sha256:e1270b82e9ea0a24fc9d66c4f9cbfb775c74355c88928a0d3e51c95482b179fd"
+        "digest": "sha256:1555695184a65da4c8630ce47f18f7747cbdbfd6db14b09b48fe3ab1672299ec",
+        "configDigest": "sha256:e4c88e4a2688c4e9f86575f3f9567745a36e3839f1e60ca9402c8fa192a2cf6f"
       },
       "company": "apple",
       "name": "Apple Health",
       "description": "Collects Apple Health export data through the PDPP Collection Profile protocol.",
-      "manifestSha256": "sha256:91d7e8af7ece79089c2e1b857bb15770fdccdcc5e80e767b3f6c7d072a5bc600",
-      "entrypointSha256": "sha256:7513de5db4e94deb75d82c7fdaae08add1689732d66952b156d4ecf21419cea7",
-      "provenanceSha256": "sha256:682be3f0a126e8ab148f43dd5ff8fa13cdc490ee78c0cd519d33a32c8b34de3b"
+      "manifestSha256": "sha256:83e71487ef1905966f00bd286f8139d5232d98830f722cfda4fe9770814dee9f",
+      "entrypointSha256": "sha256:6227d0fda6985887c2472d62d2bfd4eb7478e5257986d9287a3a2bee9208de8d",
+      "provenanceSha256": "sha256:d3e097df9d79c2aa522012b2c55460a98918ab2b78b73d582b6fb681dfe1cb46"
     },
     {
       "connectorId": "chatgpt-pdpp",
@@ -60,20 +60,20 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "version": "0.1.0",
-      "resolvedFrom": "0.1.0",
+      "version": "0.2.5",
+      "resolvedFrom": "0.2.5",
       "oci": {
         "registry": "ghcr.io",
         "repository": "pdp-connect/connector/chatgpt",
-        "digest": "sha256:811daaf8f2a9a346f1ff5109c118ea404212c8e00790cc5d448e89ad9fa9c4a4",
-        "configDigest": "sha256:8f1bc246633ae908636d841f8cf737d17daf0144207a375b694d8eea9ee1e30d"
+        "digest": "sha256:727b4469ad71ba3cd9f71d0e72191214c5439c189acf02c1f6949a41378c1ea5",
+        "configDigest": "sha256:aa81039f0ef1bd8997bebbdd49e3fd675e015a5d22aa346beef9d2436a05aeec"
       },
       "company": "openai",
       "name": "ChatGPT (PDPP Collection Profile)",
       "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
-      "manifestSha256": "sha256:eb491a782ba61925340c5334d3b35a6d0111757f63ccda72bc466f4f84b8f417",
-      "entrypointSha256": "sha256:e50f93dee4d48925f623f3be04acaed87f77783f1255579c0db7618fabe1a963",
-      "provenanceSha256": "sha256:d9695809c157e431a725aea21d1f65b48b652c5f9cc3b2b18ac925d122e2dbc5"
+      "manifestSha256": "sha256:4901f84e8b07874d47405fcb5618ed2867ebcbb0050193d18625045889f3a92c",
+      "entrypointSha256": "sha256:0b3dcbeb58422874da31a621ed36a78e0f690431d8a63970b1082089bba1b8ac",
+      "provenanceSha256": "sha256:2a643baea69b48aa7c40ea665250df4d0841c392703343c051b96a37f42430ec"
     },
     {
       "connectorId": "chatgpt-playwright",
@@ -390,20 +390,20 @@
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
       "provenancePath": "provenance.json",
-      "version": "0.3.0",
-      "resolvedFrom": "0.3.0",
+      "version": "0.3.26",
+      "resolvedFrom": "0.3.26",
       "oci": {
         "registry": "ghcr.io",
         "repository": "pdp-connect/connector/ynab",
-        "digest": "sha256:9da6a382500368ef28a8c9f59351d1f3ab6871297bf27418c7c63e8d9e241fad",
-        "configDigest": "sha256:20cc66f94d44748af7cc0c7eac1a20fa10e795b4a89f1b376e1827be947b8388"
+        "digest": "sha256:863fe543e7774252af4bd64a815fabada12a9a45dffaaebfca175411ffa4478d",
+        "configDigest": "sha256:32df5499e9e23a5639767fe7f04931808e42d78238829bac7af0df37cafa0738"
       },
       "company": "ynab",
       "name": "YNAB",
       "description": "Collects YNAB budgets, accounts, categories, transactions, and other financial data through the PDPP Collection Profile protocol.",
-      "manifestSha256": "sha256:ce2e9b6badc9ff6b0573d36a1dd3875d24eefd69da4184179354613f71ffde9f",
-      "entrypointSha256": "sha256:9f90880f8dca821b8929305ddcf1a7948a8fbea1df66910e08298774cf3cb4b8",
-      "provenanceSha256": "sha256:0cab8f965bfaa5e9e0df643e424b2cd29e77b44324c2d738f2d8590d8583dc1d"
+      "manifestSha256": "sha256:c23d2b3a6c68beac5a8d082ed2843833f755794faaf4e629229230d447bec328",
+      "entrypointSha256": "sha256:58ba4e7c97899fb25918e8e90e4ca49fb59c9c0aad4a199b081b8b3cf862ce8d",
+      "provenanceSha256": "sha256:d0d7dd10baa9854d57f3cf076aed2d035d20e438f11158557f554888293f78be"
     },
     {
       "connectorId": "youtube-playwright",

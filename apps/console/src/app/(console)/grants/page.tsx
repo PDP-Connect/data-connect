@@ -209,7 +209,7 @@ function GrantRow({
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           {connectorId ? (
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcons[connectorId]} name={grantRowLabel(grant)} />
+            <ConnectorMark {...(grant.connector_id ? { connectorId: grant.connector_id } : { sourceId: grant.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={grantRowLabel(grant)} />
           ) : null}
           <span className="truncate font-medium text-foreground">{grantRowLabel(grant)}</span>
           <StatusBadge status={grant.status} vocabulary={GRANT_LIFECYCLE_VOCABULARY} />

@@ -14,9 +14,9 @@ test("resolveEnrollmentScope rejects a device request offering an ANCESTOR of th
   // directory; the device requests the wider PARENT directory at connect
   // time. That must be rejected, not accepted with the wider root effective.
   const verdict = resolveEnrollmentScope({
-    device: { kind: "declared", scope: { source_roots: ["/home/tim/projects"] } },
+    device: { kind: "declared", scope: { source_roots: ["/home/owner/projects"] } },
     now: NOW,
-    serverDeclared: { source_roots: ["/home/tim/projects/work-only-client"] },
+    serverDeclared: { source_roots: ["/home/owner/projects/work-only-client"] },
   });
   assert.equal(verdict.accepted, false);
 });

@@ -25,7 +25,7 @@ export async function getLatestConnectorRunSummary(
   connectorId: string | null | undefined,
   status: string | null = null,
   connectorInstanceId: string | null | undefined = null
-): Promise<{ last_at: unknown; status: unknown } | null> {
+): Promise<{ last_at: string; status: string } | null> {
   if (!connectorId) {
     return null;
   }
@@ -47,7 +47,7 @@ export async function getLatestConnectorRunSummary(
   };
 }
 
-export function getManifestRefreshPolicy(manifest: { capabilities?: unknown } | null | undefined): unknown {
+export function getManifestRefreshPolicy(manifest: Record<string, unknown> | null | undefined) {
   const capabilities = manifest?.capabilities;
   if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) {
     return null;

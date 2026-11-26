@@ -33,6 +33,8 @@ import {
   COMPACTION_MODES,
   COMPACTION_POLICIES,
   type CompactionPolicy,
+  compactionPoliciesFromManifests,
+  describePolicies,
   findPolicy,
   type HistoryRow,
   isCanonicalEligible,
@@ -223,6 +225,51 @@ test("COMPACTION_POLICIES exposes the registered policies (short-name canonical 
   const sortPairs = (pairs: (readonly [string, string])[]) =>
     [...pairs].map(([c, s]) => `${c}/${s}`).sort((a, b) => a.localeCompare(b));
   assert.deepEqual(sortPairs(actual as [string, string][]), sortPairs(expected as [string, string][]));
+});
+
+const FINGERPRINT = { exclude_keys: ["fetched_at"] };
+const NOT_COMPACTED = /not compacted/;
+
+test("a manifest is eligible for compaction under every identity field the server accepts", () => {
+  const { conflicts, policies } = compactionPoliciesFromManifests([
+    { connector_key: "keyed", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    {
+      connector_id: "https://registry.pdpp.dev/connectors/by-url",
+      streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }],
+    },
+    { connector_id: "bare-id", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { storage_binding: { connector_id: "native" }, streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { connector_key: "undeclared", streams: [{ name: "items" }] },
+  ]);
+  assert.deepEqual(conflicts, []);
+  assert.deepEqual(
+    policies.map((p) => `${p.connectorIds[0]}/${p.stream}`),
+    ["keyed/items", "by-url/items", "bare-id/items", "native/items"],
+    "a manifest without an identity, or a stream without a fingerprint, gets no policy"
+  );
+});
+
+test("a stream two manifests declare under one key is not compacted, and is reported", () => {
+  const { conflicts, policies } = compactionPoliciesFromManifests([
+    { connector_key: "shared", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    {
+      connector_id: "https://registry.pdpp.dev/connectors/shared",
+      streams: [
+        { compaction_fingerprint: { exclude_keys: [] }, name: "items" },
+        { compaction_fingerprint: FINGERPRINT, name: "other" },
+      ],
+    },
+  ]);
+  assert.deepEqual(conflicts, ["shared/items"]);
+  assert.deepEqual(
+    policies.map((p) => `${p.connectorIds[0]}/${p.stream}`),
+    ["shared/other"]
+  );
+});
+
+test("no shipped stream is left uncompacted by a conflicting declaration", () => {
+  assert.doesNotMatch(describePolicies(), NOT_COMPACTED);
 });
 
 test("findPolicy returns null for unknown streams", () => {
@@ -1007,8 +1054,10 @@ if (POSTGRES_URL) {
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
+      ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0;
       CREATE TABLE IF NOT EXISTS retained_size_stream (
         connector_instance_id TEXT NOT NULL,
         connector_id TEXT NOT NULL,
@@ -1190,6 +1239,14 @@ if (POSTGRES_URL) {
 
       const plan = await planCompaction({ connectorInstanceId, limitKeys: null, policy, pool, stream });
       const result = await applyCompaction({ plan, pool, runId });
+
+      // Removed rows 2..5 were superseded by 3..6, so cursors below 6 can no
+      // longer be reconstructed: the same transaction raises the floor to 6.
+      const floorRow = await pool.query(
+        "SELECT changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+        [connectorInstanceId, stream]
+      );
+      assert.equal(floorRow.rows[0].changes_floor, 6);
 
       assert.equal(result.deleted, 4);
       assert.equal(result.inserted, 4);

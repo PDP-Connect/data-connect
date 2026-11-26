@@ -44,7 +44,7 @@ on:
       - "packages/local-collector/scripts/generate-collector-definitions-snapshot.ts"
       - "packages/local-collector/src/generated/collector-definitions.generated.ts"
       - "packages/local-collector/src/generated/collection-profile-pins.generated.ts"
-      - "packages/polyfill-connectors/connectors/google_messages/**"
+      - "packages/polyfill-connectors/connectors/google-messages/**"
       - ".github/workflows/consumer-drift-signal.yml"
       - ".github/consumer-drift-signal-config.json"
       - ".github/scripts/cross-repo-integrity/check-pin-freshness.mjs"
@@ -59,7 +59,7 @@ on:
       - "packages/local-collector/scripts/generate-collector-definitions-snapshot.ts"
       - "packages/local-collector/src/generated/collector-definitions.generated.ts"
       - "packages/local-collector/src/generated/collection-profile-pins.generated.ts"
-      - "packages/polyfill-connectors/connectors/google_messages/**"
+      - "packages/polyfill-connectors/connectors/google-messages/**"
       - ".github/workflows/consumer-drift-signal.yml"
       - ".github/consumer-drift-signal-config.json"
       - ".github/scripts/cross-repo-integrity/check-pin-freshness.mjs"
@@ -97,9 +97,9 @@ jobs:
             console.log(ids.join(" "));
           ')"
 
-          expected_declared="apple_photos claude_code codex google_messages google_takeout imessage"
-          expected_pinned="apple_photos claude_code codex google_takeout imessage"
-          source_ids="google_messages"
+          expected_declared="apple-photos claude-code codex google-messages google-takeout imessage"
+          expected_pinned="apple-photos claude-code codex google-takeout imessage"
+          source_ids="google-messages"
 
           if [[ "$declared" != "$expected_declared" || "$pinned" != "$expected_pinned" ]]; then
             echo "::error::generated definitions [$declared] or signed profile pins [$pinned] changed." >&2
@@ -107,7 +107,7 @@ jobs:
             exit 1
           fi
 
-          if ! grep -Fq "packages/polyfill-connectors/connectors/google_messages/**" .github/workflows/consumer-drift-signal.yml; then
+          if ! grep -Fq "packages/polyfill-connectors/connectors/google-messages/**" .github/workflows/consumer-drift-signal.yml; then
             echo "::error::the remaining source trigger path for [$source_ids] is missing." >&2
             exit 1
           fi
@@ -172,7 +172,7 @@ jobs:
             packages/local-collector/src/generated/collector-definitions.generated.ts
             packages/local-collector/src/generated/collection-profile-pins.generated.ts
             packages/local-collector/tsconfig.build.json
-            packages/polyfill-connectors/connectors/google_messages
+            packages/polyfill-connectors/connectors/google-messages
           )
 
           consumer_pin_required="$(node -p 'require("./.github/consumer-drift-signal-config.json").consumer_pin_required === true')"

@@ -7,6 +7,7 @@ type RemoteSurfaceMessage = Record<string, unknown>;
 type TransportLogger = (event: string, payload?: Record<string, unknown>) => void;
 
 export interface PdppRemoteSurfaceTransport extends RemoteSurfaceTransport {
+  dispose: () => void;
   receiveSseMessage: (name: string, payload: Record<string, unknown>) => void;
   sendClipboardText: (text: string) => Promise<boolean>;
   setPresentationAttachmentReady: (ready: boolean) => void;
@@ -44,15 +45,28 @@ async function readResponseBody(response: Response): Promise<unknown> {
 export function createPdppRemoteSurfaceTransport({
   clipboardUrlRef,
   inputUrlRef,
-  logDebug,
+  logDebug: logDebugToHost,
   presentationAttachmentReadyRef,
   viewportUrlRef,
 }: CreatePdppRemoteSurfaceTransportOptions): PdppRemoteSurfaceTransport {
   const handlers = new Set<(message: RemoteSurfaceMessage) => void>();
+  let disposed = false;
   let frameSequence = 0;
   let queuedViewport: RemoteSurfaceMessage | null = null;
 
+  // The host logger can schedule a network POST (stream debug telemetry), so a
+  // disposed transport must not call it: late request failures are not events
+  // of the live stream.
+  const logDebug: TransportLogger = (event, payload) => {
+    if (!disposed) {
+      logDebugToHost(event, payload);
+    }
+  };
+
   const emit = (message: RemoteSurfaceMessage): void => {
+    if (disposed) {
+      return;
+    }
     for (const handler of handlers) {
       handler(message);
     }
@@ -74,12 +88,16 @@ export function createPdppRemoteSurfaceTransport({
     }
     post(url, payload)
       .then(async (response) => {
-        if (!response.ok) {
-          const body = await readResponseBody(response);
-          throw new Error(responseMessage(body, `Input rejected by server: ${response.status}`));
+        if (disposed || response.ok) {
+          return;
         }
+        const body = await readResponseBody(response);
+        throw new Error(responseMessage(body, `Input rejected by server: ${response.status}`));
       })
       .catch((error) => {
+        if (disposed) {
+          return;
+        }
         logDebug("stream.remote_surface.input.error", {
           error: error instanceof Error ? error.message : String(error),
           type: payload.type,
@@ -163,14 +181,23 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   const sendClipboardText = async (text: string): Promise<boolean> => {
+    if (disposed) {
+      return false;
+    }
     try {
       const response = await postClipboard({ action: "local_to_remote", text, type: "clipboard" });
+      if (disposed) {
+        return false;
+      }
       const body = await readResponseBody(response);
       if (!response.ok) {
         throw new Error(responseMessage(body, `Clipboard rejected by server: ${response.status}`));
       }
-      return true;
+      return !disposed;
     } catch (error) {
+      if (disposed) {
+        return false;
+      }
       logDebug("stream.remote_surface.clipboard.error", {
         error: error instanceof Error ? error.message : String(error),
         phase: "local-to-remote",
@@ -180,6 +207,9 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   const receiveSseMessage = (name: string, payload: Record<string, unknown>): void => {
+    if (disposed) {
+      return;
+    }
     if (name === "frame") {
       frameSequence += 1;
       emit({
@@ -200,8 +230,16 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   return {
+    dispose() {
+      disposed = true;
+      queuedViewport = null;
+      handlers.clear();
+    },
     receiveSseMessage,
     send(message) {
+      if (disposed) {
+        return;
+      }
       if (message.type === "viewport") {
         sendViewport(message);
         return;
@@ -220,6 +258,9 @@ export function createPdppRemoteSurfaceTransport({
     },
     sendClipboardText,
     setPresentationAttachmentReady(ready) {
+      if (disposed) {
+        return;
+      }
       presentationAttachmentReadyRef.current = ready;
       if (!(ready && queuedViewport)) {
         return;
@@ -229,7 +270,9 @@ export function createPdppRemoteSurfaceTransport({
       sendViewport(next);
     },
     subscribe(handler) {
-      handlers.add(handler);
+      if (!disposed) {
+        handlers.add(handler);
+      }
       return () => handlers.delete(handler);
     },
   };

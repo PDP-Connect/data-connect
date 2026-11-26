@@ -2148,7 +2148,7 @@ Search, vector DB, MCP server are NOT part of the protocol. They are:
 
 **Discussion:** Anna noted the Desktop App (via its bundled Personal Server) already acts like a locally hosted personal server (decrypting and re-encrypting data). She proposed bundling the Personal Server into the Desktop App for local compute.
 
-**Maciej's synthesis:** The protocol itself is NOT opinionated about whether the Personal Server stores encrypted or unencrypted data. This is an implementation decision:
+**Synthesis:** The protocol itself is NOT opinionated about whether the Personal Server stores encrypted or unencrypted data. This is an implementation decision:
 
 | **Implementation** | **Encrypted at Rest?** | **Rationale**                                        |
 | ------------------ | ---------------------- | ---------------------------------------------------- |

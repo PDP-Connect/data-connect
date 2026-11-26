@@ -74,7 +74,7 @@ test("validateRuntimeRequirements: returns when runtime_requirements is absent",
 test("validateRuntimeRequirements: accepts valid bindings", () => {
   assert.equal(
     validateRuntimeRequirements(
-      { runtime_requirements: { bindings: { browser: { required: true }, network: {} } } },
+      { runtime_requirements: { bindings: { browser: { required: true }, network: { required: false } } } },
       CODE
     ),
     undefined
@@ -95,18 +95,18 @@ test("validateRuntimeRequirements: accepts a valid external tool (with bindings 
 
 test("validateRuntimeRequirements: rejects non-object requirements or bindings", () => {
   assertRejects({ runtime_requirements: "x" }, "runtime_requirements must be an object");
-  assertRejects({ runtime_requirements: { bindings: "x" } }, "runtime_requirements.bindings must be an object");
+  assertRejects({ runtime_requirements: { bindings: "x" } }, "runtime_requirements.bindings must be object");
 });
 
 test("validateRuntimeRequirements: rejects an unsupported binding key", () => {
-  assertRejects({ runtime_requirements: { bindings: { gpu: {} } } }, "bindings has unsupported keys: gpu");
+  assertRejects({ runtime_requirements: { bindings: { gpu: {} } } }, "gpu must have required property 'required'");
 });
 
 test("validateRuntimeRequirements: rejects a non-object binding value and a non-boolean required", () => {
-  assertRejects({ runtime_requirements: { bindings: { browser: "x" } } }, "bindings.browser must be an object");
+  assertRejects({ runtime_requirements: { bindings: { browser: "x" } } }, "bindings.browser must be object");
   assertRejects(
     { runtime_requirements: { bindings: { browser: { required: "yes" } } } },
-    "bindings.browser.required must be a boolean"
+    "bindings.browser.required must be boolean"
   );
 });
 
@@ -229,6 +229,24 @@ test("validateRuntimeRequirements: rejects an unsupported local_paths key", () =
   );
 });
 
+test("validateRuntimeRequirements: rejects a local path override that names a server-owned variable", () => {
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      paths: [{ default_relative_to_home: "data", env_override: "PDPP_DATABASE_URL", label: "data directory" }],
+    }),
+    "local_paths.paths[0].env_override PDPP_DATABASE_URL is a server-owned environment variable"
+  );
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      home_env_override: "PDPP_OWNER_TOKEN",
+      paths: [],
+    }),
+    "local_paths.home_env_override PDPP_OWNER_TOKEN is a server-owned environment variable"
+  );
+});
+
 test("validateRuntimeRequirements: rejects a missing home_default_relative_to_user_home", () => {
   assertRejects(
     withBindingsAndLocalPaths({ paths: [] }),
@@ -269,13 +287,11 @@ test("validateRuntimeRequirements: rejects an unsupported local_paths.paths entr
 
 // --- short-circuit contract -------------------------------------------------
 
-test("validateRuntimeRequirements: external_tools is NOT validated when bindings is absent (early return)", () => {
-  // No bindings => the function returns before ever reaching external_tools, so
-  // an otherwise-invalid external_tools value is not rejected here.
-  assert.equal(
-    validateRuntimeRequirements({ runtime_requirements: { external_tools: "not-an-array" } }, CODE),
-    undefined,
-    "absent bindings short-circuits external_tools validation"
+test("validateRuntimeRequirements: external_tools is validated when bindings is absent", () => {
+  // Formerly an early return skipped external_tools when bindings was absent.
+  assertRejects(
+    { runtime_requirements: { external_tools: "not-an-array" } },
+    "runtime_requirements.external_tools must be an array"
   );
 });
 
@@ -285,15 +301,23 @@ function withTuning(connector_id: string, tuning_environment: unknown): Record<s
   return { connector_id, runtime_requirements: { tuning_environment } };
 }
 
-test("validateRuntimeRequirements: tuning_environment accepts keys in the first-party namespace", () => {
+test("validateRuntimeRequirements: tuning_environment accepts keys in the connector's own namespace", () => {
   const chatgpt = "https://registry.pdpp.dev/connectors/chatgpt";
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, ["PDPP_CHATGPT_PACING_MIN_INTERVAL_MS"]), CODE), undefined);
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, []), CODE), undefined);
-  // A third-party manifest has no namespace; its keys still need an operator binding.
-  assert.equal(
-    validateRuntimeRequirements(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), CODE),
-    undefined
-  );
+});
+
+test("validateRuntimeRequirements: a connector in no list owns its own PDPP_<KEY>_ namespace and no other", () => {
+  // The key `acme-widgets` appears in no list. Its own namespace is accepted;
+  // another connector's namespace and a bare key are rejected, as for any manifest.
+  const acme = { connector_key: "acme-widgets" };
+  const declare = (...keys: string[]) => ({ ...acme, runtime_requirements: { tuning_environment: keys } });
+  assert.equal(validateRuntimeRequirements(declare("PDPP_ACME_WIDGETS_PAGE_SIZE"), CODE), undefined);
+  assertRejects(declare("PDPP_OTHER_PAGE_SIZE"), "PDPP_OTHER_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("EXAMPLE_PAGE_SIZE"), "EXAMPLE_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("PDPP_ACME_WIDGETS_"), "outside the acme-widgets tuning namespace");
+  // A manifest identified only by a foreign registry URL has no usable namespace.
+  assertRejects(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), "tuning namespace");
 });
 
 test("validateRuntimeRequirements: tuning_environment is validated even without bindings", () => {
@@ -320,4 +344,36 @@ test("validateRuntimeRequirements: tuning_environment uses the connector_key ide
     ),
     undefined
   );
+});
+
+test("validateRuntimeRequirements: a manifest keyed database cannot declare a server-owned name", () => {
+  const declare = (...keys: string[]) => ({
+    connector_key: "database",
+    runtime_requirements: { tuning_environment: keys },
+  });
+  assertRejects(declare("PDPP_DATABASE_URL"), "PDPP_DATABASE_URL is a server-owned environment variable");
+  assertRejects(declare("PDPP_DATABASE_PAGE_SIZE"), "is a server-owned environment variable");
+});
+
+const SHARED_OR_NESTED = /shared with or nested in another installed connector's/;
+
+test("validateRuntimeRequirements: a key in a longer installed namespace is not the shorter connector's", () => {
+  const foo = { connector_key: "foo", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(foo, CODE), undefined, "no longer connector installed");
+  assert.throws(() => validateRuntimeRequirements(foo, CODE, ["foo", "foo_bar"]), SHARED_OR_NESTED);
+  const fooBar = { connector_key: "foo_bar", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(fooBar, CODE, ["foo", "foo_bar"]), undefined);
+});
+
+test("validateRuntimeRequirements: a key in a namespace another installed connector shares is no one's", () => {
+  // google_messages and google-messages are distinct keys with one namespace, PDPP_GOOGLE_MESSAGES_.
+  const declare = (key: string) => ({
+    connector_key: key,
+    runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MESSAGES_PAGE_SIZE"] },
+  });
+  const installed = ["google-messages", "google_messages"];
+  for (const key of installed) {
+    assert.equal(validateRuntimeRequirements(declare(key), CODE, [key]), undefined, `${key} alone owns it`);
+    assert.throws(() => validateRuntimeRequirements(declare(key), CODE, installed), SHARED_OR_NESTED);
+  }
 });

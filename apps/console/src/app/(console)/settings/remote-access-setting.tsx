@@ -1,1375 +1,1468 @@
-"use client"
-
+"use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import type { HostSettings } from "pdpp-reference-implementation/reachability-host-settings";
+import type {
+  projectInventory,
+  projectRoute,
+  projectRuntimeReview,
+} from "pdpp-reference-implementation/reachability-projection";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
+import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
+import { ProviderSetup } from "./provider-setup.tsx";
+import { type ServiceEntry, setupCards } from "./setup-services.ts";
+import { requestReachability } from "./reachability-client.ts";
+import { OnCard } from "./on-card.tsx";
+import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
+import { type Attention, attentionSentence, journalUnreadableWarning, listedRoutes, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
+import {
+  type DisplayError,
+  Diagnostics,
+  DiagnosticsContext,
+  ErrorNotice,
+  type Recover,
+  RecoveryContext,
+  ReachabilityFailure,
+  diagnosticsText,
+  toDisplayError,
+} from "./diagnostics.tsx";
+import { formatLocalTime, plain } from "./plain-text.ts";
+import { isOpenThroughRoute } from "./remote-origin.ts";
+import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, publicError, SERVICE_DETAILS } from "./reachability-errors.ts";
+import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
+import {
+  type Action,
+  type Draft,
+  type Prepared,
+  PreparationStopped,
+  type Review,
+  changedFacts,
+  operationOutcome,
+  pickUsage,
+  prepareTurnOn,
+  reviewExpired,
+  runAction,
+  staleReviewCodes,
+} from "./prepare-remote-access.ts";
+import { OtherWays, RecommendedWay } from "./choose-way.tsx";
+import {
+  type Blocks,
+  funnelPolicyActionId,
+  funnelPolicyBlock,
+  recommendedWay,
+  wayRow,
+  wayUnusable,
+} from "./choose-way.ts";
+import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn-on.tsx";
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
-import { cn } from "@/lib/utils.ts"
-import { LiveReadAt, useLiveQuery } from "../components/live-provider.tsx"
-import {
-  asCloudflareTunnelInspection,
-  CloudflaredBinaryStatus,
-  CloudflareTunnelConnectionBanner,
-  CloudflareTunnelDomainRequirement,
-  CloudflareTunnelSetupSteps,
-  CloudflareTunnelTokenStatus,
-  CLOUDFLARE_TUNNEL_SETUP_URL,
-  useCloudflareTunnelConnectionStatus,
-} from "./cloudflare-tunnel-prerequisite.tsx"
-import { ConsolePortSetting } from "./console-port-setting.tsx"
-import { OriginVerificationStatus } from "./origin-verification-status.tsx"
-import {
-  loadRemoteAccessStateAction,
-  restartAfterOwnerPasswordSetAction,
-  requestOwnerPasswordWindowAction,
-  setConsolePortAction,
-  setRemoteAccessConfigAction,
-} from "./remote-access-actions.ts"
-import {
-  consolePortStatus,
-  DEFAULT_PUBLIC_URL_OPTION_ID,
-  ngrokDurableAddressState,
-  offRemoteAccessConfig,
-  originVerificationDisplay,
-  parseOriginVerification,
-  privacyBadgeForPosture,
-  publicUrlOptionById,
-  publicUrlOptions,
-  remoteAccessOriginDisplay,
-  validateCloudflareTunnelHostname,
-  validateNgrokDomain,
-  validatePinnedConsolePort,
-  validateUserSuppliedOrigin,
-  wouldDisconnectRemoteOwner,
-  type CloudflareTunnelInspection,
-  type PublicUrlOption,
-  type RemoteAccessConfig,
-  type RemoteAccessInspection,
-  type RemoteAccessPosture,
-} from "./remote-access.ts"
+type Inventory = ReturnType<typeof projectInventory>;
+type Route = ReturnType<typeof projectRoute> & { stopRequested?: boolean };
+type Operation = {
+  cleanupConfirmed?: boolean;
+  failureCode?: string | null;
+  handle?: unknown;
+  kind?: "start" | "stop" | "check";
+  operationId: string;
+  stage: string;
+  recovery: { available: boolean; reason: string } | null;
+};
+type State = {
+  evidenceSource?: "synthetic" | null;
+  recovery?: { pending: boolean; blockedBy: string | null; actions: string[] };
+  journalScan?: "ok" | "unavailable";
+  journalUnreadable?: number;
+  operations?: Operation[];
+  lifecycle?: {
+    handle: Route["handle"] | null;
+    phase: string;
+    confinement: { known: boolean; value?: boolean };
+    cleanup: string;
+    reason?: string | null;
+    stopRequested: boolean;
+  };
+  routes: Route[];
+  reasons: Record<string, string>;
+  services?: ServiceEntry[];
+  /** False while the owner has not chosen a password. Absent means there is nothing to ask. */
+  passwordSet?: boolean;
+  starting: boolean;
+};
+// What the preparation chain has produced for the way on screen.
+type Prep =
+  | { status: "idle" }
+  | { status: "preparing" }
+  | { status: "done"; providerId: string; result: Prepared };
+
+// A read that got no answer: the service is restarting (saving the password
+// restarts it) or is down. The card goes stale, its status line says the
+// service can't be reached and keeps the code under Details, and the next poll
+// retries. No error card. A read the service answered with an error, even its
+// generic one, is a real failure and shows its card. A read that outlived its
+// deadline (reachability_unavailable from the transport) also shows the check
+// card: the service may still be working on it, so "can't reach" would be
+// wrong, and the owner can try again.
+const gotNoAnswer = (code: string) => code === "service_unreachable";
+// How old the page's catalog may get before it is read again. A computer that answers at once is read
+// with every poll (3 s). A slow one is read after eight times as long as the last read took, so the
+// reads use about an eighth of its time, and never less often than once a minute.
+const CATALOG_MIN_REFRESH_MS = 3_000;
+const CATALOG_MAX_REFRESH_MS = 60_000;
+const CATALOG_COST_FACTOR = 8;
+const catalogRefreshAfter = (tookMs: number) =>
+  Math.min(CATALOG_MAX_REFRESH_MS, Math.max(CATALOG_MIN_REFRESH_MS, tookMs * CATALOG_COST_FACTOR));
 
 /**
- * Both providers' config surfaces (load/save) run over the owner-
- * authenticated HTTP routes on the reference server -- see
- * `remote-access-actions.ts` -- in both the desktop app and a plain browser.
- * Tauri's `invoke()` bridge is never used here: it does not exist in the
- * console's `http://127.0.0.1:{port}` window regardless of provider (Tauri
- * Discussion #2650). ngrok's authtoken travels in the same HTTP POST as the
- * rest of its config (`providerCredential`); the reference server seals it
- * before persisting it, and only the Tauri host's own config-file watcher
- * ever decrypts it, into the OS keychain -- see `owner-remote-access.ts` and
- * `src-tauri/src/unified.rs::spawn_remote_access_config_watcher`. ngrok's
- * native tunnel supervision still requires that Tauri host to be present;
- * when it is not, `ngrokInspection` reports that honestly (see
- * `ngrokInspection`/`ngrokUnavailable` below) instead of accepting a config
- * that will never activate.
+ * The Off status row: one inline text flow, so on a narrow screen the words
+ * wrap under the dot instead of splitting into columns. As the start card's
+ * header band it carries the divider (`framed`); above Step 1 it floats alone.
  */
-interface RemoteAccessSettingProps {
-  loadState?: typeof loadRemoteAccessStateAction
-  requestOwnerPasswordWindow?: typeof requestOwnerPasswordWindowAction
-  restartAfterOwnerPasswordSet?: typeof restartAfterOwnerPasswordSetAction
-  saveConfig?: typeof setRemoteAccessConfigAction
-  saveConsolePort?: typeof setConsolePortAction
+function OffStatusRow({ possiblyLive, framed = false, localOnly = true }: { possiblyLive: boolean; framed?: boolean; localOnly?: boolean }) {
+  return (
+    <p className={`text-sm font-medium ${framed ? "border-b px-4 py-3" : ""}`} role="status">
+      <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-muted-foreground/50 align-middle" />
+      {possiblyLive ? "Unknown, possibly live " : "Off "}
+      {possiblyLive || !localOnly ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
+    </p>
+  );
 }
-
-function asConfig(value: unknown): RemoteAccessConfig {
-  if (!value || typeof value !== "object") return offRemoteAccessConfig()
-  const candidate = value as Partial<RemoteAccessConfig>
-  if (
-    candidate.posture !== "off" &&
-    candidate.posture !== "my_devices_only" &&
-    candidate.posture !== "public_url"
-  ) {
-    return offRemoteAccessConfig()
-  }
-  return {
-    posture: candidate.posture,
-    provider:
-      candidate.provider === "user_supplied_origin" ||
-      candidate.provider === "ngrok" ||
-      candidate.provider === "cloudflare_tunnel"
-        ? candidate.provider
-        : null,
-    fields: candidate.fields ?? offRemoteAccessConfig().fields,
-    console_port:
-      typeof candidate.console_port === "number" ? candidate.console_port : null,
-    ngrok: candidate.ngrok ?? null,
-    cloudflare_tunnel: candidate.cloudflare_tunnel ?? null,
-    my_devices_only: candidate.my_devices_only ?? null,
-    tunnel_error:
-      typeof candidate.tunnel_error === "string" ? candidate.tunnel_error : null,
-    origin_verified: parseOriginVerification(candidate.origin_verified),
-  }
-}
-
-/** Recover which option row produced the stored config, for the active panel. */
-function activeOption(config: RemoteAccessConfig): PublicUrlOption | null {
-  if (config.provider === "user_supplied_origin") {
-    return publicUrlOptionById("user_supplied_origin")
-  }
-  if (config.provider === "cloudflare_tunnel") {
-    return publicUrlOptionById("cloudflare_tunnel")
-  }
-  if (config.provider === "ngrok" && config.ngrok) {
-    return (
-      publicUrlOptions.find(
-        option => option.ngrokMode === config.ngrok?.endpoint_mode
-      ) ?? null
-    )
-  }
-  return null
-}
-
-function asInspection(value: unknown): RemoteAccessInspection {
-  if (!value || typeof value !== "object") {
-    return {
-      availability: "unavailable",
-      authentication: "not_required",
-      reason: "The current remote access state could not be read.",
-    }
-  }
-  const candidate = value as Partial<RemoteAccessInspection>
-  return {
-    availability:
-      candidate.availability === "available" ? "available" : "unavailable",
-    authentication:
-      candidate.authentication === "required" ||
-      candidate.authentication === "authenticated" ||
-      candidate.authentication === "missing"
-        ? candidate.authentication
-        : "not_required",
-    reason: typeof candidate.reason === "string" ? candidate.reason : null,
-  }
-}
-
-const postureRows: Array<{
-  posture: RemoteAccessPosture
-  label: string
-  description: string
-}> = [
-  {
-    posture: "off",
-    label: "Off",
-    description: "Keep the Personal Server reachable from this device only.",
-  },
-  {
-    posture: "my_devices_only",
-    label: "My devices only",
-    description:
-      "Reachable from other devices on this network. No third party is involved -- the owner password is the only gate.",
-  },
-  {
-    posture: "public_url",
-    label: "Public URL",
-    description:
-      "Use a proxy you control to reach this Personal Server from outside.",
-  },
-]
 
 export function RemoteAccessSetting({
-  loadState: suppliedLoadState,
-  requestOwnerPasswordWindow: suppliedRequestOwnerPasswordWindow,
-  restartAfterOwnerPasswordSet: suppliedRestartAfterOwnerPasswordSet,
-  saveConfig: suppliedSaveConfig,
-  saveConsolePort: suppliedSaveConsolePort,
-}: RemoteAccessSettingProps) {
-  const loadRemoteAccessState = suppliedLoadState ?? loadRemoteAccessStateAction
-  const requestOwnerPasswordWindow = suppliedRequestOwnerPasswordWindow ?? requestOwnerPasswordWindowAction
-  const restartAfterOwnerPasswordSet = suppliedRestartAfterOwnerPasswordSet ?? restartAfterOwnerPasswordSetAction
-  const saveRemoteAccessConfig = suppliedSaveConfig ?? setRemoteAccessConfigAction
-  const saveConsolePort = suppliedSaveConsolePort ?? setConsolePortAction
-  const [config, setConfig] = useState<RemoteAccessConfig>(
-    offRemoteAccessConfig
-  )
-  // The default config above is a placeholder, not state we have read. Until a
-  // load succeeds, we must not paint it as the real posture: rendering "Off"
-  // for an unknown state is what let the dishonest badge go unnoticed.
-  //
-  // `remote-access` is a live topic: a change from another tab, another
-  // device, or the desktop supervisor (tunnel_error, origin verification)
-  // refetches this state within about a second.
-  const remoteAccess = useLiveQuery("remote-access", loadRemoteAccessState)
-  // A failed refetch keeps the last read on screen, with the error shown
-  // until a later read succeeds.
-  const loadState: "loading" | "loaded" | "failed" =
-    remoteAccess.data !== undefined ? "loaded" : remoteAccess.isError ? "failed" : "loading"
-  const [inspection, setInspection] = useState<RemoteAccessInspection | null>(
-    null
-  )
-  const [ngrokInspection, setNgrokInspection] =
-    useState<RemoteAccessInspection | null>(null)
-  const [cloudflareTunnelInspection, setCloudflareTunnelInspection] =
-    useState<CloudflareTunnelInspection | null>(null)
-  const [myDevicesOnlyInspection, setMyDevicesOnlyInspection] =
-    useState<RemoteAccessInspection | null>(null)
-  const [pendingPosture, setPendingPosture] =
-    useState<RemoteAccessPosture | null>(null)
-  const [origin, setOrigin] = useState("")
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [waitingForOwnerPassword, setWaitingForOwnerPassword] = useState(false)
-  const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
-  const [authtoken, setAuthtoken] = useState("")
-  const [ngrokDomain, setNgrokDomain] = useState("")
-  const [pinnedPort, setPinnedPort] = useState("")
-  // The port this console process is actually bound to right now (read
-  // server-side from process.env.PORT), independent of any pin the owner
-  // has saved. Shown so the owner's proxy config can match reality even
-  // before -- or instead of -- setting a pin.
-  const [effectiveConsolePort, setEffectiveConsolePort] = useState<
-    number | null
-  >(null)
-  const [ownerPasswordOwnerSet, setOwnerPasswordOwnerSet] = useState(true)
-  // The port the desktop supervisor told this console to keep. Differs from
-  // `effectiveConsolePort` only when that port was taken at launch; `null`
-  // on a host without the desktop supervisor.
-  const [stableConsolePort, setStableConsolePort] = useState<number | null>(null)
-  const [cloudflareToken, setCloudflareToken] = useState("")
-  const [cloudflareHostname, setCloudflareHostname] = useState("")
-  const cloudflareTunnelConnection = useCloudflareTunnelConnectionStatus(loadRemoteAccessState)
-  // Set only when a submitted change is BOTH risky (wouldDisconnectRemoteOwner)
-  // AND this browser tab is itself loaded from the remote origin -- the
-  // owner reached this settings page THROUGH the tunnel a provider switch,
-  // token rotation, or posture change could tear down. Holds the exact
-  // config that was about to be saved, so confirming resubmits it unchanged
-  // plus the acknowledgement flag, rather than re-deriving it from form
-  // state a second time (which could drift if the owner edited a field
-  // between the warning appearing and confirming).
-  const [pendingRiskyConfig, setPendingRiskyConfig] = useState<{
-    config: RemoteAccessConfig
-    providerCredential?: string
-  } | null>(null)
+  request = requestReachability,
+  appVersion,
+}: {
+  request?: typeof requestReachability;
+  appVersion?: string;
+}) {
+  const [host, setHost] = useState<{ known: true; value: HostSettings } | { known: false; reason: string }>({
+    known: false,
+    reason: "loading",
+  });
+  const [port, setPort] = useState("");
+  const [capabilities, setCapabilities] = useState<
+    Record<string, { known: boolean; value?: boolean | string; reason?: string }>
+  >({});
+  const [inventory, setInventory] = useState<Inventory | null>(null);
+  const [state, setState] = useState<State>({ routes: [], reasons: {}, starting: false });
+  const stateNow = useRef(state);
+  stateNow.current = state;
+  const [stateLoaded, setStateLoaded] = useState(false);
+  // The way on screen, owned here. It is set when the owner picks a way and
+  // when preparation starts for one. After that a catalog poll changes only
+  // which way carries the Recommended badge, never the way being prepared.
+  const [pinned, setPinned] = useState<string | null>(null);
+  // Ways whose own setup ended blocked on an administrator step.
+  const [blocks, setBlocks] = useState<Blocks>({});
+  // Why the console moved off a way the owner was on.
+  const [switchNote, setSwitchNote] = useState<string | null>(null);
+  // Bumped whenever the way on screen changes. A preparation or click binds to
+  // the value it started with and sends nothing positive once it has moved on.
+  const selection = useRef(0);
+  const [showOtherWays, setShowOtherWays] = useState(false);
+  const [declined, setDeclined] = useState<string | null>(null);
+  const [prep, setPrep] = useState<Prep>({ status: "idle" });
+  const [prepError, setPrepError] = useState<DisplayError | null>(null);
+  // Bumped to run the preparation chain again.
+  const [prepRun, setPrepRun] = useState(0);
+  // Labels of facts that changed since the owner last saw the review.
+  const [changed, setChanged] = useState<string[] | null>(null);
+  const shownReview = useRef<Review | null>(null);
+  const [runtimeReview, setRuntimeReview] = useState<{
+    routeId: string;
+    generation: number;
+    snapshot: ReturnType<typeof projectRuntimeReview>;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [stale, setStale] = useState(false);
+  // The last read that got no answer, for Details under the stale line.
+  const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
+  const [error, setError] = useState<DisplayError | null>(null);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  // After Cancel: the host is turning it off, or could not confirm it is off.
+  const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
+  // Automatic proof re-check. `rechecking` holds routes with a check under way;
+  // `recheckFailure` the code of one that failed too often in a row, and the
+  // proof time it failed on: a later proof from the host clears it.
+  const [rechecking, setRechecking] = useState<ReadonlySet<string>>(new Set());
+  const [recheckFailure, setRecheckFailure] = useState<Readonly<Record<string, { code: string; observedAt: string | null }>>>({});
+  // Routes the owner has moved past by choosing Turn on again or Turn off.
+  const [acknowledged, setAcknowledged] = useState<ReadonlySet<string>>(new Set());
+  // A stop the owner must confirm first: this page is open through the address being turned off.
+  const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean } | null>(null);
+  // The stop was confirmed from far away; this page is about to stop working.
+  const [closingPage, setClosingPage] = useState(false);
+  // Track the displayed address and keep its change notice through later polls.
+  const [seenAddress, setSeenAddress] = useState<{ origin: string; changed: boolean } | null>(null);
+  // Set by Turn on again: turn on as soon as the next review is ready, but only if it shows the
+  // facts the host recorded as approved for the route being replaced (null: none recorded).
+  const againPending = useRef<{ approvedDigest: string | null } | null>(null);
+  // One preparation at a time per selection token, never across superseded ways.
+  const preparing = useRef<{ token: number; tail: Promise<unknown> } | null>(null);
+  // The expired review whose refresh is under way. The expiry timer starts no
+  // second refresh for it.
+  const refreshing = useRef<string | null>(null);
+  const mounted = useRef(true);
+  // The poll, so a repair can read the host again at once.
+  const loadRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const reservations = setupCards(state.services);
+  // Bumped when an action starts and when it ends. A poll started in an earlier
+  // epoch is dropped. `loadSeq` and `appliedSeq` order the polls themselves.
+  const actionEpoch = useRef(0);
+  const loadSeq = useRef(0);
+  const appliedSeq = useRef(0);
+  const seenSetup = useRef<string | null>(null);
+  // Bumped by each poll above; a sign-in the owner is finishing reads its setup on each bump.
+  const [setupTick, setSetupTick] = useState(0);
 
-  // Form drafts are seeded from the saved state, but only while the Public
-  // URL form is closed: a refetch must not overwrite what the owner is typing.
-  const draftOpenRef = useRef(false)
-  draftOpenRef.current = pendingPosture !== null
-  const resumedConnectRef = useRef(false)
-  const startCloudflareConnect = cloudflareTunnelConnection.start
+  async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
+    const result = await request(path, input);
+    if (!result.ok) {
+      throw new ReachabilityFailure(result);
+    }
+    return result.data as T;
+  }
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    // A request that throws got no answer. Each read settles on its own, so
+    // one throw cannot hide what another read was answered.
+    type Read = Awaited<ReturnType<typeof request>>;
+    type Outcome = { read: Read } | { thrown: unknown };
+    const settle = (path: string) =>
+      request(path).then(
+        (read): Outcome => ({ read }),
+        (thrown: unknown): Outcome => ({ thrown })
+      );
+    // Refresh detection once for the initial choice and after an owner change.
+    // Polls read cached detection on the existing independent schedule, so a
+    // slow provider still cannot hold up state or host-setting reads.
+    let catalogLast: { outcome: Outcome; at: number; tookMs: number } | null = null;
+    let catalogRead: Promise<Outcome> | null = null;
+    let catalogEpoch = 0;
+    let needsDetection = true;
+    const readCatalog = (): Promise<Outcome> => {
+      if (catalogRead === null) {
+        const epoch = catalogEpoch;
+        const startedAt = Date.now();
+        const path = needsDetection ? "/catalog?refresh=true" : "/catalog";
+        needsDetection = false;
+        const run: Promise<Outcome> = settle(path).then((outcome) => {
+          if (epoch === catalogEpoch) {
+            catalogLast = { outcome, at: Date.now(), tookMs: Date.now() - startedAt };
+          }
+          if (catalogRead === run) {
+            catalogRead = null;
+          }
+          return outcome;
+        });
+        catalogRead = run;
+      }
+      return catalogRead;
+    };
+    const forgetCatalog = () => {
+      needsDetection = true;
+      catalogEpoch++;
+      catalogLast = null;
+      catalogRead = null;
+    };
+    const catalogOutcome = async (): Promise<Outcome> => {
+      const last = catalogLast;
+      const answered = last !== null && "read" in last.outcome && last.outcome.read.ok;
+      // Nothing held, or what is held got no answer: this poll waits for a read, as it always did.
+      if (last === null || !answered) {
+        return readCatalog();
+      }
+      if (Date.now() - last.at >= catalogRefreshAfter(last.tookMs) && catalogRead === null) {
+        void readCatalog().then((outcome) => {
+          if (active && "read" in outcome && outcome.read.ok) {
+            void load().catch(() => undefined);
+          }
+        });
+      }
+      return last.outcome;
+    };
+    const load = async () => {
+      const seq = ++loadSeq.current;
+      const startedInEpoch = actionEpoch.current;
+      // A poll reports on the moment it started. If an action began or ended
+      // since, or a later poll already landed, this answer is out of date and
+      // must not replace what the action or the later poll set.
+      const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
+      const [catalog, stateRead, hostRead, capabilityRead] = await Promise.all([
+        catalogOutcome(),
+        settle("/state"),
+        settle("/host-settings"),
+        settle("/host-capabilities"),
+      ]);
+      if (outdated()) {
+        return;
+      }
+      appliedSeq.current = seq;
+      const answered = (outcome: Outcome) => ("read" in outcome && outcome.read.ok ? outcome.read : null);
+      const catalogResult = answered(catalog);
+      const stateResult = answered(stateRead);
+      const hostResult = answered(hostRead);
+      const capabilityResult = answered(capabilityRead);
+      // A read the service answered with an error names the problem, before one that got no answer.
+      let failedRead: Extract<Read, { ok: false }> | null = null;
+      let unanswered: DisplayError | null = null;
+      for (const outcome of [catalog, stateRead]) {
+        if ("thrown" in outcome) {
+          unanswered ??= toDisplayError(outcome.thrown, "load", undefined, "check");
+        } else if (!outcome.read.ok && gotNoAnswer(outcome.read.code)) {
+          unanswered ??= toDisplayError(new ReachabilityFailure(outcome.read), "load", undefined, "check");
+        } else if (!outcome.read.ok) {
+          failedRead ??= outcome.read;
+        }
+      }
+      setNoAnswer(unanswered);
+      if (catalogResult) {
+        setInventory(catalogResult.data as Inventory);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+      const specific = failedRead;
+      if (specific) {
+        setError((current) =>
+          current?.source === "action" || (current?.source === "load" && current.code === specific.code)
+            ? current
+            : // A read failed, so the fallback sentence names a check, never a turn-on.
+              toDisplayError(new ReachabilityFailure(specific), "load", undefined, "check")
+        );
+      }
+      if (hostResult) {
+        setHost(hostResult.data as typeof host);
+      }
+      if (capabilityResult) {
+        setCapabilities(capabilityResult.data as typeof capabilities);
+      }
+      if (stateResult) {
+        const next = stateResult.data as State;
+        setState(next);
+        setStateLoaded(true);
+        if (next.operations?.length) {
+          setOperation((current) => (current?.stage === "applying" ? current : (next.operations?.[0] ?? current)));
+        }
+      } else {
+        setStale(true);
+      }
+      // A load that succeeds retires the load error it replaced; an action error stays until the next action.
+      if (catalogResult && stateResult) {
+        setError((current) => (current?.source === "load" ? null : current));
+      }
+    };
+    loadRef.current = () => {
+      forgetCatalog();
+      return load();
+    };
+    // Setups an older console kept in the browser move to the host first, and
+    // polling starts only after that finishes.
+    void migrateLegacySetupReservations(request)
+      .catch(() => undefined)
+      .then(async () => {
+        if (!active) {
+          return;
+        }
+        const refresh = () => {
+          // load() handles a request that throws itself; this only keeps a
+          // bug in applying an answer from becoming an unhandled rejection.
+          void load().catch(() => undefined);
+        };
+        // Setup observations must not wait on unrelated dashboard requests.
+        timer = setInterval(() => {
+          setSetupTick((n) => n + 1);
+          refresh();
+        }, 3000);
+        refresh();
+      });
+    return () => {
+      active = false;
+      if (timer !== undefined) {
+        clearInterval(timer);
+      }
+    };
+  }, [request]);
 
   useEffect(() => {
-    const next = remoteAccess.data
-    if (!next) return
-    const {
-      config: nextConfig,
-      effectiveConsolePort: nextPort,
-      stableConsolePort: nextStablePort,
-      inspection: nextInspection,
-      ngrokInspection: nextNgrokInspection,
-      cloudflareTunnelInspection: nextCloudflareTunnelInspection,
-      myDevicesOnlyInspection: nextMyDevicesOnlyInspection,
-      ownerPasswordOwnerSet: nextOwnerPasswordOwnerSet,
-    } = next
-    const resolved = asConfig(nextConfig)
-    setConfig(resolved)
-    setInspection(asInspection(nextInspection))
-    setNgrokInspection(asInspection(nextNgrokInspection))
-    setCloudflareTunnelInspection(
-      asCloudflareTunnelInspection(
-        asInspection(nextCloudflareTunnelInspection),
-        nextCloudflareTunnelInspection
-      )
-    )
-    setMyDevicesOnlyInspection(asInspection(nextMyDevicesOnlyInspection))
-    setEffectiveConsolePort(nextPort ?? null)
-    setStableConsolePort(nextStablePort ?? null)
-    setOwnerPasswordOwnerSet(nextOwnerPasswordOwnerSet)
-    if (!draftOpenRef.current) {
-      setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
-      // Without this, an owner who already saved their ngrok domain sees
-      // a blank field on every page load and has no way to tell their
-      // domain was remembered -- exactly the "silent fallback" the
-      // durable-address states exist to prevent.
-      setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
-      setCloudflareHostname(resolved.cloudflare_tunnel?.hostname ?? "")
-      setPinnedPort(
-        resolved.console_port != null ? String(resolved.console_port) : ""
-      )
+    if (!operation || operation.stage !== "applying") {
+      return;
     }
-    // Resume showing progress after a page reload mid-connect --
-    // otherwise a Cloudflare config with no origin yet and no
-    // reported failure renders as the same static "Waiting for the
-    // provider to report an address…" line forever, with no
-    // indication anything is still happening. This is exactly what
-    // the settings-triggered console restart produces: the window
-    // reloads Settings while cloudflared may still be connecting.
-    // Only on the first read: `start` resets its clock on every call.
-    if (
-      !resumedConnectRef.current &&
-      resolved.provider === "cloudflare_tunnel" &&
-      !resolved.fields.PDPP_REFERENCE_ORIGIN &&
-      !resolved.tunnel_error
-    ) {
-      startCloudflareConnect()
-    }
-    resumedConnectRef.current = true
-  }, [remoteAccess.data, startCloudflareConnect])
+    let active = true;
+    const timer = setInterval(() => {
+      void request(`/operations/${encodeURIComponent(operation.operationId)}`).then((result) => {
+        if (active && result.ok) {
+          setOperation((current) => ({ ...(result.data as Operation), kind: (result.data as Operation).kind ?? current?.kind }));
+        }
+      });
+    }, 500);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [operation, request]);
 
-  const loadErrorRef = useRef<string | null>(null)
   useEffect(() => {
-    // The route exists but this request could not answer it. Report the
-    // failure instead of falling back to a default that looks real, and
-    // clear that report (only that one) once a read succeeds again.
-    const loadError = remoteAccess.error ? String(remoteAccess.error) : null
-    if (loadError) {
-      setError(loadError)
-    } else if (loadErrorRef.current) {
-      const stale = loadErrorRef.current
-      setError(current => (current === stale ? null : current))
+    if (!operation || operation.stage === "applying") {
+      return;
     }
-    loadErrorRef.current = loadError
-  }, [remoteAccess.error])
+    let active = true;
+    void request("/state").then((result) => {
+      if (!active) return;
+      if (result.ok) {
+        setState(result.data as State);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+    });
+    return () => { active = false; };
+  }, [operation, request]);
 
-  const stateIsKnown = loadState === "loaded"
-  const showOwnerPasswordMigrationBanner =
-    config.posture !== "off" && !ownerPasswordOwnerSet
-  const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
-  // Specific to the ngrok row: user_supplied_origin can still work (via
-  // `inspection` above) even when ngrok cannot (no Tauri host to supervise
-  // its tunnel). Kept separate from `desktopUnavailable` so an ngrok-only
-  // outage does not blank-disable the whole Public URL flow.
-  const ngrokUnavailable = !stateIsKnown || ngrokInspection?.availability === "unavailable"
-  // Same shape as `ngrokUnavailable`, for the Cloudflare tunnel row: it too
-  // needs a native host (keychain + `cloudflared` process supervision) and
-  // can be unavailable independent of the rest of the Public URL flow.
-  const cloudflareTunnelUnavailable =
-    !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
-  // Distinct from `cloudflareTunnelUnavailable`: that flag means "no Tauri
-  // "My devices only" needs a detected LAN network interface -- unavailable
-  // (e.g. no network connection) is a real, distinct state from every other
-  // row's `desktopUnavailable`, so it gets its own inspection the same way
-  // ngrok/Cloudflare Tunnel do.
-  const myDevicesOnlyUnavailable =
-    !stateIsKnown || myDevicesOnlyInspection?.availability === "unavailable"
-  const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
-  const configuredOriginValidation = useMemo(
-    () => validateUserSuppliedOrigin(origin),
-    [origin]
-  )
-  // Driven by the SAVED config, not the in-progress edit in `ngrokDomain` --
-  // this tells the owner what is actually active right now, the same way
-  // `activeOrigin` above reflects the saved origin rather than the draft.
-  const ngrokDurableAddress = useMemo(
-    () => ngrokDurableAddressState(config),
-    [config]
-  )
-  const selectedOption = useMemo(
-    () => publicUrlOptionById(optionId),
-    [optionId]
-  )
-  const runningOption = useMemo(() => activeOption(config), [config])
-  const originDisplay = useMemo(() => remoteAccessOriginDisplay(config), [config])
-  // Evaluated against the clock when the config loads: a reading that was
-  // already stale then is shown as stale, never as verified.
-  const originVerification = useMemo(
-    () => originVerificationDisplay(config, Math.floor(Date.now() / 1000)),
-    [config]
-  )
+  // A way the owner already set up and committed is one the host has seen working.
+  const setUp = new Set((state.services ?? []).filter((entry) => entry.committed).map((entry) => entry.providerId));
+  const recommended = inventory ? recommendedWay(inventory, capabilities, blocks, setUp) : undefined;
+  const pinnedWay = inventory && pinned ? inventory.providers.find((item) => item.providerId === pinned) : undefined;
+  // The pinned way stays until it truly cannot be used: a way whose prerequisite
+  // is only unreadable for a moment is not one.
+  const way = pinnedWay && !wayUnusable(pinnedWay, capabilities, blocks) ? pinnedWay : recommended;
+  const wayUsage = way ? pickUsage(way, capabilities) : null;
+  const wayId = way?.providerId ?? null;
+  const wayLabel = way ? plain(way.label) : undefined;
+  // The selected way's card title, as the Turn on card's caption reads it.
+  const wayTitle = way ? plain(wayRow(way, capabilities, blocks).title) : null;
+  // Read by a sign-in step already under way: it must not show or open for a way the owner has left.
+  const wayIdNow = useRef<string | null>(null);
+  wayIdNow.current = wayId;
 
-  const choosePosture = (nextPosture: RemoteAccessPosture) => {
-    setError(null)
-    if (nextPosture === "off") {
-      setBusy(true)
-      void saveRemoteAccessConfig(offRemoteAccessConfig())
-        .then(result => {
-          if (!result.ok) {
-            setError(result.message)
-            return
+  const mutationBlocked = busy || stale || state.starting;
+  // The password is the only gate on an address reachable from the internet,
+  // so nothing can be turned on until the owner has chosen one.
+  const passwordMissing = state.passwordSet === false;
+  // Read by actions already under way, which can outlive the state they started in.
+  const passwordMissingNow = useRef(false);
+  passwordMissingNow.current = passwordMissing;
+  const requirePassword = () => {
+    if (passwordMissingNow.current) throw new ReachabilityFailure(publicError("owner_password_required"));
+  };
+  // Serialize only within the current selection. A hung superseded selection
+  // must not hold up a new way; both chains retain their positive-request guards.
+  function prepare(providerId: string, usage: string, isCurrent: () => boolean): Promise<Prepared> {
+    const token = selection.current;
+    const previous = preparing.current?.token === token ? preparing.current.tail : Promise.resolve();
+    const run = previous.then(() => {
+      if (!isCurrent()) throw new PreparationStopped();
+      return prepareTurnOn(request, { providerId, usage }, {
+        isCurrent,
+        mayRunActions: () => !passwordMissingNow.current,
+        onPasswordMissing: () => {
+          if (!isCurrent()) return;
+          passwordMissingNow.current = true;
+          setState((current) => ({ ...current, passwordSet: false }));
+        },
+      });
+    });
+    preparing.current = { token, tail: run.catch(() => undefined) };
+    return run;
+  }
+  const phaseOf = (route: Route) => (state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null);
+  const unsupportedOf = (route: Route) => state.reasons[route.handle.id] === "proof_refresh_unsupported";
+  // The route whose proof the app renews before its window ends: still verified
+  // (or just past its window, with no check yet), not stopping, not given up on.
+  // A failure holds until the host reports a newer proof for the route.
+  const recheckFailedFor = (route: Route) => {
+    const failure = recheckFailure[route.handle.id];
+    return failure !== undefined && failure.observedAt === route.verification.observedAt;
+  };
+  const recheckTarget = (() => {
+    for (const route of state.routes) {
+      const phase = phaseOf(route);
+      const delay = recheckDelay(route, phase);
+      if (
+        (phase === "verified" || phase === "stale") &&
+        delay !== null &&
+        route.cleanup.state !== "confirmed" &&
+        !state.lifecycle?.stopRequested &&
+        !unsupportedOf(route) &&
+        !recheckFailedFor(route) &&
+        !acknowledged.has(route.handle.id)
+      ) {
+        const until = route.verification.validUntil;
+        const key = `${route.handle.id}:${route.handle.generation}:${until?.known ? until.value : ""}`;
+        return { route, delay, key };
+      }
+    }
+    return null;
+  })();
+  const recheckPending = (route: Route) => recheckTarget?.route.handle.id === route.handle.id;
+  const recheckUnderWay = (route: Route) => rechecking.has(route.handle.id) || recheckPending(route);
+  // While a re-check is pending or under way the status stays On: neither
+  // "checking" nor "stale" reaches the owner.
+  const shownPhase = (route: Route) => {
+    const phase = phaseOf(route);
+    return recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
+  };
+  const attentionOf = (route: Route): Attention | null =>
+    routeAttention(route, {
+      lifecycleReason: state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.reason ?? null) : null,
+      recheckFailed: recheckFailedFor(route),
+      acknowledged: acknowledged.has(route.handle.id),
+      now: Date.now(),
+      lifecyclePhase: phaseOf(route),
+      recheckUnderWay: recheckUnderWay(route),
+      cleanupUnconfirmed:
+        state.lifecycle?.handle?.id === route.handle.id &&
+        state.lifecycle.cleanup === "unconfirmed" &&
+        !(operation?.kind === "stop" && operation.stage === "applying") &&
+        cancel !== "stopping",
+    });
+  const headlineOf = (route: Route) =>
+    routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+  const routesOff = state.routes.every((route) => headlineOf(route) === "Off");
+  const outcome = operation ? operationOutcome(operation) : null;
+  // Preparation runs only while nothing is on or on its way. A finished
+  // start waits for the next state read to show its address.
+  const idle =
+    stateLoaded &&
+    !stale &&
+    !state.starting &&
+    routesOff &&
+    (!operation ||
+      outcome === "did-not-turn-on" ||
+      (outcome === "done" && state.routes.length > 0 && operation.kind !== "start"));
+  const readyToPrepare = idle && !passwordMissing && wayId !== null && wayUsage !== null && declined !== wayId;
+
+  // Preparation for a way pins it. If that replaces a way the owner was on,
+  // the old way could no longer be used: say why.
+  useEffect(() => {
+    if (!wayId && pinnedWay && wayUnusable(pinnedWay, capabilities, blocks)) {
+      selection.current += 1;
+      const from = wayRow(pinnedWay, capabilities, blocks);
+      setSwitchNote(`${from.title} can\'t be used now: ${from.missing?.text ?? "No usable way is available."}`);
+      return;
+    }
+    if (!readyToPrepare || !way || !wayId || pinned === wayId) return;
+    if (pinned !== null) {
+      selection.current += 1;
+      const from = pinnedWay ? wayRow(pinnedWay, capabilities, blocks) : null;
+      setSwitchNote(
+        from
+          ? `${from.title} can't be used now${from.missing ? `: ${from.missing.text}` : "."} Using ${plain(wayRow(way, capabilities, blocks).title)} instead.`
+          : null
+      );
+    }
+    setPinned(wayId);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
+  }, [readyToPrepare, wayId, pinned]);
+
+  useEffect(() => {
+    if (!readyToPrepare || !wayId || !wayUsage) {
+      refreshing.current = null;
+      return;
+    }
+    let active = true;
+    const token = selection.current;
+    const isCurrent = () => active && mounted.current && selection.current === token;
+    // A review already on screen for this way stays while it is refreshed.
+    setPrep((current) =>
+      current.status === "done" && current.providerId === wayId && current.result.kind === "ready"
+        ? current
+        : { status: "preparing" }
+    );
+    void prepare(wayId, wayUsage, isCurrent)
+      .then(async (result) => {
+        if (result.kind === "sign-in") {
+          // The host keeps one setup per service and returns it if one exists.
+          // Positive: only while this preparation is current and the password is set.
+          if (!isCurrent() || passwordMissingNow.current) throw new PreparationStopped();
+          await send("/setups", {
+            providerId: wayId,
+            draftId: result.draft.draftId,
+            actionId: result.action.id,
+            expectedConfigurationRevision: result.draft.configuration.revision,
+            usage: wayUsage,
+          });
+          const fresh = await request("/state");
+          if (active && fresh.ok) setState(fresh.data as State);
+        }
+        return result;
+      })
+      .then((result) => {
+        if (!active) return;
+        refreshing.current = null;
+        if (result.kind === "ready") {
+          const before = shownReview.current;
+          if (before && before.candidate.consentFactsDigest !== result.review.candidate.consentFactsDigest) {
+            setChanged(changedFacts(before.candidate, result.review.candidate));
           }
-          setConfig(asConfig(result.config))
-        })
-        .catch(reason => setError(String(reason)))
-        .finally(() => setBusy(false))
-      return
-    }
-    if (nextPosture === "my_devices_only") {
-      if (myDevicesOnlyUnavailable) {
-        setError(
-          myDevicesOnlyInspection?.reason ??
-            "No LAN network interface was detected on this machine."
-        )
-        return
-      }
-      setBusy(true)
-      // The LAN address is detected server-side, never submitted from here
-      // (see owner-remote-access.ts's my_devices_only POST branch) -- the
-      // fields below are placeholders the server overwrites with real,
-      // freshly detected values before validating and persisting.
-      void saveRemoteAccessConfig({
-        posture: "my_devices_only",
-        provider: null,
-        fields: offRemoteAccessConfig().fields,
+          shownReview.current = result.review;
+        }
+        setPrep({ status: "done", providerId: wayId, result });
+        setPrepError(null);
       })
-        .then(result => {
-          if (!result.ok) {
-            if (result.code === "owner_password_required") {
-              void continueAfterOwnerPassword(
-                {
-                  posture: "my_devices_only",
-                  provider: null,
-                  fields: offRemoteAccessConfig().fields,
-                },
-                undefined,
-                retryResult => {
-                  setConfig(asConfig(retryResult.config))
-                }
-              )
-              return
-            }
-            setError(result.message)
-            return
+      .catch((failure) => {
+        if (!active) return;
+        refreshing.current = null;
+        setPrep({ status: "idle" });
+        if (failure instanceof PreparationStopped) return;
+        setPrepError(toDisplayError(failure, "action", wayLabel, "prepare"));
+      });
+    return () => {
+      active = false;
+    };
+    // `send` only wraps `request`.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
+  }, [readyToPrepare, wayId, wayUsage, prepRun, request]);
+
+  // An expired review is replaced without a click.
+  const readyReview = prep.status === "done" && prep.providerId === wayId && prep.result.kind === "ready" ? prep.result.review : null;
+  useEffect(() => {
+    if (!readyReview) return;
+    const timer = setInterval(() => {
+      if (!reviewExpired(readyReview, Date.now())) return;
+      // One refresh per expired review, however long it takes.
+      if (refreshing.current === readyReview.id) return;
+      refreshing.current = readyReview.id;
+      setPrepRun((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [readyReview]);
+
+  // After Turn on again: turn on once the review is ready, only when it shows the facts
+  // the host recorded as approved for the route. Different facts, or no record, wait for a click.
+  useEffect(() => {
+    if (!readyReview || !againPending.current || busy) return;
+    const { approvedDigest } = againPending.current;
+    againPending.current = null;
+    if (approvedDigest !== null && readyReview.candidate.consentFactsDigest === approvedDigest) {
+      void turnOn(readyReview);
+    } else {
+      setChanged([]);
+    }
+    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
+  }, [readyReview, busy]);
+
+  async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
+    actionEpoch.current += 1;
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (failure) {
+      setError(toDisplayError(failure, "action", wayLabel, kind));
+    } finally {
+      actionEpoch.current += 1;
+      setBusy(false);
+    }
+  }
+  // The same runner, told what the owner was doing, so a failure says so.
+  const turnOff = (run: () => Promise<void>) => change(run, "turn-off");
+  const checkIt = (run: () => Promise<void>) => change(run, "check");
+  const edit = (run: () => Promise<void>) => change(run, "change");
+
+  // Sends the approval for the review whose facts are on screen, then applies.
+  // `shown` is the review the owner saw: its digest is what is approved. If the
+  // host holds a newer review of the same facts, only its id is newer.
+  async function turnOn(shown: Review) {
+    const token = selection.current;
+    const isCurrent = () => mounted.current && selection.current === token && wayIdNow.current === shown.candidate.providerId;
+    await change(async () => {
+      if (!isCurrent()) return;
+      let target = shown;
+      let refresh = false;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (refresh || reviewExpired(target, Date.now())) {
+          // Stopped means the screen went away or the password is gone; the screen already says so.
+          const fresh = await prepare(
+            shown.candidate.providerId,
+            wayUsage ?? "",
+            isCurrent
+          ).catch((failure) => {
+            if (failure instanceof PreparationStopped) return null;
+            throw failure;
+          });
+          if (!fresh || !isCurrent()) return;
+          if (fresh.kind !== "ready") {
+            setPrep({ status: "done", providerId: shown.candidate.providerId, result: fresh });
+            return;
           }
-          setConfig(asConfig(result.config))
-        })
-        .catch(reason => setError(String(reason)))
-        .finally(() => setBusy(false))
-      return
-    }
-    setPendingPosture(nextPosture)
-    setOrigin(activeOrigin ?? "")
-  }
-
-  const cancelPublicUrlDialog = () => {
-    setPendingPosture(null)
-    setError(null)
-  }
-
-  /**
-   * Offered from the ERR_NGROK_312 guidance: reopens the Public URL dialog
-   * pre-selected to ngrok HTTPS, the free-plan alternative. Does not submit
-   * on its own -- the owner still needs to confirm (and re-paste the
-   * authtoken, since `enablePublicUrl` never retains it after a save), same
-   * as picking the row by hand.
-   */
-  const switchToNgrokHttps = () => {
-    setError(null)
-    setOptionId("ngrok_https_edge_termination")
-    setPendingPosture("public_url")
-  }
-
-  /**
-   * The owner is already authenticated to reach this page (an owner bearer
-   * token cannot be minted without PDPP_OWNER_PASSWORD already configured),
-   * so neither provider re-collects a password here -- there is no separate
-   * credential to set for either. ngrok's authtoken is a provider credential,
-   * not an owner credential; see the module doc comment above.
-   */
-  /**
-   * True only when THIS browser tab is itself loaded from the configured
-   * public origin -- the client-side mirror of the reference server's
-   * `isRemoteOriginRequest` (`reachability-contract.ts`), which the POST
-   * route re-checks authoritatively regardless of what this returns. This
-   * is a pre-submit UX signal only (show the warning before the owner does
-   * real work, not after a round trip), never the source of truth: the
-   * route's own check is what actually protects the owner if this is wrong
-   * or bypassed (a stale tab, a differently-configured proxy in front).
-   */
-  const isBrowserOnRemoteOrigin = (): boolean => {
-    if (typeof window === "undefined") return false
-    const origin = config.fields.PDPP_REFERENCE_ORIGIN
-    if (!origin) return false
-    try {
-      return new URL(origin).hostname === window.location.hostname
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Shared save path for both Tauri-backed providers (ngrok, Cloudflare
-   * Tunnel): checks `wouldDisconnectRemoteOwner` before saving when this
-   * tab is on the remote origin, and if risky, shows a confirmation instead
-   * of saving immediately -- see `pendingRiskyConfig`'s doc comment. The
-   * reference server's POST route enforces the same check authoritatively
-   * (`owner-remote-access.ts`), so a bypass here (an old cached bundle, a
-   * race) still cannot silently strand the owner; it would instead surface
-   * the route's 409 as a plain error, which is safe, just less polished.
-   */
-  const performSave = (
-    nextConfig: RemoteAccessConfig,
-    providerCredential: string | undefined,
-    onSuccess: (result: { config: RemoteAccessConfig }) => void
-  ) => {
-    if (
-      isBrowserOnRemoteOrigin() &&
-      wouldDisconnectRemoteOwner(config, nextConfig, providerCredential !== undefined)
-    ) {
-      setPendingRiskyConfig({ config: nextConfig, providerCredential })
-      return
-    }
-    setBusy(true)
-    setError(null)
-    void saveRemoteAccessConfig(nextConfig, providerCredential)
-      .then(result => {
-        if (!result.ok) {
-          if (result.code === "owner_password_required") {
-            void continueAfterOwnerPassword(nextConfig, providerCredential, onSuccess)
-            return
+          if (fresh.review.candidate.consentFactsDigest !== shown.candidate.consentFactsDigest) {
+            shownReview.current = fresh.review;
+            setChanged(changedFacts(shown.candidate, fresh.review.candidate));
+            setPrep({ status: "done", providerId: fresh.review.candidate.providerId, result: fresh });
+            return;
           }
-          setError(result.message)
-          return
+          target = fresh.review;
         }
-        setConfig(asConfig(result.config))
-        onSuccess(result)
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusy(false))
+        if (!isCurrent()) return;
+        requirePassword();
+        try {
+          const pending = await send<{ operationId: string }>("/operations", {
+            reviewId: target.id,
+            kind: "route",
+            consentFactsDigest: shown.candidate.consentFactsDigest,
+            acknowledgeDisconnect: true,
+          });
+          if (!isCurrent()) return;
+          setOperation({ ...pending, kind: "start", stage: "applying", recovery: null });
+          setCancel(null);
+          setChanged(null);
+          shownReview.current = null;
+          setPrep({ status: "idle" });
+          return;
+        } catch (failure) {
+          if (!isCurrent()) return;
+          const code = failure instanceof ReachabilityFailure ? failure.detail.code : null;
+          if (!(code && staleReviewCodes.has(code)) || attempt === 1) throw failure;
+          // The host no longer holds that review. Get a new one and compare.
+          refresh = true;
+        }
+      }
+    });
   }
-
-  const continueAfterOwnerPassword = async (
-    nextConfig: RemoteAccessConfig,
-    providerCredential: string | undefined,
-    onSuccess: (result: { config: RemoteAccessConfig }) => void
-  ) => {
-    let ownerPasswordSet = false
-    let remoteConfigSaved = false
-    setWaitingForOwnerPassword(true)
-    setBusy(true)
-    setError("Set an owner password in the DataConnect window that just opened. This change will continue after it is saved.")
+  async function allow(draft: Draft, action: Action, input: { value?: string; secret?: string }) {
+    const token = selection.current;
+    await change(async () => {
+      requirePassword();
+      if (selection.current !== token) return;
+      await runAction(send, draft, action, input);
+      setPrepRun((n) => n + 1);
+    });
+  }
+  function pickWay(providerId: string) {
+    // The radios are disabled while a change is in flight; this is the same rule at the handler.
+    if (mutationBlocked) return;
+    selection.current += 1;
+    setPinned(providerId);
+    setSwitchNote(null);
+    setDeclined(null);
+    setChanged(null);
+    shownReview.current = null;
+    setPrepRun((n) => n + 1);
+  }
+  function chooseAnotherWay() {
+    if (wayId) setDeclined(wayId);
+    setShowOtherWays(true);
+    setPrep({ status: "idle" });
+  }
+  async function stopOperation(current: Operation) {
+    setCancel("stopping");
+    await change(async () => {
+      try {
+        const route = await send<Route>(`/operations/${encodeURIComponent(current.operationId)}/reconcile`, {
+          action: "stop",
+          acknowledgeDisconnect: true,
+        });
+        if (route.cleanup.state === "confirmed") {
+          setCancel(null);
+          setOperation(null);
+          setPrepRun((n) => n + 1);
+        } else {
+          setCancel("unconfirmed");
+        }
+      } catch (failure) {
+        setCancel("unconfirmed");
+        throw failure;
+      }
+    }, "turn-off");
+  }
+  // Renews the proof before its window ends, with no click and no status change.
+  async function runRecheck(id: string, generation: number): Promise<CheckOutcome> {
+    setRechecking((current) => new Set(current).add(id));
     try {
-      const opened = await requestOwnerPasswordWindow()
-      if (!opened.ok) {
-        setError(opened.message)
-        return
+      const result = await request(`/routes/${encodeURIComponent(id)}/check`, { generation });
+      if (!result.ok) return { ok: false, code: result.code };
+      const checked = result.data as Route;
+      // Same guard as a poll: a reply that an action or a newer poll has passed is dropped.
+      const seq = ++loadSeq.current;
+      const startedInEpoch = actionEpoch.current;
+      const fresh = await request("/state");
+      if (fresh.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current) {
+        appliedSeq.current = seq;
+        setState(fresh.data as State);
       }
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        const state = await loadRemoteAccessState()
-        setOwnerPasswordOwnerSet(state.ownerPasswordOwnerSet)
-        if (!state.ownerPasswordOwnerSet) continue
-        ownerPasswordSet = true
-        const result = await saveRemoteAccessConfig(nextConfig, providerCredential)
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        remoteConfigSaved = true
-        setConfig(asConfig(result.config))
-        setError(null)
-        onSuccess(result)
-        return
+      if (checked.verification.status !== "verified" || !checked.published) {
+        return { ok: false, code: publicError("verification_failed").code };
       }
-      setError("The owner password window is still waiting. Save the password there, then try this remote access change again.")
-    } catch (reason) {
-      setError(String(reason))
+      return { ok: true };
     } finally {
-      // A successful config write triggers the desktop's existing config
-      // watcher, which restarts the stack with the new password. If the
-      // config was rejected after the password was saved, request a restart
-      // explicitly so the new credential still takes effect.
-      if (ownerPasswordSet && !remoteConfigSaved) {
-        const restart = await restartAfterOwnerPasswordSet()
-        if (!restart.ok) setError(restart.message)
-      }
-      setWaitingForOwnerPassword(false)
-      setBusy(false)
+      setRechecking((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
   }
-
-  const setOwnerPasswordForMigration = async () => {
-    setWaitingForOwnerPassword(true)
-    setBusy(true)
-    setError("Set an owner password in the DataConnect window that just opened.")
-    try {
-      const opened = await requestOwnerPasswordWindow()
-      if (!opened.ok) {
-        setError(opened.message)
-        return
-      }
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        const state = await loadRemoteAccessState()
-        setOwnerPasswordOwnerSet(state.ownerPasswordOwnerSet)
-        if (!state.ownerPasswordOwnerSet) continue
-        const restart = await restartAfterOwnerPasswordSet()
-        if (!restart.ok) {
-          setError(restart.message)
-          return
-        }
-        setError("Owner password saved. DataConnect is restarting.")
-        return
-      }
-      setError("The owner password window is still waiting. Save the password there, then try again.")
-    } catch (reason) {
-      setError(String(reason))
-    } finally {
-      setWaitingForOwnerPassword(false)
-      setBusy(false)
-    }
-  }
-
-  /**
-   * Resubmits `pendingRiskyConfig` exactly as it was built, plus the
-   * acknowledgement flag the route requires to bypass its own 409. Runs the
-   * SAME success handling every direct `performSave` call does (drop a
-   * submitted token from state, clear `pendingPosture`, start the
-   * connection poll for Cloudflare) by re-deriving which provider this was
-   * and calling the matching cleanup. All three providers can reach this
-   * path: `user_supplied_origin` has no credential to drop but its origin
-   * can still change under a remote owner, which is exactly the case
-   * `wouldDisconnectRemoteOwner` also flags for it.
-   */
-  const confirmRiskyChangeAndSave = () => {
-    if (!pendingRiskyConfig) return
-    const { config: nextConfig, providerCredential } = pendingRiskyConfig
-    setPendingRiskyConfig(null)
-    setBusy(true)
-    setError(null)
-    void saveRemoteAccessConfig(nextConfig, providerCredential, true)
-      .then(result => {
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        setConfig(asConfig(result.config))
-        setPendingPosture(null)
-        if (nextConfig.provider === "cloudflare_tunnel") {
-          setCloudflareToken("")
-          cloudflareTunnelConnection.start()
-        } else if (nextConfig.provider === "ngrok") {
-          setAuthtoken("")
-        }
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusy(false))
-  }
-
-  /**
-   * Pin or unpin the console port alone. Credential-free on purpose: the
-   * provider does not change, so the owner is not asked for a token again.
-   * Resolves to an error message for `ConsolePortSetting` to show, or `null`.
-   */
-  const pinConsolePort = async (port: number | null): Promise<string | null> => {
-    setBusy(true)
-    try {
-      const result = await saveConsolePort(port)
-      if (!result.ok) return result.message
-      const saved = asConfig(result.config)
-      setConfig(saved)
-      setPinnedPort(saved.console_port != null ? String(saved.console_port) : "")
-      return null
-    } catch (reason) {
-      return String(reason)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const enablePublicUrl = () => {
-    const option = publicUrlOptionById(optionId)
-    if (!option) {
-      setError("Choose how this Personal Server should be reachable.")
-      return
-    }
-    // Every provider carries the pin: a Cloudflare dashboard route targets
-    // a fixed port exactly like an owner's proxy does.
-    const portValidation = validatePinnedConsolePort(pinnedPort)
-    if (!portValidation.ok) {
-      setError(portValidation.message)
-      return
-    }
-
-    if (option.provider === "user_supplied_origin") {
-      if (!configuredOriginValidation.ok) {
-        setError(configuredOriginValidation.message)
-        return
-      }
-      const nextConfig: RemoteAccessConfig = {
-        posture: "public_url",
-        provider: "user_supplied_origin",
-        fields: configuredOriginValidation.fields,
-        console_port: portValidation.port,
-      }
-      performSave(nextConfig, undefined, () => {
-        setPendingPosture(null)
-      })
-      return
-    }
-
-    if (option.provider === "cloudflare_tunnel") {
-      if (cloudflareTunnelUnavailable) {
-        setError(
-          cloudflareTunnelInspection?.reason ??
-            "Cloudflare Tunnel is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
-        )
-        return
-      }
-      if (!cloudflareToken.trim()) {
-        setError("Paste your Cloudflare tunnel token to continue.")
-        return
-      }
-      const hostname = validateCloudflareTunnelHostname(cloudflareHostname)
-      if (!hostname.ok) {
-        setError(hostname.message)
-        return
-      }
-      // The hostname is already the durable origin -- unlike ngrok, there is
-      // no discovery step. The four fields are left empty here anyway: the
-      // reference server's validator (`validateCloudflareTunnelConfig`,
-      // `reference-implementation/server/remote-access-config.ts`) derives
-      // and persists PDPP_REFERENCE_ORIGIN/PDPP_TRUSTED_HOSTS from the
-      // hostname itself, so the console never needs to compute or echo back
-      // a value it has no way to construct correctly.
-      const nextConfig: RemoteAccessConfig = {
-        posture: "public_url",
-        provider: "cloudflare_tunnel",
-        fields: offRemoteAccessConfig().fields,
-        cloudflare_tunnel: { hostname: hostname.hostname },
-        console_port: portValidation.port,
-      }
-      performSave(nextConfig, cloudflareToken.trim(), () => {
-        setPendingPosture(null)
-        // The token is now sealed at rest and only the desktop host's
-        // config watcher can decrypt it; drop the copy here.
-        setCloudflareToken("")
-        // The saved config's PDPP_REFERENCE_ORIGIN is the address cloudflared
-        // will serve once connected, not proof it IS connected yet -- the
-        // desktop host's config watcher still has to restart the stack and
-        // spawn cloudflared, which can take real time. Poll for the actual
-        // connection outcome (`CloudflareTunnelConnectionBanner`, rendered
-        // in BOTH this form and the steady-state summary below, survives
-        // `pendingPosture` clearing) instead of letting the collapsing form
-        // make a real "still connecting" state look like silent success.
-        cloudflareTunnelConnection.start()
-      })
-      return
-    }
-
-    if (ngrokUnavailable) {
-      setError(
-        ngrokInspection?.reason ??
-          "ngrok is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
-      )
-      return
-    }
-    if (!authtoken.trim()) {
-      setError("Paste your ngrok authtoken to continue.")
-      return
-    }
-    const domain = validateNgrokDomain(ngrokDomain)
-    if (!domain.ok) {
-      setError(domain.message)
-      return
-    }
-    // ngrok is assigned its hostname by the edge at start, so the four
-    // fields stay empty until the adapter reports the origin.
-    const nextConfig: RemoteAccessConfig = {
-      posture: "public_url",
-      provider: "ngrok",
-      fields: offRemoteAccessConfig().fields,
-      ngrok: {
-        endpoint_mode: option.ngrokMode ?? "https_edge_termination",
-        reserved_domain: domain.domain,
+  // One loop for the page: each finished check schedules the next, and two
+  // failures in a row end it with a message for the owner.
+  const runRecheckRef = useRef(runRecheck);
+  runRecheckRef.current = runRecheck;
+  const recheckLoop = useRef<ReturnType<typeof createRecheckLoop> | null>(null);
+  if (recheckLoop.current === null) {
+    recheckLoop.current = createRecheckLoop({
+      run: (target) => runRecheckRef.current(target.id, target.generation),
+      giveUp: (id, code) => {
+        if (!mounted.current) return;
+        const route = stateNow.current.routes.find((item) => item.handle.id === id);
+        setRecheckFailure((current) => ({ ...current, [id]: { code, observedAt: route?.verification.observedAt ?? null } }));
       },
-      console_port: portValidation.port,
-    }
+      now: () => Date.now(),
+      setTimer: (callback, ms) => setTimeout(callback, ms),
+      clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    });
+  }
+  useEffect(() => () => recheckLoop.current?.stop(), []);
+  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
+  const recheckGeneration = recheckTarget?.route.handle.generation ?? 0;
+  const recheckWindow = recheckTarget?.key ?? "";
+  const recheckWait = recheckTarget?.delay ?? 0;
+  useEffect(() => {
+    recheckLoop.current?.track(
+      recheckId === null ? null : { id: recheckId, generation: recheckGeneration, key: recheckWindow, delay: recheckWait }
+    );
+  }, [recheckId, recheckGeneration, recheckWindow, recheckWait]);
 
-    performSave(nextConfig, authtoken.trim(), () => {
-      setPendingPosture(null)
-      // The authtoken is now sealed at rest and only the desktop host's
-      // config watcher can decrypt it (see the module doc comment); drop
-      // the copy here.
-      setAuthtoken("")
-    })
+  // `accepted` runs only once the host has accepted the stop. A refused stop
+  // leaves the route where it was, still needing the owner and still re-checked.
+  async function stopRoute(route: Route, accepted: () => void, farAway = false) {
+    // Said before the request: the tunnel may close before a reply comes back.
+    if (farAway) setClosingPage(true);
+    await turnOff(async () => {
+      let pending: { operationId: string };
+      try {
+        pending = await send<{ operationId: string }>(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
+          generation: route.handle.generation,
+          acknowledgeDisconnect: true,
+        });
+      } catch (failure) {
+        // From far away, a request that dies because the address closed is the expected end.
+        if (farAway && !(failure instanceof ReachabilityFailure)) return;
+        setClosingPage(false);
+        throw failure;
+      }
+      accepted();
+      // The reply came back, so this page is still here to show the result.
+      setClosingPage(false);
+      setAcknowledged((current) => new Set(current).add(route.handle.id));
+      setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
+    });
+  }
+  // Turn off, Turn off and on, Turn on again: ask first only when this page came in through the address.
+  function requestStop(route: Route, again: boolean) {
+    if (isOpenThroughRoute(window.location.origin, route.origin)) {
+      setConfirmStop({ route, again });
+      return;
+    }
+    void (again ? turnOnAgain(route) : turnOffRoute(route));
+  }
+  function turnOffRoute(route: Route, farAway = false) {
+    return stopRoute(
+      route,
+      () => {
+        setSeenAddress(null);
+        againPending.current = null;
+      },
+      farAway
+    );
+  }
+  // Turn off, then turn on again on the facts the host recorded as approved for this route.
+  // If they changed, or the host has no record, the owner reviews and clicks.
+  function turnOnAgain(route: Route, farAway = false) {
+    return stopRoute(
+      route,
+      () => {
+        setSeenAddress(route.origin ? { origin: route.origin, changed: false } : null);
+        againPending.current = { approvedDigest: route.approvedConsentFactsDigest };
+      },
+      farAway
+    );
+  }
+  // Same operation id: the host checks the route it already has and starts nothing new.
+  async function retryOperation(current: Operation) {
+    await checkIt(async () => {
+      await send(`/operations/${encodeURIComponent(current.operationId)}/reconcile`, {
+        action: "check",
+        acknowledgeDisconnect: true,
+      });
+      const [operationResult, stateResult] = await Promise.all([
+        request(`/operations/${encodeURIComponent(current.operationId)}`),
+        request("/state"),
+      ]);
+      if (operationResult.ok) {
+        setOperation({ ...(operationResult.data as Operation), kind: (operationResult.data as Operation).kind ?? current.kind });
+      }
+      if (stateResult.ok) setState(stateResult.data as State);
+    });
   }
 
+  // After it failed or after Cancel: Off and a fresh review, once the owner asks.
+  function startOver() {
+    setOperation(null);
+    setCancel(null);
+    setPrepRun((n) => n + 1);
+  }
+
+  // After the desktop restarts for a new password it reopens this card by its
+  // fragment. Remember that once, then clear the fragment.
+  const [returnedFromPassword] = useState(
+    () => typeof window !== "undefined" && window.location.hash === "#remote-access"
+  );
+  useEffect(() => {
+    if (returnedFromPassword) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, [returnedFromPassword]);
+  async function setPassword() {
+    // The native shell reads this address before it restarts, so the card is
+    // reopened afterwards.
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#remote-access`);
+    await change(async () => {
+      const result = await requestOwnerPasswordWindowAction();
+      if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
+    }, "change");
+  }
+  // A route turned off and replaced is history: the newest one is the card.
+  // One the owner turned off shows its Off card once, right after the stop, and
+  // a reload shows the start card. A route that ended with no owner stop stays.
+  const visibleRoutes = listedRoutes(state.routes, [...acknowledged], (route) => headlineOf(route) !== "Off");
+  const onOrigin =
+    visibleRoutes.find(
+      (route) => route.origin !== null && headlineOf(route) === "On" && route.cleanup.state !== "confirmed"
+    )?.origin ?? null;
+  useEffect(() => {
+    if (onOrigin === null) {
+      return;
+    }
+    setSeenAddress((current) =>
+      current?.origin === onOrigin ? current : { origin: onOrigin, changed: current !== null }
+    );
+  }, [onOrigin]);
+  // Until the effect above records a new address, a different one already counts as changed.
+  const addressChanged =
+    onOrigin !== null && seenAddress !== null && (seenAddress.origin !== onOrigin || seenAddress.changed);
+  // What the buttons on an error do. None of them reload the page.
+  const refresh = () => {
+    setError(null);
+    setPrepError(null);
+    void loadRef.current?.();
+    setPrepRun((n) => n + 1);
+  };
+  const recover: Recover = {
+    request,
+    onTryAgain: refresh,
+    onRefresh: refresh,
+    onTryAnotherWay: () => {
+      setError(null);
+      setPrepError(null);
+      chooseAnotherWay();
+    },
+  };
+  const desktopControlsAbsent = !host.known && host.reason === "host-supervisor-unavailable";
+  const hostReasonShown = !host.known && host.reason !== "loading" && !desktopControlsAbsent;
+  const localOnly = !desktopControlsAbsent && !(state.lifecycle?.confinement?.known && state.lifecycle.confinement.value === false);
+  const journalWarning = state.recovery?.pending
+    ? "Checking addresses from before the restart. An earlier address may still work."
+    : state.recovery?.blockedBy
+      ? "An earlier address may still work. Check remote access before starting another route."
+      : journalUnreadableWarning(state.journalUnreadable, state.journalScan);
+  const possiblyLive = Boolean(journalWarning) || state.lifecycle?.cleanup === "unconfirmed";
+  const serviceLabel = wayLabel ?? "the service";
+  const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
-    <div className="grid gap-3">
-      <div className="grid gap-1">
-        <p className="pdpp-caption text-muted-foreground">
-          Choose how this Personal Server can be reached. Remote access keeps
-          the server bound to 127.0.0.1 and requires an owner password.
-        </p>
-        {loadState === "loading" ? (
-          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-            Reading the current remote access state…
-          </p>
-        ) : null}
-        {loadState === "failed" ? (
-          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-            The current remote access state could not be read, so it is not
-            shown. The setting below is unavailable rather than assumed off.
-          </p>
-        ) : null}
-        <LiveReadAt updatedAt={remoteAccess.dataUpdatedAt} />
-        {loadState === "loaded" && inspection?.availability === "unavailable" ? (
-          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-            {inspection?.reason ??
-              "Remote access is only available in the DataConnect desktop app."}
-          </p>
-        ) : null}
-      </div>
-
-      <div
-        aria-label="Remote access posture"
-        className="grid gap-2"
-        role="radiogroup"
-      >
-        {postureRows.map(row => {
-          // No row is selected until a real config has been read.
-          const selected = stateIsKnown && config.posture === row.posture
-          const unavailable =
-            row.posture === "my_devices_only" && myDevicesOnlyUnavailable
-          return (
-            <label
-              className={cn(
-                "grid gap-2 rounded-md border px-3 py-3 transition-colors",
-                selected
-                  ? "border-foreground/50 bg-muted/30"
-                  : "border-border/70",
-                unavailable || desktopUnavailable
-                  ? "cursor-not-allowed opacity-60"
-                  : "cursor-pointer"
-              )}
-              key={row.posture}
+    <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
+    {/* The page's Section already names this card; no second heading here. */}
+    <section aria-label="Remote access" className="grid gap-4">
+      {confirmStop ? (
+        <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
+          <p className="text-sm font-medium">You're using this address now. Turning it off will close this page.</p>
+          <div className="flex flex-wrap gap-3">
+            <Button
+              onClick={() => {
+                const { route, again } = confirmStop;
+                setConfirmStop(null);
+                void (again ? turnOnAgain(route, true) : turnOffRoute(route, true));
+              }}
+              type="button"
             >
-              <span className="flex items-start gap-3">
-                <input
-                  aria-label={row.label}
-                  checked={selected}
-                  disabled={busy || unavailable || desktopUnavailable}
-                  name="remote-access-posture"
-                  onChange={() => choosePosture(row.posture)}
-                  type="radio"
-                />
-                <span className="grid min-w-0 flex-1 gap-1">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="pdpp-caption font-medium text-foreground">
-                      {row.label}
-                    </span>
-                    <span className="pdpp-caption rounded-full border border-border/80 px-2 py-0.5 text-muted-foreground">
-                      {privacyBadgeForPosture(row.posture)}
-                    </span>
-                  </span>
-                  <span className="pdpp-caption text-muted-foreground">
-                    {row.description}
-                  </span>
-                </span>
-              </span>
-            </label>
-          )
-        })}
-      </div>
-
-      {stateIsKnown && config.posture === "my_devices_only" ? (
-        <div
-          className="grid gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-3"
-          role="alert"
-        >
-          <p className="pdpp-caption font-medium text-destructive">
-            This Personal Server is reachable from every device on this
-            network.
-          </p>
-          <p className="pdpp-caption text-muted-foreground">
-            No third party is involved and nothing is relayed off this
-            network, but the owner password is the only thing standing
-            between this network and the Personal Server. Do not enable this
-            on a network you do not trust (shared Wi-Fi, a coffee shop, a
-            workplace you do not administer).
-          </p>
-          <p className="break-all font-mono text-xs text-foreground/80">
-            {myDevicesOnlyInspection?.availability === "available"
-              ? `http://${myDevicesOnlyInspection.reason}${
-                  effectiveConsolePort != null ? `:${effectiveConsolePort}` : ""
-                }`
-              : "Detecting this machine's network address…"}
-          </p>
+              Turn off
+            </Button>
+            <Button onClick={() => setConfirmStop(null)} type="button" variant="outline">
+              Cancel
+            </Button>
+          </div>
         </div>
       ) : null}
-
-      {stateIsKnown && config.posture === "public_url" ? (
-        <div className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="pdpp-caption font-medium text-foreground">
-              {runningOption?.label ?? "Public URL"}
-            </span>
-            <span
-              className={cn(
-                "pdpp-caption rounded-full border px-2 py-0.5",
-                runningOption?.badge === "Provider can read your data"
-                  ? "border-destructive/50 text-destructive"
-                  : "border-border/80 text-muted-foreground"
-              )}
-            >
-              {/* Never blank and never "unknown" for an active provider. */}
-              {runningOption?.badge ?? "Provider can read your data"}
-            </span>
-          </div>
-          <p className="pdpp-caption text-muted-foreground">
-            {runningOption?.description ??
-              "DataConnect does not operate this connection."}
+      {closingPage ? <p className="text-sm" role="status">Turning off… this page will stop working in a moment.</p> : null}
+      {passwordMissing ? (
+        <div className="grid gap-2 rounded-xl border p-4">
+          <h3 className="pdpp-label">Step 1: Set a password</h3>
+          <p className="max-w-prose text-sm">
+            Once remote access is on, anyone with your address can reach the sign-in page. Your password is the only
+            thing stopping them, so choose one first.
           </p>
-          {originDisplay.kind === "error" ? (
-            <div
-              className="grid gap-1 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2"
-              role="alert"
-            >
-              <p className="pdpp-caption text-destructive">
-                {originDisplay.guidance.message}
-              </p>
-              {originDisplay.guidance.suggestSwitchTo === "ngrok_https_edge_termination" ? (
-                <button
-                  className="justify-self-start rounded-md border border-destructive/50 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
-                  disabled={busy || desktopUnavailable}
-                  onClick={switchToNgrokHttps}
-                  type="button"
-                >
-                  Switch to ngrok — HTTPS
-                </button>
-              ) : null}
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={busy || stale} onClick={() => void setPassword()} type="button">
+              Set password
+            </Button>
+          </div>
+        </div>
+      ) : returnedFromPassword ? (
+        <p className="text-sm" role="status">Password saved ✓ Step 2: turn on.</p>
+      ) : null}
+      {way?.detection ? <p role="status">
+        {way.detection.checkedAt ? `Provider checked ${formatLocalTime(way.detection.checkedAt)}${way.detection.fresh ? "" : " (stale)"}.` : "Provider has not been checked."}
+      </p> : null}
+      <RecoveryContext.Provider value={recover}>
+        {error ? <ErrorNotice error={error} /> : null}
+        {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}
+      </RecoveryContext.Provider>
+      {stale ? (
+        <div className="grid gap-1" role="status">
+          <p className="text-sm text-muted-foreground">
+            {noAnswer
+              ? "Can't reach DataConnect's background service. Changes are paused."
+              : "Changes are paused until remote access can be checked."}
+          </p>
+          {noAnswer ? (
+            <Diagnostics>
+              <pre className="whitespace-pre-wrap break-words">{diagnosticsText(noAnswer, appVersion)}</pre>
+            </Diagnostics>
+          ) : null}
+        </div>
+      ) : null}
+      {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
+      {state.lifecycle?.cleanup === "unconfirmed" ? (
+        <p className="text-sm text-muted-foreground" role="status">{CLEANUP_UNCONFIRMED}</p>
+      ) : null}
+      {inventory ? null : (
+        <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
+      )}
+      {inventory?.earlierSetup === "needs_reentry" ? (
+        <p className="text-sm text-muted-foreground">An earlier setup was saved by an older version. Enter it again to turn remote access on.</p>
+      ) : null}
+      {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
+      {state.recovery?.actions.includes("check") ? (
+        <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
+      ) : null}
+      {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
+        <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
+      ) : null}
+      {idle && !passwordMissing ? (
+        <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
+          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
+          <div className="grid gap-4 p-4">
+            <div className="grid gap-1">
+              <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
+              <h3 className="text-base font-semibold">Turn on</h3>
             </div>
-          ) : config.provider === "cloudflare_tunnel" &&
-            cloudflareTunnelConnection.status.phase !== "idle" ? (
-            // Grounded in the same real "Registered tunnel connection"
-            // signal the form above polls for (`CloudflareTunnelConnectionBanner`),
-            // not a static line -- this is what stays on screen once
-            // `pendingPosture` clears and the form collapses, which is
-            // exactly when an owner who just saved needs to see progress
-            // instead of a state that never updates itself. `idle` is
-            // excluded deliberately: it means no poll ever ran this session
-            // (a normal page load of an ALREADY-connected tunnel, since the
-            // load effect above only calls `start()` when the origin is
-            // still missing) -- falling through to the plain origin line
-            // below is correct there, not a gap.
-            <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
-          ) : (
-            <p className="break-all font-mono text-xs text-foreground/80">
-              {originDisplay.kind === "origin"
-                ? originDisplay.origin
-                : "Waiting for the provider to report an address…"}
-            </p>
-          )}
-          {originDisplay.kind === "origin" ? (
-            // Where the address actually leads, from the supervisor's
-            // origin-proof probe, and what the owner must do about it, from
-            // the provider's own `binding` answer. This replaced a
-            // Cloudflare-only line claiming "any port -- DataConnect connects
-            // the tunnel to the right one itself", which is false for a
-            // dashboard-managed tunnel: its route overrides the port
-            // DataConnect passes.
-            <OriginVerificationStatus
-              consolePort={effectiveConsolePort}
-              display={originVerification}
-              origin={originDisplay.origin}
-            />
-          ) : null}
-          {effectiveConsolePort != null ? (
-            // One control for every provider: where the console listens,
-            // whether that survives a restart, and the pin. Rendered from
-            // `consolePortStatus`, not the provider id -- see
-            // `ConsolePortSetting`'s doc comment.
-            <ConsolePortSetting
-              busy={busy}
-              onPin={pinConsolePort}
-              pinnedPort={config.console_port ?? null}
-              status={consolePortStatus({
-                pinnedPort: config.console_port ?? null,
-                runningPort: effectiveConsolePort,
-                stablePort: stableConsolePort,
-              })}
-            />
-          ) : null}
-          <button
-            className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-            disabled={busy || desktopUnavailable}
-            onClick={() => choosePosture("public_url")}
-            type="button"
-          >
-            Change how this is reachable
-          </button>
-        </div>
-      ) : null}
-
-      {error ? (
-        <p
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-          role="alert"
-        >
-          {error}
-        </p>
-      ) : null}
-
-      {showOwnerPasswordMigrationBanner ? (
-        <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          <p>
-            Remote access is on with the original generated password. Change it
-            when you are ready.
-          </p>
-          <button
-            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100"
-            disabled={busy || desktopUnavailable}
-            onClick={() => void setOwnerPasswordForMigration()}
-            type="button"
-          >
-            Change password
-          </button>
-        </div>
-      ) : null}
-
-      {pendingRiskyConfig ? (
-        <div
-          aria-label="Confirm a change that could disconnect you"
-          className="grid gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-3"
-          role="alertdialog"
-        >
-          <p className="pdpp-caption font-semibold text-destructive">
-            This could disconnect you
-          </p>
-          <p className="pdpp-caption text-foreground/90">
-            You reached this settings page through the tunnel this change
-            would replace. If the new settings do not work, you will need
-            physical access to this machine to recover — there is no other
-            way back in. Double-check the token and hostname above before
-            continuing.
-          </p>
-          <div className="flex gap-2">
-            <button
-              className="justify-self-start rounded-md border border-destructive/60 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
-              disabled={busy}
-              onClick={confirmRiskyChangeAndSave}
-              type="button"
-            >
-              Save anyway
-            </button>
-            <button
-              className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-              disabled={busy}
-              onClick={() => setPendingRiskyConfig(null)}
-              type="button"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {pendingPosture === "public_url" ? (
-        <div
-          aria-label="Choose how this Personal Server is reachable"
-          className="grid gap-3 rounded-md border border-foreground/20 bg-background px-3 py-3"
-          role="dialog"
-        >
-          <div className="grid gap-1">
-            <h3 className="pdpp-caption font-semibold text-foreground">
-              Choose a Public URL provider
-            </h3>
-            <p className="pdpp-caption text-muted-foreground">
-              You are already signed in as the owner, so no separate password
-              is needed here.
-            </p>
-          </div>
-          <div
-            aria-label="Public URL provider"
-            className="grid gap-2"
-            role="radiogroup"
-          >
-            <span className="pdpp-caption font-semibold text-foreground">
-              How should it be reachable?
-            </span>
-            {publicUrlOptions.map(option => {
-              const chosen = optionId === option.id
-              // Only ngrok and the Cloudflare tunnel can be unavailable
-              // independent of the whole Public URL flow (see
-              // `ngrokUnavailable`/`cloudflareTunnelUnavailable` above) -- a
-              // proxy the owner runs has no native dependency and is never
-              // disabled by this check.
-              const rowUnavailable =
-                (option.provider === "ngrok" && ngrokUnavailable) ||
-                (option.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
-              return (
-                <label
-                  className={cn(
-                    "grid gap-1 rounded-md border px-3 py-2",
-                    chosen
-                      ? "border-foreground/50 bg-muted/30"
-                      : "border-border/70",
-                    rowUnavailable || waitingForOwnerPassword ? "cursor-not-allowed opacity-60" : "cursor-pointer"
-                  )}
-                  key={option.id}
-                >
-                  <span className="flex items-start gap-3">
-                    <input
-                      aria-label={option.label}
-                      checked={chosen}
-                      disabled={busy || rowUnavailable || waitingForOwnerPassword}
-                      name="public-url-option"
-                      onChange={() => {
-                        setOptionId(option.id)
-                        setError(null)
-                      }}
-                      type="radio"
-                    />
-                    <span className="grid min-w-0 flex-1 gap-1">
-                      <span className="flex flex-wrap items-center gap-2">
-                        <span className="pdpp-caption font-medium text-foreground">
-                          {option.label}
-                        </span>
-                        <span
-                          className={cn(
-                            "pdpp-caption rounded-full border px-2 py-0.5",
-                            option.badge === "Provider can read your data"
-                              ? "border-destructive/50 text-destructive"
-                              : "border-border/80 text-muted-foreground"
-                          )}
-                        >
-                          {option.badge}
-                        </span>
-                      </span>
-                      <span className="pdpp-caption text-muted-foreground">
-                        {option.description}
-                      </span>
-                      {option.planNote ? (
-                        <span className="pdpp-caption text-muted-foreground/80">
-                          {option.planNote}
-                        </span>
-                      ) : null}
-                      {rowUnavailable ? (
-                        <span className="pdpp-caption text-destructive">
-                          {option.provider === "cloudflare_tunnel"
-                            ? cloudflareTunnelInspection?.reason ??
-                              "Cloudflare Tunnel needs the DataConnect desktop app."
-                            : ngrokInspection?.reason ??
-                              "ngrok needs the DataConnect desktop app."}
-                        </span>
-                      ) : null}
-                      {!rowUnavailable && option.provider === "cloudflare_tunnel" ? (
-                        <CloudflaredBinaryStatus
-                          missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
-                        />
-                      ) : null}
-                    </span>
-                  </span>
-                </label>
-              )
-            })}
-          </div>
-
-          {selectedOption?.provider === "ngrok" ? (
-            <>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-authtoken"
-              >
-                ngrok authtoken
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-authtoken"
-                  onChange={event => setAuthtoken(event.currentTarget.value)}
-                  spellCheck={false}
-                  type="password"
-                  value={authtoken}
-                />
-                <span className="pdpp-caption text-muted-foreground">
-                  ngrok has no sign-in flow an app can complete for you, so this
-                  is a one-time copy and paste. DataConnect stores it in your
-                  system keychain and does not ask again.{" "}
-                  <OpenExternalLink
-                    className="underline"
-                    href="https://dashboard.ngrok.com/get-started/your-authtoken"
-                  >
-                    Open your ngrok authtoken page
-                  </OpenExternalLink>
-                  . You can sign up with Google or GitHub.
-                </span>
-              </label>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-ngrok-domain"
-              >
-                Your ngrok domain
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-ngrok-domain"
-                  onChange={event =>
-                    setNgrokDomain(event.currentTarget.value)
-                  }
-                  placeholder="your-name.ngrok-free.app"
-                  spellCheck={false}
-                  type="text"
-                  value={ngrokDomain}
-                />
-                {ngrokDurableAddress.kind === "available" ? (
-                  <span className="pdpp-caption text-muted-foreground">
-                    Saved. This stays your address across restarts, on the
-                    free plan or a paid one.
-                  </span>
-                ) : (
-                  <span className="pdpp-caption text-muted-foreground">
-                    Every ngrok account — including the free plan — is
-                    assigned one stable domain at signup, at no cost. This app
-                    cannot look yours up automatically, so paste it here. Find
-                    yours at{" "}
-                    <span className="select-all font-mono">
-                      dashboard.ngrok.com/domains
-                    </span>
-                    . Leaving this empty gets a brand-new random hostname
-                    every time DataConnect restarts.
-                  </span>
-                )}
-              </label>
-            </>
-          ) : null}
-
-          {selectedOption?.provider === "cloudflare_tunnel" ? (
-            <>
-              <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
-                <CloudflareTunnelDomainRequirement />
-                <CloudflaredBinaryStatus
-                  missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
-                />
-              </div>
-              {/* A <details> disclosure, not an always-visible block: the
-                  five-step dashboard walkthrough is real, necessary
-                  guidance for someone who has never created a Cloudflare
-                  tunnel, but rendering it unconditionally, ahead of the
-                  fields it explains, is exactly the "wall of text" an
-                  owner skims past without reading -- confirmed live this
-                  mattered (Tim: "that page is a wall of text"). Collapsed
-                  by default so the visible surface for someone who already
-                  knows what to do is just the two fields below; the full
-                  steps are one click away, not a scroll away. */}
-              <details className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
-                <summary className="cursor-pointer pdpp-caption font-medium text-foreground/90">
-                  New to Cloudflare Tunnel? Show the setup steps
-                </summary>
-                <div className="pt-1">
-                  <CloudflareTunnelSetupSteps />
+            {inventory && recommended ? (
+              <RecommendedWay
+                checked={wayId === recommended.providerId}
+                disabled={mutationBlocked}
+                onPick={pickWay}
+                row={wayRow(recommended, capabilities, blocks)}
+              />
+            ) : null}
+            {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
+            {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
+            {done?.kind === "allow" && declined !== wayId ? (
+              <AllowCard
+                action={done.action}
+                busy={mutationBlocked}
+                draft={done.draft}
+                onAllow={(action, input) => void allow(done.draft, action, input)}
+                onOther={chooseAnotherWay}
+              />
+            ) : null}
+            {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
+              // A step the page cannot show as a sign-in: never a blank card.
+              <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+                <p className="text-sm" role="status">{SERVICE_DETAILS}</p>
+                <div className="flex flex-wrap gap-3">
+                  <Button disabled={busy} onClick={refresh} type="button">
+                    Try again
+                  </Button>
                 </div>
-              </details>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-cloudflare-token"
-              >
-                Cloudflare tunnel token
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-cloudflare-token"
-                  onChange={event => setCloudflareToken(event.currentTarget.value)}
-                  spellCheck={false}
-                  type="password"
-                  value={cloudflareToken}
-                />
-                <CloudflareTunnelTokenStatus token={cloudflareToken} />
-                <span className="pdpp-caption text-muted-foreground">
-                  Create a tunnel in the Cloudflare dashboard, then copy its
-                  token here. DataConnect stores it in your system keychain
-                  and does not ask again.{" "}
-                  <OpenExternalLink className="underline" href={CLOUDFLARE_TUNNEL_SETUP_URL}>
-                    Open the Cloudflare Tunnel walkthrough
-                  </OpenExternalLink>
-                  .
-                </span>
-              </label>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-cloudflare-hostname"
-              >
-                Your tunnel hostname
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-cloudflare-hostname"
-                  onChange={event => setCloudflareHostname(event.currentTarget.value)}
-                  placeholder="vault.example.com"
-                  spellCheck={false}
-                  type="text"
-                  value={cloudflareHostname}
-                />
-                <span className="pdpp-caption text-muted-foreground">
-                  A subdomain of a domain on your Cloudflare account, e.g.{" "}
-                  <span className="select-all font-mono">vault.example.com</span> — not a
-                  name Cloudflare picks for you. It stays your address across restarts. A
-                  token and hostname that belong to different tunnels will still let
-                  cloudflared connect, but requests to this hostname will 404 — double
-                  check both came from the same tunnel in the dashboard.
-                </span>
-              </label>
-              <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
-            </>
-          ) : null}
-
-          {selectedOption?.provider === "user_supplied_origin" ? (
-            <>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-origin"
-              >
-                HTTPS origin
-                <input
-                  autoCapitalize="none"
-                  autoComplete="url"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-origin"
-                  onChange={event => setOrigin(event.currentTarget.value)}
-                  placeholder="https://vault.example.com"
-                  spellCheck={false}
-                  type="url"
-                  value={origin}
-                />
-              </label>
-            </>
-          ) : null}
-          <label
-            className="grid gap-1 pdpp-caption text-foreground"
-            htmlFor="remote-access-pinned-port"
-          >
-            Pin the console port (optional)
-            <input
-              autoComplete="off"
-              className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-              id="remote-access-pinned-port"
-              inputMode="numeric"
-              onChange={event => setPinnedPort(event.currentTarget.value)}
-              placeholder={
-                effectiveConsolePort != null
-                  ? String(effectiveConsolePort)
-                  : "7664"
-              }
-              type="text"
-              value={pinnedPort}
-            />
-            <span className="pdpp-caption text-muted-foreground">
-              {effectiveConsolePort != null
-                ? `Currently running on port ${effectiveConsolePort}. `
-                : ""}
-              DataConnect already keeps this port across restarts, and tells
-              you if another program took it. Pin a port if a proxy or tunnel
-              route must never find the console anywhere else: a pinned port
-              that is taken stops DataConnect from starting instead.
-            </span>
-          </label>
-          <div className="flex flex-wrap justify-end gap-2">
-            <button
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
-              disabled={busy || waitingForOwnerPassword}
-              onClick={cancelPublicUrlDialog}
+              </section>
+            ) : null}
+            {done?.kind === "ready" ? (
+              <TurnOnCard
+                busy={mutationBlocked}
+                changed={changed}
+                key={done.review.id}
+                onTurnOn={(review) => void turnOn(review)}
+                review={done.review}
+                steps={done.steps}
+                wayTitle={wayTitle}
+              />
+            ) : null}
+            {wayId && wayUsage === null ? (
+              <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
+            ) : null}
+            <Button
+              aria-expanded={showOtherWays}
+              className="justify-self-start"
+              disabled={busy}
+              onClick={() => setShowOtherWays((open) => !open)}
               type="button"
+              variant="outline"
             >
-              Cancel
-            </button>
-            <button
-              className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
-              disabled={
-                busy ||
-                (selectedOption?.provider === "ngrok" && ngrokUnavailable) ||
-                (selectedOption?.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
-              }
-              onClick={enablePublicUrl}
-              type="button"
-            >
-              {busy ? "Enabling…" : "Enable"}
-            </button>
+              Other ways
+            </Button>
+            {showOtherWays && inventory ? (
+              <OtherWays
+                blocks={blocks}
+                capabilities={capabilities}
+                disabled={mutationBlocked}
+                inventory={inventory}
+                onPick={pickWay}
+                pickedId={wayId}
+                recommendedId={recommended?.providerId ?? null}
+              />
+            ) : null}
           </div>
-        </div>
+        </section>
       ) : null}
-    </div>
-  )
+      {reservations.map((reservation) => (
+        <ProviderSetup
+          acknowledgeDisconnect
+          disabled={mutationBlocked || passwordMissing}
+          isCurrentWay={() => wayIdNow.current === reservation.providerId}
+          key={reservation.operationId}
+          pollTick={setupTick}
+          reservation={reservation}
+          request={request}
+          onReadiness={() => undefined}
+          onChange={async (view, mutation) => {
+            // A finished or changed setup moves the chain on.
+            if (view.scope.providerId === "tailscale-funnel") {
+              const policy = view.state === "blocked" && view.nextAction?.id === funnelPolicyActionId;
+              setBlocks((current) => {
+                if (!policy) {
+                  if (!("tailscale-funnel" in current)) return current;
+                  const { "tailscale-funnel": _gone, ...rest } = current;
+                  return rest;
+                }
+                return { ...current, "tailscale-funnel": funnelPolicyBlock(view.nextAction?.href) };
+              });
+            }
+            const mark = `${view.operationId}:${view.revision}:${view.state}`;
+            if ((mutation || view.state === "complete") && seenSetup.current !== mark) {
+              seenSetup.current = mark;
+              setPrepRun((n) => n + 1);
+            }
+          }}
+        />
+      ))}
+      {operation && operation.kind === "stop" && outcome === "turning-on" ? (
+        <p className="text-sm" role="status">Turning off…</p>
+      ) : null}
+      {operation && operation.kind !== "stop" && cancel === "stopping" ? <p className="text-sm" role="status">Turning off…</p> : null}
+      {operation && operation.kind !== "stop" && cancel === null && outcome === "turning-on" ? (
+        <TurningOnChecklist
+          busy={busy}
+          onCancel={() => void stopOperation(operation)}
+          service={serviceLabel}
+          step={checklistStep(state.lifecycle?.phase ?? null)}
+        />
+      ) : null}
+      {operation && (cancel === "unconfirmed" || (cancel === null && outcome === "needs-action")) ? (
+        <section aria-label="Needs your action" className="grid gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
+            Needs your action
+          </h3>
+          <p className="text-sm" role="status">
+            {cancel === "unconfirmed"
+              ? "Couldn't confirm remote access is off. This address may still work."
+              : "We lost track of the address. It may still be on."}
+          </p>
+          {cancel === null && operation.failureCode ? <p className="text-sm">{publicError(operation.failureCode).message}</p> : null}
+          {cancel === null && operation.recovery ? <p className="text-sm">{publicError(operation.recovery.reason).message}</p> : null}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={busy || (cancel === null && operation.recovery !== null && !operation.recovery.available)}
+              onClick={() => void stopOperation(operation)}
+              type="button"
+            >
+              {operation.stage === "unknown-possibly-live" && cancel === null ? "Turn off" : "Check and turn off"}
+            </Button>
+            {cancel === null && operation.recovery?.available ? (
+              <Button disabled={busy} onClick={() => void retryOperation(operation)} type="button" variant="outline">
+                Try again
+              </Button>
+            ) : null}
+          </div>
+          {operation.failureCode || operation.recovery ? (
+            <Diagnostics>
+              {operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}
+              {operation.recovery ? <p>Recovery: {operation.recovery.reason}</p> : null}
+            </Diagnostics>
+          ) : null}
+        </section>
+      ) : null}
+      {operation && operation.kind !== "stop" && cancel === null && outcome === "did-not-turn-on" ? (
+        <section aria-label="Did not turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+          <h3 className="pdpp-label">Remote access did not turn on</h3>
+          {operation.failureCode ? <p className="text-sm text-destructive" role="status">{publicError(operation.failureCode).message}</p> : null}
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={busy} onClick={startOver} type="button">
+              Try again
+            </Button>
+          </div>
+          <Diagnostics label="Details for support">{operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}</Diagnostics>
+        </section>
+      ) : null}
+      {runtimeReview ? (
+        <RuntimeRouteConsentCard
+          busy={busy}
+          onApprove={(approval) =>
+            void edit(async () => {
+              await send(`/routes/${encodeURIComponent(runtimeReview.routeId)}/approve`, {
+                generation: runtimeReview.generation,
+                ...approval,
+              });
+              setRuntimeReview(null);
+            })
+          }
+          review={runtimeReview.snapshot}
+        />
+      ) : null}
+      <section aria-label="Your address" className="grid gap-4">
+        {visibleRoutes.map((route) => {
+          const unsupportedRefresh = unsupportedOf(route);
+          const phase = phaseOf(route);
+          const attention = attentionOf(route);
+          const headline = headlineOf(route);
+          const sentence = attention === "cleanup-unconfirmed" ? null : routeSentence(route, headline);
+          const now = Date.now();
+          const { shown: knownFacts, unknown: unknownFacts } = splitFacts(route.facts);
+          const detailsBody = (
+            <>
+              <p className="break-words">
+                Requested target:{" "}
+                {route.hostConfiguration.target.known
+                  ? route.hostConfiguration.target.value
+                  : `Unknown: ${route.hostConfiguration.target.reason}`}
+              </p>
+              <p className="break-words">
+                Observed binding ({route.binding.authority}):{" "}
+                {route.binding.target.known ? route.binding.target.value : `Unknown: ${route.binding.target.reason}`}
+              </p>
+              <p>
+                {state.lifecycle?.stopRequested && state.lifecycle.confinement.known && state.lifecycle.confinement.value
+                  ? "Stopped locally"
+                  : "Local confinement not observed"}{" "}
+                · Cleanup: {route.cleanup.state}
+              </p>
+              <p>
+                Lifecycle: {phase ?? "none"} · route{" "}
+                {route.routeState}
+              </p>
+              <ConsentFacts facts={knownFacts} providerId={route.providerId} />
+              <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
+            </>
+          );
+          const details = <Diagnostics label={`Details · everything ${serviceLabel} tells us about this connection`}>{detailsBody}</Diagnostics>;
+          const extras = (
+            <>
+              {route.binding.remedy ? (
+                <div className="grid gap-2">
+                  <h4 className="pdpp-label">{plain(route.binding.remedy.label)}</h4>
+                  <p className="pdpp-caption whitespace-pre-wrap break-words">
+                    {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
+                  </p>
+                </div>
+              ) : null}
+              {route.cleanup.nextAction ? (
+                <p className="pdpp-caption whitespace-pre-wrap break-words">
+                  {plain(route.cleanup.nextAction.label)}
+                  {route.cleanup.nextAction.supportCode ? <> (support code: {route.cleanup.nextAction.supportCode})</> : null}
+                </p>
+              ) : null}
+            </>
+          );
+          if (headline === "On" && route.cleanup.state !== "confirmed") {
+            // The way the route runs through, from the provider that created it — never the way
+            // the catalog happens to select now.
+            const routeProvider = route.providerId != null ? inventory?.providers.find((item) => item.providerId === route.providerId) : undefined;
+            const onWay = routeProvider
+              ? { title: plain(wayRow(routeProvider, capabilities, blocks).title), provider: plain(routeProvider.label) }
+              : null;
+            return (
+              <OnCard
+                addressChanged={addressChanged && route.origin === onOrigin}
+                busy={busy}
+                key={route.handle.id}
+                now={now}
+                onTurnOff={() => requestStop(route, false)}
+                route={route}
+                synthetic={state.evidenceSource === "synthetic"}
+                way={onWay}
+              >
+                {extras}
+                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
+                  {detailsBody}
+                </Diagnostics>
+              </OnCard>
+            );
+          }
+          const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
+          const needsOwner = headline === "Needs your action";
+          return (
+          <div className="grid gap-3 rounded-xl border p-4" key={route.handle.id}>
+            <h3 className="flex items-center gap-2 text-sm font-medium">
+              <span
+                aria-hidden="true"
+                className={`size-2.5 flex-none rounded-full ${
+                  needsOwner ? "bg-amber-500 ring-4 ring-amber-500/15" : "bg-muted-foreground/50"
+                }`}
+              />
+              {headline}
+            </h3>
+            {sentence ? <p className="text-sm" role="status">{sentence}</p> : null}
+            {attention ? <p className="text-sm text-muted-foreground" role="status">{attentionSentence(attention, route, serviceLabel)}</p> : null}
+            {unsupportedRefresh ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
+            <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
+            {cardProof ? <p className="pdpp-caption">{cardProof}</p> : null}
+            {extras}
+            {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
+              {needsOwner && route.cleanup.state !== "unconfirmed" ? (
+                <Button disabled={busy} onClick={() => requestStop(route, true)} type="button">
+                  {unsupportedRefresh ? "Turn off and on" : "Turn on again"}
+                </Button>
+              ) : null}
+              {state.lifecycle?.phase === "review" && !unsupportedRefresh && !attention ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void edit(async () => {
+                      const snapshot = await send<ReturnType<typeof projectRuntimeReview>>(
+                        `/routes/${encodeURIComponent(route.handle.id)}/review`,
+                        { generation: route.handle.generation }
+                      );
+                      setRuntimeReview({ routeId: route.handle.id, generation: route.handle.generation, snapshot });
+                    })
+                  }
+                  type="button"
+                  variant="outline"
+                >
+                  Review changes
+                </Button>
+              ) : null}
+              {!state.lifecycle?.stopRequested && !unsupportedRefresh && !attention ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void checkIt(async () => {
+                      await send(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
+                        generation: route.handle.generation,
+                      });
+                    })
+                  }
+                  type="button"
+                  variant="outline"
+                >
+                  Check again
+                </Button>
+              ) : null}
+              <Button disabled={busy} onClick={() => requestStop(route, false)} type="button" variant="outline">
+                {attention === "cleanup-unconfirmed" ? "Turn off" : route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
+              </Button>
+            </div> : null}
+            {details}
+          </div>
+          );
+        })}
+      </section>
+      <Diagnostics label="This computer">
+        {Object.entries(capabilities).map(([id, observation]) => (
+          <p key={id}>
+            {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
+          </p>
+        ))}
+        {host.known ? (
+          <>
+            <p>
+              Password:{" "}
+              {host.value.password.known
+                ? host.value.password.value
+                  ? "Set"
+                  : "Not set"
+                : `Unknown: ${host.value.password.reason}`}
+            </p>
+            <p className="break-words">
+              Target: {host.value.target.known ? host.value.target.value : `Unknown: ${host.value.target.reason}`}
+            </p>
+            <div className="grid gap-2">
+              <label className="grid gap-1 text-sm" htmlFor="remote-access-port">
+                Port
+                <Input
+                  className="w-32"
+                  id="remote-access-port"
+                  inputMode="numeric"
+                  onChange={(event) => setPort(event.target.value)}
+                  placeholder={host.value.port.known ? String(host.value.port.value ?? "Unpinned") : "Unknown"}
+                  value={port}
+                />
+              </label>
+              <div className="flex flex-wrap gap-3">
+                <Button
+                  disabled={mutationBlocked}
+                  onClick={() =>
+                    void edit(async () => {
+                      const value = port.trim() === "" ? null : Number(port);
+                      if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
+                        throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
+                      }
+                      const updated = await send<HostSettings>("/host-settings", {
+                        expectedRevision: host.value.revision,
+                        mode: host.value.mode,
+                        port: value,
+                        acknowledgeDisconnect: true,
+                      });
+                      setHost({ known: true, value: updated });
+                    })
+                  }
+                  type="button"
+                  variant="outline"
+                >
+                  Save port
+                </Button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <p>Host settings unavailable: {host.reason}.</p>
+        )}
+        {inventory?.providers.map((item) => (
+          <div key={`${item.providerId}-${item.reach}`}>
+            <p>
+              {item.label} · {item.providerId} · {item.reach} · {item.transport}
+            </p>
+            {Object.entries(item.availability).map(([kind, available]) => (
+              <p key={kind}>
+                {kind}: {available.state}
+                {available.reason ? ` — ${available.reason}` : ""}
+              </p>
+            ))}
+            {item.prerequisites.map((prerequisite) => (
+              <p key={prerequisite.id}>
+                {prerequisite.id}: {prerequisite.state} ·{" "}
+                {prerequisite.version.known ? prerequisite.version.value : prerequisite.version.reason} ·{" "}
+                {prerequisite.observedAt ? formatLocalTime(prerequisite.observedAt) : "not checked"}
+              </p>
+            ))}
+          </div>
+        ))}
+      </Diagnostics>
+    </section>
+    </DiagnosticsContext.Provider>
+  );
 }

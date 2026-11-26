@@ -43,12 +43,12 @@ import { join } from "node:path";
 // carrying a durable DETAIL_GAP.
 import test from "node:test";
 import { type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
-
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Hoisted: the coverage-shortfall explanation the runtime authors, and the
 // connection-scoped denominator the sibling-isolation oracle asserts on.
@@ -60,7 +60,6 @@ const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
-const UNKNOWN_BLOB_MESSAGE_PATTERN = /Connector emitted unknown message type: BLOB/;
 const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (.+)$/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
@@ -188,49 +187,56 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
 
 // Connector-agnostic shape of the live failure: one parent state_stream
 // ("holdings") whose key fans out to two child detail streams.
-const MANIFEST = {
-  connector_id: "coverage-shortfall-regression",
-  display_name: "Coverage Shortfall Regression",
-  manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "holdings",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      name: "activity",
-      primary_key: ["id"],
-      relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
-      schema: {
-        properties: { holding_id: { type: "string" }, id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "coverage-shortfall-regression",
+    display_name: "Coverage Shortfall Regression",
+    manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "holdings",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      coverage_strategy: "parent_detail_accounting",
-      name: "valuations",
-      parent_streams: ["holdings", "activity"],
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        name: "activity",
+        primary_key: ["id"],
+        relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
+        schema: {
+          properties: { holding_id: { type: "string" }, id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+      {
+        coverage_strategy: "parent_detail_accounting",
+        name: "valuations",
+        parent_streams: ["holdings", "activity"],
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression" }
+);
 
 /**
- * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
- * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
- * the crediting it had before the capability existed. The capability is new in
- * Collection Profile 0.2.0, so the manifest declares that version (Section 3.1).
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. The manifest
+ * declaration alone makes a hydrated key need an accepted detail record for it:
+ * the runtime derives that requirement from the manifest, not from START. The
+ * canned connectors below never see the extension in START, so they follow the
+ * base hydrated_keys fallback. MANIFEST, which does not declare the extension,
+ * credits a hydrated key by assertion. The runtime's manifest validation
+ * requires protocol_version 0.2.0 for a manifest that declares the extension.
+ * That is a package rule, not canonical Collection Profile text.
  */
 const KEY_SETS_MANIFEST = {
   ...MANIFEST,
@@ -1273,8 +1279,8 @@ test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capabil
 
 // Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
 // and a known required capability this runtime does not implement fails before
-// any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory and
-// STREAM_EVIDENCE is implemented, so both pass. BLOB is covered separately.
+// any connector code runs. DETAIL_COVERAGE_KEY_SETS and RUN_COVERAGE_V1 are
+// elective; STREAM_EVIDENCE is implemented. BLOB is covered separately.
 test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1290,8 +1296,9 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     [["DETAIL_COVERAGE_KEY_SETS", "FORGED"], UNKNOWN_CAPABILITY_PATTERN, null],
     ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
-    [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
-    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
+    [["OBSERVATION"], null, null],
+    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], null, null],
+    [["RUN_COVERAGE_V1"], null, null],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1319,13 +1326,13 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
 
 // START.protocol_capabilities lists what this runtime implements (Section
 // 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
-// It does not implement BLOB or OBSERVATION, so it does not list them.
+// It also accepts OBSERVATION (Section 5.10) and ingests BLOB through the host spool.
 test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  for (const manifest of [MANIFEST, KEY_SETS_MANIFEST]) {
-    // biome-ignore lint/performance/noAwaitInLoops: each manifest is one isolated run.
+  await [MANIFEST, KEY_SETS_MANIFEST].reduce(async (previous, manifest) => {
+    await previous;
     const { start, thrown } = await runCapturingStart(
       server,
       ownerToken,
@@ -1333,45 +1340,72 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
-  }
+    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"]);
+  }, Promise.resolve());
 });
 
-// BLOB is a runtime-specific extension (Collection Profile Section 7) that this
-// runtime does not implement. chatgpt and anthropic declare it but emit BLOB
-// only for an item over the inline cap, so a declaring connector still starts
-// here. A run that emits no BLOB completes; a run that emits one fails at that
-// line, with the same error as before the capability gate existed.
-test("a 0.1.0 manifest declaring BLOB starts; it completes without BLOB and fails at a BLOB line", async (t) => {
+test("reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.0" };
-  assert.equal(isAdmitted(await registerManifest(server, blobManifest)), true, "the BLOB manifest is admitted");
+  const manifest = {
+    ...MANIFEST,
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    streams: MANIFEST.streams.map((stream) => ({
+      ...stream,
+      coverage_stores: [`${stream.name}-store`],
+    })),
+    version: "1.1.0",
+  };
+  assert.equal(isAdmitted(await registerManifest(server, manifest)), true, "the extension manifest is admitted");
+  const terminalMessages = holdingsRun([]).map((message) =>
+    message.type === "DONE"
+      ? {
+          ...message,
+          coverage: {
+            collection_scope: "unscoped",
+            streams: ["holdings", "activity"].map((stream) => ({
+              scoped: true,
+              stores: [{ status: "collected", store: `run-coverage-${stream}-store` }],
+              stream,
+            })),
+            version: 1,
+          },
+        }
+      : message
+  );
+  const run = await runCapturingStart(server, ownerToken, manifest, terminalMessages);
+  assert.equal(run.thrown, null);
+  assert.ok(run.start, "the connector received START");
+  assert.equal("run_coverage_version" in run.start, false);
+  assert.equal(run.result?.status, "succeeded");
+  const terminalRow = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(run.result?.run_id);
+  assert.ok(terminalRow, "the run has a terminal event");
+  assert.equal(JSON.stringify(JSON.parse(terminalRow.data_json)).includes("run-coverage-"), false);
+});
 
-  const clean = await runCapturingStart(
+test("reference runtime refuses 0.3.0 before spawn until the whole profile is implemented", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const outcome = await runCapturingStart(
     server,
     ownerToken,
-    blobManifest,
-    holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
+    {
+      ...MANIFEST,
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.3.0",
+      streams: MANIFEST.streams.map((stream) => ({ ...stream, coverage_stores: [`${stream.name}-store`] })),
+    },
+    holdingsRun([])
   );
-  assert.equal(clean.thrown, null);
-  assert.ok(clean.start, "the connector received START");
-  assert.equal(clean.start?.protocol_capabilities instanceof Array, true);
-  assert.equal((clean.start?.protocol_capabilities as string[]).includes("BLOB"), false, "START does not offer BLOB");
-  assert.equal(clean.result?.status, "succeeded");
-
-  const blobLine = {
-    file: "blob-1.json",
-    key: "H",
-    mime_type: "application/json",
-    sha256: "a".repeat(64),
-    size_bytes: 2,
-    stream: "holdings",
-    type: "BLOB",
-  };
-  const withBlob = await runCapturingStart(server, ownerToken, blobManifest, [blobLine, ...holdingsRun([])]);
-  assert.ok(withBlob.start, "the connector received START");
-  const failure = withBlob.thrown instanceof Error ? withBlob.thrown.message : JSON.stringify(withBlob.result);
-  assert.match(failure, UNKNOWN_BLOB_MESSAGE_PATTERN);
+  assert.equal(outcome.start, null, "the connector was not spawned");
+  assert.ok(outcome.thrown instanceof Error);
+  assert.match(outcome.thrown.message, /protocol_version must be one of 0\.1\.0, 0\.2\.0/);
 });

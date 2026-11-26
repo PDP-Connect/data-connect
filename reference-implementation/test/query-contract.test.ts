@@ -31,6 +31,7 @@ import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -215,6 +216,7 @@ function setUniqueConnectorKey(manifest: JsonObject, key: string): JsonObject {
   manifest.connector_key = key;
   manifest.connector_id = undefined;
   manifest.manifest_uri = undefined;
+  Object.assign(manifest, withFixtureSourceDeclaration(manifest));
   return manifest;
 }
 
@@ -1814,6 +1816,19 @@ test("owner expansion hydrates declared has_many relations", async () => {
         track_name: "Track 1",
       },
     ]);
+
+    await Promise.all(
+      ["expand[]=recently_played", "expand[0]=recently_played", "expand=recently_played&expand=recently_played"].map(
+        async (expand) => {
+          const accepted = await fetchJson(
+            `${rsUrl}/v1/streams/saved_tracks/records?connector_id=${encodeURIComponent(connectorId)}&${expand}&expand_limit[recently_played]=1`,
+            { headers: { Authorization: `Bearer ${ownerToken}` } }
+          );
+          assert.equal(accepted.status, 200, `${expand}: ${JSON.stringify(accepted.body)}`);
+          assert.equal(accepted.body.data[0].expanded.recently_played.data[0].id, "play_1");
+        }
+      )
+    );
 
     const { status, body } = await fetchJson(
       `${rsUrl}/v1/streams/saved_tracks/records?connector_id=${encodeURIComponent(connectorId)}&expand=recently_played&expand_limit[recently_played]=1`,

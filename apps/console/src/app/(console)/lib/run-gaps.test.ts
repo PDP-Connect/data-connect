@@ -13,6 +13,7 @@ import {
   formatRecoveryHint,
   type KnownGap,
   normalizeKnownGaps,
+  recoveryHintLabel,
   resolvePartialCoverageCue,
   summarizeSkippedStreams,
 } from "./run-gaps.ts";
@@ -163,6 +164,30 @@ test("normalizeKnownGaps and formatRecoveryHint tolerate unknown payloads", () =
   const [gap] = gaps;
   assert.ok(gap);
   assert.equal(formatRecoveryHint(gap), "manual action required");
+});
+
+// Collection Profile 0.2.0, Section 5.11: a connector's hint is shown as its
+// suggestion, never as an instruction.
+test("recoveryHintLabel attributes a connector's hint and hides an absent one", () => {
+  assert.equal(
+    recoveryHintLabel({ kind: "run_failed", reason: "connector_reported_failed", recovery_hint: { action: "refresh_credentials" } }),
+    "connector suggests"
+  );
+  assert.equal(
+    recoveryHintLabel({ kind: "skip_result", reason: "rate_limited", recovery_hint: { action: "retry_by_runtime" } }),
+    "connector suggests"
+  );
+  // The connector sent no hint, so it suggested nothing.
+  assert.equal(
+    recoveryHintLabel({ kind: "run_failed", reason: "connector_reported_failed", recovery_hint: { action: "unknown" } }),
+    null
+  );
+  assert.equal(recoveryHintLabel({ kind: "skip_result", reason: "rate_limited" }), null);
+  // The runtime writes the hint on its own gap kinds.
+  assert.equal(
+    recoveryHintLabel({ kind: "checkpoint_commit", reason: "not_committed", recovery_hint: { action: "retry_by_runtime" } }),
+    "recovery"
+  );
 });
 
 test("normalizeKnownGaps propagates bounded SKIP_RESULT diagnostics object", () => {

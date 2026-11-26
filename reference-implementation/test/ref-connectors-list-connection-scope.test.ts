@@ -46,6 +46,7 @@ import {
 
 process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= "test connector-summary cursor key";
 
+import { recordReceivedHead } from "../server/continuation-budget.ts";
 import type { MiddlewareHandler } from "../server/routes/_route-contract.ts";
 import { type MountRefConnectorsContext, mountRefConnectorsList } from "../server/routes/ref-connectors.ts";
 
@@ -64,6 +65,17 @@ type AppLike = Parameters<typeof mountRefConnectorsList>[0];
 type RouteArgUnion = Parameters<AppLike["get"]>[2];
 type RouteHandler = Exclude<Extract<RouteArgUnion, (...args: never[]) => unknown>, MiddlewareHandler>;
 type RouteRequest = Parameters<RouteHandler>[0];
+
+/** What the transport hands a route: the page route measures it before it reads a page. */
+const WIRE_REQUEST = {
+  httpVersion: "1.1",
+  method: "GET",
+  rawHeaders: ["Host", "127.0.0.1"],
+  // The socket has read exactly this request's head.
+  socket: { bytesRead: "GET /_ref/connectors?limit=1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".length },
+  url: "/_ref/connectors?limit=1",
+};
+recordReceivedHead(WIRE_REQUEST);
 type RouteResponse = Parameters<RouteHandler>[1];
 
 function summaryItem(connectorId: string, connectionId: string = connectorId): RefConnectorsListItem {
@@ -210,7 +222,10 @@ function buildHarness({
     // A refused bare GET responds only via `ctx.pdppError` (see calls.pdppError)
     // and never calls `res.json`, so `invoke` returns `null` rather than
     // asserting an envelope always exists.
-    async invoke(query: Readonly<Record<string, unknown>> = {}): Promise<RefConnectorsListEnvelope | null> {
+    async invoke(
+      query: Readonly<Record<string, unknown>> = {},
+      options: { readonly withTransport?: boolean } = {}
+    ): Promise<RefConnectorsListEnvelope | null> {
       let recorded: RefConnectorsListEnvelope | undefined;
       const res: RouteResponse = {
         end: () => unusedByThisRoute("res.end"),
@@ -230,7 +245,7 @@ function buildHarness({
       if (!handler) {
         throw new Error("mountRefConnectorsList must register a GET handler");
       }
-      const req: RouteRequest = { params: {}, query };
+      const req: RouteRequest = options.withTransport === false ? { params: {}, query } : { params: {}, query, raw: WIRE_REQUEST };
       await handler(req, res);
       return recorded ?? null;
     },
@@ -361,6 +376,16 @@ test("explicit cursor forwards the decoded immutable boundary to the next page",
     ["conn-gh"]
   );
   assert.equal(envelope.has_more, false);
+});
+
+test("a page request without a measurable transport request reads no page and issues no cursor", async () => {
+  const harness = buildHarness({
+    page: { data: [], has_more: true, next_cursor: "rcs1.next" },
+    summaryForRoute: () => assert.fail("unscoped page must not resolve a single connection"),
+  });
+
+  await assert.rejects(harness.invoke({ limit: "1" }, { withTransport: false }), /raw request is unavailable/);
+  assert.equal(harness.calls.listConnectorSummaryPage, 0);
 });
 
 test("scoped connection requests remain unpaginated", async () => {

@@ -8,9 +8,9 @@
  * separately (server/records.ts, server/postgres-records.ts), so each oracle
  * runs over HTTP against both:
  *
- *   - spec-core §4 "Tombstones": a sparse `fields` read keeps the whole
- *     tombstone envelope (object, id, stream, deleted, deleted_at,
- *     emitted_at) and adds no `data`.
+ *   - spec-core §4 "Tombstones": a sparse `fields` read keeps the whole client
+ *     tombstone envelope (object, id, instance_id, stream, deleted), carries no
+ *     `deleted_at` or `emitted_at` (Core "Response records"), and adds no `data`.
  *   - spec-core §8 `fields`: an owner sparse read always includes the
  *     schema-required fields; a client sparse read stays inside the request.
  *   - spec-core §8 query parameters: a malformed `limit` is rejected with
@@ -20,7 +20,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { configureNativeManifest, registerConnector } from "../server/auth.ts";
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -28,6 +27,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { deleteRecord, ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface Backend {
   databaseUrl?: string;
@@ -50,7 +50,7 @@ const CLIENT_ID = "concert_recommendation_app";
 const OWNER_CLIENT_ID = "cli_longview";
 const OWNER_ID = "rs_projection_limit_owner";
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
-const TOMBSTONE_KEYS = ["deleted", "deleted_at", "emitted_at", "id", "object", "stream"];
+const TOMBSTONE_KEYS = ["deleted", "id", "object", "stream"];
 
 function notesStream(): JsonObject {
   return {
@@ -72,16 +72,19 @@ function notesStream(): JsonObject {
 }
 
 function runtimeManifest(connectorKey: string): JsonObject {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: "Records projection and limit",
-    manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: [notesStream()],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: "Records projection and limit",
+      manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: [notesStream()],
+      version: "1.0.0",
+    },
+    { sourceId: `https://implementations.example/connectors/${connectorKey}` }
+  );
 }
 
 function localFulfillment(sourceId: string, connectorKey: string): JsonObject {
@@ -196,7 +199,12 @@ async function assertSparseTombstone(rsUrl: string, clientToken: string, cursor:
   assert.equal(full.status, 200, `${label}: ${JSON.stringify(full.body)}`);
   const [fullTombstone] = full.body.data;
   assert.ok(fullTombstone, `${label}: the delete must produce a tombstone`);
-  assert.deepEqual(Object.keys(fullTombstone).filter((key) => TOMBSTONE_KEYS.includes(key)).sort(), TOMBSTONE_KEYS);
+  assert.deepEqual(
+    Object.keys(fullTombstone)
+      .filter((key) => TOMBSTONE_KEYS.includes(key))
+      .sort(),
+    TOMBSTONE_KEYS
+  );
 
   for (const fields of ["title", "id", "kind,title"]) {
     const sparse = await fetchJson(
@@ -211,8 +219,9 @@ async function assertSparseTombstone(rsUrl: string, clientToken: string, cursor:
     assert.equal(tombstone.id, "n2");
     assert.equal(tombstone.stream, "notes");
     assert.equal(tombstone.deleted, true);
-    assert.ok(typeof tombstone.deleted_at === "string" && tombstone.deleted_at.length > 0);
-    assert.ok(typeof tombstone.emitted_at === "string" && tombstone.emitted_at.length > 0);
+    // Core "Response records": a client tombstone carries neither timestamp.
+    assert.equal(Object.hasOwn(tombstone, "deleted_at"), false, `${label} fields=${fields}`);
+    assert.equal(Object.hasOwn(tombstone, "emitted_at"), false, `${label} fields=${fields}`);
     assert.equal(Object.hasOwn(tombstone, "data"), false);
     assert.equal(sparse.body.has_more, false);
     assert.equal(sparse.body.next_changes_since, full.body.next_changes_since);
@@ -241,6 +250,90 @@ async function assertLimitContract(rsUrl: string, token: string, label: string) 
   }
 }
 
+// Exercise the real HTTP parser, handler error writer and both bearer kinds.
+// Unknown keys must fail even when there are no records/bindings to validate.
+async function assertReadQueryKeys(asUrl: string, rsUrl: string, token: string) {
+  const records = "/v1/streams/notes/records";
+  await Promise.all(
+    (
+      [
+        [records, "q=Title", "q"],
+        [records, "fitler[kind]=note", "fitler"],
+        [records, "filterr[title][gte]=a", "filterr"],
+        [`${records}/n1`, "feilds=title", "feilds"],
+        [`${records}/n1/field-window`, "field=title&limt_chars=10", "limt_chars"],
+        ["/v1/schema", "streem=notes", "streem"],
+        ["/v1/streams", "conection_id=cin_missing", "conection_id"],
+        ["/v1/streams/notes", "feilds=title", "feilds"],
+        ["/v1/streams/notes/aggregate", "metric=count&fitler[kind]=note", "fitler"],
+        ["/v1/search", "q=Title&streems[]=notes", "streems"],
+        ["/v1/connectors", "streem=notes", "streem"],
+        ["/v1/blobs/missing", "conection_id=cin_missing", "conection_id"],
+      ] as const
+    ).map(async ([path, query, param]) => {
+      const response = await fetchJson(`${rsUrl}${path}?${query}`, bearer(token));
+      assert.equal(response.status, 400, `${path}?${query}: ${JSON.stringify(response.body)}`);
+      assert.equal(response.body.error?.code, "invalid_request", query);
+      assert.equal(response.body.error?.param, param, query);
+      assert.equal(response.body.error?.request_id, response.headers.get("Request-Id"), query);
+      assert.equal(Object.hasOwn(response.body, "data"), false, query);
+      if (param === "q") {
+        assert.ok(response.body.error.message.includes("/v1/search"));
+        const traceId = response.headers.get("PDPP-Reference-Trace-Id");
+        assert.ok(traceId);
+        const timeline = await fetchJson(`${asUrl}/_ref/traces/${encodeURIComponent(traceId)}`);
+        const events = timeline.body.data.filter(
+          (event: JsonObject) => event.object_id === response.body.error.request_id
+        );
+        assert.deepEqual(
+          events.map((event: JsonObject) => event.event_type),
+          ["query.received", "query.rejected"]
+        );
+        assert.equal(events[1].data.error.code, "invalid_request");
+      }
+    })
+  );
+}
+
+async function assertLegalReadEncodings(rsUrl: string, token: string, connectionId: string) {
+  await Promise.all(
+    [
+      "fields=id,title",
+      "fields[]=id&fields[]=title",
+      "fields=id&fields=title",
+      "fields[0]=id&fields[1]=title",
+      "count=exact&window=exact&limit=1&order=asc",
+      `connection_id=${connectionId}&subject_id=context`,
+      `connector_instance_id=${connectionId}`,
+      `connection_id=${connectionId}&connector_instance_id=${connectionId}`,
+    ].map(async (query) => {
+      const response = await fetchJson(`${rsUrl}/v1/streams/notes/records?${query}`, bearer(token));
+      assert.equal(response.status, 200, `${query}: ${JSON.stringify(response.body)}`);
+      assert.ok(response.body.data.length > 0, query);
+      if (query.startsWith("fields")) {
+        assert.equal(response.body.data[0].data.title, `Title ${response.body.data[0].id}`);
+        assert.equal(Object.hasOwn(response.body.data[0].data, "secret"), false);
+      }
+      if (response.body.next_cursor) {
+        const next = await fetchJson(
+          `${rsUrl}/v1/streams/notes/records?limit=1&order=asc&cursor=${encodeURIComponent(response.body.next_cursor)}`,
+          bearer(token)
+        );
+        assert.equal(next.status, 200, JSON.stringify(next.body));
+        assert.notEqual(next.body.data[0].id, response.body.data[0].id);
+      }
+    })
+  );
+  await Promise.all(
+    ["fields=id,title", "fields[]=id&fields[]=title", "fields=id&fields=title"].map(async (query) => {
+      const response = await fetchJson(`${rsUrl}/v1/streams/notes/records/n1?${query}`, bearer(token));
+      assert.equal(response.status, 200, JSON.stringify(response.body));
+      assert.equal(response.body.data.title, "Title n1");
+      assert.equal(Object.hasOwn(response.body.data, "secret"), false);
+    })
+  );
+}
+
 async function runScenario(backend: Backend): Promise<void> {
   const suffix = `${backend.name}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
   const connectorKey = `rs_projection_limit_${suffix}`;
@@ -262,6 +355,12 @@ async function runScenario(backend: Backend): Promise<void> {
     })) as TestServer;
 
     await registerConnector(runtimeManifest(connectorKey));
+    const asUrl = `http://localhost:${server.asPort}`;
+    const rsUrl = `http://localhost:${server.rsPort}`;
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    await assertReadQueryKeys(asUrl, rsUrl, ownerToken);
+
     const now = new Date().toISOString();
     await createRequestConnectorInstanceStore().upsert({
       connectorId: connectorKey,
@@ -284,10 +383,11 @@ async function runScenario(backend: Backend): Promise<void> {
       });
     }
 
-    const asUrl = `http://localhost:${server.asPort}`;
-    const rsUrl = `http://localhost:${server.rsPort}`;
-    const ownerToken = await issueOwnerToken(asUrl);
     const clientToken = await approveClientGrant(asUrl, sourceId);
+    await assertReadQueryKeys(asUrl, rsUrl, ownerToken);
+    await assertReadQueryKeys(asUrl, rsUrl, clientToken);
+    await assertLegalReadEncodings(rsUrl, ownerToken, connectorInstanceId);
+    await assertLegalReadEncodings(rsUrl, clientToken, connectorInstanceId);
 
     // Owner sparse reads keep schema-required fields; full reads stay whole.
     const ownerSparse = await fetchJson(`${rsUrl}/v1/streams/notes/records?fields=title`, bearer(ownerToken));
@@ -330,11 +430,9 @@ async function runScenario(backend: Backend): Promise<void> {
 
 test("records-list projection and limit contract on SQLite", () => runScenario({ name: "sqlite" }));
 
-test(
-  "records-list projection and limit contract on PostgreSQL",
-  { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required" },
-  () => {
-    assert.ok(POSTGRES_URL);
-    return runScenario({ databaseUrl: POSTGRES_URL, name: "postgres" });
-  }
-);
+test("records-list projection and limit contract on PostgreSQL", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required",
+}, () => {
+  assert.ok(POSTGRES_URL);
+  return runScenario({ databaseUrl: POSTGRES_URL, name: "postgres" });
+});

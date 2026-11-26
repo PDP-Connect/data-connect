@@ -25,8 +25,8 @@ const TOP_LEVEL_REGEX_1 = /cursor_field/i;
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
@@ -174,99 +174,108 @@ async function withHarness(fn: (harness: Harness) => Promise<void>): Promise<voi
 // Modeled after packages/polyfill-connectors/manifests/ynab.json's `budgets`
 // stream — `cursor_field` is a nullable date-time string.
 function nullableDateTimeManifest() {
-  return {
-    connector_id: "nullable-datetime",
-    display_name: "Nullable DateTime Cursor",
-    manifest_uri: "https://sources.example/nullable-datetime",
-    protocol_version: "0.1.0",
-    runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
-      {
-        cursor_field: "last_modified_on",
-        description: "Budgets, modeled after ynab.budgets",
-        name: "budgets",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            last_modified_on: {
-              format: "date-time",
-              type: ["string", "null"],
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: "nullable-datetime",
+      display_name: "Nullable DateTime Cursor",
+      manifest_uri: "https://sources.example/nullable-datetime",
+      protocol_version: "0.1.0",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      streams: [
+        {
+          cursor_field: "last_modified_on",
+          description: "Budgets, modeled after ynab.budgets",
+          name: "budgets",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              last_modified_on: {
+                format: "date-time",
+                type: ["string", "null"],
+              },
+              name: { type: "string" },
             },
-            name: { type: "string" },
+            required: ["id", "name"],
+            type: "object",
           },
-          required: ["id", "name"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://sources.example/nullable-datetime" }
+  );
 }
 
 // Modeled after packages/polyfill-connectors/manifests/slack.json's
 // `channels` stream — `cursor_field` is a nullable integer epoch.
 function nullableIntegerManifest() {
-  return {
-    connector_id: "nullable-integer",
-    display_name: "Nullable Integer Cursor",
-    manifest_uri: "https://sources.example/nullable-integer",
-    protocol_version: "0.1.0",
-    runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
-      {
-        cursor_field: "created",
-        description: "Channels, modeled after slack.channels",
-        name: "channels",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            created: { type: ["integer", "null"] },
-            id: { type: "string" },
-            name: { type: "string" },
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: "nullable-integer",
+      display_name: "Nullable Integer Cursor",
+      manifest_uri: "https://sources.example/nullable-integer",
+      protocol_version: "0.1.0",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      streams: [
+        {
+          cursor_field: "created",
+          description: "Channels, modeled after slack.channels",
+          name: "channels",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              created: { type: ["integer", "null"] },
+              id: { type: "string" },
+              name: { type: "string" },
+            },
+            required: ["id", "name"],
+            type: "object",
           },
-          required: ["id", "name"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://sources.example/nullable-integer" }
+  );
 }
 
 // A plain-string cursor with no date format — this must still be rejected,
 // because SQLite's BINARY collation on TEXT does not match JS localeCompare.
 function unsupportedPlainStringManifest() {
-  return {
-    connector_id: "plain-string-cursor",
-    display_name: "Plain String Cursor",
-    manifest_uri: "https://sources.example/plain-string-cursor",
-    protocol_version: "0.1.0",
-    runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
-      {
-        cursor_field: "title",
-        description: "Notes keyed by arbitrary string — not a date",
-        name: "notes",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            title: { type: ["string", "null"] },
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: "plain-string-cursor",
+      display_name: "Plain String Cursor",
+      manifest_uri: "https://sources.example/plain-string-cursor",
+      protocol_version: "0.1.0",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      streams: [
+        {
+          cursor_field: "title",
+          description: "Notes keyed by arbitrary string — not a date",
+          name: "notes",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              title: { type: ["string", "null"] },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://sources.example/plain-string-cursor" }
+  );
 }
 
 test("records paginate with nullable date-time cursor_field (all present)", async () => {

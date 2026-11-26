@@ -21,8 +21,10 @@
 // (`connector_maintenance_cursor.name = 'run_history_backfill'`) on the
 // SAME fenced-lease cursor store the evidence sweep uses, and runs as one
 // more bounded branch on `runConnectorMaintenanceSweep`'s periodic tick +
-// the existing one-shot startup sweep. No new table, no new column
-// (provenance lives in `facts_json`, not a schema column), no traffic gate.
+// the existing one-shot startup sweep. No new table, no traffic gate, and no
+// column of its own: its `origin: "backfill"` marker lives in `facts_json`. A
+// row it inserts also carries `run_history.actor_type` (the run's provenance),
+// taken from the first terminal event in the window it already fetched.
 
 import { exec, iterateDynamicSqlAcknowledged, referenceQueries } from "../../lib/db.ts";
 import {
@@ -275,6 +277,17 @@ function candidateKey(runId: string, connectorInstanceId: string | null): string
   return `${runId} ${connectorInstanceId ?? ""}`;
 }
 
+// The run's provenance: the actor_type of its FIRST terminal event in the
+// window (event_seq order), the event the live writer finalizes a row from
+// (a later duplicate terminal no-ops there). Read from the window the fold
+// already fetched, so it costs no query. null = the window holds no
+// terminal event.
+function firstTerminalActorType(
+  window: readonly { readonly actor_type?: string | null; readonly event_type: string }[]
+): string | null {
+  return window.find((e) => RUN_TERMINAL_EVENT_TYPES_FOR_FACTS.has(e.event_type))?.actor_type ?? null;
+}
+
 // SQLite: extract the terminal event's `data` from the already-fetched,
 // per-candidate-scoped event window — zero extra query.
 function sqliteTerminalDataByCandidate(
@@ -347,6 +360,7 @@ function sourceJsonForBackfill(): string {
 }
 
 function sqliteInsertBackfilledRun(input: {
+  readonly actorType: string | null;
   readonly attribution: ResolvedRunAttribution;
   readonly factsJson: string;
   readonly finishedAt: string;
@@ -368,10 +382,12 @@ function sqliteInsertBackfilledRun(input: {
     null,
     null,
     input.factsJson,
+    input.actorType,
   ]);
 }
 
 async function postgresInsertBackfilledRun(input: {
+  readonly actorType: string | null;
   readonly attribution: ResolvedRunAttribution;
   readonly factsJson: string;
   readonly finishedAt: string;
@@ -383,8 +399,8 @@ async function postgresInsertBackfilledRun(input: {
     `INSERT INTO run_history(
        run_id, connector_instance_id, connector_id, trigger_kind, source_json,
        status, known_gaps_json, started_at, completed_at, records_emitted,
-       connector_error_json, failure_reason, terminal_reason, facts_json, attempt
-     ) VALUES($1, $2, $3, NULL, $4::jsonb, $5, '[]'::jsonb, $6, $7, 0, NULL, NULL, NULL, $8::jsonb, 1)
+       connector_error_json, failure_reason, terminal_reason, facts_json, actor_type, attempt
+     ) VALUES($1, $2, $3, NULL, $4::jsonb, $5, '[]'::jsonb, $6, $7, 0, NULL, NULL, NULL, $8::jsonb, $9, 1)
      ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
     [
       input.runId,
@@ -395,6 +411,7 @@ async function postgresInsertBackfilledRun(input: {
       input.startedAt,
       input.finishedAt,
       input.factsJson,
+      input.actorType,
     ]
   );
 }
@@ -414,7 +431,8 @@ async function backfillOneCandidate(
   postgres: boolean,
   candidate: CandidateRun,
   summary: PostgresSpineSummary | SpineSummary,
-  terminalDataByCandidate: ReadonlyMap<string, Record<string, unknown> | null>
+  terminalDataByCandidate: ReadonlyMap<string, Record<string, unknown> | null>,
+  terminalActorByCandidate: ReadonlyMap<string, string | null>
 ): Promise<boolean> {
   if (!summary.first_at) {
     return false;
@@ -427,8 +445,10 @@ async function backfillOneCandidate(
   const key = candidateKey(candidate.runId, candidate.connectorInstanceId);
   const factsJson = factsJsonForBackfill(terminalDataByCandidate.get(key) ?? null);
   const finishedAt = summary.last_at || summary.first_at;
+  const actorType = terminalActorByCandidate.get(key) ?? null;
   if (postgres) {
     await postgresInsertBackfilledRun({
+      actorType,
       attribution,
       factsJson,
       finishedAt,
@@ -438,6 +458,7 @@ async function backfillOneCandidate(
     });
   } else {
     sqliteInsertBackfilledRun({
+      actorType,
       attribution,
       factsJson,
       finishedAt,
@@ -477,12 +498,14 @@ async function loadCandidateFoldData(
   candidates: readonly CandidateRun[]
 ): Promise<{
   readonly summariesById: ReadonlyMap<string, PostgresSpineSummary | SpineSummary>;
+  readonly terminalActorByCandidate: ReadonlyMap<string, string | null>;
   readonly terminalDataByCandidate: ReadonlyMap<string, Record<string, unknown> | null>;
 }> {
   const runIds = [...new Set(candidates.map((c) => c.runId))];
   if (postgres) {
     const rowsByRunId = await fetchRowsForSummaries("run", "run_id", runIds);
     const summariesById = new Map<string, PostgresSpineSummary>();
+    const terminalActorByCandidate = new Map<string, string | null>();
     for (const candidate of candidates) {
       const rows = (rowsByRunId.get(candidate.runId) ?? []).filter(
         (row) => row.connector_instance_id === candidate.connectorInstanceId
@@ -491,23 +514,27 @@ async function loadCandidateFoldData(
         continue;
       }
       const key = candidateKey(candidate.runId, candidate.connectorInstanceId);
+      terminalActorByCandidate.set(key, firstTerminalActorType(rows));
       // biome-ignore lint/performance/noAwaitInLoops: bounded per-batch candidate count; summarizeRows itself issues at most one lease-lookup query per in-progress candidate.
       summariesById.set(key, await summarizeRows(candidate.runId, rows));
     }
     return {
       summariesById,
+      terminalActorByCandidate,
       terminalDataByCandidate: await postgresTerminalDataByCandidate(candidates),
     };
   }
   const eventsByRunId = loadEventsForSummaries("run", runIds);
   const summariesById = new Map<string, SpineSummary>();
   const eventsByCandidate = new Map<string, SpineEventRecord[]>();
+  const terminalActorByCandidate = new Map<string, string | null>();
   for (const candidate of candidates) {
     const events = (eventsByRunId.get(candidate.runId) ?? []).filter(
       (event) => connectionIdFromEventData(event) === candidate.connectorInstanceId
     );
     const key = candidateKey(candidate.runId, candidate.connectorInstanceId);
     eventsByCandidate.set(key, events);
+    terminalActorByCandidate.set(key, firstTerminalActorType(events));
     if (events.length === 0) {
       continue;
     }
@@ -518,6 +545,7 @@ async function loadCandidateFoldData(
   }
   return {
     summariesById,
+    terminalActorByCandidate,
     terminalDataByCandidate: sqliteTerminalDataByCandidate(candidates, eventsByCandidate),
   };
 }
@@ -548,7 +576,10 @@ export async function runRunHistoryBackfillRound(options: {
     return { attempted: 0, backfilled: 0, incomplete: false, resumeAfterSeq: null };
   }
 
-  const { summariesById, terminalDataByCandidate } = await loadCandidateFoldData(postgres, candidates);
+  const { summariesById, terminalActorByCandidate, terminalDataByCandidate } = await loadCandidateFoldData(
+    postgres,
+    candidates
+  );
 
   let backfilled = 0;
   let incomplete = false;
@@ -578,7 +609,13 @@ export async function runRunHistoryBackfillRound(options: {
       continue;
     }
     // biome-ignore lint/performance/noAwaitInLoops: sequential per-candidate work within one bounded batch; ordering matches candidate discovery order.
-    const landed = await backfillOneCandidate(postgres, candidate, summary, terminalDataByCandidate);
+    const landed = await backfillOneCandidate(
+      postgres,
+      candidate,
+      summary,
+      terminalDataByCandidate,
+      terminalActorByCandidate
+    );
     if (landed) {
       backfilled += 1;
     }

@@ -136,7 +136,10 @@ export const CONNECTION_CONDITION_REASONS = Object.freeze({
   COLLECTION_SUCCEEDED_IMPORT_COMPLETE: "collection_succeeded_import_complete",
   COLLECTION_SUCCEEDED_LOCAL_DEVICE: "collection_succeeded_local_device",
   COVERAGE_COMPLETE_UNFILLABLE_ACCOUNTED: "coverage_complete_unfillable_accounted",
+  COVERAGE_REPORTED_COLLECTED: "coverage_reported_collected",
   COVERAGE_UNKNOWN: "coverage_unknown",
+  COVERAGE_UNKNOWN_ARTIFACT_MISMATCH: "coverage_unknown_artifact_mismatch",
+  COVERAGE_UNKNOWN_ARTIFACT_UNPINNED: "coverage_unknown_artifact_unpinned",
   COVERAGE_UNKNOWN_STALE_COLLECTOR: "coverage_unknown_stale_collector",
   CREDENTIAL_CONTINUITY_NOT_APPLICABLE: "credential_continuity_not_applicable",
   CREDENTIAL_CONTINUITY_PROVEN: "credential_continuity_proven",
@@ -1100,6 +1103,19 @@ export interface ConnectionCoverageEvidence {
    * other cause.
    */
   readonly unknownStaleCollectorBuild?: boolean;
+  /**
+   * `true` when `axis === "unknown"` because the connector reported every
+   * store collected and the runtime found no contradiction in its delivery
+   * accounting, but holds no evidence about the source itself. The runtime
+   * enumerates none of a local connector's stores, so the report is the only
+   * claim there is. It is a stated, neutral state: not `complete` (nothing
+   * independent verified it), and not a gap (nothing disagrees with it). It
+   * never satisfies `SourceCoverageComplete`, so it never makes a source
+   * Healthy. Absent preserves the generic `unknown` message.
+   */
+  readonly unknownReportedCollected?: boolean;
+  /** Why a local terminal receipt cannot be bound to server-known executable bytes. */
+  readonly unknownArtifactBinding?: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
 }
 
 /** Outbox/work rollup from local collector or other durable executor. */
@@ -1547,7 +1563,12 @@ export function computeConnectionHealth(input: ComputeConnectionHealthInput): Co
     }
   }
   // Fallback -> unknown. Reached when evidence combinations don't line up
-  // cleanly (e.g. succeeded run but coverage axis is unknown).
+  // cleanly (e.g. succeeded run but coverage axis is unknown). A connector
+  // report that nothing contradicts is named as such: the state is neutral,
+  // and the reason says why it is not Healthy.
+  const reportedCollected = conditions.some(
+    (item) => item.type === "SourceCoverageComplete" && item.reason === CONDITION_REASON.COVERAGE_REPORTED_COLLECTED
+  );
   return finishWith({
     axes,
     badges,
@@ -1556,7 +1577,7 @@ export function computeConnectionHealth(input: ComputeConnectionHealthInput): Co
     reasonCode: null,
     remoteSurface,
     state: "unknown",
-    unknownReasons: ["unclassified"],
+    unknownReasons: [reportedCollected ? CONDITION_REASON.COVERAGE_REPORTED_COLLECTED : "unclassified"],
   });
 }
 
@@ -2352,7 +2373,7 @@ function collectionSucceededCondition(input: ComputeConnectionHealthInput): Conn
     // a real run is always authoritative.
     if (input.localDeviceCollection?.verdict === "succeeded") {
       return condition({
-        message: "The local collector drained cleanly with complete coverage.",
+        message: "The local collector drained cleanly and its latest run committed.",
         observedAt: input.run?.lastSuccessAt ?? null,
         origin: "local_device",
         reason: CONDITION_REASON.COLLECTION_SUCCEEDED_LOCAL_DEVICE,
@@ -3090,6 +3111,32 @@ function localExporterAvailableCondition(
 
 function sourceCoverageCondition(input: ComputeConnectionHealthInput, axes: ConnectionAxes): ConnectionHealthCondition {
   if (axes.coverage === "unknown") {
+    if (input.coverage?.unknownArtifactBinding) {
+      const missingPin = input.coverage.unknownArtifactBinding === "artifact_digest_unknown";
+      return condition({
+        message: missingPin
+          ? "The server has no known artifact digest for this local connector, so its collection result is unverified."
+          : "The local collection result names a different artifact than the server's current pin.",
+        origin: "local_device",
+        reason: missingPin
+          ? CONDITION_REASON.COVERAGE_UNKNOWN_ARTIFACT_UNPINNED
+          : CONDITION_REASON.COVERAGE_UNKNOWN_ARTIFACT_MISMATCH,
+        severity: "warning",
+        status: "unknown",
+        type: "SourceCoverageComplete",
+      });
+    }
+    if (input.coverage?.unknownReportedCollected === true) {
+      return condition({
+        message:
+          "The connector reports it collected every store in its latest run, and nothing in the run's delivery contradicts it. PDP Connect has not independently checked coverage of the source.",
+        origin: "connector",
+        reason: CONDITION_REASON.COVERAGE_REPORTED_COLLECTED,
+        severity: "info",
+        status: "unknown",
+        type: "SourceCoverageComplete",
+      });
+    }
     if (input.coverage?.unknownStaleCollectorBuild === true) {
       return condition({
         message: "This local collector build predates coverage evidence the server now requires. Update the collector.",
@@ -3449,6 +3496,16 @@ export interface ForwardDispositionInput {
    * Optional; absent/`false` preserves the shipped behavior exactly.
    */
   readonly unfillableAccounted?: boolean;
+  /**
+   * Whether an `unknown` coverage condition is the connector's own positive
+   * report that nothing contradicts. No outstanding gap is recorded and none is
+   * suspected, so no later run owes anything: the disposition answers "what does
+   * the next run do" the same way it does for any gap-free stream. What the
+   * runtime cannot say, that it checked the source, stays on the coverage
+   * condition. Meaningful only with `coverage: "unknown"`; absent/`false`
+   * preserves the shipped behavior exactly.
+   */
+  readonly reportedCollected?: boolean;
 }
 
 /**
@@ -3566,7 +3623,7 @@ export function deriveForwardDisposition(input: ForwardDispositionInput): Forwar
   // evidence, not proof of completeness and not proof of a recoverable gap.
   // Keep it in a resting measurement-gap disposition rather than fabricating
   // `checking` or `resumable`.
-  if (input.coverage === "unknown") {
+  if (input.coverage === "unknown" && input.reportedCollected !== true) {
     return "unmeasured";
   }
 
@@ -3649,6 +3706,7 @@ function deriveConnectionForwardDisposition(
     // the flag must never become a bypass for a manifest that both requires a
     // stream and accepts its absence.
     unfillableAccounted: input.coverage?.requiredButAccepted !== true && input.coverage?.unfillableAccounted === true,
+    reportedCollected: input.coverage?.unknownReportedCollected === true,
   });
 }
 
@@ -4306,11 +4364,11 @@ export function deriveOutboxAxisFromHeartbeat(
  * Extracted from `deriveOutboxAxisFromHeartbeat` to keep that function's
  * cognitive complexity within the repo's lint budget.
  *
- * Stale-heartbeat split (owner-reported 2026-08-27, Signal/peregrine): a
+ * Stale-heartbeat split (owner-reported 2026-08-27, Signal/workstation): a
  * `blocked` heartbeat with no dead letters used to classify
  * `state_read_failed` REGARDLESS of heartbeat age, and that cause renders
  * "The server cannot read the collector's last state from that host." For
- * `cin_992b0c94cebeb3066ba42a6e` that sentence was simply false — the server
+ * `cin_7c3e1d5a9b2f4086d1e0a3c7` that sentence was simply false — the server
  * had read the host's state fine (a `blocked` heartbeat plus 22 outbox rows,
  * all `succeeded`, 7,780 records accepted across 18 batches at HTTP 201). What
  * had actually happened is that the collector on that machine stopped checking

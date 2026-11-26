@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
@@ -9,34 +10,38 @@ import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import { configureSemanticBackend } from "../server/search-semantic.ts";
 import { listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const RECORDS = 501;
 const CONNECTOR_ID = "dcr-73-lexical-abort";
 const INSTANCE_ID = "cin_dcr_73_lexical_abort";
 
 function manifest() {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: CONNECTOR_ID,
-    display_name: CONNECTOR_ID,
-    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        query: { search: { lexical_fields: ["subject"] } },
-        schema: {
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: CONNECTOR_ID,
+      display_name: CONNECTOR_ID,
+      manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          query: { search: { lexical_fields: ["subject"] } },
+          schema: {
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+  );
 }
 
 test("reconcile abort stops lexical backfill at the next page boundary", {

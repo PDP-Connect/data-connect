@@ -30,6 +30,7 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { ingestRecord as ingestRecordUntyped } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Real ingest resolves the acting owner subject from the request's bearer
 // token (`getOwnerTokenSubjectId` in server/index.ts), independent of
@@ -1664,7 +1665,7 @@ test("event spine", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams`, {
           headers: { Authorization: `Bearer ${approval.token}` },
         });
-        assert.equal(rejectedResp.status, 403);
+        assert.equal(rejectedResp.status, 401);
         const requestId = rejectedResp.headers.get("Request-Id");
         const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(requestId?.startsWith("req_"));
@@ -2096,7 +2097,6 @@ test("event spine", async (t) => {
       assert.deepEqual(startedEvent.data.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
       assert.deepEqual(startedEvent.data.scope, {
@@ -2190,8 +2190,11 @@ rl.on('line', (line) => {
     });
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
-    const manifest = {
+    const manifest = withFixtureSourceDeclaration({
       connector_id: "event-spine-multi-stream-checkpoint-test",
+      connector_key: "event-spine-multi-stream-checkpoint-test",
+      display_name: "Event Spine Multi-Stream Checkpoint Test",
+      protocol_version: "0.1.0",
       streams: [
         {
           name: "items",
@@ -2204,6 +2207,8 @@ rl.on('line', (line) => {
             required: ["id"],
             type: "object",
           },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
         {
           name: "other_items",
@@ -2216,22 +2221,11 @@ rl.on('line', (line) => {
             required: ["id"],
             type: "object",
           },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
       ],
       version: "0.1.0",
-    };
-    Object.assign(manifest, {
-      source_declaration: {
-        declaration_version: "event-spine-multi-stream-checkpoint-test.v1",
-        display: { name: "Event Spine Multi-Stream Checkpoint Test" },
-        protocol_version: "0.1.0",
-        publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-        source: {
-          id: "https://registry.pdpp.dev/connectors/event-spine-multi-stream-checkpoint-test",
-          kind: "connector",
-        },
-        streams: manifest.streams,
-      },
     });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-multi-stream-commit-"));
@@ -2333,8 +2327,10 @@ rl.on('line', (line) => {
       rsPort: 0,
     });
     const asUrl = `http://localhost:${server.asPort}`;
-    const manifest = {
-      connector_id: "https://registry.pdpp.dev/connectors/event-spine-partial-checkpoint-failure-test",
+    const manifest = withFixtureSourceDeclaration({
+      connector_id: "event-spine-partial-checkpoint-failure-test",
+      connector_key: "event-spine-partial-checkpoint-failure-test",
+      display_name: "Event Spine Partial Checkpoint Failure Test",
       protocol_version: "0.1.0",
       streams: [
         {
@@ -2348,6 +2344,8 @@ rl.on('line', (line) => {
             required: ["id"],
             type: "object",
           },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
         {
           name: "other_items",
@@ -2360,22 +2358,11 @@ rl.on('line', (line) => {
             required: ["id"],
             type: "object",
           },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
       ],
       version: "0.1.0",
-    };
-    Object.assign(manifest, {
-      source_declaration: {
-        declaration_version: "event-spine-partial-checkpoint-failure-test.v1",
-        display: { name: "Event Spine Partial Checkpoint Failure Test" },
-        protocol_version: "0.1.0",
-        publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-        source: {
-          id: manifest.connector_id,
-          kind: "connector",
-        },
-        streams: manifest.streams,
-      },
     });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-partial-checkpoint-failure-"));
@@ -2434,7 +2421,7 @@ rl.on('line', (line) => {
         return;
       }
 
-      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(manifest.connector_id)}`) {
+      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id)}`) {
         let body = "";
         for await (const chunk of req) {
           body += chunk;
@@ -2542,7 +2529,7 @@ rl.on('line', (line) => {
 
       for (const event of [...advancedEvents, failedEvent]) {
         assert.equal(event.data.source?.kind, "connector");
-        assert.equal(event.data.source?.id, manifest.connector_id);
+        assert.equal(event.data.source?.id, canonicalConnectorKey(manifest.connector_id));
         assert.ok(
           !("connector_id" in event.data),
           `${event.event_type} should use source descriptors instead of raw connector_id`
@@ -3139,7 +3126,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.reason, "connector_reported_failed");
         assert.equal(failedEvent.data.connector_error_message, "Remote provider rate limit");
         assert.equal(failedEvent.data.connector_error_retryable, true);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
+        assert.equal(failedEvent.data.records_flushed, 1);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
       } finally {
         rmSync(tmpDir, { force: true, recursive: true });
@@ -4730,7 +4718,15 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId: spotifyManifest.connector_id,
             connectorPath,
-            manifest: spotifyManifest,
+            // The connector emits an otp INTERACTION. The seed declares only
+            // `credentials`, so this run's manifest also declares `otp`.
+            manifest: {
+              ...spotifyManifest,
+              capabilities: {
+                ...((spotifyManifest.capabilities as Record<string, unknown> | undefined) ?? {}),
+                human_interaction: ["credentials", "otp"],
+              },
+            },
             onInteraction: async () =>
               new Promise(() => {
                 /* intentionally waits for the page to advance */

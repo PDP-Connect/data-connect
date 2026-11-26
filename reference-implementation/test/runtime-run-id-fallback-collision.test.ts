@@ -49,6 +49,7 @@ import {
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
 import type { ActiveRunRecord, SchedulerStore } from "../server/stores/scheduler-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -155,23 +156,26 @@ function fakeAdmitRunConnection(
 }
 
 function manifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
@@ -303,22 +307,25 @@ const CONNECTOR_INSTANCE_ID_A = makeDefaultAccountConnectorInstanceId(SCHEDULER_
 const CONNECTOR_INSTANCE_ID_B = makeDefaultAccountConnectorInstanceId(SCHEDULER_OWNER_SUBJECT_ID, CONNECTOR_ID_B);
 
 function schedulerManifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 const SCHEDULED_POLICY = projectRunAutomationPolicy({ refreshPolicy: null, triggerKind: "scheduled" });

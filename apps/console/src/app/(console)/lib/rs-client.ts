@@ -16,12 +16,11 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { findManifestForConnectorId } from "../sources/lib/relationships.ts";
 import type { OwnerConnectorTemplateLike } from "./connection-catalog.ts";
 import { resolveInstalledConnectorManifestsDir } from "./connector-manifests-dir.ts";
 import { isActiveConnectorRunSummaryStatus } from "./connector-run-summary-status.ts";
-import { resolveConnectorIconFromManifestPath } from "./resolve-connector-icon-path.ts";
-import { resolveConnectorIconFromSimpleIcons } from "./resolve-connector-icon-simple-icons.ts";
 import {
   getOwnerToken,
   getRsInternalUrl,
@@ -29,6 +28,7 @@ import {
   ResourceServerHttpError,
 } from "./owner-token.ts";
 import { type CanonicalReadWarning, extractReadWarnings } from "./read-envelope.ts";
+import { resolveManifestDisplayMark } from "./resolve-manifest-display-mark.ts";
 import type {
   RefAcquisitionCoverageSummary,
   RefCollectionReportEntry,
@@ -171,11 +171,9 @@ export interface ConnectorManifest {
   connector_key?: string;
   display_name?: string;
   /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: {
-    color?: string | null;
-    kind?: string | null;
-    svg?: string | null;
-  } | null;
+  icon?: ConnectorIconLike | null;
+  /** Server-side enrichment provenance; never read from or written to a manifest. */
+  resolvedIconSource?: "manifest" | "bundled" | "simple-icons";
   /**
    * Shipped manifests declare their brand glyph here as a relative path
    * under the connector-manifests directory (e.g. "icons/amazon.svg"), not
@@ -184,6 +182,7 @@ export interface ConnectorManifest {
    * single `icon` (inline_svg) shape.
    */
   brand?: {
+    background_color?: string | null;
     icon?: string | null;
   } | null;
   name?: string;
@@ -817,21 +816,11 @@ export async function listConnectorManifests(): Promise<ConnectorManifest[]> {
       try {
         const raw = await readFile(join(dir, file), "utf8");
         const manifest = JSON.parse(raw) as ConnectorManifest;
-        // Three-layer icon resolution (first hit wins), so every reader
-        // downstream keeps consuming the single `icon` (inline_svg) shape it
-        // already knows:
-        //   1. Bundled: the manifest's own `brand.icon` relative path (e.g.
-        //      "icons/amazon.svg"), shipped with every connector today.
-        //   2. Vendored: a same-slug lookup into the offline simple-icons
-        //      corpus, for a connector added later with no bundled icon.
-        //   3. Deterministic Monogram — @pdpp/brand-react's ConnectorIcon
-        //      fallback when `icon` is left unset here.
-        if (!manifest.icon && manifest.brand?.icon) {
-          manifest.icon = await resolveConnectorIconFromManifestPath(dir, manifest.brand.icon);
-        }
-        if (!manifest.icon && manifest.connector_key) {
-          manifest.icon = await resolveConnectorIconFromSimpleIcons(manifest.connector_key);
-        }
+        // `icon` leaves here as the one display mark every surface renders
+        // (sanitized SVG, validated backdrop); see resolveManifestDisplayMark.
+        const mark = await resolveManifestDisplayMark(manifest, dir);
+        manifest.icon = mark.icon;
+        manifest.resolvedIconSource = mark.source;
         return manifest;
       } catch {
         return null;

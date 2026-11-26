@@ -12,8 +12,10 @@ import {
   diffRequiredProtocolCapabilities,
   evaluatePlacement,
   PROVIDER_RUNTIME_CAPABILITIES,
+  RUNTIME_BINDING_INVALID_CODE,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
+  RuntimeBindingInvalidError,
   RuntimeCapabilityMismatchError,
   RuntimeCapabilityUndeclaredError,
 } from "./runtime-capabilities.ts";
@@ -170,6 +172,20 @@ test("a declared OBSERVATION capability is a named missing capability, not a mal
     protocolCapabilities: new Set(["OBSERVATION" as const]),
   };
   assert.equal(evaluatePlacement(observationConnector, observingRuntime).kind, "ok");
+});
+
+// RUN_COVERAGE_V1 is an elective extension. The collector advertises it and
+// may request evidence; a runtime that does not advertise it still starts the
+// connector without evidence.
+test("a declared RUN_COVERAGE_V1 places on runtimes with or without the extension", () => {
+  const evidenceConnector = {
+    connector_id: "evidence-connector",
+    protocol_capabilities: ["RUN_COVERAGE_V1" as const],
+  };
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), true);
+  assert.equal(PROVIDER_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), false);
+  assert.deepEqual(evaluatePlacement(evidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+  assert.deepEqual(evaluatePlacement(evidenceConnector, PROVIDER_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
 });
 
 test("boundary_claim remains optional and does not require a protocol capability", () => {
@@ -438,4 +454,143 @@ test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable
       return true;
     }
   );
+});
+
+const withFeatures = (binding: "browser" | "network", features: readonly string[]) => ({
+  connector_id: "featured",
+  protocol_capabilities: [],
+  runtime_requirements: { bindings: { [binding]: { features, required: true } } },
+});
+
+test("a required binding whose declared features the runtime supplies is placed", () => {
+  const decision = evaluatePlacement(
+    withFeatures("browser", ["page_navigation", "page_script_evaluation"]),
+    COLLECTOR_RUNTIME_CAPABILITIES
+  );
+  assert.deepEqual(decision, { kind: "ok", satisfied: ["browser"] });
+});
+
+test("a required binding that declares a feature the runtime does not supply is refused with the feature named", () => {
+  const decision = evaluatePlacement(
+    withFeatures("network", ["same_origin_page_fetch", "unknown_feature"]),
+    COLLECTOR_RUNTIME_CAPABILITIES
+  );
+  assert.equal(decision.kind, "missing_capability");
+  assert.deepEqual(decision.kind === "missing_capability" ? decision.missing : [], ["network"]);
+  assert.deepEqual(decision.kind === "missing_capability" ? decision.missingFeatures : [], [
+    { binding: "network", features: ["unknown_feature"] },
+  ]);
+  assert.throws(
+    () => assertPlacementOrThrow(withFeatures("network", ["unknown_feature"]), COLLECTOR_RUNTIME_CAPABILITIES),
+    (error: unknown) =>
+      error instanceof RuntimeCapabilityMismatchError &&
+      error.missingFeatures[0]?.features[0] === "unknown_feature" &&
+      error.message.includes("network [unknown_feature]")
+  );
+});
+
+test("a runtime with no feature entry for a binding supplies no feature of it", () => {
+  const { bindings, id, protocolCapabilities, protocolVersion } = COLLECTOR_RUNTIME_CAPABILITIES;
+  const runtime = { bindings, id, protocolCapabilities, protocolVersion };
+  assert.deepEqual(diffRequiredBindings(withFeatures("browser", ["page_navigation"]), runtime), ["browser"]);
+  assert.deepEqual(diffRequiredBindings(browserConnector, runtime), [], "no declared features, so nothing is missing");
+});
+
+test("an optional binding with an unsupplied feature does not block placement", () => {
+  const connector = {
+    connector_id: "optional-featured",
+    protocol_capabilities: [],
+    runtime_requirements: { bindings: { browser: { features: ["unknown_feature"], required: false } } },
+  };
+  assert.deepEqual(evaluatePlacement(connector, COLLECTOR_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+});
+
+test("malformed binding requirements from a JSON caller are refused, not read as a feature list", () => {
+  for (const features of ["page_navigation", ["page_navigation", "page_navigation"], [""], [1], null]) {
+    const connector = {
+      connector_id: "bad-features",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { browser: { features, required: true } } },
+    } as unknown as ConnectorPlacementInput;
+    const decision = evaluatePlacement(connector, COLLECTOR_RUNTIME_CAPABILITIES);
+    assert.equal(decision.kind, "malformed_bindings", JSON.stringify(features));
+    assert.throws(
+      () => assertPlacementOrThrow(connector, COLLECTOR_RUNTIME_CAPABILITIES),
+      (error: unknown) => error instanceof RuntimeBindingInvalidError && error.code === RUNTIME_BINDING_INVALID_CODE
+    );
+  }
+  const notAnObject = {
+    connector_id: "bad-binding",
+    protocol_capabilities: [],
+    runtime_requirements: { bindings: { browser: true } },
+  } as unknown as ConnectorPlacementInput;
+  assert.equal(evaluatePlacement(notAnObject, COLLECTOR_RUNTIME_CAPABILITIES).kind, "malformed_bindings");
+});
+
+const fromJson = (text: string): ConnectorPlacementInput => JSON.parse(text) as ConnectorPlacementInput;
+
+test("collector refuses an unadvertised required binding interface", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "future-network",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@999", required: true } } },
+    })
+  );
+  for (const runtime of [PROVIDER_RUNTIME_CAPABILITIES, COLLECTOR_RUNTIME_CAPABILITIES]) {
+    const decision = evaluatePlacement(connector, runtime);
+    assert.equal(decision.kind, "missing_capability");
+    if (decision.kind === "missing_capability") {
+      assert.deepEqual(decision.missing, ["network"]);
+      assert.deepEqual(decision.missingInterfaces, [{ binding: "network", interface: "network@999" }]);
+    }
+    assert.throws(() => assertPlacementOrThrow(connector, runtime), /network@999/);
+  }
+});
+
+test("a required binding that states the supported interface version is placed", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "v1-network",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@1", required: true } } },
+    })
+  );
+  assert.deepEqual(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: ["network"] });
+});
+
+test("an optional binding with an unsupported interface does not block placement", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "optional-future",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@999", required: false } } },
+    })
+  );
+  assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "ok");
+});
+
+test("a binding interface that is not <kind>@<positive integer> for its own kind is malformed", () => {
+  for (const iface of ["network", "browser@1", "network@0", "network@01", 1, null]) {
+    const connector = fromJson(
+      JSON.stringify({
+        connector_id: "bad-interface",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: { network: { interface: iface, required: true } } },
+      })
+    );
+    assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "malformed_bindings", String(iface));
+  }
+});
+
+test("missing binding required flag is malformed, not an optional request", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "missing-required",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { browser: {} } },
+    })
+  );
+  assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "malformed_bindings");
+  assert.throws(() => assertPlacementOrThrow(connector, PROVIDER_RUNTIME_CAPABILITIES), RuntimeBindingInvalidError);
 });

@@ -44,6 +44,7 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
+import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
@@ -285,27 +286,23 @@ function loadPackageManifest(name: string): PackageManifest {
   return entry.manifest as PackageManifest;
 }
 
+/**
+ * Test-only explicit attribution. The declaration is the production legacy projection of the manifest's
+ * own content (streams keep only the Core members), not a copy of connector-only stream fields, which
+ * Core refuses. Source and publisher are fixture identities, never a production source.
+ */
 function withExplicitTestSourceDeclaration(manifest: PackageManifest): PackageManifest {
   if (manifest.source_declaration && typeof manifest.source_declaration === "object") {
     return manifest;
   }
   const connectorKey = canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id;
-  const streams = Array.isArray(manifest.streams)
-    ? manifest.streams.map((stream) => ({
-        ...stream,
-        ...(stream.semantics === "append" ? { semantics: "append_only" } : {}),
-      }))
-    : [];
   return {
     ...manifest,
-    source_declaration: {
-      declaration_version: `owner-connection-intent-test:${connectorKey}:v1`,
-      display: { name: typeof manifest.display_name === "string" ? manifest.display_name : connectorKey },
-      protocol_version: manifest.protocol_version,
-      publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-      source: { id: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`, kind: "connector" },
-      streams,
-    },
+    source_declaration: snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(manifest, {
+      connectorImplementationId: `https://implementations.example/connectors/${encodeURIComponent(connectorKey)}`,
+      publisherId: "https://pdpp.dev/reference-implementation/tests",
+      sourceId: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`,
+    }),
   };
 }
 
@@ -555,19 +552,32 @@ test("omitting collection_scope at intent creation defaults the connection to re
   });
 });
 
-test("owner-agent intent rejects an unparseable collection_scope.since with a typed 400", async () => {
+test("owner-agent intent rejects a collection_scope.since without an offset with a typed 400", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
-    const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, {
-      collection_scope: { since: "last tuesday" },
-      connector_id: "codex",
-    });
-    const body = rawBody as IntentResponseBody;
-    assert.equal(status, 400);
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
-    assert.equal(body?.error?.code, "invalid_request");
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
-    assert.equal(body?.error?.param, "collection_scope");
+    // A full-date or a zoneless date-time names no instant: the runtime would
+    // have to guess the owner's time zone to bound a date-time field.
+    // An object whose toString is not callable must still get the typed 400,
+    // not a 500 from building the error message.
+    for (const since of [
+      "last tuesday",
+      "2026-09-05",
+      "2026-09-05T00:00:00",
+      { toString: null } as unknown as string,
+      42 as unknown as string,
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: each case is one request against the same server; order keeps failures readable.
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, {
+        collection_scope: { since },
+        connector_id: "codex",
+      });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 400, String(JSON.stringify(since)));
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
+      assert.equal(body?.error?.code, "invalid_request");
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
+      assert.equal(body?.error?.param, "collection_scope");
+    }
 
     // A rejected intent must mint no enrollment code and materialize nothing.
     const rows = await createSqliteConnectorInstanceStore().listByOwner(OWNER_SUBJECT_ID);

@@ -23,12 +23,12 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { listSpineEventsPage } from "../lib/spine.ts";
-import { PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS } from "../server/connection-setup-plan.ts";
+import { isProviderAuthLifecycleProven } from "../server/connection-setup-plan.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import type { ProviderAuthExchanger } from "../server/routes/ref-provider-auth.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const REGEXP_1 = /access_token|refresh_token|tok_access|Bearer/i;
 const REGEXP_2 = /secret/i;
@@ -80,66 +80,74 @@ interface JsonBody {
 
 // Synthetic provider OAuth connector registered for all tests.
 // Must have: network binding, oauth auth kind, deployment_config keys.
-const TEST_PROVIDER_MANIFEST = {
-  capabilities: {
-    auth: {
-      deployment_config: ["TEST_PROVIDER_CLIENT_ID", "TEST_PROVIDER_CLIENT_SECRET"],
-      kind: "oauth",
-    },
-    refresh_policy: {
-      background_safe: true,
-      interaction_posture: "credentials",
-      rationale: "Synthetic provider can refresh with stored OAuth tokens.",
-      recommended_interval_seconds: 900,
-      recommended_mode: "automatic",
-    },
-  },
-  connector_id: "test_provider",
-  connector_key: "test_provider",
-  display_name: "Test Provider",
-  manifest_uri: "https://sources.example/test_provider",
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: true } } },
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      schema: {
-        properties: { id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const TEST_PROVIDER_MANIFEST = withFixtureSourceDeclaration(
+  {
+    capabilities: {
+      auth: {
+        deployment_config: ["TEST_PROVIDER_CLIENT_ID", "TEST_PROVIDER_CLIENT_SECRET"],
+        kind: "oauth",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
+      proven: { provider_auth_lifecycle: true },
+      refresh_policy: {
+        background_safe: true,
+        interaction_posture: "credentials",
+        rationale: "Synthetic provider can refresh with stored OAuth tokens.",
+        recommended_interval_seconds: 900,
+        recommended_mode: "automatic",
+      },
     },
-  ],
-  version: "1.0.0",
-};
+    connector_id: "test_provider",
+    connector_key: "test_provider",
+    display_name: "Test Provider",
+    manifest_uri: "https://sources.example/test_provider",
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    setup: { modality: "provider_authorization" },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/test_provider" }
+);
 
 // A no-oauth connector used to test that non-provider-auth connectors are rejected.
-const NON_OAUTH_MANIFEST = {
-  capabilities: { auth: { kind: "api_key" } },
-  connector_id: "plain_api",
-  connector_key: "plain_api",
-  display_name: "Plain API",
-  manifest_uri: "https://sources.example/plain_api",
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: true } } },
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      schema: {
-        properties: { id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const NON_OAUTH_MANIFEST = withFixtureSourceDeclaration(
+  {
+    capabilities: { auth: { kind: "api_key" } },
+    connector_id: "plain_api",
+    connector_key: "plain_api",
+    display_name: "Plain API",
+    manifest_uri: "https://sources.example/plain_api",
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/plain_api" }
+);
 
 // Minimal exchanger double that records all calls and lets callers inject
 // per-call behavior via callbacks.
@@ -324,11 +332,8 @@ async function initiateProviderAuth(
 // Setup planner unit-level check
 // ---------------------------------------------------------------------------
 
-test("PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS includes test_provider", () => {
-  assert.ok(
-    PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS.includes("test_provider"),
-    "test_provider must be in the lifecycle-proven set"
-  );
+test("test_provider's manifest declares the provider-auth lifecycle proven", () => {
+  assert.ok(isProviderAuthLifecycleProven(TEST_PROVIDER_MANIFEST), "test_provider must claim the lifecycle proof");
 });
 
 // ---------------------------------------------------------------------------
@@ -533,13 +538,15 @@ test("callback via a trusted proxy without a forwarded-host header still matches
     const session = OPEN_SESSION_COOKIE;
     // The initiate request is forwarded through the trusted proxy, presenting
     // the deployment's real public host.
-    const initWithProxyHeaders = await fetchJson(
-      `${asUrl}/_ref/connectors/test_provider/provider-auth-initiate`,
-      {
-        headers: { "Content-Type": "application/json", Cookie: session, "x-forwarded-host": "vault.local:8443", "x-forwarded-proto": "https" },
-        method: "POST",
-      }
-    );
+    const initWithProxyHeaders = await fetchJson(`${asUrl}/_ref/connectors/test_provider/provider-auth-initiate`, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session,
+        "x-forwarded-host": "vault.local:8443",
+        "x-forwarded-proto": "https",
+      },
+      method: "POST",
+    });
     const initiatedRedirectUri = initWithProxyHeaders.body.next_step.redirect_uri;
     assert.equal(initiatedRedirectUri, "https://vault.local:8443/_ref/provider-auth/callback");
 

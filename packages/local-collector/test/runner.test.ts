@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -10,6 +10,10 @@ import { dirname, join } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome 2.5.5's built-in Node module registry does not yet recognize node:sqlite; Node's own resolver and tsc both resolve it (same pre-existing gap as packages/collector-runtime/src/local-device-outbox.ts and its sibling test files).
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
+import { DEFAULT_COLLECTOR_OUTBOX_POLICY, drainCollectorOutbox } from "@pdpp/collector-runtime/collector-runner";
+import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { LocalDeviceClient, type TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
+import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import {
   // The concrete bundled-connector registry is assembled at the composition
   // root (the bin) from connector-owned definitions; the src runtime is
@@ -66,6 +70,7 @@ import {
   COLLECTOR_RUNTIME_CAPABILITIES,
   LocalDeviceHttpError,
   LocalDeviceOutbox,
+  runCollectorConnector,
 } from "../src/runner.ts";
 
 /**
@@ -87,7 +92,7 @@ import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, Collector
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 
 const CLAUDE_CODE_DIGEST_DIR = (
-  COLLECTION_PROFILE_PINS.find((pin) => pin.connectorId === "claude_code")?.digest ?? ""
+  COLLECTION_PROFILE_PINS.find((pin) => pin.connectorId === "claude-code")?.digest ?? ""
 ).replace(":", "-");
 
 const FRESH_DEVICE_TOKEN_PATTERN = /PDPP_LOCAL_DEVICE_TOKEN="fresh-token"/;
@@ -114,7 +119,7 @@ test("runner exports the collector runtime capability profile with collector id"
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.id, "collector");
   const bindings = [...COLLECTOR_RUNTIME_CAPABILITIES.bindings].sort();
   assert.deepEqual(bindings, ["filesystem", "local_device", "network"]);
-  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], []);
+  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], ["RUN_COVERAGE_V1"]);
 });
 
 test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
@@ -125,22 +130,22 @@ test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
 
 test("bundled connectors registry contains every local connector with a pinned Collection Profile", () => {
   assert.deepEqual([...BUNDLED_CONNECTOR_IDS].sort(), [
-    "apple_photos",
-    "claude_code",
+    "apple-photos",
+    "claude-code",
     "codex",
-    "google_takeout",
+    "google-takeout",
     "imessage",
   ]);
-  assert.ok(BUNDLED_CONNECTORS.claude_code);
+  assert.ok(BUNDLED_CONNECTORS["claude-code"]);
   assert.ok(BUNDLED_CONNECTORS.codex);
   assert.ok(BUNDLED_CONNECTORS.imessage);
-  assert.ok(BUNDLED_CONNECTORS.google_takeout);
-  assert.ok(BUNDLED_CONNECTORS.apple_photos);
-  // google_messages has a local-collector definition, but data-connectors does
+  assert.ok(BUNDLED_CONNECTORS["google-takeout"]);
+  assert.ok(BUNDLED_CONNECTORS["apple-photos"]);
+  // google-messages has a local-collector definition, but data-connectors does
   // not publish a signed Collection Profile for it (it needs gmcli, and the
   // artifact builder has no tool layer yet), so there is nothing to install.
-  assert.deepEqual([...UNPINNED_CONNECTOR_IDS], ["google_messages"]);
-  assert.equal(BUNDLED_CONNECTORS.google_messages, undefined);
+  assert.deepEqual([...UNPINNED_CONNECTOR_IDS], ["google-messages"]);
+  assert.equal(BUNDLED_CONNECTORS["google-messages"], undefined);
 });
 
 test("an unpinned connector is refused by name, not as an unknown id", () => {
@@ -162,7 +167,7 @@ test("an unpinned connector is refused by name, not as an unknown id", () => {
     (error: unknown) =>
       error instanceof CollectorUsageError &&
       /connector 'google-messages' has no published, signed Collection Profile yet/.test(error.message) &&
-      /Supported: claude_code, codex, google_takeout, imessage, apple_photos\./.test(error.message)
+      /Supported: claude-code, codex, google-takeout, imessage, apple-photos\./.test(error.message)
   );
 });
 
@@ -228,42 +233,6 @@ test("bundled connector entries declare filesystem binding as required", () => {
     assert.equal(entry.connector_id, id);
     assert.equal(entry.bindings.filesystem.required, true);
     assert.ok(Array.isArray(entry.streams) && entry.streams.length > 0);
-  }
-});
-
-test("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
-  // Reads each connector's pinned Collection Profile (the manifest of the
-  // release the collector installs), which the reference server keeps under
-  // reference-implementation/server/local-collector-profiles/.
-  //
-  // Local-device collectors push records from a device outbox and write no
-  // spine run, so the connection-health rollup can only project a non-`unknown`
-  // coverage axis from durable `coverage_diagnostics` records where that is the
-  // connector's coverage mechanism. If the published default stream set omits
-  // that stream, every `pdpp-local-collector run` emits zero coverage evidence
-  // and the dashboard is stuck at `coverage_unknown` even after a healthy
-  // drain. See openspec/changes/derive-local-collector-coverage-from-diagnostics.
-  //
-  // Not every connector uses this mechanism: iMessage declares a per-stream
-  // `coverage_strategy` (snapshot_import_receipt) in its manifest instead, and
-  // has no coverage_diagnostics stream to request at all — this check only
-  // applies when the manifest declares one.
-  for (const id of BUNDLED_CONNECTOR_IDS) {
-    const entry = getBundledConnector(id);
-    assert.ok(entry, `entry for ${id}`);
-    const manifestPath = new URL(
-      `../../../reference-implementation/server/local-collector-profiles/${id.replaceAll("_", "-")}.json`,
-      import.meta.url
-    );
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    const declaresCoverageDiagnostics = manifest.streams.some((stream) => stream.name === "coverage_diagnostics");
-    if (!declaresCoverageDiagnostics) {
-      continue;
-    }
-    assert.ok(
-      entry.streams.includes("coverage_diagnostics"),
-      `${id} default streams must include coverage_diagnostics; got ${entry.streams.join(", ")}`
-    );
   }
 });
 
@@ -466,15 +435,13 @@ test("local collector doctor flags missing db, expired leases, and dead letters"
 
     assert.equal(doctor.status, "critical");
     assert.deepEqual(doctor.checks, {
-      coverage_diagnostics: "ok",
       deployment_posture: "ok",
       expired_leases: "warn",
       outbox_db: "ok",
       outbox_failures: "fail",
+      terminal_coverage: "unknown",
     });
-    // Dead letters dominate the lifecycle state even though no coverage
-    // diagnostic was observed: a lane that needs recovery is not first
-    // labeled "coverage missing".
+    // Dead letters dominate the lifecycle state even without a typed verdict.
     assert.equal(doctor.lifecycle_state, "dead_letter");
     assert.equal(doctor.outbox.counts.dead_letter, 1);
     assert.equal(doctor.outbox.counts.retrying, 1);
@@ -593,9 +560,7 @@ test("doctor --exit-code turns a dead-lettered outbox into a non-zero status", a
     outbox.deadLetter({ error: "bounded error", holder: "worker-a", id: claim.id, leaseEpoch: claim.lease_epoch });
 
     const options = parseArgs(["doctor", "--queue", path, "--source-instance-id", "src-1", "--exit-code"]);
-    const doctor = buildLocalOutboxDoctor(
-      inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE })
-    );
+    const doctor = buildLocalOutboxDoctor(inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE }));
     assert.equal(doctor.status, "critical");
     assert.equal(doctorExitCode(doctor.status), 1);
   } finally {
@@ -973,7 +938,7 @@ test("local collector retry-dead-letters does not retry terminal commit bytes", 
   const payload = {
     collection_boundary: "unscoped",
     commit_id: "old-terminal-commit",
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: "cin-1",
     device_id: "device-1",
     run_id: "old-run",
@@ -1046,10 +1011,10 @@ test("local collector status resolves the matching source-instance profile queue
     outbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     [
       "PDPP_REFERENCE_BASE_URL=https://pdpp.example.com",
-      "PDPP_COLLECTOR_CONNECTOR=claude_code",
+      "PDPP_COLLECTOR_CONNECTOR=claude-code",
       "PDPP_LOCAL_DEVICE_ID=device-1",
       "PDPP_LOCAL_DEVICE_TOKEN=token-1",
       "PDPP_SOURCE_INSTANCE_ID=dsrc_laptop",
@@ -1128,10 +1093,11 @@ test("local collector inspection refuses a missing named profile instead of usin
   }
 });
 
-test("normalizeConnectorId lowercases and folds hyphens to underscores", () => {
-  assert.equal(normalizeConnectorId("claude-code"), "claude_code");
-  assert.equal(normalizeConnectorId("CLAUDE_CODE"), "claude_code");
-  assert.equal(normalizeConnectorId("  Claude-Code  "), "claude_code");
+test("normalizeConnectorId lowercases and folds underscores to hyphens", () => {
+  assert.equal(normalizeConnectorId("claude-code"), "claude-code");
+  assert.equal(normalizeConnectorId("claude_code"), "claude-code");
+  assert.equal(normalizeConnectorId("CLAUDE_CODE"), "claude-code");
+  assert.equal(normalizeConnectorId("  Claude_Code  "), "claude-code");
   assert.equal(normalizeConnectorId("codex"), "codex");
 });
 
@@ -1139,14 +1105,14 @@ test("writeLocalCollectorProfile writes a profile .env that findLocalCollectorPr
   const profileDir = tempDirSync();
   const path = writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-42",
     deviceToken: "token-42",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_setup",
   });
-  assert.equal(path, join(profileDir, "claude_code.env"));
+  assert.equal(path, join(profileDir, "claude-code.env"));
   assert.equal(existsSync(path), true);
 
   const lookup = findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_setup" });
@@ -1154,10 +1120,130 @@ test("writeLocalCollectorProfile writes a profile .env that findLocalCollectorPr
   const [profile] = lookup.matches;
   assert.ok(profile, "expected exactly one matching profile");
   assert.equal(profile.env.PDPP_REFERENCE_BASE_URL, "https://pdpp.example.com");
-  assert.equal(profile.env.PDPP_COLLECTOR_CONNECTOR, "claude_code");
+  assert.equal(profile.env.PDPP_COLLECTOR_CONNECTOR, "claude-code");
   assert.equal(profile.env.PDPP_LOCAL_DEVICE_ID, "device-42");
   assert.equal(profile.env.PDPP_LOCAL_DEVICE_TOKEN, "token-42");
   assert.equal(profile.source_instance_id, "dsrc_setup");
+});
+
+function writeProfile(profileDir: string, name: string, deviceToken: string, sourceInstanceId: string): string {
+  return writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: name,
+    deviceId: `device-${deviceToken}`,
+    deviceToken,
+    name,
+    profileDir,
+    sourceInstanceId,
+  });
+}
+
+test("a legacy underscore-named profile is renamed once to the hyphen name, keeping its contents and mode", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  assert.equal(legacyPath, join(profileDir, "claude_code.env"));
+  const body = readFileSync(legacyPath, "utf8");
+
+  // Any profile lookup runs the migration; the credential survives under the new name.
+  const byName = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" });
+  const currentPath = join(profileDir, "claude-code.env");
+  assert.equal(byName.matches.length, 1);
+  assert.equal(byName.matches[0]?.path, currentPath);
+  assert.equal(byName.matches[0]?.source_instance_id, "dsrc_old");
+  assert.equal(existsSync(legacyPath), false, "the legacy file is gone after the rename");
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(currentPath).mode & 0o777, 0o600);
+  }
+  assert.equal(findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_old" }).matches.length, 1);
+
+  // A second run has nothing to do.
+  assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 1);
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+});
+
+test("an underscore-named profile that duplicates the hyphen-named one is removed", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = join(profileDir, "claude-code.env");
+  writeFileSync(currentPath, readFileSync(legacyPath, "utf8"), { mode: 0o600 });
+  const matches = findLocalCollectorProfiles({ profileDir }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
+  assert.equal(existsSync(legacyPath), false);
+});
+
+test("an underscore-named profile that differs from the hyphen-named one is kept; the hyphen one wins", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const matches = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
+  assert.equal(matches[0]?.source_instance_id, "dsrc_new");
+  assert.equal(existsSync(legacyPath), true, "a differing file may hold another device's token, so it is not deleted");
+  assert.match(readFileSync(legacyPath, "utf8"), /token-old/);
+});
+
+test("an operator profile named like a connector but for another connector is not renamed or deleted", () => {
+  const profileDir = tempDirSync();
+  // A profile an operator named `claude_code` for the codex connector.
+  const operatorPath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir,
+    sourceInstanceId: "dsrc_codex",
+  });
+  const body = readFileSync(operatorPath, "utf8");
+  // Beside a real claude-code profile: listing must not delete the codex credential.
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  findLocalCollectorProfiles({ profileDir });
+  assert.equal(readFileSync(operatorPath, "utf8"), body);
+  assert.equal(existsSync(currentPath), true);
+  // Without a claude-code profile: it is not renamed onto the claude-code name either.
+  const alone = tempDirSync();
+  const alonePath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir: alone,
+    sourceInstanceId: "dsrc_codex",
+  });
+  findLocalCollectorProfiles({ profileDir: alone });
+  assert.equal(existsSync(alonePath), true);
+  assert.equal(existsSync(join(alone, "claude-code.env")), false);
+});
+
+test("logout removes a migrated legacy profile and stays idempotent; no underscore file is left to come back", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const removal = removeLocalCollectorProfile({ name: "claude-code", profileDir });
+  assert.equal(removal.removed, true);
+  assert.equal(removal.path, join(profileDir, "claude-code.env"));
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+  assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 0);
+  assert.equal(
+    removeLocalCollectorProfile({ name: "claude-code", profileDir }).removed,
+    false,
+    "logout stays idempotent"
+  );
+});
+
+test("the profile migration touches connector names only, not operator-chosen profile names", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "my_work", "token-1", "dsrc_work");
+  assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "my-work" }).matches.length, 0);
+  assert.equal(existsSync(join(profileDir, "my_work.env")), true, "an operator-named profile is left alone");
 });
 
 test("writeLocalCollectorProfile restricts directory and file permissions to the owner (POSIX)", {
@@ -1221,10 +1307,10 @@ test("writeLocalCollectorProfile round-trips a base URL containing special chara
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: 'https://pdpp.example.com/path?x="y"&z=\\',
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_escape",
   });
@@ -1238,18 +1324,18 @@ test("removeLocalCollectorProfile deletes an existing profile and is idempotent 
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_remove",
   });
-  const first = removeLocalCollectorProfile({ name: "claude_code", profileDir });
+  const first = removeLocalCollectorProfile({ name: "claude-code", profileDir });
   assert.equal(first.removed, true);
   assert.equal(existsSync(first.path), false);
 
-  const second = removeLocalCollectorProfile({ name: "claude_code", profileDir });
+  const second = removeLocalCollectorProfile({ name: "claude-code", profileDir });
   assert.equal(second.removed, false);
 });
 
@@ -1257,10 +1343,10 @@ test("run without --queue fills device-id/device-token/connector from a matching
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-from-profile",
     deviceToken: "token-from-profile",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_run_profile",
   });
@@ -1271,7 +1357,7 @@ test("run without --queue fills device-id/device-token/connector from a matching
     const resolved = resolveRunProfileOptions(options);
     assert.equal(resolved.deviceId, "device-from-profile");
     assert.equal(resolved.deviceToken, "token-from-profile");
-    assert.equal(resolved.connector, "claude_code");
+    assert.equal(resolved.connector, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
@@ -1299,12 +1385,12 @@ test("run with device-id/device-token/connector supplied via flags never consult
       "--device-token",
       "token-1",
       "--connector",
-      "claude_code",
+      "claude-code",
     ]);
     const resolved = resolveRunProfileOptions(options);
     assert.equal(resolved.deviceId, "device-1");
     assert.equal(resolved.deviceToken, "token-1");
-    assert.equal(resolved.connector, "claude_code");
+    assert.equal(resolved.connector, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
@@ -1318,19 +1404,19 @@ test("logout removes the named profile and reports removed:false when absent", (
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_logout",
   });
   const previous = process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
   process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR = profileDir;
   try {
-    const first = removeLocalCollectorProfile({ name: "claude_code" });
+    const first = removeLocalCollectorProfile({ name: "claude-code" });
     assert.equal(first.removed, true);
-    const second = removeLocalCollectorProfile({ name: "claude_code" });
+    const second = removeLocalCollectorProfile({ name: "claude-code" });
     assert.equal(second.removed, false);
   } finally {
     if (previous === undefined) {
@@ -1427,14 +1513,14 @@ const LOGOUT_CASES: Array<{
 for (const testCase of LOGOUT_CASES) {
   test(`runLogout: ${testCase.name}`, async () => {
     const profileDir = tempDirSync();
-    const profilePath = join(profileDir, "claude_code.env");
+    const profilePath = join(profileDir, "claude-code.env");
     if (testCase.seedProfile) {
       writeLocalCollectorProfile({
         baseUrl: "https://pdpp.example.com",
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         deviceId: "device-1",
         deviceToken: "token-1",
-        name: "claude_code",
+        name: "claude-code",
         profileDir,
         sourceInstanceId: "dsrc_logout",
       });
@@ -1444,7 +1530,7 @@ for (const testCase of LOGOUT_CASES) {
       const options: CliOptions = {
         baseUrl: "https://pdpp.example.com",
         command: "logout",
-        connector: "claude_code",
+        connector: "claude-code",
         ...(testCase.localOnly ? { localOnly: true } : {}),
         queuePath: "unused.sqlite",
       };
@@ -1494,10 +1580,10 @@ test("local collector recover dry-run loads the matching source-instance profile
     outbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     [
       "PDPP_REFERENCE_BASE_URL=https://pdpp.example.com",
-      "PDPP_COLLECTOR_CONNECTOR=claude_code",
+      "PDPP_COLLECTOR_CONNECTOR=claude-code",
       "PDPP_LOCAL_DEVICE_ID=device-1",
       "PDPP_LOCAL_DEVICE_TOKEN=token-1",
       "PDPP_SOURCE_INSTANCE_ID=dsrc_laptop",
@@ -1511,12 +1597,12 @@ test("local collector recover dry-run loads the matching source-instance profile
   try {
     const lookup = findLocalCollectorProfiles({ sourceInstanceId: "dsrc_laptop" });
     assert.equal(lookup.matches.length, 1);
-    assert.equal(lookup.matches[0]?.name, "claude_code");
+    assert.equal(lookup.matches[0]?.name, "claude-code");
 
     const result = await recoverLocalCollector(parseArgs(["recover", "--source-instance-id", "dsrc_laptop"]));
     assert.equal(result.object, "local_collector_recovery");
     assert.equal(result.dry_run, true);
-    assert.equal(result.profile.name, "claude_code");
+    assert.equal(result.profile.name, "claude-code");
     assert.equal(result.profile.source, "local_profile");
     assert.equal(result.db.exists, true);
     assert.equal(result.db.path, queuePath);
@@ -1555,7 +1641,7 @@ test("local collector recover respects explicit queue over the matching profile 
     explicitOutbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     ["PDPP_SOURCE_INSTANCE_ID=dsrc_laptop", `PDPP_COLLECTOR_QUEUE=${profileQueuePath}`, ""].join("\n")
   );
 
@@ -1917,7 +2003,6 @@ test("local collector run output summarizes state cursors without dumping payloa
 /** A baseline succeeded-source run result with a fully drained outbox. */
 function baseRunResult(outboxSummary) {
   return {
-    completeness: null,
     done: { records_emitted: 1, status: "succeeded", type: "DONE" },
     enqueuedBatches: 1,
     flushedState: {},
@@ -2035,81 +2120,6 @@ test("run summary names the scan-budget cutoff so the backlog is not read as the
   assert.match(output.drain_note, /enqueue budget/);
 });
 
-// --- coverage_note: exhaustive-vs-partial completion honesty ---
-//
-// A run's coverage_note must agree EXACTLY with whether collector-runner.ts's
-// own reportTerminalCollection gate fired — the same three axes: scan budget,
-// DONE status, and a real coverage observation. It must never say "committed"
-// for a run that could not have reached that call.
-
-test("coverage_note reports committed + fully accounted for a clean succeeded run", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 5, total: 5 });
-  result.completeness = {
-    byStore: { messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1 },
-    fullyAccounted: true,
-    storeCount: 1,
-    unaccountedStores: [],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /Coverage committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /fully accounted/);
-});
-
-test("coverage_note names unaccounted stores rather than claiming full coverage", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 5, total: 5 });
-  result.completeness = {
-    byStore: { attachments: "unaccounted", messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1, unaccounted: 1 },
-    fullyAccounted: false,
-    storeCount: 2,
-    unaccountedStores: ["attachments"],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /Coverage committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /attachments/);
-});
-
-test("coverage_note never claims committed coverage when the scan budget stopped the run", () => {
-  const result = baseRunResult({ ready: 500, succeeded: 1000, total: 1500 });
-  result.scanBudgetExceeded = true;
-  result.completeness = {
-    byStore: { messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1 },
-    fullyAccounted: true,
-    storeCount: 1,
-    unaccountedStores: [],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /scan budget/);
-});
-
-test("coverage_note never claims committed coverage when the connector did not report succeeded", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 0, total: 0 });
-  result.done = { records_emitted: 0, status: "failed", type: "DONE" };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /did not finish/);
-});
-
-test("coverage_note never claims committed coverage when no coverage diagnostic was observed", () => {
-  const output = summarizeRunResultForCli(baseRunResult({ ready: 0, succeeded: 5, total: 5 }));
-  assert.equal(output.completeness, null);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /reported no coverage diagnostics/);
-});
-
 test("run summary drained flag is true iff lifecycle_state is healthy_idle", () => {
   // Invariant: the boolean honesty flag and the lifecycle taxonomy must never
   // disagree. Exercise every non-stale open-work shape plus the idle case.
@@ -2133,13 +2143,13 @@ test("run summary drained flag is true iff lifecycle_state is healthy_idle", () 
 
 // --- Connector adoption (tasks 5.1-5.4) ---
 
-test("pdpp-local-collector run --connector claude_code resolves to the bundled durable-outbox entrypoint", () => {
+test("pdpp-local-collector run --connector claude-code resolves to the bundled durable-outbox entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude_code",
+    "claude-code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2148,10 +2158,10 @@ test("pdpp-local-collector run --connector claude_code resolves to the bundled d
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
-  assert.equal(spec.command, BUNDLED_CONNECTORS.claude_code.command);
-  assert.deepEqual([...spec.args], [...BUNDLED_CONNECTORS.claude_code.args]);
-  assert.deepEqual([...spec.streams].sort(), [...BUNDLED_CONNECTORS.claude_code.streams].sort());
+  assert.equal(spec.connector_id, "claude-code");
+  assert.equal(spec.command, BUNDLED_CONNECTORS["claude-code"].command);
+  assert.deepEqual([...spec.args], [...BUNDLED_CONNECTORS["claude-code"].args]);
+  assert.deepEqual([...spec.streams].sort(), [...BUNDLED_CONNECTORS["claude-code"].streams].sort());
   assert.equal(spec.runtime_requirements.bindings.filesystem?.required, true);
 });
 
@@ -2161,7 +2171,7 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude_code",
+    "claude-code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2174,7 +2184,10 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
   // the package and the repository, so the child runs from the directory that
   // holds it.
   assert.equal(spec.command, process.execPath);
-  assert.equal(spec.args[0], join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs"));
+  assert.equal(
+    spec.args[0],
+    join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs")
+  );
   const executionRoot = resolveExecutionRoot(spec);
   assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
@@ -2196,13 +2209,13 @@ test("resolveExecutionRoot resolves a relative development entrypoint to the enc
   assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
 });
 
-test("pdpp-local-collector run --connector claude-code (hyphen) normalizes to the bundled claude_code entrypoint", () => {
+test("pdpp-local-collector run --connector claude_code (legacy underscore) normalizes to the bundled claude-code entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude-code",
+    "claude_code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2211,11 +2224,11 @@ test("pdpp-local-collector run --connector claude-code (hyphen) normalizes to th
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
-  assert.equal(spec.command, BUNDLED_CONNECTORS.claude_code.command);
+  assert.equal(spec.connector_id, "claude-code");
+  assert.equal(spec.command, BUNDLED_CONNECTORS["claude-code"].command);
 });
 
-test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to the bundled claude_code entrypoint", () => {
+test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to the bundled claude-code entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
@@ -2230,12 +2243,12 @@ test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
+  assert.equal(spec.connector_id, "claude-code");
 });
 
 test("pdpp-local-collector run reads connector id from PDPP_COLLECTOR_CONNECTOR", () => {
   const previous = process.env.PDPP_COLLECTOR_CONNECTOR;
-  process.env.PDPP_COLLECTOR_CONNECTOR = "claude_code";
+  process.env.PDPP_COLLECTOR_CONNECTOR = "claude-code";
   try {
     const options = parseArgs([
       "run",
@@ -2249,7 +2262,7 @@ test("pdpp-local-collector run reads connector id from PDPP_COLLECTOR_CONNECTOR"
       "src-claude",
     ]);
     const spec = buildConnectorSpec(options);
-    assert.equal(spec.connector_id, "claude_code");
+    assert.equal(spec.connector_id, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_COLLECTOR_CONNECTOR;
@@ -2324,7 +2337,7 @@ test("pdpp-local-collector run refuses --command <bin> without the dev opt-in en
       "--base-url",
       "http://127.0.0.1:7662",
       "--connector",
-      "claude_code",
+      "claude-code",
       "--device-id",
       "device-1",
       "--device-token",
@@ -2376,7 +2389,7 @@ test("resolveConnectorProtocolCapabilities forces [] whenever entrypointCommand 
 
 test("pdpp-local-collector run --connector <bundled> --command <bin> declares [] protocol_capabilities regardless of the bundled connector's own declaration", () => {
   // Integration companion at the buildConnectorSpec level, using the real
-  // bundled claude_code connector (whose real protocol_capabilities is []
+  // bundled claude-code connector (whose real protocol_capabilities is []
   // today, so this alone would not distinguish a reverted ternary — the
   // unit test above pins the actual behavior difference; this confirms the
   // real CLI code path reaches resolveConnectorProtocolCapabilities with
@@ -2390,7 +2403,7 @@ test("pdpp-local-collector run --connector <bundled> --command <bin> declares []
       "--base-url",
       "http://127.0.0.1:7662",
       "--connector",
-      "claude_code",
+      "claude-code",
       "--device-id",
       "device-1",
       "--device-token",
@@ -2400,7 +2413,7 @@ test("pdpp-local-collector run --connector <bundled> --command <bin> declares []
       "--command",
       "/bin/cat",
     ]);
-    assert.ok(getBundledConnector("claude_code"), "expected claude_code to resolve as a bundled connector");
+    assert.ok(getBundledConnector("claude-code"), "expected claude-code to resolve as a bundled connector");
     const spec = buildConnectorSpec(options);
     assert.equal(spec.command, "/bin/cat");
     assert.deepEqual([...spec.protocol_capabilities], []);
@@ -2418,8 +2431,8 @@ test("buildLocalDeviceOutboxId namespaces ids by source instance so identical pa
   // devices / source instances, the durable outbox id must differ. This
   // protects the unique-key constraint on the local outbox row and keeps
   // multi-device local collection collision-safe.
-  const partsA = ["claude_code", 1, "batch-shared-id"];
-  const partsB = ["claude_code", 1, "batch-shared-id"];
+  const partsA = ["claude-code", 1, "batch-shared-id"];
+  const partsB = ["claude-code", 1, "batch-shared-id"];
   const idA = buildLocalDeviceOutboxId({ kind: "record_batch", parts: partsA, sourceInstanceId: "src-A" });
   const idB = buildLocalDeviceOutboxId({ kind: "record_batch", parts: partsB, sourceInstanceId: "src-B" });
   assert.notEqual(idA, idB, "same parts under different source instances must yield different ids");
@@ -2428,7 +2441,7 @@ test("buildLocalDeviceOutboxId namespaces ids by source instance so identical pa
   // same work on a re-run is idempotent (no duplicate row creation).
   const idAagain = buildLocalDeviceOutboxId({
     kind: "record_batch",
-    parts: ["claude_code", 1, "batch-shared-id"],
+    parts: ["claude-code", 1, "batch-shared-id"],
     sourceInstanceId: "src-A",
   });
   assert.equal(idA, idAagain);
@@ -2444,7 +2457,7 @@ test("LocalDeviceOutbox isolates rows across connection-scoped source instances"
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-A"],
+        parts: ["claude-code", 1, "batch-A"],
         sourceInstanceId: "src-A",
       }),
       kind: "record_batch",
@@ -2454,7 +2467,7 @@ test("LocalDeviceOutbox isolates rows across connection-scoped source instances"
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-B"],
+        parts: ["claude-code", 1, "batch-B"],
         sourceInstanceId: "src-B",
       }),
       kind: "record_batch",
@@ -2491,7 +2504,7 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-A"],
+        parts: ["claude-code", 1, "batch-A"],
         sourceInstanceId: "src-only-A",
       }),
       kind: "record_batch",
@@ -2532,11 +2545,9 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
   assert.equal(bOnly.outbox.counts.total, 1);
 });
 
-// --- Lifecycle state axis (Target 2/4): status/doctor must distinguish
-// healthy_idle, draining, retryable_backlog, dead_letter, stale_lease, and
-// coverage_missing from the durable outbox alone. ---
+// Status and doctor derive lifecycle state from durable outbox counts.
 
-function statusFor(path, sourceInstanceId = "src-1") {
+function statusFor(path, sourceInstanceId = "src-1", selectedRelease = SELECTED_RELEASE) {
   return inspectLocalOutboxStatus(
     {
       baseUrl: "http://127.0.0.1:7662",
@@ -2544,7 +2555,7 @@ function statusFor(path, sourceInstanceId = "src-1") {
       queuePath: path,
       sourceInstanceId,
     },
-    { deploymentPosture: PUBLISHED_POSTURE }
+    { deploymentPosture: PUBLISHED_POSTURE, selectedRelease }
   );
 }
 
@@ -2556,10 +2567,8 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
     payload: {
       batchId: id,
       batchSeq: 1,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       deviceId: "device-1",
-      // Shape mirrors buildLocalDeviceRecordEnvelope output: the outbox's
-      // coverage scan reads $.records[*].stream.
       records: streams.map((stream, index) => ({ data: { id: `${stream}-${index}` }, stream })),
       sourceInstanceId,
     },
@@ -2567,21 +2576,788 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
   });
 }
 
-/** Claim + acknowledge a row so it reaches status 'succeeded' (drained). */
+// Run sequences a current server issues: each acknowledged terminal record is a later run.
+let acknowledgedRunSequence = 0;
+
+/**
+ * Claim + acknowledge the next ready row, which must be `id`, so it reaches status 'succeeded' (drained).
+ * A terminal record is acknowledged as a current server does, with its run sequence and revision.
+ */
 function drainRow(outbox, id, sourceInstanceId = "src-1") {
-  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, sourceInstanceId });
-  assert.ok(claim, `expected to claim a ready row for ${id}`);
-  outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId });
+  assert.equal(claim?.id, id, `expected ${id} to be the next ready row`);
+  acknowledgedRunSequence += 1;
+  outbox.acknowledge({
+    holder: "drainer",
+    id: claim.id,
+    leaseEpoch: claim.lease_epoch,
+    terminalAck: {
+      collectionRevision: acknowledgedRunSequence,
+      runId: typeof claim.payload?.run_id === "string" ? claim.payload.run_id : claim.id,
+      runSequence: acknowledgedRunSequence,
+      storageEpoch: 1,
+    },
+  });
 }
 
-test("lifecycle_state is healthy_idle on an empty outbox (nothing collected, no coverage to miss)", async () => {
+// The release this device selects for the connector, and one it has since
+// replaced. A v2 receipt is current only when its facts name the selected one.
+const SELECTED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"a".repeat(64)}`,
+  manifestFingerprint: "b".repeat(64),
+});
+const SUPERSEDED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"c".repeat(64)}`,
+  manifestFingerprint: "d".repeat(64),
+});
+
+/** The release fields a v2 terminal fact carries; `null` models a receipt with no binding. */
+function releaseBinding(release) {
+  return release ? { artifact_digest: release.artifactDigest, manifest_fingerprint: release.manifestFingerprint } : {};
+}
+
+/** The runtime accounting the collector attaches to a v2 fact for a run that ran clean. */
+const CLEAN_ACCOUNTING = Object.freeze({
+  checkpoint_eligible: true,
+  detail_complete: true,
+  durable_admission: true,
+  outstanding_debt: 0,
+  stream_evidence_consistent: true,
+});
+
+/** Enqueue a terminal run commit without draining it. `accounting: null` models a v2 fact with none. */
+function enqueueTerminalCoverage(
+  outbox,
+  {
+    id,
+    sourceInstanceId = "src-1",
+    stores,
+    scoped = true,
+    version = 2,
+    release = SELECTED_RELEASE,
+    accounting = CLEAN_ACCOUNTING,
+  }
+) {
+  outbox.enqueue({
+    id,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "unscoped",
+      commit_id: id,
+      connector_id: "claude_code",
+      connector_instance_id: "connector-1",
+      device_id: "device-1",
+      run_id: id,
+      source_instance_id: sourceInstanceId,
+      state_delta: {},
+      terminal_facts: version === 2
+        ? [
+            {
+              ...releaseBinding(release),
+              ...(accounting ? { runtime_accounting: accounting } : {}),
+              scoped,
+              stores,
+              stream: "sessions",
+            },
+          ]
+        : [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version,
+    },
+    sourceInstanceId,
+  });
+}
+
+function acknowledgeTerminalCoverage(outbox, options) {
+  enqueueTerminalCoverage(outbox, options);
+  drainRow(outbox, options.id, options.sourceInstanceId ?? "src-1");
+}
+
+test("acknowledged v2 coverage stays reported-collected after sent rows are pruned", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-covered",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.outbox.counts.total, 0);
+  assert.equal(status.terminal_coverage.verdict, "reported_collected");
+  assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
+  // The verdict names what it is a fact about: the run and its place in run order.
+  const asOf = status.terminal_coverage.as_of;
+  assert.ok(asOf, "a reported-collected verdict carries its as-of");
+  assert.deepEqual(
+    { ...asOf, acknowledged_at: typeof asOf.acknowledged_at },
+    {
+      acknowledged_at: "string",
+      collection_revision: acknowledgedRunSequence,
+      run_id: "terminal-covered",
+      run_sequence: acknowledgedRunSequence,
+      storage_epoch: 1,
+    }
+  );
+  assert.equal(status.lifecycle_state, "reported_collected");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
+  const matchingDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "unscoped",
+    status: "ok",
+  });
+  assert.equal(matchingDoctor.lifecycle_state, "reported_collected");
+  assert.equal(matchingDoctor.scope.active, "unscoped");
+  const staleDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "new-owner-scope",
+    status: "ok",
+  });
+  assert.equal(staleDoctor.lifecycle_state, "no_evidence");
+  assert.equal(staleDoctor.terminal_coverage.verdict, "no_evidence");
+  assert.equal(staleDoctor.checks.terminal_coverage, "warn");
+  assert.equal(staleDoctor.status, "warning");
+});
+
+test("a receipt without a run sequence is no evidence, and an older run's late ACK does not replace a newer receipt", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    // An older server acknowledged the run without a run sequence: the device cannot order it.
+    enqueueTerminalCoverage(outbox, { id: "terminal-unsequenced", stores: [{ store: "local_files", status: "collected" }] });
+    const [unsequenced] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(unsequenced);
+    outbox.acknowledge({ holder: "drainer", id: unsequenced.id, leaseEpoch: unsequenced.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const unordered = statusFor(path);
+  assert.equal(unordered.terminal_coverage.verdict, "no_evidence");
+  assert.equal(unordered.terminal_coverage.as_of, null);
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(reopened, { id: "terminal-newer", stores: [{ store: "local_files", status: "collected" }] });
+    const newer = acknowledgedRunSequence;
+    // A run that started before it is acknowledged later, with its own, lower sequence.
+    enqueueTerminalCoverage(reopened, { id: "terminal-older", stores: [{ store: "local_files", status: "partial" }] });
+    const [older] = reopened.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(older);
+    reopened.acknowledge({
+      holder: "drainer",
+      id: older.id,
+      leaseEpoch: older.lease_epoch,
+      terminalAck: { collectionRevision: newer + 1, runId: "terminal-older", runSequence: newer - 1, storageEpoch: 1 },
+    });
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "reported_collected", "the newer run's receipt stands");
+    assert.equal(status.terminal_coverage.as_of?.run_sequence, newer);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("a later partial terminal receipt replaces a previously reported-collected verdict", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-first",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-second",
+      stores: [{ store: "local_files", status: "partial" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "incomplete");
+  assert.equal(status.lifecycle_state, "coverage_incomplete");
+});
+
+test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v2",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v1",
+      stores: [{ store: "local_files", status: "collected" }],
+      version: 1,
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// The collector's own accounting can contradict a store that reads collected:
+// the server withholds collected for these facts, so the device must not read
+// the receipt as reported-collected either.
+for (const [field, value] of [
+  ["durable_admission", false],
+  ["detail_complete", false],
+  ["stream_evidence_consistent", false],
+  ["checkpoint_eligible", false],
+  ["outstanding_debt", 1],
+]) {
+  test(`v2 receipt with runtime ${field} ${value} is incomplete, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-unclean-${field}`,
+        accounting: { ...CLEAN_ACCOUNTING, [field]: value },
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "incomplete");
+    assert.equal(status.lifecycle_state, "coverage_incomplete");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
+
+test("v2 receipt without runtime accounting reads no_evidence, even when every store is collected", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-no-accounting",
+      accounting: null,
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// A reported-collected receipt is a report for the run that wrote it. A later run whose record
+// batch the server refuses is not admitted, and its terminal commit waits behind
+// that batch, so the device must not keep reporting the older run's proof.
+test("a later run whose record batch stays ready makes an earlier reported-collected receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "draining");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+});
+
+test("a later run whose record batch is dead-lettered makes an earlier reported-collected receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    outbox.deadLetter({ error: "refused", holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "dead_letter");
+});
+
+/**
+ * A reference stand-in for a server that refuses one pass's state read. Heartbeats
+ * and gap acknowledgements succeed, so a failed pass can still deliver its gap.
+ * Records each gap acknowledgement it receives.
+ */
+async function startStateReadRefusingServer() {
+  const gapAcks = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state") && req.method === "GET") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "synthetic_state_read_failure" } }));
+        return;
+      }
+      if (url.includes("/heartbeat")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "device_exporter_heartbeat", status: "accepted" }));
+        return;
+      }
+      if (url.includes("/local-collector-gaps")) {
+        gapAcks.push(JSON.parse(body));
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            attempt_count: 0,
+            connector_id: "claude_code",
+            connector_instance_id: "cin_fake",
+            device_id: "device-1",
+            first_seen_at: null,
+            first_seen_run_id: null,
+            gap_id: "gap_fake",
+            last_run_id: null,
+            object: "device_local_collector_gap",
+            reason: "connector_child_failure",
+            retryable: true,
+            source_instance_id: "src-1",
+            status: "pending",
+            stream: "local-collector/connector_child_failure",
+            updated_at: new Date().toISOString(),
+          })
+        );
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+    gapAcks,
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
+/** One pass of `src-1` for `claude_code`. Its child is never spawned when the state read is refused. */
+function refusedStatePassConfig(baseUrl, queuePath, runId) {
+  return {
+    baseUrl,
+    connector: {
+      args: [],
+      command: process.execPath,
+      connector_id: "claude_code",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: ["sessions"],
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: dirname(queuePath),
+    queuePath,
+    runId,
+    sourceInstanceId: "src-1",
+  };
+}
+
+// A failed pass must not leave an earlier reported-collected receipt standing for its lane. Both
+// tests fail the pass at the state read, which is before the scan starts.
+test("a pass that fails before its scan leaves an earlier reported-collected receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-state-read-failed")),
+      /failed to read prior state/
+    );
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
+});
+
+test("a pass that fails after its pre-scan drain delivered an earlier gap leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    // An earlier pass's failure gap, not yet delivered. The id is the one the
+    // runner derives for this lane's connector_child_failure gap.
+    outbox.enqueue({
+      id: buildLocalDeviceOutboxId({
+        kind: "gap",
+        parts: ["claude_code", "src-1", "connector_child_failure", null, null],
+        sourceInstanceId: "src-1",
+      }),
+      kind: "gap",
+      payload: {
+        connectorId: "claude_code",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "src-1",
+      },
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-after-pre-scan-drain")),
+      /failed to read prior state/
+    );
+    assert.equal(server.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await server.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "unadmitted");
+});
+
+/**
+ * Enqueues the connector_child_failure gap a failed pass leaves for `src-1`,
+ * under the id the runner derives for it. Returns that id.
+ */
+function enqueueFailureGap(outbox: LocalDeviceOutbox, connectorId: string): string {
+  const id = buildLocalDeviceOutboxId({
+    kind: "gap",
+    parts: [connectorId, "src-1", "connector_child_failure", null, null],
+    sourceInstanceId: "src-1",
+  });
+  outbox.enqueue({
+    id,
+    kind: "gap",
+    payload: {
+      connectorId,
+      firstSeenAt: "2026-10-22T11:00:00.000Z",
+      nextAttemptBackoffMs: 60_000,
+      reason: "connector_child_failure",
+      retryable: true,
+      sourceInstanceId: "src-1",
+    },
+    sourceInstanceId: "src-1",
+  });
+  return id;
+}
+
+/** One independent drain of `src-1`'s ready rows, outside any collector run. */
+async function drainLaneOnce(path: string, baseUrl: string, connectorId: string): Promise<void> {
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    await drainCollectorOutbox({
+      client: new LocalDeviceClient({ baseUrl, deviceId: "device-1", deviceToken: "device-token" }),
+      connectorId,
+      holderId: "independent-drain",
+      outbox,
+      policy: DEFAULT_COLLECTOR_OUTBOX_POLICY,
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+}
+
+test("a run aborted before start leaves an earlier reported-collected receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
+
+  const controller = new AbortController();
+  controller.abort(new Error("operator cancelled run"));
+  await assert.rejects(
+    runCollectorConnector({
+      abortSignal: controller.signal,
+      baseUrl: "http://127.0.0.1:9",
+      connector: {
+        args: [],
+        command: process.execPath,
+        connector_id: "claude_code",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["sessions"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: dirname(path),
+      queuePath: path,
+      runId: "run-aborted-before-start",
+      sourceInstanceId: "src-1",
+    }),
+    /operator cancelled run/
+  );
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
+});
+
+test("an unrecovered failure gap delivered by an independent drain leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
+
+  // A failed pass leaves its gap open, then an independent drain delivers it.
+  // Delivery is not recovery: no complete run has resolved the barrier.
+  const seeded = new LocalDeviceOutbox({ path });
+  try {
+    enqueueFailureGap(seeded, "claude_code");
+  } finally {
+    seeded.close();
+  }
+  const server = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, server.url, "claude_code");
+    assert.equal(server.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
+});
+
+test("a following successful pass without coverage evidence leaves a delivered failure gap unrecovered and the lane not reported-collected", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  let gapId = "";
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    gapId = enqueueFailureGap(outbox, "custom");
+  } finally {
+    outbox.close();
+  }
+
+  const gapServer = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, gapServer.url, "custom");
+    assert.equal(gapServer.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await gapServer.close();
+  }
+
+  // A pass that succeeds without negotiating coverage commits a terminal run
+  // record with no evidence. It clears the receipt but recovers no gap.
+  const previous = process.env[ALLOW_CUSTOM_COMMAND_ENV];
+  process.env[ALLOW_CUSTOM_COMMAND_ENV] = "1";
+  const server = await startAcceptingDeviceServer();
+  try {
+    const fixture = await writeCountingFixtureConnector(1);
+    const result = await runCollectorOnce({
+      args: [fixture],
+      baseUrl: server.url,
+      command: "run",
+      connector: "custom",
+      deviceId: "device-1",
+      deviceToken: "token-1",
+      entrypointCommand: "node",
+      quiet: true,
+      queuePath: path,
+      sourceInstanceId: "src-1",
+      streams: ["messages"],
+    });
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(result.statePutFailed, false);
+    assert.equal(
+      result.outboxSummary.ready + result.outboxSummary.leased + result.outboxSummary.deadLetter,
+      0,
+      "the pass drained all of its own work, so any unadmitted verdict comes from the gap"
+    );
+  } finally {
+    await server.close();
+    if (previous === undefined) {
+      delete process.env[ALLOW_CUSTOM_COMMAND_ENV];
+    } else {
+      process.env[ALLOW_CUSTOM_COMMAND_ENV] = previous;
+    }
+  }
+
+  const after = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(after.get(gapId)?.status, "succeeded", "the successful pass left the delivered gap unrecovered");
+  } finally {
+    after.close();
+  }
+  // The pass's own no-evidence terminal record replaced run A's reported-collected receipt.
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
+});
+
+test("open record work without an acknowledged receipt stays no_evidence", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    enqueueRecordBatch(outbox, { id: "rb-first-run", streams: ["sessions"] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "draining");
+});
+
+test("a reported-collected verdict returns once the later run's commit is acknowledged clean", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+    drainRow(outbox, "rb-run-b");
+    drainRow(outbox, "terminal-run-b");
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "reported_collected");
+  assert.equal(status.lifecycle_state, "reported_collected");
+});
+
+// A receipt is current only for the release this device selects. Each case is
+// a receipt acknowledged for another release, or for none, while every store
+// reads collected: it must not be reported as collected.
+for (const [label, receiptRelease, selectedRelease] of [
+  ["a superseded artifact digest", SUPERSEDED_RELEASE, SELECTED_RELEASE],
+  [
+    "a matching artifact digest and a different manifest fingerprint",
+    { artifactDigest: SELECTED_RELEASE.artifactDigest, manifestFingerprint: "e".repeat(64) },
+    SELECTED_RELEASE,
+  ],
+  ["no release binding on the receipt", null, SELECTED_RELEASE],
+  ["no selected release on this device", SELECTED_RELEASE, null],
+]) {
+  test(`v2 receipt with ${label} is not current, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: "terminal-not-current",
+        release: receiptRelease,
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path, "src-1", selectedRelease);
+    assert.equal(status.terminal_coverage.verdict, "not_current");
+    assert.equal(status.lifecycle_state, "coverage_not_current");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
+
+test("partial, failed, unscoped, and v1 terminal commits do not prove coverage", async () => {
+  for (const [statusValue, scoped, version, expected] of [
+    ["partial", true, 2, "incomplete"],
+    ["failed", true, 2, "incomplete"],
+    ["unavailable", true, 2, "incomplete"],
+    ["collected", false, 2, "incomplete"],
+    ["collected", true, 1, "no_evidence"],
+  ]) {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-${statusValue}-${scoped}-${version}`,
+        stores: [{ store: "local_files", status: statusValue }],
+        scoped,
+        version,
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const observed = statusFor(path);
+    assert.equal(observed.terminal_coverage.verdict, expected);
+    assert.notEqual(observed.lifecycle_state, "reported_collected");
+    assert.equal(buildLocalOutboxDoctor(observed).checks.terminal_coverage, expected === "no_evidence" ? "unknown" : "warn");
+  }
+});
+
+test("a malformed persisted terminal receipt stays unknown without crashing status", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-corrupt",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare("UPDATE local_device_terminal_coverage_receipts SET terminal_facts_json = ? WHERE source_instance_id = ?")
+      .run("{malformed", "src-1");
+  } finally {
+    db.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("lifecycle_state is no_evidence on an empty scoped outbox", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   outbox.close();
   const status = statusFor(path);
-  assert.equal(status.lifecycle_state, "healthy_idle");
-  assert.deepEqual(status.coverage, { observed: false, record_batches: 0 });
-  assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
 });
 
 test("lifecycle_state is draining when claimable-now record work exists", async () => {
@@ -2654,98 +3430,14 @@ test("lifecycle_state is stale_lease when a lease is past expiry", async () => {
   assert.ok(doctor.remediation.some((line) => /past expiry/.test(line)));
 });
 
-test("lifecycle_state is coverage_missing after a clean drain that never carried a coverage record", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // Collect and fully drain real records, but none on coverage_diagnostics.
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["sessions", "messages"] });
-    drainRow(outbox, "rb-content");
-  } finally {
-    outbox.close();
-  }
-  const status = statusFor(path);
-  assert.equal(status.outbox.counts.pending, 0);
-  assert.equal(status.outbox.counts.leased, 0);
-  assert.equal(status.coverage.observed, false);
-  assert.ok(status.coverage.record_batches >= 1);
-  assert.equal(status.lifecycle_state, "coverage_missing");
-
-  const doctor = buildLocalOutboxDoctor(status);
-  assert.equal(doctor.checks.coverage_diagnostics, "warn");
-  assert.equal(doctor.status, "warning");
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /coverage_unknown/.test(line)));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /default stream set/.test(line)));
-  // The hint must name the npx -y path so an operator with a stale globally-installed
-  // binary (which may predate coverage_diagnostics in bundled defaults) gets the right
-  // recovery: fetch a current published build, not just re-run with the existing install.
-  assert.ok(
-    // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-    doctor.remediation.some((line) => /npx -y @pdpp\/local-collector/.test(line)),
-    "coverage_missing remediation must name the npx -y upgrade path"
-  );
-  // …but it must not promise that the published build is current. When the
-  // coverage fix only exists on the repo build and not yet published, the npx
-  // path alone would not close the gap, so the hint routes verification through
-  // the release owner's dist-tag check instead of asserting the publish is current.
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  const coverageHint = doctor.remediation.find((line) => /coverage_unknown/.test(line));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /can still lag the repo build/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /release:dist-tag-check/);
-});
-
-test("lifecycle_state is healthy_idle once a drained lane has carried a coverage_diagnostics record", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["messages"] });
-    drainRow(outbox, "rb-content");
-    enqueueRecordBatch(outbox, { id: "rb-coverage", streams: ["coverage_diagnostics"] });
-    drainRow(outbox, "rb-coverage");
-  } finally {
-    outbox.close();
-  }
-  const status = statusFor(path);
-  assert.equal(status.coverage.observed, true);
-  assert.equal(status.lifecycle_state, "healthy_idle");
-  assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
-});
-
-test("coverage observation survives a clean drain and ignores dead-letter rows", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // A coverage record that only ever dead-lettered was never durably
-    // observed by the lane, so it must not count as coverage.
-    enqueueRecordBatch(outbox, { id: "rb-dl-coverage", streams: ["coverage_diagnostics"] });
-    const [claim] = outbox.claimReady({ holder: "w", leaseMs: 60_000, sourceInstanceId: "src-1" });
-    outbox.deadLetter({ error: "terminal", holder: "w", id: claim.id, leaseEpoch: claim.lease_epoch });
-    // A separate, successfully drained content batch with no coverage.
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["messages"] });
-    drainRow(outbox, "rb-content");
-  } finally {
-    outbox.close();
-  }
-  // dead_letter dominates the lifecycle verdict, but the coverage signal
-  // itself still reports observed:false because the only coverage row
-  // dead-lettered.
-  const status = statusFor(path);
-  assert.equal(status.coverage.observed, false);
-  assert.equal(status.lifecycle_state, "dead_letter");
-});
-
-test("lifecycle/coverage status leaks no payloads", async () => {
+test("lifecycle status leaks no payloads", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
       id: "secret-row",
       kind: "record_batch",
-      payload: { records: [{ data: { id: "do-not-print", token: "nope" }, stream: "coverage_diagnostics" }] },
+      payload: { records: [{ data: { id: "do-not-print", token: "nope" }, stream: "messages" }] },
       sourceInstanceId: "src-1",
     });
     drainRow(outbox, "secret-row");
@@ -2758,48 +3450,6 @@ test("lifecycle/coverage status leaks no payloads", async () => {
   // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
   assert.doesNotMatch(rendered, /do-not-print|secret-row|nope/);
 });
-
-test("status/doctor stay bounded and report observed:null on a giant legacy (pre-index) outbox", async () => {
-  // The performance flaw this lane fixes: doctor against a real ~35 GB Codex
-  // outbox hung because coverage detection scanned every retained payload with
-  // json_each. The fix moves coverage to a payload-light index; a pre-index
-  // outbox whose unindexed backlog exceeds the bounded scan budget must report
-  // observed:null (unknown) instead of launching an unbounded scan. We assert
-  // the bounded behavior by timing a status/doctor pass over an over-budget
-  // legacy DB and proving it answers null rather than a partial false negative.
-  const path = await tempOutboxPath();
-  const budget = 5000;
-  seedLegacyV1Outbox(
-    path,
-    Array.from({ length: budget + 50 }, (_value, index) => ({
-      id: `legacy-${index}`,
-      sourceInstanceId: "src-legacy",
-      streams: ["messages"],
-    }))
-  );
-
-  const status = inspectLocalOutboxStatus({
-    baseUrl: "http://127.0.0.1:7662",
-    command: "status",
-    queuePath: path,
-    sourceInstanceId: "src-legacy",
-  });
-  // Unknown coverage suppresses the coverage_missing verdict (never guess from
-  // a partial scan); the lane is fully drained otherwise, so it is healthy_idle.
-  assert.equal(status.coverage.observed, null);
-  assert.equal(status.lifecycle_state, "healthy_idle");
-
-  const doctor = buildLocalOutboxDoctor(status);
-  assert.equal(doctor.checks.coverage_diagnostics, "ok");
-  // The whole pass leaks no payloads even on the legacy path.
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.doesNotMatch(JSON.stringify({ status, doctor }), /messages-\d/);
-});
-
-// --- Sent-row retention / prune-sent (outbox-retention-health-v1) ---
-//
-// Invariant: pruneSent never touches pending, leased, retrying, or dead-letter
-// rows. It only deletes succeeded rows that satisfy the age/count policy.
 
 test("pruneSent dry-run reports matched count without deleting", async () => {
   const path = await tempOutboxPath();
@@ -2913,17 +3563,11 @@ test("pruneSent cascades to the observed-stream index", async () => {
     enqueueRecordBatch(outbox, { id: "rb-1", streams: ["messages", "sessions"] });
     drainRow(outbox, "rb-1");
 
-    // Verify coverage observation works before pruning.
-    assert.equal(outbox.hasObservedStream({ sourceInstanceId: "src-1", stream: "messages" }), true);
-
     const result = outbox.pruneSent({ dryRun: false, keepCount: 0 });
     assert.equal(result.pruned, 1);
 
     // After pruning, the parent outbox row is gone. The index entries for this
     // outbox_id are also gone (no orphan rows left behind).
-    // The coverage observation now returns false (no non-dead-letter record_batch rows).
-    assert.equal(outbox.hasObservedStream({ sourceInstanceId: "src-1", stream: "messages" }), false);
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-1" }), 0);
   } finally {
     outbox.close();
   }
@@ -3332,6 +3976,79 @@ function tempDirSync(prefix = "pdpp-local-collector-test-"): string {
  * two routes a sample run actually hits. Not a general harness — keep it
  * this small; `collector-runner.test.ts` already owns the full route set.
  */
+/**
+ * A reference stand-in that accepts a whole pass: prior state, state writes, and
+ * ingest batches echoing the accepted count the client requires. Unlike
+ * {@link startSampleTestServer}, a batch it accepts is actually drained, so a
+ * pass that uses it leaves no open work of its own.
+ */
+async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void>; url: string }> {
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            connector_instance_id: "cin-1",
+            device_id: "device-1",
+            object: "device_source_instance_state",
+            source_instance_id: "src-1",
+            state: {},
+            updated_at: null,
+          })
+        );
+        return;
+      }
+      if (url.includes("/ingest-batches")) {
+        const records = (JSON.parse(body || "{}").records ?? []) as unknown[];
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            accepted_record_count: records.length,
+            object: "device_ingest_batch_result",
+            rejected_record_count: 0,
+            status: "accepted",
+          })
+        );
+        return;
+      }
+      if (url.includes("/terminal-run-commits")) {
+        // Every successful pass commits a terminal run record; acknowledge it as the server does.
+        const request = JSON.parse(body || "{}") as TerminalRunCommitRequest;
+        res.writeHead(201, { "content-type": "application/json" });
+        acknowledgedRunSequence += 1;
+        res.end(
+          JSON.stringify({
+            collection_revision: acknowledgedRunSequence,
+            commit_id: request.commit_id,
+            envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
+            object: "device_terminal_run_commit",
+            run_id: request.run_id,
+            run_sequence: acknowledgedRunSequence,
+            storage_epoch: 1,
+            terminal_event_id: `evt-${request.run_id}`,
+          })
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
 async function startSampleTestServer(): Promise<{ close: () => Promise<void>; url: string }> {
   const server = createServer((req, res) => {
     if (req.url?.endsWith("/state")) {
@@ -3451,13 +4168,13 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
         baseUrl: "https://pdpp.example.com",
         code: "one-time-code",
         command: "setup",
-        connector: "claude_code",
+        connector: "claude-code",
         // Deliberately stale/wrong credentials on the input options, to
         // prove the sample pass uses the enrollment's fresh ones instead.
         deviceId: "stale-device",
         deviceToken: "stale-token",
         json: true,
-        profile: "claude_code",
+        profile: "claude-code",
         queuePath: "unused.sqlite",
         sample: 2,
       } as CliOptions,
@@ -3466,7 +4183,7 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
           calls.push("enroll");
           assert.equal(input.code, "one-time-code");
           return Promise.resolve({
-            connector_id: "claude_code",
+            connector_id: "claude-code",
             device_id: "fresh-device",
             device_token: "fresh-token",
             local_binding_name: "test-binding",
@@ -3477,7 +4194,7 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
           calls.push("sample");
           sampleOptionsSeen = sampleOptions;
           return Promise.resolve({
-            connector: "claude_code",
+            connector: "claude-code",
             note: "sampled",
             object: "local_collector_sample",
             records_seen: 2,
@@ -3520,15 +4237,15 @@ test("runSetup without --sample enrolls and writes the profile but never runs a 
         baseUrl: "https://pdpp.example.com",
         code: "one-time-code",
         command: "setup",
-        connector: "claude_code",
+        connector: "claude-code",
         json: true,
-        profile: "claude_code",
+        profile: "claude-code",
         queuePath: "unused.sqlite",
       } as CliOptions,
       {
         enroll: () =>
           Promise.resolve({
-            connector_id: "claude_code",
+            connector_id: "claude-code",
             device_id: "fresh-device",
             device_token: "fresh-token",
             local_binding_name: "test-binding",
@@ -4304,10 +5021,7 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     (process.listeners("SIGINT").at(-1) as () => void)();
 
     await assert.rejects(runPromise);
-    assert.ok(
-      recordEmitted,
-      `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`
-    );
+    assert.ok(recordEmitted, `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`);
     assert.equal(process.listenerCount("SIGINT"), beforeInt, "the handler must be removed once the run settles");
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
@@ -4338,61 +5052,3 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     }
   }
 });
-
-/**
- * Seed a schema-v1 (pre-observed-stream-index) outbox file directly so the CLI
- * surface can be tested against the legacy bounded-scan fallback. Mirrors the
- * v1 table DDL and creates NO observed-stream index table, exactly as a
- * database created before this index existed would look.
- */
-function seedLegacyV1Outbox(path, rows) {
-  const db = new DatabaseSync(path);
-  try {
-    db.exec(`
-      CREATE TABLE local_device_outbox (
-        id TEXT PRIMARY KEY,
-        source_instance_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        body_hash TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        next_attempt_at TEXT NOT NULL,
-        lease_holder TEXT,
-        lease_epoch INTEGER NOT NULL DEFAULT 0,
-        lease_until TEXT,
-        last_error TEXT,
-        acknowledged_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      PRAGMA user_version = 1;
-    `);
-    const insert = db.prepare(
-      `INSERT INTO local_device_outbox (
-         id, source_instance_id, kind, status, payload_json, body_hash,
-         attempt_count, next_attempt_at, created_at, updated_at
-       ) VALUES (?, ?, 'record_batch', 'succeeded', ?, 'hash', 0, ?, ?, ?)`
-    );
-    const stamp = "2026-05-19T12:00:00.000Z";
-    // This fixture is intentionally over the legacy bounded-scan budget. Its
-    // setup is not the behavior under test, so seed it in one transaction
-    // rather than paying an fsync for every synthetic row and making the
-    // aggregate suite look like it has leaked an open handle.
-    db.exec("BEGIN");
-    try {
-      for (const row of rows) {
-        const payload = JSON.stringify({
-          records: row.streams.map((stream, index) => ({ data: { id: `${stream}-${index}` }, stream })),
-        });
-        insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
-      }
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-  } finally {
-    db.close();
-  }
-}

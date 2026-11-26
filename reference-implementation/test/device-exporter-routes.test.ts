@@ -312,6 +312,54 @@ function firstRecord(batch: DeviceBatch): DeviceRecordEntry {
   return mustExist(batch.records[0], "batch must carry its first record");
 }
 
+test("any pre-repin local device can ingest its legacy coverage record beside data", async () => {
+  await withServer(async ({ asUrl }) => {
+    await runSerial(["codex", "imessage"], async (connectorId) => {
+      const device = await enrollDevice(asUrl, `legacy-coverage-${connectorId}`, connectorId);
+      const batch = makeBatch(device, `legacy-coverage-batch-${connectorId}`, "data");
+      batch.records.push({
+        data: {
+          id: "coverage:messages",
+          reason: "collected",
+          status: "collected",
+          store: "messages",
+          stream: "messages",
+        },
+        emitted_at: "2026-04-30T12:00:00.000Z",
+        record_key: "coverage:messages",
+        stream: "coverage_diagnostics",
+      });
+      batch.body_hash = bodyHash(batch.records);
+      const response = await postJson(
+        `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+        batch,
+        authHeaders(device.device_token)
+      );
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      await drainConnectorInstanceIndexWorkForTests();
+      const reconcile = await runSearchIndexDirtyReconcileRound({ maxDurationMs: 10_000 });
+      assert.equal(reconcile.failed, 0);
+      assert.equal(
+        selectRow<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM search_index_dirty WHERE connector_instance_id = ? AND dirty <> 0",
+          device.connector_instance_id
+        ).count,
+        0,
+        "retired diagnostic records must not leave an unrepairable index scope"
+      );
+      assert.equal(
+        selectRow<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM records WHERE connector_instance_id = ? AND stream = ?",
+          device.connector_instance_id,
+          "messages"
+        ).count,
+        1,
+        "the mixed legacy batch must preserve its data record"
+      );
+    });
+  });
+});
+
 // Local-device records are stored under the bare canonical connector key,
 // the same key API/browser records use; connection isolation is carried by
 // connector_instance_id, not a `local-device:` storage prefix. See
@@ -2044,7 +2092,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
   // empty connection started collecting. Addressing the CONNECTION removes the
   // guess entirely.
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine", "codex");
+    const original = await enrollDevice(asUrl, "workstation", "codex");
 
     // Mint against the connection id — never naming the binding.
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
@@ -2054,7 +2102,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
     // The response echoes the resolved target so the owner can confirm it
     // BEFORE handing the code to a device.
     assert.equal(bodyOf(codeResp).connector_instance_id, original.connector_instance_id);
-    assert.equal(bodyOf(codeResp).local_binding_name, "peregrine");
+    assert.equal(bodyOf(codeResp).local_binding_name, "workstation");
 
     const enrollResp = await postJson(
       `${asUrl}/_ref/device-exporters/enroll`,
@@ -2089,7 +2137,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
 
 test("a rebind enrollment code cannot be minted for another owner's connection or a missing one", async () => {
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine-owned", "codex");
+    const original = await enrollDevice(asUrl, "workstation-owned", "codex");
 
     // Unknown connection: 404, the same non-leaking shape revoke uses — a
     // probe must not be able to distinguish "absent" from "someone else's".
@@ -2111,7 +2159,7 @@ test("a rebind enrollment code cannot be minted for another owner's connection o
 
 test("a rebind enrollment code rejects a self-contradicting or non-active target", async () => {
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine-conflict", "codex");
+    const original = await enrollDevice(asUrl, "workstation-conflict", "codex");
 
     // Stating the target twice could disagree with itself; reject rather than
     // silently picking a winner.
@@ -2218,30 +2266,28 @@ test("enrollment against an owner-deleted binding fails closed with a typed 409,
 test("device exporter enrollment keeps connector type display names separate from device labels", async () => {
   await withServer(async ({ asUrl }) => {
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "claude_code",
-      display_name: "simon@192.168.1.7 Claude Code",
-      local_binding_name: "simon-laptop",
+      connector_id: "claude-code",
+      display_name: "user@192.0.2.7 Claude Code",
+      local_binding_name: "dev-laptop",
     });
     assert.equal(codeResp.status, 201);
 
     const enrollResp = await postJson(
       `${asUrl}/_ref/device-exporters/enroll`,
       {
-        device_label: "simon@192.168.1.7 Claude Code",
+        device_label: "user@192.0.2.7 Claude Code",
         enrollment_code: bodyOf(codeResp).enrollment_code,
       },
       PROTOCOL_HEADERS
     );
     assert.equal(enrollResp.status, 201);
 
-    // The owner may enroll with the legacy snake_case alias (`claude_code`),
-    // but the catalog row, instance row, and storage key are canonicalized to
-    // `claude-code` so the connector type has one identity. The enroll
-    // response echoes the canonical key. See canonicalize-connector-keys
-    // design Decision 7.
+    // The connector type has one identity, its manifest key (`claude-code`).
+    // The enroll response echoes it, and no row exists under the old
+    // underscore spelling.
     assert.equal(bodyOf(enrollResp).connector_id, "claude-code");
-    const legacyAliasRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
-    assert.equal(legacyAliasRow, undefined, "legacy alias MUST NOT be registered as a connector row");
+    const oldIdRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
+    assert.equal(oldIdRow, undefined, "an old id MUST NOT be registered as a connector row");
 
     const connectorRow = mustExist(
       typedDb()
@@ -2262,7 +2308,114 @@ test("device exporter enrollment keeps connector type display names separate fro
         .get(stringField(bodyOf(enrollResp), "connector_instance_id")),
       "instance row must exist"
     );
-    assert.equal(instanceRow.display_name, "simon@192.168.1.7 Claude Code");
+    assert.equal(instanceRow.display_name, "user@192.0.2.7 Claude Code");
+  });
+});
+
+test("enrollment-codes rejects an old connector id and registers no connector row", async () => {
+  await withServer(async ({ asUrl }) => {
+    const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "claude_code",
+      local_binding_name: "simon-laptop",
+    });
+    assert.equal(codeResp.status, 400);
+    assert.equal(errorCode(codeResp), "invalid_request");
+    assert.equal(errorOf(codeResp).param, "connector_id");
+    assert.equal(
+      getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code"),
+      undefined,
+      "an old id MUST NOT be registered as a connector row"
+    );
+  });
+});
+
+// A collector from before the connector-id rename still sends the underscore
+// spelling. The server has no rename step: the old id is an unknown connector,
+// and each device route that carries a connector_id refuses it with the
+// route's ordinary binding error.
+function assertOldConnectorIdRefused(response: JsonResponse): void {
+  assert.equal(response.status, 400);
+  assert.equal(errorCode(response), "invalid_request");
+  assert.doesNotMatch(errorMessage(response), /claude-code/, "the refusal does not name a replacement key");
+}
+
+test("ingest-batches refuses an old connector id as an unknown connector", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-batch", "claude-code");
+    assert.equal(device.connector_id, "claude-code");
+    const batch = makeBatch(device, "batch-retired-id", "v1");
+
+    const retired = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      { ...batch, connector_id: "claude_code" },
+      authHeaders(device.device_token)
+    );
+    assertOldConnectorIdRefused(retired);
+
+    const current = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      batch,
+      authHeaders(device.device_token)
+    );
+    assert.ok(
+      current.status < 300,
+      `the current key is accepted, got ${current.status}: ${JSON.stringify(current.body)}`
+    );
+  });
+});
+
+test("terminal-collection refuses an old connector id as an unknown connector", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-collection", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-collection`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      connector_id: "claude-code",
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      streams: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+    };
+
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
+    assertOldConnectorIdRefused(retired);
+
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is accepted: ${JSON.stringify(current.body)}`
+    );
+  });
+});
+
+test("terminal-run-commits refuses an old connector id as an unknown connector and commits nothing", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-commit", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-run-commits`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      collection_boundary: "unscoped",
+      commit_id: "commit-retired-1",
+      connector_id: "claude-code",
+      connector_instance_id: device.connector_instance_id,
+      device_id: device.device_id,
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      state_delta: {},
+      terminal_facts: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version: 1,
+    };
+
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
+    assertOldConnectorIdRefused(retired);
+
+    // Had the refused request stored its commit, this same commit id would now be a replay or a conflict.
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is a first commit: ${JSON.stringify(current.body)}`
+    );
   });
 });
 
@@ -2680,63 +2833,6 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     );
     assert.equal(ingestFirst.status, 201);
 
-    // The first device also ingests coverage diagnostics. The records carry
-    // a `reason` with a planted path+secret; the projection must surface
-    // only the safe store/stream/status triple and never the reason text.
-    const coverageBatch = {
-      batch_id: "diag-coverage-1",
-      batch_seq: 2,
-      body_hash: "hash-diag-coverage-1",
-      connector_id: first.connector_id,
-      device_id: first.device_id,
-      records: [
-        {
-          data: {
-            id: "sessions:collected",
-            reason: "declared stream at /home/user owner/.codex/sessions token=coverage-secret",
-            status: "collected",
-            store: "sessions",
-            stream: "sessions",
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "sessions:collected",
-          stream: "coverage_diagnostics",
-        },
-        {
-          data: {
-            id: "auth:excluded",
-            reason: "auth-adjacent /home/user owner/.codex/auth.json",
-            status: "excluded",
-            store: "auth",
-            stream: null,
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "auth:excluded",
-          stream: "coverage_diagnostics",
-        },
-        {
-          data: {
-            id: "logs:deferred",
-            reason: "redaction pending",
-            status: "deferred",
-            store: "logs",
-            stream: "logs",
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "logs:deferred",
-          stream: "coverage_diagnostics",
-        },
-      ],
-      source_instance_id: first.source_instance_id,
-    };
-    coverageBatch.body_hash = bodyHash(coverageBatch.records);
-    const ingestCoverage = await postJson(
-      `${asUrl}/_ref/device-exporters/${encodeURIComponent(first.device_id)}/ingest-batches`,
-      coverageBatch,
-      authHeaders(first.device_token)
-    );
-    assert.equal(ingestCoverage.status, 201, JSON.stringify(ingestCoverage.body));
-
     // Only the second device reports a local-collector gap. The first
     // device must show zero pending local-collector gaps even though
     // both devices share the `codex` connector type.
@@ -2804,6 +2900,10 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.equal(secondSource.outbox_diagnostics.dead_letter, 1);
     assert.equal(secondSource.outbox_diagnostics.oldest_pending_at, undefined);
     const diagnosticsJson = JSON.stringify(diagnostics);
+    // PR #553 retires the raw coverage inventory; the owner summary's coverage_as_of is the only claim.
+    assert.equal(diagnosticsJson.includes("local_collector_coverage"), false);
+    assert.equal(firstSource.local_collector_coverage, undefined);
+    assert.equal(secondSource.local_collector_coverage, undefined);
     assert.equal(diagnosticsJson.includes("top-secret-token"), false);
     assert.equal(diagnosticsJson.includes("source-secret"), false);
     assert.equal(diagnosticsJson.includes("session-cookie"), false);
@@ -2815,9 +2915,8 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.equal(diagnosticsJson.includes("/Users/user owner"), false);
     assert.ok(diagnosticsJson.includes("[REDACTED"));
 
-    // Ingest counts scoped per source instance: 1 message record plus 3
-    // coverage-diagnostic records across two batches.
-    assert.equal(firstSource.accepted_record_count, 4);
+    // Ingest counts scoped per source instance.
+    assert.equal(firstSource.accepted_record_count, 1);
     assert.ok(firstSource.last_ingest_at);
     assert.equal(secondSource.accepted_record_count, 0);
     assert.equal(secondSource.last_ingest_at, null);
@@ -2841,30 +2940,6 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.deepEqual(secondSource.local_collector_gaps.reasons, ["policy_budget"]);
     assert.equal(secondSource.local_collector_gaps.unreliable, false);
     assert.ok(secondSource.local_collector_gaps.last_updated_at);
-
-    // Local-collector coverage (Section 5.3) surfaces per source instance,
-    // scoped to the connector instance, with only safe store/stream/status.
-    assert.ok(firstSource.local_collector_coverage);
-    assert.equal(firstSource.local_collector_coverage.observed, true);
-    assert.equal(firstSource.local_collector_coverage.store_count, 3);
-    assert.equal(firstSource.local_collector_coverage.fully_accounted, true);
-    assert.deepEqual(firstSource.local_collector_coverage.unaccounted_stores, []);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.collected, 1);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.excluded, 1);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.deferred, 1);
-    assert.equal(firstSource.local_collector_coverage.by_store.auth, "excluded");
-    assert.equal(firstSource.local_collector_coverage.by_store.logs, "deferred");
-    // The second device requested no coverage; absence reads as absence.
-    const secondCoverage = mustExist(secondSource.local_collector_coverage, "second source coverage must exist");
-    assert.equal(secondCoverage.observed, false);
-    assert.equal(secondCoverage.store_count, 0);
-    assert.equal(secondCoverage.fully_accounted, false);
-    // The coverage `reason` free-text (with its planted path/secret) must
-    // never reach the diagnostics surface.
-    assert.equal(diagnosticsJson.includes("coverage-secret"), false);
-    assert.equal(diagnosticsJson.includes("redaction pending"), false);
-    assert.equal(diagnosticsJson.includes(".codex/sessions"), false);
-    assert.equal(diagnosticsJson.includes(".codex/auth.json"), false);
 
     // Recovering the second device's gap clears its per-source backlog
     // without disturbing the first device.
@@ -3087,14 +3162,6 @@ interface DiagnosticsSourceInstance extends Row {
   last_heartbeat_status: string | null;
   last_ingest_at: string | null;
   local_binding_name: string;
-  local_collector_coverage: {
-    observed: boolean;
-    store_count: number;
-    fully_accounted: boolean;
-    unaccounted_stores: string[];
-    counts_by_status: Record<string, number>;
-    by_store: Record<string, string>;
-  } | null;
   local_collector_gaps: {
     pending_count: number;
     reasons: string[];

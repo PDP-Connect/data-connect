@@ -1,0 +1,60 @@
+{
+  "id": "fixture-iris",
+  "label": "Iris stream route",
+  "kinds": ["attached"],
+  "reach": "this-device",
+  "transport": "tcp",
+  "proofProtocol": "echo",
+  "facts": [
+    {
+      "id": "iris.residency-window",
+      "label": "Residency window",
+      "value": "An additional consent boundary supplied only by registry data.",
+      "group": "jurisdiction-new",
+      "known": true,
+      "affectsConsent": true,
+      "source": "fixture-data",
+      "asOf": null
+    }
+  ],
+  "setupActions": [
+    {
+      "id": "iris.credential",
+      "kind": "provide-secret",
+      "label": "Fixture credential",
+      "secretLabel": "Credential",
+      "required": true,
+      "digest": "fixture-secret-v1",
+      "disclosure": {
+        "revision": "fixture-v1",
+        "text": "Store the synthetic credential in host custody.",
+        "links": []
+      }
+    },
+    {
+      "id": "iris.value",
+      "kind": "provide-value",
+      "label": "Fixture label",
+      "valueLabel": "Label",
+      "valueFormat": "text",
+      "required": true,
+      "digest": "fixture-value-v1",
+      "disclosure": {
+        "revision": "fixture-v1",
+        "text": "Store a non-secret label.",
+        "links": []
+      }
+    }
+  ],
+  "addedFact": {
+    "id": "iris.storage-window",
+    "label": "New storage window",
+    "value": "This row arrived as data after the earlier approval.",
+    "group": "jurisdiction-new",
+    "known": true,
+    "affectsConsent": true,
+    "source": "fixture-data",
+    "asOf": null
+  },
+  "secondId": "fixture-lotus"
+}

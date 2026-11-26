@@ -28,8 +28,14 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
-import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
+import type { EmittedMessage, RunCoverageVerdict, StartMessage, StreamScope } from "@pdpp/connector-protocol";
+import {
+  COLLECTION_PROFILE_VERSIONS,
+  collectionProfileDeclarationError,
+  RUN_COVERAGE_V1_CAPABILITY,
+  validateHostBlobMessage,
+  validateStreamEvidenceCounts,
+} from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
 import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
@@ -37,11 +43,13 @@ import {
   type EnrollmentExchangeResponse,
   type HeartbeatLastError,
   type HeartbeatOutboxDiagnostics,
+  type IngestBatchReceipt,
   LocalDeviceClient,
   LocalDeviceHttpError,
   LocalDeviceReceiptValidationError,
   LocalDeviceRequestTimeoutError,
   type TerminalCollectionFact,
+  type TerminalCoverageFact,
   type TerminalRunCommitRequest,
 } from "./local-device-client.ts";
 import {
@@ -50,13 +58,14 @@ import {
   hashCanonicalJson,
   type LocalDeviceRecordEnvelope,
 } from "./local-device-envelope.ts";
+import { migrateLegacyConnectorIdSpelling } from "./local-device-legacy-connector-id.ts";
 import {
   buildLocalDeviceOutboxId,
   LocalDeviceOutbox,
   type LocalDeviceOutboxItem,
   type LocalDeviceOutboxSummary,
+  type TerminalRunAck,
 } from "./local-device-outbox.ts";
-import type { LocalDeviceQueue, LocalDeviceQueueItem } from "./local-device-queue.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
 import {
   assertPlacementOrThrow,
@@ -86,6 +95,8 @@ const COLLECTOR_AGENT_VERSION = buildAgentVersion();
 export const COLLECTOR_STDERR_MAX_BYTES = 256 * 1024;
 
 const COLLECTOR_GAP_DETAILS_MAX_CHARS = 300;
+const MANIFEST_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
+const ARTIFACT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const KEYED_SECRET_RE =
   /\b(authorization|bearer|token|password|passwd|cookie|secret|otp|api[_-]?key)\b\s*[:=]\s*["']?[^"',\s}]+/gi;
 const OTP_RE = /\b\d{6}\b/g;
@@ -606,10 +617,18 @@ export function readCollectionScopeFromState(
  */
 interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
+  /** Release identity of the executable used for this run. */
+  readonly artifactDigest?: string;
+  /** Raw base profile version from the verified manifest, when one was loaded. */
+  readonly collectionProfileVersion?: unknown;
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
   /** Stable connector id used for ingest envelopes. */
   readonly connector_id: string;
+  /** Streams with a valid, non-empty manifest `coverage_stores` inventory. */
+  readonly coverageStoreStreams?: readonly string[];
+  /** True when any manifest stream declares a `coverage_stores` member. */
+  readonly declaresCoverageStores?: boolean;
   /**
    * Whether the connector declared it ENFORCES path roots at enumeration time.
    * Gates whether a roots boundary may be reported as `scoped` coverage; a
@@ -619,8 +638,12 @@ interface CollectorConnectorSpecExtra {
   readonly enforcesSourceRoots?: boolean;
   /** Optional extra env passed to the connector child process. */
   readonly env?: NodeJS.ProcessEnv;
+  /** Fingerprint of the verified manifest used for this run. */
+  readonly manifestFingerprint?: string;
   /** Optional stream resources for scoped connector runs. */
   readonly resources?: Readonly<Record<string, readonly string[]>>;
+  /** Set only when an accepted base profile inventories every requested stream. */
+  readonly runCoverageVersion?: 1;
   /**
    * The owner-declared collection boundary this run must stay inside, as
    * resolved from the durable per-connection scope. `null`/absent is a full
@@ -734,81 +757,12 @@ export interface CollectorRunConfig {
   sourceInstanceId: string;
 }
 
-/**
- * Coverage statuses emitted by the local source inventory's
- * `coverage_diagnostics` stream. Kept in sync with
- * `local-source-inventory.ts`'s `CoverageStatus`. `unaccounted` is not a
- * connector-emitted status today; it is reserved so a future inventory
- * that cannot classify a discovered store has a home in the summary
- * without changing this contract.
- */
-export const COLLECTOR_COVERAGE_STATUSES = [
-  "collected",
-  "inventory_only",
-  "excluded",
-  "deferred",
-  "missing",
-  "unsupported",
-  "unaccounted",
-] as const;
-
-export type CollectorCoverageStatus = (typeof COLLECTOR_COVERAGE_STATUSES)[number];
-
-/**
- * Completeness summary derived from the `coverage_diagnostics` RECORDs a
- * connector emits during this run. This is deliberately distinct from
- * {@link CollectorRunResult.done}: `done.status` reports whether the
- * declared streams ran to a clean DONE, while this summary reports what
- * the local source inventory saw, collected, inventoried, excluded,
- * deferred, or could not account for. A run can succeed on every declared
- * stream while completeness shows excluded/deferred/missing stores — that
- * is the honest, non-failing local-completeness signal Section 5.2
- * requires.
- *
- * `null` on the run result means no coverage diagnostic was observed this
- * pass (the run did not request `coverage_diagnostics`, or the connector
- * did not spawn — e.g. a backlog skip). Absence is reported as absence,
- * not as "complete".
- *
- * The summary carries only the safe coverage fields — `store`, `stream`,
- * `status`. Each coverage RECORD's `data` is `{ id, store, stream, status,
- * reason }`; this summary keeps counts plus the per-store status map and
- * never copies `reason` text or any path/payload. The inventory itself
- * keeps `reason` free of paths and secrets.
- */
-export interface CollectorCompletenessSummary {
-  /** Per-store latest coverage status, keyed by store name. */
-  byStore: Readonly<Record<string, CollectorCoverageStatus>>;
-  /** Count of stores at each coverage status. */
-  countsByStatus: Readonly<Record<CollectorCoverageStatus, number>>;
-  /**
-   * True when every discovered store reached an accounted status
-   * (anything other than `unaccounted`). Declared-stream success does not
-   * imply this; this is the completeness bit Section 5.2 separates out.
-   */
-  fullyAccounted: boolean;
-  /** Total number of distinct stores the coverage diagnostic reported. */
-  storeCount: number;
-  /**
-   * Stores whose coverage status is `unaccounted` — discovered but not
-   * classified. Empty on a healthy run; non-empty means the connector saw
-   * a store it could not place, which must not read as complete.
-   */
-  unaccountedStores: readonly string[];
-}
-
 export interface CollectorRunResult {
   /**
    * Transient local-device request dead letters requeued before the pre-scan
    * drain. Terminal dead letters stay dead-lettered and are not counted here.
    */
   autoRecoveredTransientDeadLetters: number;
-  /**
-   * Local-completeness summary from this run's `coverage_diagnostics`
-   * RECORDs, distinct from {@link CollectorRunResult.done} (declared-stream
-   * success). `null` when no coverage diagnostic was observed this pass.
-   */
-  completeness: CollectorCompletenessSummary | null;
   done: Extract<EmittedMessage, { type: "DONE" }> | null;
   enqueuedBatches: number;
   /**
@@ -888,9 +842,6 @@ export class CollectorStateReadError extends Error {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ordered durable-run lifecycle; splitting it would hide checkpoint and heartbeat ordering.
 export async function runCollectorConnector(config: CollectorRunConfig): Promise<CollectorRunResult> {
-  throwIfAborted(config.abortSignal);
-  const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
-
   const policy: CollectorOutboxPolicy = {
     ...DEFAULT_COLLECTOR_OUTBOX_POLICY,
     ...(config.outboxPolicy ?? {}),
@@ -915,11 +866,35 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   // A failed state read emits the definitive terminal heartbeat for this pass.
   // Never replace it with a generic corrective status in the outer catch.
   let definitiveBlockedHeartbeatSent = false;
-  // Distinguishes a failure while only draining/heartbeating old backlog from
-  // a failure after a new local scan began. Only the latter invalidates the
-  // scan's coverage proof with a new child-failure barrier.
-  let scanStarted = false;
   try {
+    // Preflight refusals are attempts for this lane too. They run inside the try
+    // so the catch below opens the failure barrier for each of them.
+    const profileDeclarationError = collectionProfileDeclarationError(
+      config.connector.collectionProfileVersion ?? "0.1.0",
+      config.connector.protocol_capabilities,
+      config.connector.declaresCoverageStores === true
+    );
+    if (profileDeclarationError !== null) {
+      throw new Error(`Invalid Collection Profile declaration: ${profileDeclarationError}`);
+    }
+    if (
+      config.connector.runCoverageVersion === 1 &&
+      !(
+        MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
+        ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
+      )
+    ) {
+      throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
+    }
+    throwIfAborted(config.abortSignal);
+    const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
+
+    // Work queued before connector ids were manifest keys carries the old
+    // spelling; the drain sends what is stored, so fix it before anything drains.
+    migrateLegacyConnectorIdSpelling(outbox, {
+      connectorId: config.connector.connector_id,
+      sourceInstanceId: config.sourceInstanceId,
+    });
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });
@@ -980,6 +955,11 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       recordsPending: pendingOutboxWorkCount(postDrainSummary),
     });
     const priorState = priorStateProjection.state;
+    // The run id the server orders this run by, and the one its terminal
+    // record names. Registered before the scan, so every record the scan
+    // admits is ordered after any earlier run's proof.
+    const runId = config.runId ?? randomUUID();
+    await registerRunStart({ client, config, connectorInstanceId: priorStateProjection.connectorInstanceId, runId });
 
     await client.heartbeat({
       agent_version: COLLECTOR_AGENT_VERSION,
@@ -993,7 +973,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     });
     startingHeartbeatSent = true;
 
-    scanStarted = true;
     // The SERVER is the authority on the declared boundary: it is persisted with
     // the connection and delivered on the state read, so it cannot be widened by
     // a local flag or lost when the CLI process goes away. A caller-supplied
@@ -1030,44 +1009,65 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     const afterRecordsSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });
-    const scopedTimeRanges = resolveScopedStreamTimeRanges(declaredScope, config.connector.timeScopableStreams);
-    const scopedRoots = resolveScopedSourceRoots(declaredScope);
-    const terminalFacts =
+    const durableAdmission =
+      recordDrain.failed === 0 &&
+      afterRecordsSummary.ready === 0 &&
+      afterRecordsSummary.leased === 0 &&
+      afterRecordsSummary.deadLetter === 0;
+    const durableDebt = afterRecordsSummary.ready + afterRecordsSummary.leased + afterRecordsSummary.deadLetter;
+    const typedTerminalFacts = buildTypedTerminalCoverageFacts({
+      connector: config.connector,
+      done,
+      durableAdmission,
+      durableDebt,
+      streamResult,
+    });
+    const hasTypedTerminalEvidence = typedTerminalFacts !== null;
+    // A typed terminal commit carries both evidence and state. Keep state out
+    // of that commit when an effect was not durably admitted; a coverage
+    // downgrade alone does not change the normal checkpoint policy.
+    const checkpointState = Object.freeze(hasTypedTerminalEvidence && !durableAdmission ? {} : { ...bufferedState });
+    let terminalEvidence: TerminalEvidence | null = null;
+    if (typedTerminalFacts) {
+      terminalEvidence = { facts: typedTerminalFacts, version: 2 };
+    } else if (
       done?.status === "succeeded" &&
-      !streamResult.scanBudgetExceeded &&
-      streamResult.coverageByStore &&
-      Object.hasOwn(bufferedState, COVERAGE_DIAGNOSTICS_STREAM)
-        ? buildTerminalCollectionFacts(
-            streamResult.coverageByStore,
-            scopedTimeRanges,
-            scopedRoots,
-            config.connector.enforcesSourceRoots === true,
-            config.connector.sourceRootScopableStreams
-          )
-        : null;
+      priorStateProjection.connectorInstanceId &&
+      !hasTerminalRecordForRun(outbox, config)
+    ) {
+      // This profile version commits an orderable terminal run record for every
+      // successful run, whether or not coverage was negotiated and whether or
+      // not STATE changed. Without evidence the record carries no facts: the
+      // server stores unknown coverage for the run and retires any earlier
+      // proof, and the device clears its receipt. A server that names no
+      // connection on its state read cannot bind a terminal record, and a run
+      // id that already has one is a continuation of that run; both keep the
+      // plain state checkpoint.
+      terminalEvidence = { facts: [], version: 2 };
+    }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
-      bufferedState,
+      bufferedState: checkpointState,
       client,
       config,
       holderId,
       outbox,
       policy,
-      terminalFacts,
+      runId,
+      terminalEvidence,
       terminalRunBoundary: collectorScopeFingerprint(declaredScope),
       terminalRunConnectorInstanceId: priorStateProjection.connectorInstanceId,
     });
 
+    // A local failure barrier is recovered only by a complete successful run
+    // whose typed coverage committed. A scoped success, a corrective heartbeat,
+    // and a run that negotiated no coverage are deliberately insufficient.
+    const coverageCheckpointCommitted = checkpointResult.flushedState !== null && typedTerminalFacts !== null;
     await recoverResolvedLocalCollectorGaps({
       client,
       config,
-      // A local failure barrier is recovered only by a complete successful
-      // coverage STATE commit. A scoped success or corrective heartbeat is
-      // deliberately insufficient.
       deferRecoveredGapCleanup:
-        streamResult.scanBudgetExceeded ||
-        done?.status !== "succeeded" ||
-        !Object.hasOwn(checkpointResult.flushedState ?? {}, COVERAGE_DIAGNOSTICS_STREAM),
+        streamResult.scanBudgetExceeded || done?.status !== "succeeded" || !coverageCheckpointCommitted,
       outbox,
     });
 
@@ -1116,7 +1116,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
 
     return {
       autoRecoveredTransientDeadLetters,
-      completeness: summarizeCollectorCompleteness(streamResult.coverageByStore),
       done,
       enqueuedBatches: enqueueResult.enqueuedBatches,
       flushedState: checkpointResult.flushedState,
@@ -1133,6 +1132,21 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       streamingBufferHighWaterMark: streamResult.bufferHighWaterMark,
     };
   } catch (error) {
+    // Every failed run leaves an open connector_child_failure gap, whether it was
+    // refused before any work (provenance, abort, placement), failed before its
+    // scan (state read, starting heartbeat, pre-scan drain), or failed during it.
+    // The device verdict reads open outbox rows as unadmitted, so the lane stops
+    // reading covered until a later complete run recovers the gap.
+    ensureOpenFailureGapRow({
+      clock: () => new Date(),
+      connectorId: config.connector.connector_id,
+      details: "collector run failed before a committed coverage checkpoint",
+      outbox,
+      reason: "connector_child_failure",
+      retryable: true,
+      ...(config.runId ? { runId: config.runId } : {}),
+      sourceInstanceId: config.sourceInstanceId,
+    });
     // A throw after the "starting" heartbeat (connector child failure, unclean
     // exit, abort, protocol-parse error, drain transition error, …) would
     // otherwise leave "starting" as the last status the server ever saw — even
@@ -1142,18 +1156,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     // was never sent, preserving the honest "blocked" the state-read block
     // emits on its own.
     if (startingHeartbeatSent && !definitiveBlockedHeartbeatSent) {
-      if (scanStarted) {
-        ensureCollectorGapRow({
-          clock: () => new Date(),
-          connectorId: config.connector.connector_id,
-          details: "collector run failed before a committed coverage checkpoint",
-          outbox,
-          reason: "connector_child_failure",
-          retryable: true,
-          ...(config.runId ? { runId: config.runId } : {}),
-          sourceInstanceId: config.sourceInstanceId,
-        });
-      }
       await emitCorrectiveHeartbeatFromOutbox({
         client,
         config,
@@ -1269,8 +1271,6 @@ async function maybeSkipScanForBacklog(input: MaybeSkipScanInput): Promise<Colle
   });
   return {
     autoRecoveredTransientDeadLetters: input.autoRecoveredTransientDeadLetters,
-    // No connector spawned on a backlog skip, so no coverage was observed.
-    completeness: null,
     done: null,
     enqueuedBatches: 0,
     flushedState: null,
@@ -1286,6 +1286,37 @@ async function maybeSkipScanForBacklog(input: MaybeSkipScanInput): Promise<Colle
     statePutFailed: false,
     streamingBufferHighWaterMark: 0,
   };
+}
+
+/**
+ * Register the run with the server at its start. The answered sequence is the
+ * run's place in run order: only a run with one can produce an eligible
+ * coverage proof. A server without the route, a connection the state read did
+ * not name, or a failed call leaves the run without a sequence. The run still
+ * collects and commits its terminal record, which then reads as unknown
+ * coverage.
+ */
+async function registerRunStart(input: {
+  client: Pick<LocalDeviceClient, "startRun">;
+  config: CollectorRunConfig;
+  connectorInstanceId: string;
+  runId: string;
+}): Promise<void> {
+  if (!input.connectorInstanceId) {
+    return;
+  }
+  throwIfAborted(input.config.abortSignal);
+  try {
+    await input.client.startRun({
+      connector_id: input.config.connector.connector_id,
+      run_id: input.runId,
+      source_instance_id: input.config.sourceInstanceId,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `${input.config.connector.connector_id} run start not registered; this run cannot prove coverage (${error instanceof Error ? error.message : String(error)})\n`
+    );
+  }
 }
 
 async function readPriorStateOrBlock(input: {
@@ -1342,58 +1373,16 @@ interface StreamConnectorIntoOutboxInput {
 interface StreamConnectorIntoOutboxResult {
   bufferedState: Readonly<Record<string, unknown>>;
   bufferHighWaterMark: number;
-  /**
-   * Per-store coverage status accumulated from `coverage_diagnostics`
-   * RECORDs seen this pass, or `null` when none were observed. Last write
-   * wins per store so a re-emitted store keeps its final status.
-   */
-  coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null;
+  /** Whether this run's START requested version 1 store evidence. */
+  coverageRequested: boolean;
   done: Extract<EmittedMessage, { type: "DONE" }> | null;
+  duplicateStreamEvidence: ReadonlySet<string>;
   enqueuedBatches: number;
+  recordsObservedByStream: ReadonlyMap<string, number>;
   recordsQueued: number;
   scanBudgetExceeded: boolean;
-}
-
-/**
- * Stream name on which the local source inventory emits coverage records.
- * Mirrors the connector-side stream contract; the runner only needs the
- * name to recognize and aggregate the diagnostic.
- */
-const COVERAGE_DIAGNOSTICS_STREAM = "coverage_diagnostics";
-
-/**
- * Extract the safe `{ store, status }` coverage entry from a
- * `coverage_diagnostics` RECORD, or `null` when the message is not a
- * coverage record or lacks a store. An unrecognized status maps to
- * `unaccounted` so a future tool release cannot read as complete.
- */
-function coverageEntryFromRecord(message: Extract<EmittedMessage, { type: "RECORD" }>): {
-  status: CollectorCoverageStatus;
-  store: string;
-  stream: string | null;
-} | null {
-  if (message.stream !== COVERAGE_DIAGNOSTICS_STREAM) {
-    return null;
-  }
-  const { data } = message;
-  const dataStore = isRecord(data) && typeof data.store === "string" && data.store ? data.store : null;
-  const keyStore = typeof message.key === "string" && message.key ? message.key : null;
-  const store = dataStore ?? keyStore;
-  if (!store) {
-    return null;
-  }
-  const rawStatus = isRecord(data) && typeof data.status === "string" ? data.status : null;
-  if (!rawStatus) {
-    return null;
-  }
-  const status = (COLLECTOR_COVERAGE_STATUSES as readonly string[]).includes(rawStatus)
-    ? (rawStatus as CollectorCoverageStatus)
-    : "unaccounted";
-  return {
-    status,
-    store,
-    stream: isRecord(data) && typeof data.stream === "string" && data.stream ? data.stream : null,
-  };
+  skipCountByStream: ReadonlyMap<string, number>;
+  streamEvidenceByStream: ReadonlyMap<string, Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>>;
 }
 
 /**
@@ -1414,12 +1403,122 @@ function assertValidStreamEvidence(
   }
   try {
     validateStreamEvidenceCounts(message);
+    if (message.reference_only !== true) {
+      throw new Error("STREAM_EVIDENCE must be reference-only");
+    }
   } catch (error) {
     throw new Error(
       `${connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`,
       { cause: error }
     );
   }
+}
+
+function buildTypedTerminalCoverageFacts(input: {
+  connector: CollectorRunConfig["connector"];
+  done: Extract<EmittedMessage, { type: "DONE" }> | null;
+  durableAdmission: boolean;
+  durableDebt: number;
+  streamResult: StreamConnectorIntoOutboxResult;
+}): readonly TerminalCoverageFact[] | null {
+  if (input.done?.status !== "succeeded" || input.streamResult.scanBudgetExceeded) {
+    return null;
+  }
+  if (!input.done.coverage) {
+    return input.streamResult.coverageRequested ? [] : null;
+  }
+
+  const evidenceRequired = input.connector.protocol_capabilities.includes("STREAM_EVIDENCE");
+  return input.done.coverage.streams.map((stream): TerminalCoverageFact => {
+    const evidence = input.streamResult.streamEvidenceByStream.get(stream.stream);
+    const skipCount = input.streamResult.skipCountByStream.get(stream.stream) ?? 0;
+    const recordCount = input.streamResult.recordsObservedByStream.get(stream.stream) ?? 0;
+    const evidenceConsistent =
+      !input.streamResult.duplicateStreamEvidence.has(stream.stream) &&
+      (evidence ? evidence.outcomes.emitted === recordCount : !evidenceRequired);
+    let evidenceDebt = 0;
+    if (evidence) {
+      evidenceDebt = evidence.outcomes.gapped + evidence.outcomes.unaccounted + (evidenceConsistent ? 0 : 1);
+    } else if (evidenceRequired) {
+      evidenceDebt = 1;
+    }
+    const detailComplete = skipCount === 0 && evidenceDebt === 0;
+    // Completeness and checkpoint eligibility are separate: this signal only
+    // reflects whether the runtime admitted this run's durable effects.
+    const checkpointEligible = input.durableAdmission;
+    return {
+      artifact_digest: input.connector.artifactDigest as string,
+      manifest_fingerprint: input.connector.manifestFingerprint as string,
+      runtime_accounting: {
+        checkpoint_eligible: checkpointEligible,
+        detail_complete: detailComplete,
+        durable_admission: input.durableAdmission,
+        outstanding_debt: Math.min(Number.MAX_SAFE_INTEGER, input.durableDebt + skipCount + evidenceDebt),
+        stream_evidence_consistent: evidenceConsistent,
+      },
+      scoped: stream.scoped,
+      stores: stream.stores.map((store) =>
+        !detailComplete && store.status === "collected" ? { ...store, status: "partial" as const } : store
+      ),
+      stream: stream.stream,
+    };
+  });
+}
+
+/** Parse the optional terminal claim before it can enter a durable outbox row. */
+export function validateRunCoverageVerdict(
+  value: unknown,
+  requestedStreams: readonly string[],
+  collectionScope: string
+): RunCoverageVerdict {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.collection_scope !== collectionScope ||
+    !Array.isArray(value.streams)
+  ) {
+    throw new Error("DONE coverage version or collection scope is invalid");
+  }
+  const requested = new Set(requestedStreams);
+  const seenStreams = new Set<string>();
+  const streams: RunCoverageVerdict["streams"][number][] = [];
+  for (const rawStream of value.streams) {
+    if (
+      !isRecord(rawStream) ||
+      typeof rawStream.stream !== "string" ||
+      !requested.has(rawStream.stream) ||
+      seenStreams.has(rawStream.stream) ||
+      typeof rawStream.scoped !== "boolean" ||
+      !Array.isArray(rawStream.stores) ||
+      rawStream.stores.length === 0
+    ) {
+      throw new Error("DONE coverage stream set is invalid");
+    }
+    seenStreams.add(rawStream.stream);
+    const seenStores = new Set<string>();
+    const stores: RunCoverageVerdict["streams"][number]["stores"][number][] = [];
+    for (const rawStore of rawStream.stores) {
+      if (
+        !isRecord(rawStore) ||
+        typeof rawStore.store !== "string" ||
+        !rawStore.store.trim() ||
+        seenStores.has(rawStore.store) ||
+        !(["collected", "partial", "unavailable", "failed"] as readonly unknown[]).includes(rawStore.status)
+      ) {
+        throw new Error("DONE coverage store verdict is invalid");
+      }
+      seenStores.add(rawStore.store);
+      stores.push({
+        status: rawStore.status as RunCoverageVerdict["streams"][number]["stores"][number]["status"],
+        store: rawStore.store,
+      });
+    }
+    streams.push({ scoped: rawStream.scoped, stores, stream: rawStream.stream });
+  }
+  if (seenStreams.size !== requested.size) {
+    throw new Error("DONE coverage is missing a requested stream");
+  }
+  return { collection_scope: collectionScope, streams, version: 1 };
 }
 
 /** Local collector has no durable blob transport, even for a declared emitter. */
@@ -1432,86 +1531,6 @@ function rejectUnsupportedHostBlob(
   }
   validateHostBlobMessage(message);
   throw new Error(`${connector.connector_id} emitted BLOB to a collector without blob transport support`);
-}
-
-/**
- * Fold the per-store coverage map collected during a run into the safe
- * {@link CollectorCompletenessSummary} surfaced on the run result. Returns
- * `null` when no coverage diagnostic was observed so absence reads as
- * absence rather than "complete".
- */
-export function summarizeCollectorCompleteness(
-  coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null
-): CollectorCompletenessSummary | null {
-  if (!coverageByStore || coverageByStore.size === 0) {
-    return null;
-  }
-  const countsByStatus: Record<CollectorCoverageStatus, number> = Object.fromEntries(
-    COLLECTOR_COVERAGE_STATUSES.map((status) => [status, 0])
-  ) as Record<CollectorCoverageStatus, number>;
-  const unaccountedStores: string[] = [];
-  const byStore: Record<string, CollectorCoverageStatus> = {};
-  for (const store of [...coverageByStore.keys()].sort()) {
-    const status = coverageByStore.get(store)?.status as CollectorCoverageStatus;
-    byStore[store] = status;
-    countsByStatus[status] += 1;
-    if (status === "unaccounted") {
-      unaccountedStores.push(store);
-    }
-  }
-  return {
-    byStore,
-    countsByStatus,
-    fullyAccounted: unaccountedStores.length === 0,
-    storeCount: coverageByStore.size,
-    unaccountedStores,
-  };
-}
-
-/**
- * Preserve the collector's existing per-store coverage diagnostics at the
- * terminal handoff. The server's manifest coverage-policy authority decides
- * whether an observed absence is accepted; the runner must not invent policy.
- */
-export function buildTerminalCollectionFacts(
-  coverageByStore: ReadonlyMap<string, { status: CollectorCoverageStatus; stream: string | null }>,
-  timeRanges: CollectorStreamTimeRanges = {},
-  sourceRoots: readonly string[] = [],
-  enforcesSourceRoots = false,
-  sourceRootScopableStreams: readonly string[] = []
-): readonly TerminalCollectionFact[] {
-  const statusesByStream = new Map<string, CollectorCoverageStatus[]>();
-  for (const entry of coverageByStore.values()) {
-    if (!entry.stream) {
-      continue;
-    }
-    const statuses = statusesByStream.get(entry.stream) ?? [];
-    statuses.push(entry.status);
-    statusesByStream.set(entry.stream, statuses);
-  }
-  // Path roots bound enumeration for every stream — but ONLY when the connector
-  // positively declared it enforces them. Supplying roots to a connector that
-  // never implemented root pruning would otherwise mark every stream `scoped`
-  // while the run walked the whole corpus: a fabricated watermark. For such a
-  // connector the roots boundary is declassified here (data still collected, no
-  // stream claims the bound) rather than silently honoured.
-  const rootsBounded = sourceRoots.length > 0 && enforcesSourceRoots;
-  const rootScopedStreams = new Set(sourceRootScopableStreams);
-  const scopedRun = rootsBounded || Object.keys(timeRanges).length > 0;
-  return [...statusesByStream.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([stream, statuses]) => ({
-      coverage_statuses: [...statuses].sort(),
-      stream,
-      // Only meaningful on a scoped run. `false` is the honest marker for a
-      // stream the bound could not be enforced on: it was collected whole, so
-      // its coverage must never be read as proving the declared boundary.
-      ...(scopedRun
-        ? {
-            scoped: Object.hasOwn(timeRanges, stream) || (rootsBounded && rootScopedStreams.has(stream)),
-          }
-        : {}),
-    }));
 }
 
 /**
@@ -1546,6 +1565,20 @@ async function streamConnectorIntoOutbox(
 ): Promise<StreamConnectorIntoOutboxResult> {
   throwIfAborted(input.abortSignal);
 
+  // START is built before spawn: a START the builder refuses starts no child.
+  const startMessage = buildCollectorStartMessage(
+    input.config.connector.streams,
+    input.config.connector.streamsToBackfill,
+    input.priorState,
+    input.config.connector.resources,
+    resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
+    // Roots only reach the connector when it declared it enforces them, so
+    // an unsupported connector cannot silently receive a boundary it will
+    // ignore while the run still looks bounded.
+    input.config.connector.enforcesSourceRoots === true ? resolveScopedSourceRoots(input.config.connector.scope) : [],
+    collectorScopeFingerprint(input.config.connector.scope),
+    connectorRequestsRunCoverage(input.config.connector) ? 1 : undefined
+  );
   const child = spawnConnector(
     input.config.connector,
     {
@@ -1560,16 +1593,16 @@ async function streamConnectorIntoOutbox(
   const bufferedState: Record<string, unknown> = {};
   let batchSeq = nextOutboxBatchSeq(input.outbox, input.config.sourceInstanceId);
   let pendingRecords: Extract<EmittedMessage, { type: "RECORD" }>[] = [];
+  const recordsObservedByStream = new Map<string, number>();
+  const skipCountByStream = new Map<string, number>();
+  const streamEvidenceByStream = new Map<string, Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>>();
+  const duplicateStreamEvidence = new Set<string>();
   let bufferHighWaterMark = 0;
   let recordsQueued = 0;
+  let recordsObserved = 0;
   let enqueuedBatches = 0;
   let done: Extract<EmittedMessage, { type: "DONE" }> | null = null;
   let scanBudgetExceeded = false;
-  // Accumulate coverage diagnostics as we see them so completeness can be
-  // summarized without re-reading the durable outbox. Stays null until the
-  // first coverage record so an absent diagnostic reads as absent.
-  let coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null = null;
-
   const flushPendingBatch = (): void => {
     if (pendingRecords.length === 0) {
       return;
@@ -1619,18 +1652,6 @@ async function streamConnectorIntoOutbox(
     });
   };
 
-  const recordCoverageIfPresent = (message: Extract<EmittedMessage, { type: "RECORD" }>): void => {
-    const entry = coverageEntryFromRecord(message);
-    if (!entry) {
-      return;
-    }
-    coverageByStore ??= new Map<string, { status: CollectorCoverageStatus; stream: string | null }>();
-    coverageByStore.set(entry.store, {
-      status: entry.status,
-      stream: entry.stream,
-    });
-  };
-
   const notifyOnMessage = (message: EmittedMessage): void => {
     if (!input.config.onMessage) {
       return;
@@ -1643,13 +1664,15 @@ async function streamConnectorIntoOutbox(
     }
   };
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one ordered protocol handler keeps terminal and record state transitions together.
   const handleMessage = (message: EmittedMessage): void => {
     notifyOnMessage(message);
     if (done !== null) {
       throw new Error(`${input.config.connector.connector_id} emitted ${message.type} after terminal DONE`);
     }
     if (message.type === "RECORD") {
-      recordCoverageIfPresent(message);
+      recordsObserved += 1;
+      recordsObservedByStream.set(message.stream, (recordsObservedByStream.get(message.stream) ?? 0) + 1);
       pendingRecords.push(message);
       if (pendingRecords.length > bufferHighWaterMark) {
         bufferHighWaterMark = pendingRecords.length;
@@ -1671,10 +1694,46 @@ async function streamConnectorIntoOutbox(
     }
     if (message.type === "STREAM_EVIDENCE") {
       assertValidStreamEvidence(message, input.config.connector);
+      if (!inScopeStreams.has(message.stream)) {
+        throw new Error(`${input.config.connector.connector_id} emitted STREAM_EVIDENCE outside its requested streams`);
+      }
+      if (streamEvidenceByStream.has(message.stream)) {
+        duplicateStreamEvidence.add(message.stream);
+      } else {
+        streamEvidenceByStream.set(message.stream, message);
+      }
       return;
     }
+    if (message.type === "SKIP_RESULT") {
+      if (!inScopeStreams.has(message.stream)) {
+        throw new Error(`${input.config.connector.connector_id} emitted SKIP_RESULT outside its requested streams`);
+      }
+      skipCountByStream.set(message.stream, (skipCountByStream.get(message.stream) ?? 0) + 1);
+      return;
+    }
+    if (message.type === "DETAIL_GAP" || message.type === "DETAIL_COVERAGE") {
+      throw new Error(`${input.config.connector.connector_id} emitted unsupported ${message.type} to local collector`);
+    }
     if (message.type === "DONE") {
-      done = message;
+      if (message.coverage === undefined) {
+        done = message;
+        return;
+      }
+      // Only the scope string START actually sent can be echoed.
+      const requestedScope = startMessage.run_coverage_version === 1 ? startMessage.collection_scope : undefined;
+      if (requestedScope === undefined) {
+        throw new Error(`${input.config.connector.connector_id} emitted unrequested DONE coverage`);
+      }
+      if (message.records_emitted !== recordsObserved) {
+        throw new Error(`${input.config.connector.connector_id} DONE coverage contradicted emitted record count`);
+      }
+      if (message.status !== "succeeded") {
+        throw new Error(`${input.config.connector.connector_id} emitted coverage on failed DONE`);
+      }
+      done = {
+        ...message,
+        coverage: validateRunCoverageVerdict(message.coverage, input.config.connector.streams, requestedScope),
+      };
     }
   };
 
@@ -1733,23 +1792,7 @@ async function streamConnectorIntoOutbox(
     // actionable diagnostic; do not mask it with EPIPE.
   });
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.stdin.end(
-    `${JSON.stringify(
-      buildCollectorStartMessage(
-        input.config.connector.streams,
-        input.config.connector.streamsToBackfill,
-        input.priorState,
-        input.config.connector.resources,
-        resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
-        // Roots only reach the connector when it declared it enforces them, so
-        // an unsupported connector cannot silently receive a boundary it will
-        // ignore while the run still looks bounded.
-        input.config.connector.enforcesSourceRoots === true
-          ? resolveScopedSourceRoots(input.config.connector.scope)
-          : []
-      )
-    )}\n`
-  );
+  child.stdin.end(`${JSON.stringify(startMessage)}\n`);
 
   let exitCode: number | null;
   try {
@@ -1815,14 +1858,15 @@ async function streamConnectorIntoOutbox(
   return {
     bufferedState: Object.freeze(scanBudgetExceeded ? {} : { ...bufferedState }),
     bufferHighWaterMark,
-    // Coverage is a diagnostic of what the inventory saw, not record-level
-    // checkpoint state, so it is reported even when the scan budget cut the
-    // run short — an honest partial coverage beats none.
-    coverageByStore,
+    coverageRequested: startMessage.run_coverage_version === 1,
     done: scanBudgetExceeded ? null : done,
+    duplicateStreamEvidence,
     enqueuedBatches,
+    recordsObservedByStream,
     recordsQueued,
     scanBudgetExceeded,
+    skipCountByStream,
+    streamEvidenceByStream,
   };
 }
 
@@ -1945,7 +1989,7 @@ function recordConnectorChildFailureGap(input: {
   enqueuedBatches: number;
   input: StreamConnectorIntoOutboxInput;
 }): void {
-  ensureCollectorGapRow({
+  ensureOpenFailureGapRow({
     clock: () => new Date(),
     connectorId: input.input.config.connector.connector_id,
     details: input.details,
@@ -1955,6 +1999,24 @@ function recordConnectorChildFailureGap(input: {
     ...(input.input.config.runId ? { runId: input.input.config.runId } : {}),
     sourceInstanceId: input.input.config.sourceInstanceId,
   });
+}
+
+type TerminalEvidence =
+  | { facts: readonly TerminalCollectionFact[]; version: 1 }
+  | { facts: readonly TerminalCoverageFact[]; version: 2 };
+
+/**
+ * The server binds one terminal record to one run identity. A caller that
+ * reuses a run id across passes already has that record in the outbox, so a
+ * later pass of the same run must not send a second, different one.
+ */
+function hasTerminalRecordForRun(outbox: LocalDeviceOutbox, config: CollectorRunConfig): boolean {
+  if (!config.runId) {
+    return false;
+  }
+  return outbox
+    .listByKind({ kind: "terminal_run_commit", sourceInstanceId: config.sourceInstanceId })
+    .some((item) => isRecord(item.payload) && item.payload.run_id === config.runId);
 }
 
 async function maybeCommitCheckpoint(input: {
@@ -1968,19 +2030,20 @@ async function maybeCommitCheckpoint(input: {
   holderId: string;
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
-  terminalFacts: readonly TerminalCollectionFact[] | null;
+  runId: string;
+  terminalEvidence: TerminalEvidence | null;
   terminalRunBoundary: string;
   terminalRunConnectorInstanceId: string;
 }): Promise<{
   flushedState: Readonly<Record<string, unknown>> | null;
   statePutFailed: boolean;
 }> {
-  if (Object.keys(input.bufferedState).length === 0 && !input.terminalFacts) {
+  if (Object.keys(input.bufferedState).length === 0 && !input.terminalEvidence) {
     return { flushedState: null, statePutFailed: false };
   }
 
-  const runId = input.config.runId ?? randomUUID();
-  const terminalCommitIdentity = input.terminalFacts
+  const { runId } = input;
+  const terminalCommitIdentity = input.terminalEvidence
     ? {
         collection_boundary: input.terminalRunBoundary,
         connector_id: input.config.connector.connector_id,
@@ -1989,8 +2052,9 @@ async function maybeCommitCheckpoint(input: {
         run_id: runId,
         source_instance_id: input.config.sourceInstanceId,
         state_delta: input.bufferedState,
-        terminal_facts: input.terminalFacts,
-        version: 1 as const,
+        ...(input.terminalEvidence.version === 1
+          ? { terminal_facts: input.terminalEvidence.facts, version: 1 as const }
+          : { terminal_facts: input.terminalEvidence.facts, version: 2 as const }),
       }
     : null;
   const commitId = terminalCommitIdentity ? `terminal-commit:${hashCanonicalJson(terminalCommitIdentity)}` : null;
@@ -2219,22 +2283,60 @@ export function resolveScopedSourceRoots(scope: CollectionScope | null | undefin
   ].sort();
 }
 
+/** The resources START names for one stream: its non-empty strings, possibly none. */
+function startStreamResources(resources: Readonly<Record<string, readonly string[]>>, stream: string): string[] {
+  return resources[stream]?.filter((value) => typeof value === "string" && value.length > 0) ?? [];
+}
+
+/**
+ * Whether START requests version 1 store evidence.
+ *
+ * {@link collectorScopeFingerprint} binds the time bound and the source roots,
+ * not per-stream resources. A START that narrows a stream to named resources
+ * would carry a scope string, often `unscoped`, without that restriction, and
+ * the extension forbids that. The manifest must also declare RUN_COVERAGE_V1
+ * and a non-empty inventory for every requested stream.
+ */
+function connectorRequestsRunCoverage(connector: CollectorConnectorSpec): boolean {
+  const profileVersion = connector.collectionProfileVersion ?? "0.1.0";
+  const coverageStoreStreams = new Set(connector.coverageStoreStreams ?? []);
+  return (
+    connector.runCoverageVersion === 1 &&
+    (COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(profileVersion) &&
+    connector.protocol_capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) &&
+    connector.streams.length > 0 &&
+    connector.streams.every((stream) => coverageStoreStreams.has(stream)) &&
+    connector.streams.every((stream) => startStreamResources(connector.resources ?? {}, stream).length === 0)
+  );
+}
+
 export function buildCollectorStartMessage(
   streams: readonly string[],
   streamsToBackfill: readonly string[] = [],
   priorState?: Readonly<Record<string, unknown>> | null,
   resources: Readonly<Record<string, readonly string[]>> = {},
   timeRanges: CollectorStreamTimeRanges = {},
-  sourceRoots: readonly string[] = []
+  sourceRoots: readonly string[] = [],
+  collectionScope?: string,
+  runCoverageVersion?: 1
 ): StartMessage {
+  const requestsCoverage =
+    runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
+  // A version 1 request binds its evidence to this string (Collection Profile
+  // Section 5.1). Without one the proof would bind to no boundary.
+  if (requestsCoverage && !collectionScope?.trim()) {
+    throw new Error("a version 1 store evidence request requires a non-empty collection_scope");
+  }
   const start: StartMessage = {
+    ...(requestsCoverage && collectionScope ? { collection_scope: collectionScope } : {}),
+    ...(requestsCoverage ? { run_coverage_version: 1 } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {
-        const streamResources = resources[name]?.filter((value) => typeof value === "string" && value.length > 0);
+        const streamResources = startStreamResources(resources, name);
         const timeRange = timeRanges[name];
         return {
           name,
-          ...(streamResources && streamResources.length > 0 ? { resources: streamResources } : {}),
+          ...(streamResources.length > 0 ? { resources: streamResources } : {}),
           // Only streams the caller proved scopable carry a bound. A stream
           // absent from `timeRanges` is collected whole rather than silently
           // narrowed against a field it does not have.
@@ -2444,6 +2546,20 @@ function ensureCollectorGapRow(input: EnsureGapInput): LocalDeviceOutboxItem {
     payload,
     sourceInstanceId: input.sourceInstanceId,
   });
+}
+
+/**
+ * Make a `connector_child_failure` gap open for its lane. A gap the server already
+ * acknowledged is `succeeded` here, and {@link ensureCollectorGapRow} returns it
+ * unchanged. It stays open until a complete successful run recovers it, so reopen
+ * it. Left delivered, the device verdict would count no open work and read the
+ * lane covered while the server still holds the gap open.
+ */
+function ensureOpenFailureGapRow(input: EnsureGapInput): void {
+  const gap = ensureCollectorGapRow(input);
+  if (gap.status === "succeeded") {
+    input.outbox.reopenSucceeded(gap.id);
+  }
 }
 
 function sanitizeCollectorGapDetails(value: string): string {
@@ -2768,7 +2884,7 @@ async function drainClaimedOutboxItem(
       leaseEpoch: item.lease_epoch,
       leaseMs: input.policy.leaseMs,
     });
-    await sendOutboxItem(input.client, current, {
+    const terminalAck = await sendOutboxItem(input.client, current, {
       ...(input.blobUpload ? { blobUpload: input.blobUpload } : {}),
       ...(input.spool ? { spool: input.spool } : {}),
     });
@@ -2776,6 +2892,7 @@ async function drainClaimedOutboxItem(
       holder: input.holderId,
       id: current.id,
       leaseEpoch: current.lease_epoch,
+      ...(terminalAck ? { terminalAck } : {}),
     });
     result.sent += 1;
     sentByKind[current.kind] = (sentByKind[current.kind] ?? 0) + 1;
@@ -2873,27 +2990,41 @@ interface SendOutboxItemDeps {
   spool?: LocalDeviceBlobSpool;
 }
 
+/**
+ * What the server acknowledged for a terminal record: the run's place in run
+ * order and its commit revision. The receipt keeps them so the device can show
+ * the as-of and keep a newer run's receipt over an older run's late ACK.
+ */
+function terminalRunAck(response: Awaited<ReturnType<LocalDeviceClient["commitTerminalRun"]>>): TerminalRunAck {
+  return {
+    collectionRevision: response.collection_revision ?? null,
+    runId: response.run_id,
+    runSequence: response.run_sequence ?? null,
+    storageEpoch: response.storage_epoch ?? null,
+  };
+}
+
 async function sendOutboxItem(
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>,
   item: LocalDeviceOutboxItem,
   deps: SendOutboxItemDeps = {}
-): Promise<void> {
+): Promise<TerminalRunAck | undefined> {
   if (item.kind === "record_batch") {
     const payload = assertRecordBatchPayload(item.payload, item.id);
     if (payload.records.length === 0) {
       throw new OutboxPayloadShapeError(`record_batch payload has no records: ${item.id}`);
     }
-    await client.ingestBatch(
-      buildLocalDeviceIngestBatchRequest({
-        batchId: payload.batchId,
-        batchSeq: payload.batchSeq,
-        connectorId: payload.connectorId,
-        deviceId: payload.deviceId,
-        records: payload.records,
-        sourceInstanceId: payload.sourceInstanceId,
-      })
-    );
+    const request = buildLocalDeviceIngestBatchRequest({
+      batchId: payload.batchId,
+      batchSeq: payload.batchSeq,
+      connectorId: payload.connectorId,
+      deviceId: payload.deviceId,
+      records: payload.records,
+      sourceInstanceId: payload.sourceInstanceId,
+    });
+    const receipt = await client.ingestBatch(request);
+    assertAcceptedIngestBatchReceipt(receipt, request.records.length);
     return;
   }
   if (item.kind === "checkpoint") {
@@ -2908,8 +3039,7 @@ async function sendOutboxItem(
     if (!client.commitTerminalRun) {
       throw new OutboxPayloadShapeError("collector client does not support terminal_run_commit; upgrade required");
     }
-    await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id));
-    return;
+    return terminalRunAck(await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id)));
   }
   if (item.kind === "gap") {
     // Validate first so a malformed gap dead-letters via OutboxPayloadShapeError
@@ -2935,6 +3065,19 @@ async function sendOutboxItem(
     return;
   }
   throw new OutboxPayloadShapeError(`unsupported outbox kind ${item.kind} for id ${item.id}`);
+}
+
+function assertAcceptedIngestBatchReceipt(receipt: IngestBatchReceipt, submittedRecordCount: number): void {
+  if (
+    receipt?.object !== "device_ingest_batch_result" ||
+    receipt.status !== "accepted" ||
+    receipt.accepted_record_count !== submittedRecordCount ||
+    receipt.rejected_record_count !== 0
+  ) {
+    throw new LocalDeviceReceiptValidationError(
+      "device ingest batch response rejected records or omitted durable admission counts"
+    );
+  }
 }
 
 /**
@@ -3117,7 +3260,7 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     throw new OutboxPayloadShapeError(`terminal_run_commit payload is not an object: ${id}`);
   }
   if (
-    payload.version !== 1 ||
+    (payload.version !== 1 && payload.version !== 2) ||
     typeof payload.commit_id !== "string" ||
     typeof payload.run_id !== "string" ||
     typeof payload.device_id !== "string" ||
@@ -3127,12 +3270,12 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     typeof payload.collection_boundary !== "string" ||
     !isRecord(payload.state_delta) ||
     !Array.isArray(payload.terminal_facts) ||
-    payload.terminal_facts.length === 0 ||
-    !payload.terminal_facts.every(isTerminalCollectionFact)
+    (payload.version === 1 && payload.terminal_facts.length === 0) ||
+    !payload.terminal_facts.every(payload.version === 1 ? isTerminalCollectionFact : isTerminalCoverageFact)
   ) {
     throw new OutboxPayloadShapeError(`terminal_run_commit payload missing or invalid fields: ${id}`);
   }
-  return {
+  const common = {
     collection_boundary: payload.collection_boundary,
     commit_id: payload.commit_id,
     connector_id: payload.connector_id,
@@ -3141,9 +3284,42 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     run_id: payload.run_id,
     source_instance_id: payload.source_instance_id,
     state_delta: payload.state_delta,
+  };
+  if (payload.version === 2) {
+    const facts = payload.terminal_facts.filter(isTerminalCoverageFact);
+    if (new Set(facts.map((fact) => fact.stream)).size !== facts.length) {
+      throw new OutboxPayloadShapeError(`terminal_run_commit duplicate coverage streams: ${id}`);
+    }
+    return { ...common, terminal_facts: facts, version: 2 };
+  }
+  return {
+    ...common,
     terminal_facts: payload.terminal_facts.filter(isTerminalCollectionFact),
     version: 1,
   };
+}
+
+function isTerminalCoverageFact(value: unknown): value is TerminalCoverageFact {
+  if (
+    !isRecord(value) ||
+    typeof value.stream !== "string" ||
+    !value.stream ||
+    typeof value.scoped !== "boolean" ||
+    !Array.isArray(value.stores) ||
+    value.stores.length === 0
+  ) {
+    return false;
+  }
+  const { stores } = value;
+  return (
+    stores.every(
+      (store) =>
+        isRecord(store) &&
+        typeof store.store === "string" &&
+        Boolean(store.store) &&
+        (["collected", "partial", "unavailable", "failed"] as readonly unknown[]).includes(store.status)
+    ) && new Set(stores.map((store) => store.store)).size === stores.length
+  );
 }
 
 function isTerminalCollectionFact(value: unknown): value is TerminalCollectionFact {
@@ -3256,7 +3432,7 @@ function isUnresolvedScanBudgetGap(
  *
  * Priority order (most-actionable first) when several conditions overlap:
  * `dead_letter` > `stale_lease` > `retryable_backlog` > `draining` >
- * `coverage_missing` > `healthy_idle`.
+ * `healthy_idle`.
  *
  * - `dead_letter`: at least one row exhausted retries and needs operator
  *   recovery (`retry-dead-letters`). Drain bandwidth is otherwise fine.
@@ -3268,13 +3444,7 @@ function isUnresolvedScanBudgetGap(
  *   next scheduled run; no operator action required.
  * - `draining`: claimable-now or leased work exists — the lane is actively
  *   moving records to the server.
- * - `coverage_missing`: the lane has drained real records but never carried
- *   a `coverage_diagnostics` record, so the dashboard can only project
- *   `coverage_unknown`. Re-running with the default stream set (which
- *   includes `coverage_diagnostics`) promotes the axis. This is the local
- *   shape behind the upgrade note in the runbook.
- * - `healthy_idle`: fully drained with coverage accounted for (or nothing
- *   has been collected yet, so there is no coverage to miss).
+ * - `healthy_idle`: fully drained or nothing collected yet.
  */
 export const LOCAL_COLLECTOR_LIFECYCLE_STATES = [
   "healthy_idle",
@@ -3282,31 +3452,17 @@ export const LOCAL_COLLECTOR_LIFECYCLE_STATES = [
   "retryable_backlog",
   "dead_letter",
   "stale_lease",
-  "coverage_missing",
 ] as const;
 
 export type LocalCollectorLifecycleState = (typeof LOCAL_COLLECTOR_LIFECYCLE_STATES)[number];
 
 export interface LocalCollectorLifecycleInput {
-  /**
-   * Whether the lane has durably carried a `coverage_diagnostics` record.
-   * When the caller cannot determine this (e.g. an unscoped status with no
-   * connection id), pass `null` to suppress the `coverage_missing` verdict
-   * rather than guess.
-   */
-  coverageObserved: boolean | null;
-  /**
-   * Count of non-dead-letter `record_batch` rows for the lane. Used to tell
-   * an empty/never-run lane (no coverage to miss) apart from one that has
-   * collected records but no coverage diagnostic.
-   */
-  recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
 }
 
 /**
  * Derive the single mutually-exclusive {@link LocalCollectorLifecycleState}
- * for a lane from its durable outbox summary plus the coverage observation.
+ * for a lane from its durable outbox summary.
  * Pure and side-effect free so both the heartbeat path and the CLI doctor
  * read the same taxonomy.
  */
@@ -3324,13 +3480,6 @@ export function deriveLocalCollectorLifecycleState(input: LocalCollectorLifecycl
   }
   if (summary.retrying > 0) {
     return "retryable_backlog";
-  }
-  // Fully drained from here down. Coverage is only "missing" when the lane
-  // has actually collected records but none of them was a coverage
-  // diagnostic; an empty lane has no coverage to miss, and a null
-  // observation means the caller could not check (do not guess).
-  if (input.coverageObserved === false && input.recordBatchCount > 0) {
-    return "coverage_missing";
   }
   return "healthy_idle";
 }
@@ -3401,29 +3550,6 @@ function nextOutboxBatchSeq(outbox: LocalDeviceOutbox, sourceInstanceId: string)
   return outbox.maxRecordBatchSeq({ sourceInstanceId }) + 1;
 }
 
-export async function drainCollectorQueue(input: {
-  abortSignal?: AbortSignal;
-  client: Pick<LocalDeviceClient, "ingestBatch">;
-  queue: LocalDeviceQueue;
-}): Promise<number> {
-  let sent = 0;
-  for (;;) {
-    throwIfAborted(input.abortSignal);
-    const item = await input.queue.dequeueReady();
-    if (!item) {
-      return sent;
-    }
-    try {
-      await sendQueueItem(input.client, item);
-      await input.queue.markSent(item.batch_id);
-      sent += 1;
-    } catch (error) {
-      await input.queue.markRetry(item.batch_id, error instanceof Error ? error.message : String(error));
-      return sent;
-    }
-  }
-}
-
 /**
  * Drain-before-scan helper for the durable outbox path.
  *
@@ -3450,26 +3576,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
   }
-}
-
-async function sendQueueItem(
-  client: Pick<LocalDeviceClient, "ingestBatch">,
-  item: LocalDeviceQueueItem
-): Promise<void> {
-  const [firstRecord] = item.records;
-  if (!firstRecord) {
-    throw new Error(`collector batch has no records: ${item.batch_id}`);
-  }
-  await client.ingestBatch(
-    buildLocalDeviceIngestBatchRequest({
-      batchId: item.batch_id,
-      batchSeq: item.batch_seq,
-      connectorId: firstRecord.connector_id,
-      deviceId: firstRecord.device_id,
-      records: item.records,
-      sourceInstanceId: item.source_instance_id,
-    })
-  );
 }
 
 /**

@@ -269,6 +269,51 @@ test("a registry rejection before commit leaves no install, no root and no regis
   });
 });
 
+test("installs a catalog connector whose key no build ever saw", async () => {
+  // A connector published to the catalog after this server was built: a
+  // registry-URL connector_id with a matching declared connector_key. Install
+  // must work without a server redeploy.
+  const key = "unlisted-catalog-connector";
+  const manifest = {
+    ...installedGmail,
+    connector_id: `https://registry.pdpp.dev/connectors/${key}`,
+    connector_key: key,
+    legacy_source_ids: [`https://registry.pdpp.dev/connectors/${key}`],
+    manifest_uri: `https://registry.pdpp.dev/connectors/${key}`,
+  };
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    await initDb(dbPath);
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [
+        {
+          bindings: {},
+          config_digest: CONFIG_DIGEST,
+          connector_id: key,
+          connector_key: key,
+          digest: GMAIL_INSTALL_DIGEST,
+          latest: true,
+          version: String(manifest.version),
+        },
+      ],
+      dataDir,
+      installArtifact: (root) => {
+        writeArtifact(root, manifest);
+      },
+      registerManifest: installedConnectorManifestRegistration.registerManifest,
+      store: createConnectorInstallStore(),
+    });
+
+    const active = await service.install(key, GMAIL_INSTALL_DIGEST);
+
+    assert.equal(active.connectorId, key);
+    assert.equal((await createConnectorInstallStore().getActive(key))?.digest, GMAIL_INSTALL_DIGEST);
+    const registered = await getConnectorManifest(key);
+    assert.equal(registered?.connector_id, key);
+    assert.equal(registered?.connector_key, key);
+    assert.equal(registered?.manifest_uri, `https://registry.pdpp.dev/connectors/${key}`);
+  });
+});
+
 test("a deadline that passes before registration starts rolls the install back", async () => {
   await withSandbox(async ({ dataDir, dbPath }) => {
     await initDb(dbPath);

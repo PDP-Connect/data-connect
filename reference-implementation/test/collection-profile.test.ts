@@ -26,7 +26,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-
 import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import {
@@ -44,6 +43,7 @@ import {
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -712,6 +712,13 @@ const MINIMAL_MANIFEST = {
   version: "1.0.0",
 };
 
+// Section 3.4: an INTERACTION.kind must be declared in capabilities.human_interaction.
+// Tests that emit INTERACTION use this manifest. Undeclared-kind refusal uses MINIMAL_MANIFEST.
+const HUMAN_INTERACTION_MANIFEST = {
+  ...MINIMAL_MANIFEST,
+  capabilities: { human_interaction: ["credentials", "otp", "manual_action"] },
+};
+
 function buildMultiStreamManifest(connectorId = "test-multi-stream") {
   return {
     ...MINIMAL_MANIFEST,
@@ -782,9 +789,9 @@ test("Collection Profile conformance", async (t) => {
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-start-capture-"));
     const capturePath = join(tmpDir, "start.json");
     const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
-    const scope = {
-      streams: [{ fields: ["id"], name: "items", time_range: { since: "2026-01-01T00:00:00Z" } }],
-    };
+    // MINIMAL_MANIFEST's stream has no consent_time_field, so START must not
+    // carry a time_range for it (Collection Profile 5.1).
+    const scope = { streams: [{ fields: ["id"], name: "items" }] };
 
     try {
       const result = await runTestConnector({
@@ -809,7 +816,6 @@ test("Collection Profile conformance", async (t) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
       assert.ok(!("config" in captured), "legacy START.config should be absent");
@@ -1159,6 +1165,34 @@ test("Collection Profile conformance", async (t) => {
     }
   );
 
+  await t.test("runtime rejects explicit START.scope time_range on a stream without a consent_time_field", async () => {
+    const { connectorPath, cleanup } = createTestConnector([{ records_emitted: 0, status: "succeeded", type: "DONE" }]);
+
+    try {
+      await assert.rejects(
+        () =>
+          runTestConnector({
+            collectionMode: "full_refresh",
+            connectorId: "test",
+            connectorPath,
+            manifest: MINIMAL_MANIFEST,
+            onInteraction: async () => ({}),
+            ownerToken: "test",
+            persistState: true,
+            rsUrl: "http://localhost:9999",
+            scope: {
+              streams: [{ name: "items", time_range: { since: "2026-09-05T00:00:00Z" } }],
+            },
+            state: null,
+          }),
+        // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
+        /START\.scope stream 'items' has no consent_time_field, so it must not include time_range/
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   await t.test("runtime rejects unresolved START.scope view selectors instead of passing them through", async () => {
     const { connectorPath, cleanup } = createTestConnector([{ records_emitted: 0, status: "succeeded", type: "DONE" }]);
 
@@ -1314,7 +1348,7 @@ test("Collection Profile conformance", async (t) => {
             schema: {
               properties: {
                 id: { type: "string" },
-                source_updated_at: { type: "string" },
+                source_updated_at: { format: "date-time", type: "string" },
                 value: { type: "string" },
               },
               required: ["value"],
@@ -1385,7 +1419,7 @@ test("Collection Profile conformance", async (t) => {
             schema: {
               properties: {
                 id: { type: "string" },
-                source_updated_at: { type: "string" },
+                source_updated_at: { format: "date-time", type: "string" },
                 value: { type: "string" },
               },
               required: ["value"],
@@ -1432,6 +1466,150 @@ test("Collection Profile conformance", async (t) => {
         const captured = JSON.parse(readFileSync(capturePath, "utf8"));
         assert.deepEqual(captured.scope, {
           streams: [{ name: "temporal_items", time_range: { since: declaredSince } }, { name: "non_temporal_items" }],
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
+    "a declared collection_scope.since reaches each temporal stream in its consent field's format (Collection Profile 5.1)",
+    async () => {
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
+      const { asPort, rsPort } = server;
+      const temporalStream = (name: string, field: Record<string, unknown>) => ({
+        consent_time_field: "occurred",
+        name,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, occurred: field, value: { type: "string" } },
+          required: ["value"],
+          type: "object",
+        },
+        semantics: "append_only",
+      });
+      const manifest = {
+        ...MINIMAL_MANIFEST,
+        connector_id: "test-hosted-owner-window-by-format",
+        streams: [
+          temporalStream("dated", { format: "date", type: "string" }),
+          temporalStream("nullable_dated", { format: "date", type: ["string", "null"] }),
+          temporalStream("instants", { format: "date-time", type: "string" }),
+          temporalStream("epoch_seconds", { type: "integer" }),
+          temporalStream("formatless", { type: "string" }),
+        ],
+      };
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-hosted-owner-window-by-format-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      // "Since 5 Sep" for an owner in UTC-4.
+      const declaredSince = "2026-09-05T00:00:00-04:00";
+      const storedScope = buildStoredCollectionScope({ since: declaredSince }, "2026-09-06T00:00:00.000Z");
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: { [COLLECTION_SCOPE_STATE_KEY]: storedScope },
+        });
+
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.scope, {
+          streams: [
+            // A date field gets a full-date, the owner's calendar day.
+            { name: "dated", time_range: { since: "2026-09-05" } },
+            { name: "nullable_dated", time_range: { since: "2026-09-05" } },
+            // A date-time field gets the owner's instant unchanged.
+            { name: "instants", time_range: { since: declaredSince } },
+            // A field with no date or date-time format cannot take a bound.
+            { name: "epoch_seconds" },
+            { name: "formatless" },
+          ],
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
+    "a stored legacy collection_scope.since with no offset still runs, read at its earliest instant (+14:00)",
+    async () => {
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
+      const { asPort, rsPort } = server;
+      const temporalStream = (name: string, format: string) => ({
+        consent_time_field: "occurred",
+        name,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, occurred: { format, type: "string" }, value: { type: "string" } },
+          required: ["value"],
+          type: "object",
+        },
+        semantics: "append_only",
+      });
+      const manifest = {
+        ...MINIMAL_MANIFEST,
+        connector_id: "test-hosted-legacy-offsetless-scope",
+        streams: [temporalStream("dated", "date"), temporalStream("instants", "date-time")],
+      };
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-hosted-legacy-offsetless-scope-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      // Written raw, as the route stored it before it required an offset;
+      // buildStoredCollectionScope would canonicalize it.
+      const legacyStoredScope = {
+        declared_at: "2026-09-01T00:00:00.000Z",
+        fingerprint: "since=2026-09-05T08:30:00",
+        scope: { since: "2026-09-05T08:30:00" },
+      };
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: { [COLLECTION_SCOPE_STATE_KEY]: legacyStoredScope },
+        });
+
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.scope, {
+          streams: [
+            { name: "dated", time_range: { since: "2026-09-05" } },
+            { name: "instants", time_range: { since: "2026-09-05T08:30:00+14:00" } },
+          ],
         });
       } finally {
         cleanup();
@@ -2635,11 +2813,12 @@ test("Collection Profile conformance", async (t) => {
   });
 
   await t.test(
-    "STATE currently flushes and stages only the named stream when other streams still have buffered records",
+    "STATE flushes co-emitted streams before it stages their parent",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const manifest = buildMultiStreamManifest("test-multi-stream-state-boundary");
+      const base = buildMultiStreamManifest("test-multi-stream-state-boundary");
+      const manifest = { ...base, streams: base.streams.map((stream) => ({ ...stream, ...(stream.name === "other_items" ? { state_stream: "items", coverage_strategy: "checkpoint_window", freshness_strategy: "scheduled_window" } : {}) })) };
       const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
       const asUrl = `http://localhost:${asPort}`;
 
@@ -2696,8 +2875,8 @@ rl.on('line', (line) => {
 
         assert.equal(result.status, "failed");
         assert.equal(result.exit_code, 1);
-        assert.equal(checkpointSummaryOf(result).records_flushed, 1);
-        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 1);
+        assert.equal(checkpointSummaryOf(result).records_flushed, 2);
+        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
         assert.equal(checkpointSummaryOf(result).state_streams_staged, 1);
         assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
 
@@ -2713,7 +2892,10 @@ rl.on('line', (line) => {
 
         const otherPage = await fetchRecords(rsPort, connectorId, ownerToken, "", "other_items");
         const otherFound = otherPage.find((record) => record.data?.id === "stream_other_1");
-        assert.ok(!otherFound, "other buffered streams should remain unflushed");
+        assert.ok(
+          otherFound,
+          "other buffered streams are flushed too: a cursor may pass only records the store already holds"
+        );
 
         const { body: runTimeline } = await fetchJson<TimelineBody>(
           `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
@@ -2728,8 +2910,8 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent);
         assert.equal(failedEvent.data.reason, "connector_exit_without_done");
-        assert.equal(failedEvent.data.records_flushed, 1);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.records_flushed, 2);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.state_streams_staged, 1);
         assert.equal(failedEvent.data.state_streams_committed, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
@@ -2803,11 +2985,17 @@ rl.on('line', (line) => {
         assert.equal(advancedEvents.length, 2);
         assert.deepEqual(
           new Set(stagedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           new Set(advancedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           advancedEvents.map((event) => event.data.state_streams_committed as number).sort((a, b) => a - b),
@@ -2943,6 +3131,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
           {
             name: "other_items",
@@ -2955,6 +3145,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
         ],
         version: "0.1.0",
@@ -3583,55 +3775,53 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
-    const manifestWithInteractiveBinding = {
-      ...MINIMAL_MANIFEST,
-      runtime_requirements: {
-        bindings: {
-          interactive: { required: true },
-        },
-      },
-    };
+  await t.test(
+    "START.bindings never advertises interactive, even when the manifest declares human_interaction",
+    async () => {
+      const manifestWithInteractiveBinding = {
+        ...MINIMAL_MANIFEST,
+        capabilities: { human_interaction: ["credentials"] },
+      };
 
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
-    const capturePath = join(tmpDir, "start.json");
-    const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
 
-    try {
-      const result = await runTestConnector({
-        // Bare runtime unit test: no server, no registered connector, an
-        // unreachable rsUrl. A pure-echo admission just needs to clear the
-        // gate so the START.bindings capture under test is reached.
-        admitRunConnection: fakeEchoAdmitRunConnection(),
-        collectionMode: "full_refresh",
-        connectorId: "test",
-        connectorPath,
-        manifest: manifestWithInteractiveBinding,
-        onInteraction: async () => ({
-          data: {},
-          request_id: "unused",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        }),
-        ownerToken: "test",
-        persistState: true,
-        rsUrl: "http://localhost:9999",
-        state: null,
-      });
+      try {
+        const result = await runTestConnector({
+          // Bare runtime unit test: no server, no registered connector, an
+          // unreachable rsUrl. A pure-echo admission just needs to clear the
+          // gate so the START.bindings capture under test is reached.
+          admitRunConnection: fakeEchoAdmitRunConnection(),
+          collectionMode: "full_refresh",
+          connectorId: "test",
+          connectorPath,
+          manifest: manifestWithInteractiveBinding,
+          onInteraction: async () => ({
+            data: {},
+            request_id: "unused",
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          }),
+          ownerToken: "test",
+          persistState: true,
+          rsUrl: "http://localhost:9999",
+          state: null,
+        });
 
-      assert.equal(result.status, "succeeded");
-      const captured = JSON.parse(readFileSync(capturePath, "utf8"));
-      assert.deepEqual(captured.bindings, {
-        browser: {},
-        filesystem: {},
-        interactive: {},
-        network: {},
-      });
-    } finally {
-      cleanup();
-      rmSync(tmpDir, { force: true, recursive: true });
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.bindings, {
+          browser: {},
+          filesystem: {},
+          network: {},
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
     }
-  });
+  );
 
   await t.test(
     "runtime omits interactive from START.bindings when interaction handling is explicitly disabled",
@@ -5631,7 +5821,7 @@ rl.on('line', (line) => {
   await t.test("runtime reports manual-action known gaps without persisting interaction responses", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-manual-gap-"));
@@ -5673,7 +5863,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () => ({
           data: { otp: "123456", password: "supersecret" },
           request_id: "manual_login",
@@ -6678,7 +6868,7 @@ rl.on('line', (line) => {
   await t.test("INTERACTION round-trip allows connector to continue collecting", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     // Connector that emits INTERACTION, waits for response, then emits RECORD + DONE
@@ -6713,7 +6903,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -6803,7 +6993,7 @@ rl.on('line', (line) => {
   await t.test("resolved OTP assistance completes a pending interaction after page advancement", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(process.cwd(), ".scratch-otp-manual-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6834,7 +7024,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () =>
           new Promise(() => {
             // Keep the interaction pending until the connector advances the browser page.
@@ -6854,7 +7044,7 @@ rl.on('line', (line) => {
   await t.test("late OTP assistance status is ignored after a console response", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-otp-late-status-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6884,7 +7074,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async (message: unknown) => ({
           data: { code: "123456" },
           request_id: (message as InteractionMessage).request_id,
@@ -6906,7 +7096,7 @@ rl.on('line', (line) => {
   await t.test("browser-surface-backed otp INTERACTION projects streamable assistance with secret input", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-interaction-browser-otp-"));
@@ -6951,7 +7141,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7003,7 +7193,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7434,7 +7624,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects connector output emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-output-"));
@@ -7481,7 +7671,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7533,7 +7723,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-state-"));
@@ -7578,7 +7768,7 @@ rl.on('line', (line) => {
               collectionMode: "incremental",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7633,7 +7823,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-progress-"));
@@ -7678,7 +7868,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7729,7 +7919,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-skip-result-"));
@@ -7775,7 +7965,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7824,7 +8014,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects a second INTERACTION emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-overlap-"));
@@ -7872,7 +8062,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7925,7 +8115,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-done-"));
@@ -7970,7 +8160,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8019,11 +8209,118 @@ rl.on('line', (line) => {
   );
 
   await t.test(
+    "runtime keeps a failed DONE's error as connector_error when DONE arrives while waiting for INTERACTION_RESPONSE",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
+      const asUrl = `http://localhost:${asPort}`;
+
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-done-error-"));
+      const connectorPath = join(tmpDir, "connector.mjs");
+      writeFileSync(
+        connectorPath,
+        `
+import { createInterface } from 'readline';
+process.on('SIGTERM', () => process.exit(1));
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({
+      type: 'INTERACTION',
+      request_id: 'int_blocked_done_error_1',
+      kind: 'otp',
+      message: 'Enter the code',
+      schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+      timeout_seconds: 300
+    }) + '\\n');
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({
+        type: 'DONE',
+        status: 'failed',
+        records_emitted: 0,
+        error: {
+          message: 'sign_in_probe_failed: probe page was refused',
+          code: 'sign_in_probe_failed',
+          retryable: false,
+          recovery_hint: 'refresh_credentials'
+        }
+      }) + '\\n');
+    }, 10);
+  }
+});
+`,
+        "utf-8"
+      );
+
+      try {
+        let rejected: RuntimeRunConnectorError | undefined;
+        await assert.rejects(
+          async () => {
+            await runTestConnector({
+              collectionMode: "full_refresh",
+              connectorId,
+              connectorPath,
+              manifest: HUMAN_INTERACTION_MANIFEST,
+              onInteraction: async () => new Promise(() => undefined),
+              ownerToken,
+              persistState: true,
+              rsUrl: `http://localhost:${rsPort}`,
+              state: null,
+            });
+          },
+          (err) => {
+            rejected = asRuntimeError(err);
+            return true;
+          }
+        );
+        assert.ok(rejected);
+        // Still a protocol violation: the connector broke the INTERACTION wait.
+        assert.equal(rejected.message, "Connector emitted DONE while waiting for INTERACTION_RESPONSE");
+        assert.equal(rejected.failure_reason, "connector_protocol_violation");
+        // But the connector's own cause is kept. Its recovery_hint is not:
+        // the runtime terminated the child and owns the recovery action.
+        assert.deepEqual(rejected.connector_error, {
+          code: "sign_in_probe_failed",
+          message: "sign_in_probe_failed: probe page was refused",
+          retryable: false,
+        });
+
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(rejected))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected run.failed for DONE emitted during an open interaction");
+        assert.equal(failedEvent.data.reason, "connector_protocol_violation");
+        assert.equal(failedEvent.data.failure_message, "Connector emitted DONE while waiting for INTERACTION_RESPONSE");
+        assert.equal(failedEvent.data.connector_error_message, "sign_in_probe_failed: probe page was refused");
+        assert.equal(failedEvent.data.connector_error_code, "sign_in_probe_failed");
+        const runFailedGap = ((failedEvent.data.known_gaps as Record<string, unknown>[] | undefined) || []).find(
+          (gap) => gap.kind === "run_failed"
+        );
+        assert.ok(runFailedGap, "expected a run_failed known gap");
+        assert.equal(runFailedGap.reason, "connector_protocol_violation");
+        assert.notEqual(
+          (runFailedGap.recovery_hint as { action?: string } | undefined)?.action,
+          "refresh_credentials",
+          "a protocol violation must not adopt the connector's recovery_hint"
+        );
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
     "runtime rejects invalid JSONL emitted while waiting for INTERACTION_RESPONSE and does not record completion artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-invalid-jsonl-"));
@@ -8064,7 +8361,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8116,7 +8413,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION timeout responses when the handler does not answer in time", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-timeout-"));
@@ -8163,7 +8460,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8202,7 +8499,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION cancelled responses when the handler aborts", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-cancelled-"));
@@ -8249,7 +8546,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8290,7 +8587,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-invalid-response-"));
@@ -8328,7 +8625,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
               onInteraction: async (message: unknown) => {
                 const msg = message as InteractionMessage;
@@ -8690,7 +8987,7 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "runtime rejects INTERACTION when START.bindings omit interactive and records no interaction artifacts",
+    "runtime rejects INTERACTION whose kind the manifest does not declare and records no interaction artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -8742,7 +9039,10 @@ rl.on('line', (line) => {
             rejected = asRuntimeError(err);
             assert.equal(rejected.failure_reason, "connector_protocol_violation");
             // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-            assert.match(rejected.message, /START\.bindings omitted interactive/);
+            assert.match(
+              rejected.message,
+              /INTERACTION\.kind not declared in capabilities\.human_interaction: credentials/
+            );
             assert.equal(checkpointSummaryOf(rejected).records_flushed, 0);
             assert.equal(checkpointSummaryOf(rejected).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(rejected).state_streams_staged, 0);
@@ -8762,7 +9062,7 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(
           failedEvent,
-          "run.failed should be emitted when INTERACTION arrives without an advertised interactive binding"
+          "run.failed should be emitted when INTERACTION names a kind the manifest does not declare"
         );
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.records_flushed, 0);
@@ -8775,15 +9075,16 @@ rl.on('line', (line) => {
     }
   );
 
-  // ── 8. Failed DONE does not ingest remaining buffered records ──
+  // ── 8. Failed DONE ingests the remaining validated records but commits no STATE ──
 
-  await t.test("DONE(failed) does not flush remaining buffered records", async () => {
+  await t.test("DONE(failed) flushes remaining buffered records but commits no STATE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
     const { ownerToken, connectorId } = await setupConnector(server, asPort);
 
-    // Connector emits a record then fails — the record should NOT be ingested
-    // (records are flushed only on DONE(succeeded))
+    // Connector emits a record then fails. The record is validated and already
+    // emitted, so it is ingested (as a mid-run batch would be); only STATE is
+    // withheld on a failed run.
     const { connectorPath, cleanup } = createTestConnector([
       {
         data: { id: "should_not_persist", value: "fail" },
@@ -8816,8 +9117,8 @@ rl.on('line', (line) => {
       assert.equal(result.status, "failed");
       assert.equal(checkpointSummaryOf(result).mode, "checkpointed_streaming");
       assert.equal(checkpointSummaryOf(result).commit_status, "not_committed");
-      assert.equal(checkpointSummaryOf(result).records_flushed, 0);
-      assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 1);
+      assert.equal(checkpointSummaryOf(result).records_flushed, 1);
+      assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
       assert.equal(checkpointSummaryOf(result).state_streams_staged, 0);
       assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
       assert.equal(result.terminal_reason, "connector_reported_failed");
@@ -8826,10 +9127,10 @@ rl.on('line', (line) => {
         retryable: true,
       });
 
-      // Check RS — record should NOT be present
+      // Check RS — the record is present
       const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken);
       const found = bodyRecords.find((r) => r.data?.id === "should_not_persist");
-      assert.ok(!found, "Records from a failed run should not be ingested");
+      assert.ok(found, "Validated records from a failed run are ingested");
 
       const asUrl = `http://localhost:${asPort}`;
       const { body: runTimeline } = await fetchJson<TimelineBody>(
@@ -8838,8 +9139,8 @@ rl.on('line', (line) => {
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
       assert.ok(failedEvent, "run.failed should be emitted when the connector reports DONE(failed)");
       assert.equal(failedEvent.data.reason, "connector_reported_failed");
-      assert.equal(failedEvent.data.records_flushed, 0);
-      assert.equal(failedEvent.data.buffered_records_dropped, 1);
+      assert.equal(failedEvent.data.records_flushed, 1);
+      assert.equal(failedEvent.data.buffered_records_dropped, 0);
       assert.equal(failedEvent.data.state_streams_staged, 0);
       assert.equal(failedEvent.data.state_streams_committed, 0);
       assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
@@ -8850,6 +9151,60 @@ rl.on('line', (line) => {
       await closeServer(server);
     }
   });
+
+  await t.test(
+    "DONE.error.message keeps a lowercase error code and still redacts machine secrets and the run's credential",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      // A lowercase snake_case passphrase is the shape the word rule keeps, so
+      // only identity redaction can catch it.
+      const runCredential = "correct_horse_battery_staple";
+      // Assembled at runtime so secret scanners do not flag the fixture.
+      const machineSecret = ["sk", "live", "51HxYzAbCdEfGhIjKlMnOp"].join("_");
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            message: `chase_unexpected: additional_browser_page_forbidden: use the owned run page; login failed for ${runCredential}; key ${machineSecret}`,
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+          staticSecretEnv: { TEST_CONNECTION_PASSWORD: runCredential },
+        });
+        assert.equal(result.status, "failed");
+
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected run.failed");
+        assert.equal(
+          failedEvent.data.connector_error_message,
+          "chase_unexpected: additional_browser_page_forbidden: use the owned run page; login failed for [REDACTED]; key [REDACTED]"
+        );
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
+    }
+  );
 
   await t.test("DONE(failed) after staging multiple stream checkpoints still commits none of them", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
@@ -8912,7 +9267,10 @@ rl.on('line', (line) => {
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
         new Set(stagedEvents.map((event) => eventCursorKey(event))),
-        new Set([cursorEventKey("items", "cursor_items_done_failed"), cursorEventKey("other_items", "cursor_other_done_failed")])
+        new Set([
+          cursorEventKey("items", "cursor_items_done_failed"),
+          cursorEventKey("other_items", "cursor_other_done_failed"),
+        ])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
@@ -8993,8 +9351,15 @@ rl.on('line', (line) => {
     }
   );
 
+  // Oracle: Section 5.8 (DONE.error shape) and the owner-visibility rule in Section
+  // 5.11 (the connector's own DONE.error.message stays visible with the diagnosis).
+  // The run fails as connector_protocol_violation. The bounded message is kept, the
+  // unsupported field's VALUE never reaches durable artifacts, and the connector's
+  // retryable claim gives no retry authority. Plausible defect caught: an invalid
+  // envelope's unsupported value (or its retryable:true) leaking into the terminal
+  // record or restarting the run. Backend: memory profile, child process.
   await t.test(
-    "DONE.error with unsupported fields is rejected as a protocol violation before terminal artifacts are recorded as connector failures",
+    "DONE.error with unsupported fields is a protocol violation: the bounded connector message stays visible, the unsupported value and retryable claim do not",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9033,7 +9398,10 @@ rl.on('line', (line) => {
             assert.equal(checkpointSummaryOf(capturedError).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(capturedError).commit_status, "not_committed");
             assert.equal(capturedError.terminal_reason, "connector_protocol_violation");
-            assert.equal(capturedError.connector_error, null);
+            // The bounded connector message stays visible with the diagnosis (Section 5.11).
+            assert.equal(capturedError.connector_error?.message, "rate limited");
+            // The connector's retryable:true is a claim with no retry authority.
+            assert.notEqual(capturedError.connector_error?.retryable, true);
             return true;
           }
         );
@@ -9047,13 +9415,13 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
+        // The connector's bounded message is durable diagnosis (Section 5.11).
+        assert.equal(failedEvent.data.connector_error_message, "rate limited");
+        assert.notEqual(failedEvent.data.connector_error_retryable, true);
+        // The unsupported field's value must never reach a durable artifact.
         assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
+          !JSON.stringify(runTimeline).includes("upstream_rate_limit"),
+          "an unsupported DONE.error field's value must not enter durable artifacts"
         );
       } finally {
         cleanup();
@@ -9062,8 +9430,11 @@ rl.on('line', (line) => {
     }
   );
 
+  // Section 5.8: successful DONE cannot carry a terminal connector error. This
+  // contradiction is a protocol failure and must not be published as a valid
+  // connector error. Failed-DONE message preservation is tested separately.
   await t.test(
-    "DONE(succeeded) with terminal error details is rejected as a protocol violation before success artifacts are recorded",
+    "DONE(succeeded) with terminal error details is a protocol violation before success artifacts are recorded",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9120,14 +9491,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
+        assert.ok(!("connector_error_message" in failedEvent.data));
+        assert.ok(!("connector_error_retryable" in failedEvent.data));
       } finally {
         cleanup();
         await closeServer(server);
@@ -11184,25 +11549,26 @@ function testSourceIdForConnector(connectorId: string): string {
 }
 
 function withTestSourceDeclaration(manifest: ConnectorManifest): ConnectorManifest {
-  const streams = asArray(manifest.streams).map((stream) => {
-    const streamRecord = asRecord(stream);
-    return {
-      ...streamRecord,
-      selection: {
-        fields: true,
-        resources: true,
+  const declared = asRecord(
+    withFixtureSourceDeclaration(
+      {
+        ...manifest,
+        streams: asArray(manifest.streams).map((stream) => ({
+          ...asRecord(stream),
+          selection: { fields: true, resources: true },
+        })),
       },
-    };
-  });
+      {
+        sourceId: testSourceIdForConnector(manifest.connector_id),
+      }
+    )
+  );
   return {
     ...manifest,
     source_declaration: {
+      ...asRecord(declared.source_declaration),
       declaration_version: `collection-profile-test:${manifest.connector_id}:${manifest.version}`,
-      display: { name: manifest.display_name },
-      protocol_version: manifest.protocol_version,
       publisher: { id: "https://sources.example/publishers/collection-profile-tests" },
-      source: { id: testSourceIdForConnector(manifest.connector_id), kind: "connector" },
-      streams,
     },
   };
 }

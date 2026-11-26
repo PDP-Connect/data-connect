@@ -1,0 +1,68 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import { appendFileSync } from "node:fs";
+import { statfs } from "node:fs/promises";
+
+export const RELEASE_DISK_FLOOR_BYTES = 105_000_000_000;
+// A local run may lower the floor only with an explicit byte value AND a
+// reason. The real free bytes are always measured and logged, and the run
+// still refuses below the lowered floor. Release runs set neither variable.
+export const LOCAL_DISK_FLOOR_ENV = "PDPP_LOCAL_DISK_FLOOR_BYTES";
+export const LOCAL_DISK_REASON_ENV = "PDPP_LOCAL_DISK_WAIVER_REASON";
+export const LOCAL_DISK_LOG_ENV = "PDPP_LOCAL_DISK_WAIVER_LOG";
+export const LOCAL_DISK_FOOTPRINT_ENV = "PDPP_LOCAL_DISK_FOOTPRINT_BYTES";
+const HARD_MINIMUM_BYTES = 15_000_000_000;
+// Release and CI runs must never use the waiver, even when the variables leak in.
+const CI_MARKERS = ["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE"];
+
+export function resolveDiskFloor(env = process.env, defaultFloor = RELEASE_DISK_FLOOR_BYTES) {
+	if (!Number.isSafeInteger(defaultFloor) || defaultFloor < RELEASE_DISK_FLOOR_BYTES)
+		throw new Error("default disk floor must not lower the release floor");
+	const raw = env[LOCAL_DISK_FLOOR_ENV];
+	if (raw === undefined || raw === "")
+		return { floor: defaultFloor, waived: false };
+	const floor = Number(raw);
+	const reason = env[LOCAL_DISK_REASON_ENV]?.trim();
+	const ci = CI_MARKERS.find((name) => env[name] && env[name] !== "false" && env[name] !== "0");
+	if (ci) throw new Error(`${LOCAL_DISK_FLOOR_ENV} is refused when ${ci} is set`);
+	if (!Number.isSafeInteger(floor) || floor < HARD_MINIMUM_BYTES)
+		throw new Error(
+			`${LOCAL_DISK_FLOOR_ENV} must be an integer of at least ${HARD_MINIMUM_BYTES} bytes`,
+		);
+	if (floor >= RELEASE_DISK_FLOOR_BYTES)
+		throw new Error(`${LOCAL_DISK_FLOOR_ENV} must be below the release floor`);
+	if (!reason) throw new Error(`${LOCAL_DISK_REASON_ENV} is required with a waived floor`);
+	return { floor, waived: true, reason };
+}
+
+export async function requireDiskFloor(env = process.env, cwd = process.cwd(), defaultFloor = RELEASE_DISK_FLOOR_BYTES, { reserveBytes = 0 } = {}) {
+	const { floor: baseFloor, waived, reason } = resolveDiskFloor(env, defaultFloor);
+	if (!Number.isSafeInteger(reserveBytes) || reserveBytes < 0 || !Number.isSafeInteger(baseFloor + reserveBytes))
+		throw new Error("disk reserve must be a nonnegative safe integer with a safe total");
+	const floor = baseFloor + reserveBytes;
+	const disk = await statfs(cwd);
+	const available = disk.bavail * disk.bsize;
+	if (waived) {
+		const line = JSON.stringify({
+			at: new Date().toISOString(),
+			status: "DISK_PREFLIGHT_WAIVED",
+			availableBytes: available,
+			waivedFloorBytes: baseFloor,
+			reserveBytes,
+			requiredFreeBytes: floor,
+			releaseFloorBytes: defaultFloor,
+			reason,
+			...(env[LOCAL_DISK_FOOTPRINT_ENV]
+				? { measuredFootprintBytes: Number(env[LOCAL_DISK_FOOTPRINT_ENV]) }
+				: {}),
+		});
+		process.stderr.write(`${line}\n`);
+		if (env[LOCAL_DISK_LOG_ENV]) appendFileSync(env[LOCAL_DISK_LOG_ENV], `${line}\n`);
+	}
+	if (available < floor)
+		throw Object.assign(
+			new Error(`NOT RUN (disk): need ${Math.round(floor / 1e9)} GB free`),
+			{ code: "disk_floor", requiredFreeBytes: floor, availableBytes: available },
+		);
+	return { available, floor, waived };
+}

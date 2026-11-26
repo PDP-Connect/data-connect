@@ -239,7 +239,7 @@ export default async function RecordDetailPage({
         description={
           <>
             <span className="mr-2 inline-flex items-center gap-2">
-              <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+              <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
               <span>{sourceLabel}</span>
             </span>
             {ts.label} <IcTimestamp className="text-foreground" value={ts.value} />

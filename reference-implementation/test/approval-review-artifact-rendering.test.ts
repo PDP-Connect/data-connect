@@ -134,7 +134,7 @@ function sourceManifest() {
 async function setup(): Promise<{ asUrl: string; server: TestServerHandle }> {
   const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServerHandle;
   const asUrl = `http://localhost:${server.asPort}`;
-  const manifest = loadSpotifyManifest();
+  const manifest = { ...loadSpotifyManifest(), source_declaration: sourceManifest().source_declaration };
   const registered = await fetch(`${asUrl}/connectors`, {
     body: JSON.stringify(manifest),
     headers: { Accept: "application/json", "Content-Type": "application/json" },

@@ -38,10 +38,12 @@ import {
   clientAssertionIssuer,
   verifyPrivateKeyJwtClientAssertion,
 } from "./oauth-client-auth.ts";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "./connector-key.ts";
 import {
   invalidConnectorManifest,
+  declaredLegacySourceIds,
   resolveManifestSensitivity,
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
@@ -71,13 +73,14 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import { PRODUCT_ICON_SVG, productIconUrl } from "./product-icons.ts";
 import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
 import {
   lockOwnerPasswordVerifierRevision,
   ownerPasswordVerifierRevision,
 } from "./stores/owner-password-verifier-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
-import { snapshotSourceDeclaration } from "./source-declaration.ts";
+import { InvalidSourceDeclarationError, snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
 import {
   type AcceptedSourceDeclarationRevisionStore,
@@ -909,11 +912,6 @@ async function pgExec(sql: string, params: unknown[] = []): Promise<{ changes: n
 }
 
 let configuredNativeManifest: DbRow | null = null;
-// Source of truth: connector-key.ts's legacyLocalAliasMap(). This used to be a
-// second, independently-maintained table here and had drifted (missing
-// google_takeout/apple_photos/google_messages) — see
-// docs/inbox/report-connector-knowledge-clusters-bc.md.
-const LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES = new Map(Object.entries(legacyLocalAliasMap()));
 const PENDING_CONSENT_REQUEST_URI_PREFIX = "urn:pdpp:pending-consent:";
 const LEADING_SLASH_RE = /^\//;
 const TRAILING_SLASHES_RE = /\/+$/;
@@ -3503,14 +3501,41 @@ function derivedRepairPlan(
   };
 }
 
+function assertLegacyOwnership(incoming: Record<string, unknown>, others: { manifest: unknown }[]): void {
+  const legacy = declaredLegacySourceIds(incoming);
+  const current = sourceIdOfDeclaration(sourceDeclarationOf(incoming));
+  for (const { manifest } of others) {
+    const other = manifestRecordOf(manifest);
+    if (!other) continue;
+    const otherLegacy = declaredLegacySourceIds(other);
+    const otherCurrent = sourceIdOfDeclaration(sourceDeclarationOf(other));
+    if (legacy.some((id) => otherLegacy.includes(id) || id === otherCurrent) || (current !== undefined && otherLegacy.includes(current))) {
+      throw invalidConnectorManifest("Legacy source identity is already owned by another connector");
+    }
+  }
+}
+
+export async function assertLegacyOwnershipPostgres(client: PostgresTransactionClient, key: string, manifest: Record<string, unknown>): Promise<void> {
+  // Serialize identity claims across different connector keys, including first registrations.
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
+  const others = await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id <> $1", [key]);
+  assertLegacyOwnership(manifest, others.rows);
+}
+
+export function assertLegacyOwnershipSqlite(key: string, manifest: Record<string, unknown>): void {
+  assertLegacyOwnership(manifest, getDb().prepare("SELECT manifest FROM connectors WHERE connector_id <> ?").all<{ manifest: string }>(key));
+}
+
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean } = {}
+  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean; verifiedSourceDeclaration?: boolean } = {}
 ): Promise<boolean> {
   const markedAt = new Date().toISOString();
+  const identityOptions = { verifiedSourceDeclaration: options.verifiedSourceDeclaration === true };
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
+      await assertLegacyOwnershipPostgres(client, connectorId, JSON.parse(manifestJson));
       await lockConnectorManifestPublication(client, connectorId);
       const activation = await client.query<{ state: string; canonical_manifest_json: string }>(
         "SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=$1 FOR SHARE",
@@ -3524,6 +3549,10 @@ async function persistManifestAndAdvanceGenerations(
           connectorId,
         ])
       ).rows[0]?.manifest;
+      const identityMove = retainedSourceIdentityChange(connectorId, previous, manifestJson, identityOptions);
+      if (identityMove) {
+        await moveSourceIdentityPostgres(client, identityMove);
+      }
       // A manifest stored before digests were retained is the only record of
       // its version's accepted content: keep it before it is replaced.
       const previousDigest = previous ? declarationDigestOf(previous) : null;
@@ -3586,6 +3615,7 @@ async function persistManifestAndAdvanceGenerations(
   }
   return transaction(() => {
     const db = getDb();
+    assertLegacyOwnershipSqlite(connectorId, JSON.parse(manifestJson));
     const activation = db
       .prepare("SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=?")
       .get<{ state: string; canonical_manifest_json: string }>(connectorId);
@@ -3595,6 +3625,10 @@ async function persistManifestAndAdvanceGenerations(
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
+    const identityMove = retainedSourceIdentityChange(connectorId, existing?.manifest, manifestJson, identityOptions);
+    if (identityMove) {
+      moveSourceIdentitySqlite(identityMove);
+    }
     if (options.queueDerivedRepair) {
       const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
       const instances = db
@@ -5501,7 +5535,7 @@ export async function registerDynamicClient(
     client_name: registered.metadata.client_name || null,
     client_uri: registered.metadata.client_uri || (asBase ? asBase : undefined),
     grant_types: registered.metadata.grant_types || undefined,
-    logo_uri: registered.metadata.logo_uri || (asBase ? `${asBase}/icon.svg` : undefined),
+    logo_uri: registered.metadata.logo_uri || (asBase ? productIconUrl(asBase, PRODUCT_ICON_SVG) : undefined),
     policy_uri: registered.metadata.policy_uri || (asBase ? asBase : undefined),
     redirect_uris: registered.metadata.redirect_uris || undefined,
     response_types: registered.metadata.response_types || undefined,
@@ -5547,14 +5581,24 @@ export async function registerConnector(
     replaceAcceptedDigest?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
+    /**
+     * The installer verified the manifest's `source_declaration` against the package it installed.
+     * Only such a declaration may move a legacy projected source identity (retainedSourceIdentityChange).
+     */
+    verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
-  validateConnectorManifest(manifest);
-  const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
+  validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
+  // The retained identity is read here and re-checked under the publication lock in
+  // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
+  const storageContext = await retainedStorageContextForConnector(storageConnectorIdOf(manifest));
+  const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest, storageContext);
   if (!options.skipManifestPersistence) {
+    await maybeRegisterConnectorPhaseForTest("before-manifest-persisted", { connectorId, manifest: storedManifest });
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
       replaceAcceptedDigest: options.replaceAcceptedDigest === true,
+      verifiedSourceDeclaration: options.verifiedSourceDeclaration === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
@@ -5642,13 +5686,291 @@ export async function registerConnector(
  * authority. In particular, legacy manifest projection adds a durable source
  * declaration that is not present in the shipped JSON.
  */
-export function normalizeConnectorManifestForStorage(manifest: Record<string, unknown>): {
+/**
+ * Facts a caller reads under the same authority that will persist the result.
+ * Normalization stays a pure function of its arguments: it never looks anything up.
+ */
+export interface ConnectorManifestStorageContext {
+  /**
+   * The SourceDeclaration an earlier accepted registration retained under this
+   * connector key. When the incoming manifest carries no explicit declaration,
+   * the retained `source.id` is kept. Its projection is re-derived from the
+   * incoming content, so a legitimate content update yields a new
+   * `declaration_version` under the same source identity.
+   */
+  readonly retainedSourceDeclaration?: unknown;
+  readonly retainedConnectorId?: string;
+}
+
+function storageConnectorIdOf(manifest: Record<string, unknown>): unknown {
+  return canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id;
+}
+
+/** The `source_declaration` of a stored or incoming manifest; undefined when absent or unparseable. */
+function sourceDeclarationOf(manifest: unknown): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+    return isRecord(parsed) && isRecord(parsed.source_declaration) ? parsed.source_declaration : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceIdOfDeclaration(declaration: Record<string, unknown> | undefined): string | undefined {
+  const source = declaration?.source;
+  return isRecord(source) && typeof source.id === "string" && source.id.length > 0 ? source.id : undefined;
+}
+
+/**
+ * Storage context for a writer that replaces `previousManifest`. Call it with the row read under the same
+ * lock or transaction that persists the result. A pre-projection row keeps its connector key,
+ * so an update without a declaration preserves the absence of a retained source identity.
+ */
+export function retainedStorageContext(previousManifest: unknown): ConnectorManifestStorageContext {
+  const declaration = sourceDeclarationOf(previousManifest);
+  const previous = manifestRecordOf(previousManifest);
+  const id = previous && storageConnectorIdOf(previous);
+  return { ...(declaration === undefined ? {} : { retainedSourceDeclaration: declaration }), ...(typeof id === "string" ? { retainedConnectorId: id } : {}) };
+}
+
+/** The declaration currently retained under a connector key, read before the registration transaction. */
+async function retainedStorageContextForConnector(connectorId: unknown): Promise<ConnectorManifestStorageContext> {
+  if (!isNonEmptyString(connectorId)) {
+    return {};
+  }
+  const row = await getConnectorCatalogStore().getManifestById(connectorId);
+  return retainedStorageContext(row?.manifest);
+}
+
+/** A retained source identity that a registration moves to the identity its verified declaration names. */
+export interface SourceIdentityMove {
+  readonly connectorId: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+function manifestRecordOf(manifest: unknown): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The one identity change Core Section 5 allows here. A connector registered before source declarations
+ * retains a legacy projection whose `source.id` is its own provenance URI. A package for the same
+ * implementation (same `manifest_uri`) whose source declaration the installer verified names the source
+ * that implementation acquires, so the retained identity moves to it.
+ */
+function legacyProjectionMove(
+  connectorId: string,
+  previousManifest: unknown,
+  incomingManifestJson: string,
+  verifiedSourceDeclaration: boolean
+): SourceIdentityMove | null {
+  if (!verifiedSourceDeclaration) {
+    return null;
+  }
+  const previous = manifestRecordOf(previousManifest);
+  const incoming = manifestRecordOf(incomingManifestJson);
+  const retained = sourceDeclarationOf(previous);
+  const declared = sourceDeclarationOf(incoming);
+  const from = sourceIdOfDeclaration(retained);
+  const to = sourceIdOfDeclaration(declared);
+  const isLegacyProjection =
+    isRecord(retained?.publisher) &&
+    retained.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
+    isRecord(retained.source) &&
+    retained.source.kind === "connector" &&
+    previous?.manifest_uri === from;
+  const isPublishedDeclaration =
+    isRecord(declared?.publisher) &&
+    declared.publisher.id !== LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
+    isRecord(declared.source) &&
+    declared.source.kind === "connector";
+  if (
+    from === undefined ||
+    to === undefined ||
+    !isLegacyProjection ||
+    !isPublishedDeclaration ||
+    incoming?.manifest_uri !== from
+  ) {
+    return null;
+  }
+  return { connectorId, from, to };
+}
+
+/**
+ * Core Section 5: a retained source identity is never replaced by a registration that names another one,
+ * except by `legacyProjectionMove`. Returns that move, or null when the identity is unchanged.
+ */
+export function retainedSourceIdentityChange(
+  connectorId: string,
+  previousManifest: unknown,
+  incomingManifestJson: string,
+  options: { verifiedSourceDeclaration?: boolean } = {}
+): SourceIdentityMove | null {
+  const retained = sourceIdOfDeclaration(sourceDeclarationOf(previousManifest));
+  if (retained === undefined) {
+    return null;
+  }
+  const incoming = sourceIdOfDeclaration(sourceDeclarationOf(incomingManifestJson));
+  if (incoming === retained) {
+    return null;
+  }
+  const move = legacyProjectionMove(
+    connectorId,
+    previousManifest,
+    incomingManifestJson,
+    options.verifiedSourceDeclaration === true
+  );
+  if (move) {
+    return move;
+  }
+  throw invalidConnectorManifest(
+    `Connector ${connectorId} is already bound to source ${retained}; this registration names ${incoming ?? "no source"}. A source identity change needs an explicit identity-change path.`
+  );
+}
+
+// Rows that name a connector source by id. Grants and grant package members keep the source a
+// consent was given for; pairwise instance handles keep the source a handle was issued under (the
+// handle value does not depend on it). They move with the retained identity in the same transaction.
+// The rows carry no connector key, so the move is refused when another connector retains the old id.
+// A handle already issued under the new id for the same instance is refused rather than overwritten.
+export async function moveSourceIdentityPostgres(client: PostgresTransactionClient, move: SourceIdentityMove) {
+  const sharing = await client.query<{ connector_id: string }>(
+    `SELECT connector_id FROM connectors
+      WHERE connector_id <> $1 AND manifest->'source_declaration'->'source'->>'id' = $2 LIMIT 1`,
+    [move.connectorId, move.from]
+  );
+  const collision = await client.query(`${HANDLE_COLLISION_SQL} WHERE a.source_id = $1 AND b.source_id = $2 LIMIT 1`, [
+    move.from,
+    move.to,
+  ]);
+  assertSourceIdentityMovable(move, sharing.rows[0]?.connector_id, collision.rows.length > 0);
+  await client.query(
+    `UPDATE grants SET grant_json = jsonb_set(grant_json, '{source,id}', to_jsonb($2::text))
+      WHERE grant_json->'source'->>'id' = $1 AND grant_json->'source'->>'kind' = 'connector'`,
+    [move.from, move.to]
+  );
+  await client.query(
+    `UPDATE grant_package_members SET source_json = jsonb_set(source_json, '{id}', to_jsonb($2::text))
+      WHERE source_json->>'id' = $1 AND source_json->>'kind' = 'connector'`,
+    [move.from, move.to]
+  );
+  await client.query("UPDATE pairwise_identity_handles SET source_id = $2 WHERE source_id = $1", [move.from, move.to]);
+}
+
+export function moveSourceIdentitySqlite(move: SourceIdentityMove) {
+  const db = getDb();
+  const sharing = db
+    .prepare(
+      `SELECT connector_id FROM connectors
+        WHERE connector_id <> ? AND json_extract(manifest, '$.source_declaration.source.id') = ? LIMIT 1`
+    )
+    .get<{ connector_id: string }>(move.connectorId, move.from);
+  const collision = db
+    .prepare(`${HANDLE_COLLISION_SQL} WHERE a.source_id = ? AND b.source_id = ? LIMIT 1`)
+    .get(move.from, move.to);
+  assertSourceIdentityMovable(move, sharing?.connector_id, collision !== undefined);
+  db.prepare(
+    `UPDATE grants SET grant_json = json_set(grant_json, '$.source.id', ?)
+      WHERE json_extract(grant_json, '$.source.id') = ? AND json_extract(grant_json, '$.source.kind') = 'connector'`
+  ).run(move.to, move.from);
+  db.prepare(
+    `UPDATE grant_package_members SET source_json = json_set(source_json, '$.id', ?)
+      WHERE json_extract(source_json, '$.id') = ? AND json_extract(source_json, '$.kind') = 'connector'`
+  ).run(move.to, move.from);
+  db.prepare("UPDATE pairwise_identity_handles SET source_id = ? WHERE source_id = ?").run(move.to, move.from);
+}
+
+const HANDLE_COLLISION_SQL = `SELECT 1 FROM pairwise_identity_handles a JOIN pairwise_identity_handles b
+  ON b.issuer = a.issuer AND b.subject_id = a.subject_id AND b.client_id = a.client_id AND b.kind = a.kind
+  AND b.internal_id = a.internal_id AND b.scheme = a.scheme`;
+
+function assertSourceIdentityMovable(
+  move: SourceIdentityMove,
+  sharedWith: string | undefined,
+  handleCollision: boolean
+) {
+  if (sharedWith !== undefined) {
+    throw invalidConnectorManifest(
+      `Connector ${move.connectorId} cannot move source ${move.from} to ${move.to}: connector ${sharedWith} also retains ${move.from}, so the grants and handles that name it cannot be attributed to one connector.`
+    );
+  }
+  if (handleCollision) {
+    throw invalidConnectorManifest(
+      `Connector ${move.connectorId} cannot move source ${move.from} to ${move.to}: a pairwise handle is already issued under ${move.to} for an instance that also has one under ${move.from}.`
+    );
+  }
+}
+
+/** Validate an explicit declaration through the Core boundary before it is retained. */
+function acceptedSourceDeclaration(value: unknown): Record<string, unknown> {
+  try {
+    return snapshotSourceDeclaration(value) as unknown as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof InvalidSourceDeclarationError) {
+      throw invalidConnectorManifest(error.message);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Project the legacy manifest under the source identity a retained declaration
+ * already holds. The projection's content is the incoming manifest's; the
+ * identity is the retained one, never the manifest's provenance.
+ */
+function projectRetainedSourceDeclaration(
+  storedManifest: Record<string, unknown>,
+  retainedValue: unknown
+): Record<string, unknown> {
+  const retained = acceptedSourceDeclaration(retainedValue);
+  const source = retained.source as { id: string; kind: string };
+  const publisher = retained.publisher as { id: string };
+  if (source.kind !== "connector") {
+    throw invalidConnectorManifest(
+      `Connector ${String(storedManifest.connector_key)} is bound to a ${source.kind} source; a connector registration cannot change its source kind`
+    );
+  }
+  return snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(storedManifest, {
+    connectorImplementationId: implementationIdOf(storedManifest, source.id),
+    publisherId: publisher.id,
+    sourceId: source.id,
+  }) as unknown as Record<string, unknown>;
+}
+
+/**
+ * The implementation id a legacy projection records: the manifest document's provenance URI when it
+ * is absolute, else the source id. The alias stamp in `normalizeConnectorManifestForStorage` can put a
+ * non-URI alias in `manifest_uri`; that value is not a provenance URI.
+ */
+function implementationIdOf(storedManifest: Record<string, unknown>, sourceId: string): string {
+  const provenance = storedManifest.manifest_uri;
+  return isNonEmptyString(provenance) && URL.canParse(provenance) ? provenance : sourceId;
+}
+
+export function normalizeConnectorManifestForStorage(
+  manifest: Record<string, unknown>,
+  context: ConnectorManifestStorageContext = {}
+): {
   connectorId: string;
   storedManifest: Record<string, unknown>;
 } {
-  const connectorId = canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id;
+  declaredLegacySourceIds(manifest);
+  const connectorId = storageConnectorIdOf(manifest);
   if (!isNonEmptyString(connectorId)) {
     throw invalidConnectorManifest("connector_id is required");
+  }
+  if (URL.canParse(connectorId)) {
+    // Known aliases have already resolved to slugs. Any remaining URL is unsupported as an operational
+    // key, whether or not the manifest carries a source declaration.
+    throw invalidConnectorManifest(
+      `connector_id ${connectorId} is a URL with no connector_key; register a connector key, and keep the URL as manifest_uri`
+    );
   }
   const storedManifest: Record<string, unknown> = {
     ...cloneJson(manifest),
@@ -5661,21 +5983,26 @@ export function normalizeConnectorManifestForStorage(manifest: Record<string, un
       storedManifest.manifest_uri = originalConnectorId;
     }
   }
-  if (!isRecord(storedManifest.source_declaration) && isNonEmptyString(manifest.connector_id)) {
-    // `connector_id` is the local storage key after canonicalization. When a
-    // legacy manifest carried a URL-shaped identity in `manifest_uri`, retain
-    // that explicit URI as the SourceDeclaration identity instead of asking
-    // the projection to materialize a non-URI storage key (for example the
-    // local `codex` catalog entry).
-    const sourceId = isNonEmptyString(manifest.manifest_uri)
-      ? manifest.manifest_uri.trim()
-      : manifest.connector_id.trim();
+  // This optional Core extension treats an absent or null declaration as unspecified. Any nonnull
+  // declaration must validate; it cannot fall back to a retained declaration or compatibility mapping.
+  if (storedManifest.source_declaration !== undefined && storedManifest.source_declaration !== null) {
+    storedManifest.source_declaration = acceptedSourceDeclaration(storedManifest.source_declaration);
+  } else if (context.retainedSourceDeclaration !== undefined) {
+    storedManifest.source_declaration = projectRetainedSourceDeclaration(storedManifest, context.retainedSourceDeclaration);
+  } else {
+    const ids = declaredLegacySourceIds(storedManifest);
+    if (context.retainedConnectorId !== undefined && context.retainedConnectorId !== connectorId) {
+      throw invalidConnectorManifest("Declared legacy identity does not match the retained connector key");
+    }
+    if (ids.length === 0 && context.retainedConnectorId !== undefined) return { connectorId, storedManifest };
+    if (ids.length !== 1) {
+      throw invalidConnectorManifest(`Connector ${connectorId} has no source declaration; register an explicit source_declaration or one legacy_source_ids identity`);
+    }
+    const sourceId = ids[0]!;
     storedManifest.source_declaration = snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(
       storedManifest,
       {
-        connectorImplementationId: isNonEmptyString(storedManifest.manifest_uri)
-          ? storedManifest.manifest_uri
-          : sourceId,
+        connectorImplementationId: implementationIdOf(storedManifest, sourceId),
         publisherId: LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID,
         sourceId,
       }
@@ -5695,6 +6022,16 @@ export async function listRegisteredConnectorIds(): Promise<string[]> {
 }
 
 /**
+ * Canonical keys of every installed connector (vendored, signed-catalog and
+ * local sources; all are registered in the connector catalog). Tuning-namespace
+ * ownership uses it to give a key to the connector with the longest namespace.
+ */
+export async function listInstalledConnectorKeys(): Promise<string[]> {
+  const ids = await listRegisteredConnectorIds();
+  return [...new Set(ids.map((id) => canonicalConnectorKey(id) ?? id))];
+}
+
+/**
  * Get manifest by connector_id
  */
 export async function getConnectorManifest(connectorId: unknown): Promise<DbRow | null> {
@@ -5706,15 +6043,7 @@ export async function getConnectorManifest(connectorId: unknown): Promise<DbRow 
   if (!row) {
     return null;
   }
-  try {
-    return parseAndValidateConnectorManifestRow(row, connectorId);
-  } catch (err) {
-    const legacyAlias = await getLegacyLocalConnectorAliasManifest(connectorId);
-    if (legacyAlias) {
-      return legacyAlias;
-    }
-    throw err;
-  }
+  return parseAndValidateConnectorManifestRow(row, connectorId);
 }
 
 async function getConnectorManifestRow(connectorId: string): Promise<DbRow | null> {
@@ -5735,7 +6064,7 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     if (!isNonEmptyString(row.manifest)) {
       throw invalidConnectorManifest("Stored connector manifest is missing");
     }
-    const manifest: unknown = JSON.parse(row.manifest);
+    const manifest: unknown = parseManifestJsonText(row.manifest);
     if (!isRecord(manifest)) {
       throw invalidConnectorManifest("Stored connector manifest must be an object");
     }
@@ -5759,19 +6088,6 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     err.cause = cause;
     throw err;
   }
-}
-
-async function getLegacyLocalConnectorAliasManifest(connectorId: string): Promise<DbRow | null> {
-  const canonicalConnectorId = LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES.get(connectorId);
-  if (!canonicalConnectorId) {
-    return null;
-  }
-  const canonicalRow = await getConnectorManifestRow(canonicalConnectorId);
-  if (!canonicalRow) {
-    return null;
-  }
-  const manifest = parseAndValidateConnectorManifestRow(canonicalRow, canonicalConnectorId);
-  return cloneJson(manifest);
 }
 
 export async function getManifestForStorageBinding(

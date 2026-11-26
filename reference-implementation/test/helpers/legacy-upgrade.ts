@@ -8,7 +8,7 @@
  * `package/manifests/*.json` bundle entries. An upgraded database holds them
  * the way c82718d4's registerConnector stored them: the row id is the
  * manifest's `connector_key`, and the JSON went through
- * `normalizeConnectorManifestForStorage`. Only the OCI fetch is replaced in
+ * the pre-retention declaration projection (`legacyStoredManifest`). Only the OCI fetch is replaced in
  * the scenarios; the install service, owner routes, registration, state,
  * ingest and read paths are the production ones.
  */
@@ -19,7 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { normalizeConnectorManifestForStorage, registerConnector } from "../../server/auth.ts";
+import { registerConnector } from "../../server/auth.ts";
 import {
   type ConnectorCatalogEntry,
   createConnectorInstallService,
@@ -28,6 +28,7 @@ import {
 import { getDb } from "../../server/db.ts";
 import { startServer } from "../../server/index.ts";
 import { postgresQuery } from "../../server/postgres-storage.ts";
+import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../../server/source-declaration-legacy-collection.ts";
 import {
   createPostgresConnectorInstanceStore,
   createSqliteConnectorInstanceStore,
@@ -52,9 +53,28 @@ export function legacyManifest(key: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(HERE, "..", "fixtures", "legacy-upgrade", `${key}.json`), "utf8"));
 }
 
-/** The manifest JSON c82718d4 left in `connectors.manifest`. */
+/** Publisher the pre-retention projection stamped on every legacy declaration (server/auth.ts). */
+const LEGACY_PROJECTION_PUBLISHER_ID = "https://pdpp.dev/reference-implementation";
+
+/**
+ * The manifest JSON c82718d4 left in `connectors.manifest`: the O-era manifest plus the
+ * declaration base projected from its provenance (`source.id = manifest_uri`). Built here
+ * rather than through the current normalizer, whose fresh-path rule refuses keys with no
+ * reviewed mapping, because an upgraded row was written by the earlier projection.
+ */
 export function legacyStoredManifest(key: string): Record<string, unknown> {
-  return normalizeConnectorManifestForStorage(legacyManifest(key)).storedManifest;
+  const manifest = legacyManifest(key);
+  // The O-era projection stored connector_id/connector_key as the canonical key and kept the URL as manifest_uri.
+  const stored: Record<string, unknown> = { ...manifest, connector_id: key, connector_key: key };
+  const provenance = typeof manifest.manifest_uri === "string" ? manifest.manifest_uri : String(manifest.connector_id);
+  return {
+    ...stored,
+    source_declaration: snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(stored, {
+      connectorImplementationId: provenance,
+      publisherId: LEGACY_PROJECTION_PUBLISHER_ID,
+      sourceId: provenance,
+    }),
+  };
 }
 
 type InstanceStore = ReturnType<typeof createSqliteConnectorInstanceStore> | ReturnType<typeof createPostgresConnectorInstanceStore>;

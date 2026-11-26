@@ -43,46 +43,52 @@ import {
 } from "../server/ref-control.ts";
 import { rebuildRetainedSize as rebuildRetainedSizeTyped } from "../server/retained-size-read-model.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const OWNER = "owner_local";
 const NOW = "2026-07-16T12:00:00.000Z";
-const CONNECTOR_ID = "https://test.pdpp.dev/connectors/summary-evidence-oracle";
+const SOURCE_ID = "https://test.pdpp.dev/connectors/summary-evidence-oracle";
+const CONNECTOR_ID = "summary-evidence-oracle";
 const INSTANCE_ID = "cin_summary_evidence_oracle";
 const STREAM = "messages";
 const EMPTY_STREAM = "empty_stream";
 const UNEXPECTED_STREAM = "legacy_stream";
-const MANIFEST: any = {
-  capabilities: {
-    public_listing: { tier: "supported" },
-    refresh_policy: {
-      maximum_staleness_seconds: 3_153_600_000,
-      rationale: "Dedicated evidence-oracle fixture has no automatic refresh.",
-      recommended_mode: "manual",
+const MANIFEST: any = withFixtureSourceDeclaration(
+  {
+    capabilities: {
+      public_listing: { tier: "supported" },
+      refresh_policy: {
+        maximum_staleness_seconds: 3_153_600_000,
+        rationale: "Dedicated evidence-oracle fixture has no automatic refresh.",
+        recommended_mode: "manual",
+      },
     },
+    connector_id: CONNECTOR_ID,
+    display_name: "Summary Evidence Oracle",
+    manifest_uri: SOURCE_ID,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        coverage_strategy: "full_inventory",
+        name: STREAM,
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+      {
+        coverage_strategy: "full_inventory",
+        name: EMPTY_STREAM,
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
   },
-  connector_id: CONNECTOR_ID,
-  display_name: "Summary Evidence Oracle",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      coverage_strategy: "full_inventory",
-      name: STREAM,
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      coverage_strategy: "full_inventory",
-      name: EMPTY_STREAM,
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+  { sourceId: SOURCE_ID }
+);
 
 const MANIFEST_JSON = JSON.stringify(MANIFEST);
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
@@ -517,7 +523,9 @@ test("SQLite rebuild refuses pre-generation terminal facts and accepts a post-mu
         capabilities: MANIFEST.capabilities,
         connector_id: MANIFEST.connector_id,
         display_name: MANIFEST.display_name,
+        manifest_uri: MANIFEST.manifest_uri,
         protocol_version: MANIFEST.protocol_version,
+        source_declaration: MANIFEST.source_declaration,
         streams: MANIFEST.streams,
         version: MANIFEST.version,
       },
@@ -922,10 +930,18 @@ test("SQLite route fails terminal facts closed when bounded v3 replay contention
       assert.equal(v2Wins, 2, "the barrier made exactly its bounded two replay attempts");
       assert.equal(route.terminal_facts.state, "stale");
       assert.equal(route.terminal_facts.reason_code, "terminal_fold_contention");
+      const rawDurable = getDb()
+        .prepare("SELECT stream_latest_facts_json FROM connector_summary_evidence WHERE connector_instance_id = ?")
+        .get(INSTANCE_ID) as { stream_latest_facts_json: string | null };
       assert.match(
-        JSON.stringify((await getConnectorSummaryEvidence(INSTANCE_ID)).stream_latest_facts),
+        String(rawDurable.stream_latest_facts_json),
         TOP_LEVEL_REGEX_3,
         "the raw durable v2 row may still contain history, but the same route cannot trust it"
+      );
+      assert.equal(
+        (await getConnectorSummaryEvidence(INSTANCE_ID)).stream_latest_facts,
+        null,
+        "a read credits no stream from the version-behind durable row"
       );
     } finally {
       __testOnlySetFoldPauseHook(null);
@@ -1490,7 +1506,9 @@ test("dedicated PostgreSQL manifest generations fence historical facts and undec
       capabilities: MANIFEST.capabilities,
       connector_id: MANIFEST.connector_id,
       display_name: MANIFEST.display_name,
+      manifest_uri: MANIFEST.manifest_uri,
       protocol_version: MANIFEST.protocol_version,
+      source_declaration: MANIFEST.source_declaration,
       streams: MANIFEST.streams,
       version: MANIFEST.version,
     };

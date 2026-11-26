@@ -135,11 +135,14 @@ jobs:
             echo "No reference-impacting changes detected (or reference-implementation/ does not exist in this repo yet); required context will pass without heavy reference tests."
           fi
 
+  # Patchright needs supported Ubuntu; keep native modules/browser caches on the same pinned ABI.
   typecheck-reference:
     name: typecheck reference implementation
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: Patchright publishes no Chromium build for 26.04, which
+    # ubuntu-latest now resolves to. Return to ubuntu-latest once it does.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -157,6 +160,11 @@ jobs:
       # npm's download cache is already restored above, yet `npm ci` still takes
       # about 70 s to rebuild node_modules. Restore the installed tree itself,
       # keyed on the lockfile, and install only on a miss.
+      #
+      # The jobs that use this cache run on ubuntu-24.04, not ubuntu-latest:
+      # Patchright ships no Chromium for Ubuntu 26.04, so an install there
+      # leaves no browser in this tree. The image name is in the key so a tree
+      # saved from a 26.04 run is never restored here.
       - name: Restore installed node_modules
         id: node-modules-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -167,7 +175,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-${{ runner.os }}-ubuntu24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -205,7 +213,9 @@ jobs:
     name: test reference implementation shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: Patchright publishes no Chromium build for 26.04, which
+    # ubuntu-latest now resolves to. Return to ubuntu-latest once it does.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -237,7 +247,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-${{ runner.os }}-ubuntu24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -255,6 +265,13 @@ jobs:
           npm --prefix reference-implementation/vendor/read-core run build
           npm --prefix reference-implementation/vendor/mcp-server run build
           npm --prefix reference-implementation/vendor/cli run build
+
+      # The browser tests launch Patchright's bundled Chromium, as the app does.
+      # A restored tree skips the install hook that downloads it, and a tree
+      # saved without it must not leave the tests with no browser. This is a
+      # no-op when the cache already holds the right revision.
+      - name: Install Patchright Chromium
+        run: npx --no-install patchright install chromium
 
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app
@@ -369,6 +386,25 @@ jobs:
       - name: Check vendored connector-manifests tarball matches its pin
         run: node scripts/check-polyfill-connectors-tarball-freshness.mjs
 
+  check-patchright-version:
+    name: check one Patchright version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+
+      # CI, the Docker image and the desktop app must launch one Chromium revision.
+      - name: Check that the lock files resolve one Patchright version
+        run: node scripts/check-patchright-version.mjs
+
   gate:
     name: reference-implementation gate
     needs:
@@ -376,6 +412,7 @@ jobs:
       - typecheck-reference
       - test-reference-implementation
       - check-vendor-freshness
+      - check-patchright-version
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -388,7 +425,8 @@ jobs:
           for job_result in \
             "typecheck-reference:${{ needs.typecheck-reference.result }}" \
             "test-reference-implementation:${{ needs.test-reference-implementation.result }}" \
-            "check-vendor-freshness:${{ needs.check-vendor-freshness.result }}"
+            "check-vendor-freshness:${{ needs.check-vendor-freshness.result }}" \
+            "check-patchright-version:${{ needs.check-patchright-version.result }}"
           do
             name="${job_result%%:*}"
             result="${job_result##*:}"

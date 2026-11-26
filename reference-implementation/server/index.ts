@@ -7,6 +7,8 @@
  * Combined AS + RS implementing PDPP v0.1.0 core spec.
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
+import { manifestDeclaresSemanticFields, queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { currentStorageGeneration } from "./storage-generation.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
@@ -37,6 +39,7 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
+  getRunRecordOutcomes,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
@@ -53,6 +56,7 @@ import { SourceWebhookError } from "../operations/ref-source-webhook-ingest/inde
 import { deriveClientEventsFromRecordChange } from "../operations/rs-client-event-derive/index.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
 import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
+import { createAllocatorReadinessCheck } from "../runtime/browser-surface/allocator-readiness.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
 import {
   type BrowserSurfaceLeaseSweepCloseSource,
@@ -69,6 +73,7 @@ import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
 } from "../runtime/browser-surface-readiness.ts";
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import {
   type ConnectorEnvironmentPolicy,
   parseConnectorEnvironmentPolicy,
@@ -95,12 +100,18 @@ import {
   withConnectorLifecycleLock,
 } from "./connector-lifecycle-lock.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
-import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
-import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
+import { createBrowserEnrollmentReadinessResolver } from "./connector-readiness.ts";
+import { remoteAccessConfigPath } from "./remote-access-store.ts";
+import { ownerPasswordManagedByDesktop } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
-import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
+import {
+  type BrowserProfilePurger,
+  countOtherConnectionsOfConnector as countOtherConnectorInstances,
+  createBrowserProfilePurger,
+} from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { createInstanceIdentityProvider } from "./instance-identity.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -154,7 +165,10 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
-import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
+import {
+  autoEnrollEligibleSchedules,
+  listServerRunnableConnectorInstanceIds,
+} from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
 import {
@@ -168,7 +182,6 @@ import { projectStorageDisplayName, resolveRequestConnectionId } from "./connect
 import {
   AmbiguousConnectionError,
   listActiveBindingsForGrant,
-  listGrantedConnectionsForStream,
   projectBindingForWire,
 } from "./connection-identity.ts";
 import { type ConnectorManifestLike, connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
@@ -205,8 +218,20 @@ import {
   runtimeBrowserCapabilityFromEnv,
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
-import { deriveReferenceFreshness } from "./freshness.ts";
-import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
+import {
+  pinnedLocalCollectorManifest,
+  readLocalCollectorArtifactDigest,
+  readLocalCollectorRelease,
+} from "./local-collector-profiles.ts";
+import { getLatestConnectorRunSummary, getManifestRefreshPolicy } from "./connector-run-evidence.ts";
+import {
+  buildConnectorAwareFreshness,
+  buildConnectorDiscoveryItem,
+  buildConnectorSchemaItem,
+  buildStreamMetadataEntry,
+  getConnectorFreshnessEvidence,
+  listSubjectVisibleStreamSummaries,
+} from "./connector-schema-builder.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -317,9 +342,7 @@ import {
   listAllStreams,
   listDatasetSummaryStreamProjectionSeeds,
   listDatasetTopConnectorCandidates,
-  listLocalCoverageDiagnostics,
   listStreamsAcrossBindings,
-  listStreamsByResolvedBindings,
   maintainRecordIndexes,
   prepareDeviceFinalRecords,
   putSyncState,
@@ -391,6 +414,15 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { type StartedReachability, startHostReachability } from "./reachability/host.ts";
+import { ReachabilityOperations } from "./reachability/operations.ts";
+import { mountServiceChallenge } from "./reachability/service-challenge.ts";
+import {
+  REACHABILITY_RESTART_RECONCILE_DEADLINE_MS,
+  REACHABILITY_SHUTDOWN_DEADLINE_MS,
+} from "./reachability/service.ts";
+import { ReachabilitySetups } from "./reachability/setups.ts";
+import { mountOwnerReachability } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
@@ -510,6 +542,7 @@ import {
   type ProviderAuthExchanger,
 } from "./routes/ref-provider-auth.ts";
 import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
+import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
@@ -528,6 +561,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
+import { createRunBlobUploadCredentialRegistry } from "./run-blob-upload-credentials.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
@@ -632,12 +666,14 @@ import {
   markAcceptedRecordRejectionsStale,
   type RecordRejectionReceipt,
 } from "./stores/record-rejection-store.ts";
+import { runStartupRunHistoryActorBackfillToCompletion } from "./stores/run-history-actor-backfill.ts";
 import {
   createResumableRunHistoryBackfillStage,
   runStartupRunHistoryBackfillToCompletion,
 } from "./stores/run-history-backfill-stage.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
 import {
+  connectorHasRetainedSemanticState,
   countDirtySearchIndexScopes,
   parkSearchIndexDirtyScope,
   rearmSearchIndexDirtyScope,
@@ -810,6 +846,12 @@ interface MutationContext {
 }
 
 interface ServerOpts {
+  /** Trusted host injects one long-lived reachability service and its usage policy. */
+  reachability?: StartedReachability;
+  /** Which host row to start when no desktop supervisor is present. The CLI asks for "server". */
+  reachabilityProfile?: "server";
+  /** The operation journal shared by the owner routes and the shutdown path. */
+  reachabilityOperations?: ReachabilityOperations;
   acceptedCollectorProtocolVersions?: readonly string[];
   /** Internal onboarding handoff. This value is never accepted from the PAR request. */
   acceptedProviderNativeRevision?: {
@@ -912,6 +954,8 @@ interface ServerOpts {
   } | null;
   trustedProxies?: string | null;
   ownerToken?: string | null;
+  /** Single-use capability for synthetic retained-state restart tests. */
+  testOnlyAlreadyAdmittedPostgresChildAttachment?: string;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
   preRegisteredPublicClients?: unknown;
@@ -928,6 +972,8 @@ interface ServerOpts {
     max?: number;
   } | null;
   quiet?: boolean;
+  /** Optional catalog directory for boot reconciliation; unset uses the installed catalog. */
+  polyfillManifestsDir?: string;
   reconcilePolyfillManifests?: boolean;
   reconcilePolyfillManifestsImpl?: typeof reconcilePolyfillManifests;
   recoveryOnly?: boolean;
@@ -944,6 +990,12 @@ interface ServerOpts {
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
+  /**
+   * Run-scoped blob upload credentials shared with the controller. The blob
+   * upload route accepts these as an alternative to the owner bearer; no other
+   * route consults them. Standalone RS apps without it accept only owner tokens.
+   */
+  blobUploadCredentials?: import("./run-blob-upload-credentials.ts").RunBlobUploadCredentialRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
   semanticRetrievalCapability?: unknown;
@@ -1135,6 +1187,11 @@ const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE = 25;
 const STARTUP_RUN_HISTORY_BACKFILL_MAX_DURATION_MS = 2000;
 const STARTUP_RUN_HISTORY_BACKFILL_BATCH_SIZE = 25;
 const STARTUP_RUN_HISTORY_BACKFILL_MAX_ROUNDS = 20;
+// Run provenance (run_history.actor_type) for rows that predate the column.
+// Rounds are short single statements over this many rows; see
+// server/stores/run-history-actor-backfill.ts.
+const STARTUP_RUN_HISTORY_ACTOR_BACKFILL_BATCH_SIZE = 200;
+const STARTUP_RUN_HISTORY_ACTOR_BACKFILL_MAX_ROUNDS = 1000;
 
 /**
  * Walks `runBoundedSummaryEvidenceSweep` to completion across up to
@@ -1285,11 +1342,44 @@ async function collectRetrievalStartupBackfillManifests({
   return registered.map(({ manifest }) => manifest);
 }
 
+const STARTUP_TICKET_RETRY_BASE_MS = 250;
+const STARTUP_TICKET_RETRY_MAX_MS = 30_000;
+
+/** Exponential backoff from 250 ms, capped at 30 s. */
+function startupTicketRetryDelayMs(attempt: number): number {
+  return Math.min(STARTUP_TICKET_RETRY_MAX_MS, STARTUP_TICKET_RETRY_BASE_MS * 2 ** attempt);
+}
+
+/**
+ * Waits `ms`; resolves false at once if `signal` aborts first. The timer is
+ * unref'd: this is background retry, and a retry that outlives its owner (a
+ * caller that never aborts the signal) must not hold the process open.
+ */
+export function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boolean> {
+  if (signal?.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function runRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1301,6 +1391,26 @@ async function runRetrievalStartupBackfill({
   const startedAt = Date.now();
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill started");
 
+  // A failed queue write (for example a transient read or write fault while
+  // finding the scopes to mark) must not leave a failed backfill without a
+  // ticket. Those manifests stay in this local list and are retried with
+  // bounded backoff until a mark commits or shutdown aborts the run, so a fault
+  // that outlasts a fixed number of attempts still ends in a ticket. No new
+  // durable state: if the process stops first, the next startup repeats the
+  // backfill.
+  const queueWriteFailed: ConnectorManifest[] = [];
+  const queueRetry = async (manifest: ConnectorManifest, err: unknown) => {
+    try {
+      await queueStartupSearchIndexRetry(manifest as never, generation);
+    } catch (queueError) {
+      logger.warn(
+        { connectorId: manifest.connector_id, err, queueError },
+        "retrieval startup backfill retry queue write failed"
+      );
+      queueWriteFailed.push(manifest);
+    }
+  };
+
   for (const manifest of manifests) {
     if (signal?.aborted) {
       logger.info({ reason: "shutdown" }, "retrieval startup backfill aborted between connectors");
@@ -1311,6 +1421,7 @@ async function runRetrievalStartupBackfill({
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       await lexicalIndexBackfillForManifest({
+        generation,
         log: (msg) => logger.info(msg),
         manifest: manifest as never,
         signal,
@@ -1318,10 +1429,23 @@ async function runRetrievalStartupBackfill({
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
         await semanticIndexBackfillForManifest({
+          generation,
           log: (msg) => logger.info(msg),
           manifest: manifest as never,
           signal,
         });
+      } else if (
+        semanticBackend &&
+        (manifestDeclaresSemanticFields(manifest) || (await connectorHasRetainedSemanticState(String(connectorId))))
+      ) {
+        // Configured but not available (for example still warming): the semantic
+        // half is unproven, so leave a ticket. Retained semantic state counts like
+        // declared fields, because removed-field cleanup also needs the backend.
+        // With no backend configured at all nothing is queued, or every boot would
+        // dirty every semantic connector.
+        logger.warn({ connectorId }, "retrieval startup backfill skipped semantic pass: backend unavailable");
+        await queueRetry(manifest, new Error("semantic backend unavailable at startup"));
+        continue;
       }
       logger.info({ connectorId }, "retrieval startup backfill connector completed");
     } catch (err) {
@@ -1332,7 +1456,34 @@ async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
+      await queueRetry(manifest, err);
     }
+  }
+
+  let pending = queueWriteFailed;
+  for (let attempt = 0; pending.length > 0; attempt++) {
+    // biome-ignore lint/performance/noAwaitInLoops: Backoff is sequential by design.
+    if (!(await sleepUnlessAborted(startupTicketRetryDelayMs(attempt), signal))) {
+      logger.info({ reason: "shutdown" }, "retrieval startup ticket retry aborted");
+      return;
+    }
+    const stillFailing: ConnectorManifest[] = [];
+    for (const manifest of pending) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        if (signal?.aborted) {
+          return;
+        }
+        logger.warn(
+          { attempt: attempt + 1, connectorId: manifest.connector_id, queueError },
+          "retrieval startup backfill ticket write failed again; retrying"
+        );
+        stillFailing.push(manifest);
+      }
+    }
+    pending = stillFailing;
   }
 
   logger.info(
@@ -1342,10 +1493,12 @@ async function runRetrievalStartupBackfill({
 }
 
 function scheduleRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1357,7 +1510,7 @@ function scheduleRetrievalStartupBackfill({
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill scheduled after AS/RS listen");
 
   return new Promise((resolve) => setImmediate(resolve))
-    .then(() => runRetrievalStartupBackfill({ logger, manifests, signal }))
+    .then(() => runRetrievalStartupBackfill({ generation, logger, manifests, signal }))
     .catch((err) => {
       // Abort-driven exits travel through this catch when the loop
       // re-throws an AbortError-like value before reaching the inner
@@ -1373,10 +1526,12 @@ function scheduleRetrievalStartupBackfill({
 function schedulePolyfillManifestReconciliation({
   enabled,
   logger,
+  manifestsDir,
   reconcile = reconcilePolyfillManifests,
 }: {
   enabled: boolean;
   logger: LoggerLike;
+  manifestsDir?: string;
   reconcile?: typeof reconcilePolyfillManifests;
 }): Promise<void> {
   logger.info({ enabled }, "polyfill manifest reconciliation scheduled after AS/RS listen");
@@ -1386,6 +1541,7 @@ function schedulePolyfillManifestReconciliation({
         enabled,
         includeUnlisted: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
         log: (msg) => logger.info(msg),
+        ...(manifestsDir === undefined ? {} : { manifestsDir }),
       });
       if (summary.scanned > 0) {
         logger.info(summary, "polyfill manifest reconcile summary");
@@ -1543,17 +1699,7 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
   try {
-    const manifest = readLocalCollectorProfile(connectorKey);
-    if (!manifest) {
-      return null;
-    }
-    return {
-      ...manifest,
-      connector_id: connectorKey,
-      // The manifest is the only source of the owner-facing name; there is no
-      // RI-side fallback string to disagree with it.
-      display_name: manifest.display_name || connectorKey,
-    };
+    return pinnedLocalCollectorManifest(connectorId);
   } catch {
     return {
       connector_id: connectorKey,
@@ -1808,13 +1954,13 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError, statusOverride?: number) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {
@@ -2137,6 +2283,7 @@ async function requireTokenWithIntrospection(
     }
   }
   if (!info.active) {
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
@@ -2153,25 +2300,25 @@ async function requireTokenWithIntrospection(
     await emitAuthGateQueryRejection(req, res, info, {
       code: info.inactive_reason || "authentication_error",
       message: gateErrMsg,
+      // The token is rejected, so the recorded status is the 401 sent below
+      // even where the internal code (grant_invalid) maps to 403.
+      status: 401,
     });
     if (info.inactive_reason === "grant_revoked") {
-      return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
+      return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
     if (info.inactive_reason === "grant_expired") {
-      return pdppError(res, 403, "grant_expired", "Grant has expired");
+      return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "authentication_error", "Invalid or expired token");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;
@@ -2210,7 +2357,7 @@ async function emitAuthGateQueryRejection(
   req: ReqLike,
   res: ResLike,
   info: TokenInfo,
-  rejection: { code: string; message: string; sourceDescriptor?: unknown }
+  rejection: { code: string; message: string; sourceDescriptor?: unknown; status?: number }
 ) {
   const authGateQuery = inferAuthGateQueryContext(req, info);
   if (!(authGateQuery && info.trace_id)) {
@@ -2240,7 +2387,7 @@ async function emitAuthGateQueryRejection(
   };
   await emitQueryReceived(authGateContext, req);
   const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
-  await emitQueryRejected(authGateContext, req, gateErr);
+  await emitQueryRejected(authGateContext, req, gateErr, rejection.status);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -2314,11 +2461,7 @@ function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger
     createBrowserProfilePurger({
       countOtherConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
         const instances = await createRequestConnectorInstanceStore().listByOwnerIncludingDrafts(ownerSubjectId);
-        return instances.filter(
-          (instance) =>
-            instance.connectorInstanceId !== connectorInstanceId &&
-            canonicalConnectorKey(instance.connectorId) === connectorKey
-        ).length;
+        return countOtherConnectorInstances(instances, { connectorInstanceId, connectorKey }, canonicalConnectorKey);
       },
       isConnectionRunActive: async (connectorInstanceId) =>
         Boolean(await createRequestConnectorInstanceStore().getActiveRun(connectorInstanceId)),
@@ -2337,12 +2480,9 @@ async function countOtherConnectionsOfConnector(connectorInstanceId: string): Pr
   if (!instance) {
     return null;
   }
-  const connectorKey = canonicalConnectorKey(instance.connectorId);
+  const connectorKey = canonicalConnectorKey(instance.connectorId) ?? instance.connectorId;
   const instances = await store.listByOwnerIncludingDrafts(instance.ownerSubjectId);
-  return instances.filter(
-    (other) =>
-      other.connectorInstanceId !== connectorInstanceId && canonicalConnectorKey(other.connectorId) === connectorKey
-  ).length;
+  return countOtherConnectorInstances(instances, { connectorInstanceId, connectorKey }, canonicalConnectorKey);
 }
 
 async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Promise<boolean> {
@@ -3719,682 +3859,6 @@ export async function resolveGrantScopedStateGrant(connectorId: string, grantId:
   }
 }
 
-function normalizePrimaryKey(primaryKey: unknown): string[] {
-  if (Array.isArray(primaryKey)) {
-    return primaryKey as string[];
-  }
-  if (typeof primaryKey === "string" && primaryKey.trim()) {
-    return [primaryKey];
-  }
-  return [];
-}
-
-function buildFreshness(lastUpdated: string | null = null) {
-  return deriveReferenceFreshness({ recordLastUpdatedAt: lastUpdated });
-}
-
-async function getLatestConnectorRunSummary(
-  connectorId: string | null,
-  status: string | null = null,
-  connectorInstanceId: string | null | undefined = null
-) {
-  if (!connectorId) {
-    return null;
-  }
-  const filters = {
-    limit: 1,
-    sourceId: connectorId,
-    sourceKind: "connector",
-    ...(status ? { status } : {}),
-    ...(connectorInstanceId ? { connectorInstanceId } : {}),
-  };
-  const { summaries } = await listSpineCorrelations("run", filters);
-  const summary = summaries[0] || null;
-  if (!summary) {
-    return null;
-  }
-  return {
-    last_at: summary.last_at,
-    status: summary.status,
-  };
-}
-
-function getManifestRefreshPolicy(manifest: Record<string, unknown> | null | undefined) {
-  const capabilities = manifest?.capabilities;
-  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) {
-    return null;
-  }
-  return (capabilities as Record<string, unknown>).refresh_policy ?? null;
-}
-
-function getMaximumStalenessSeconds(refreshPolicy: unknown) {
-  if (!refreshPolicy || typeof refreshPolicy !== "object" || Array.isArray(refreshPolicy)) {
-    return null;
-  }
-  const value = (refreshPolicy as Record<string, unknown>).maximum_staleness_seconds;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
-}
-
-async function getConnectorFreshnessEvidence({
-  storageBinding,
-  manifest,
-}: {
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown> | null | undefined;
-}) {
-  const connectorId = storageBinding.connector_id ?? null;
-  const refreshPolicy = getManifestRefreshPolicy(manifest);
-  const [lastRun, lastSuccessfulRun] = await Promise.all([
-    getLatestConnectorRunSummary(connectorId),
-    getLatestConnectorRunSummary(connectorId, "succeeded"),
-  ]);
-  return {
-    lastRun,
-    lastSuccessfulRun,
-    maximumStalenessSeconds: getMaximumStalenessSeconds(refreshPolicy),
-  };
-}
-
-function buildConnectorAwareFreshness(
-  evidence:
-    | {
-        lastRun?: { last_at?: string | null; status?: string | null } | null;
-        lastSuccessfulRun?: { last_at?: string | null } | null;
-        maximumStalenessSeconds?: number | null;
-      }
-    | null
-    | undefined,
-  recordLastUpdatedAt: string | null = null
-) {
-  return deriveReferenceFreshness({
-    lastAttemptedAt: evidence?.lastRun?.last_at ?? null,
-    lastAttemptStatus: evidence?.lastRun?.status ?? null,
-    lastSuccessfulRunAt: evidence?.lastSuccessfulRun?.last_at ?? null,
-    maximumStalenessSeconds: evidence?.maximumStalenessSeconds ?? null,
-    recordLastUpdatedAt,
-  });
-}
-
-function hasObjectEntries(value: unknown): boolean {
-  return !!(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0);
-}
-
-function getNonNullSchemaTypes(schema: Record<string, unknown> | null | undefined): Set<string> {
-  const rawType = schema?.type;
-  if (!rawType) {
-    return new Set();
-  }
-  const types = Array.isArray(rawType) ? rawType : [rawType];
-  return new Set((types as string[]).filter((type) => type !== "null"));
-}
-
-function isExactFilterableSchema(schema: Record<string, unknown> | null | undefined): boolean {
-  const types = getNonNullSchemaTypes(schema);
-  if (types.size !== 1) {
-    return false;
-  }
-  const [type] = types;
-  return ["boolean", "integer", "number", "string"].includes(type as string);
-}
-
-function buildFieldCapabilityFlag({
-  declared,
-  granted,
-  operators = null,
-}: {
-  declared: boolean;
-  granted: boolean;
-  operators?: unknown;
-}): Record<string, unknown> {
-  const flag: Record<string, unknown> = {
-    declared,
-    usable: declared && granted,
-  };
-  if (operators) {
-    flag.operators = operators;
-  }
-  if (declared && !granted) {
-    flag.reason = "field_not_granted";
-  }
-  return flag;
-}
-
-function buildFieldAggregationCapabilities(
-  aggregations: Record<string, unknown> | null | undefined,
-  field: string,
-  granted: boolean
-) {
-  return {
-    count_distinct: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.count_distinct) && aggregations.count_distinct.includes(field),
-      granted,
-    }),
-    group_by: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by) && aggregations.group_by.includes(field),
-      granted,
-    }),
-    group_by_time: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.group_by_time) && aggregations.group_by_time.includes(field),
-      granted,
-    }),
-    max: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.max) && aggregations.max.includes(field),
-      granted,
-    }),
-    min: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.min) && aggregations.min.includes(field),
-      granted,
-    }),
-    sum: buildFieldCapabilityFlag({
-      declared: Array.isArray(aggregations?.sum) && aggregations.sum.includes(field),
-      granted,
-    }),
-  };
-}
-
-function buildFieldCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null
-) {
-  const schema = (manifestStream?.schema || {}) as Record<string, unknown>;
-  const properties = (schema.properties || {}) as Record<string, unknown>;
-  const fieldDeclarations = new Map<string, string>();
-  for (const declarations of [manifestStream?.fields, schema.fields]) {
-    if (!Array.isArray(declarations)) {
-      continue;
-    }
-    for (const declaration of declarations) {
-      if (
-        declaration &&
-        typeof declaration === "object" &&
-        typeof (declaration as Record<string, unknown>).name === "string" &&
-        ((declaration as Record<string, unknown>).name as string).trim().length > 0 &&
-        typeof (declaration as Record<string, unknown>).type === "string" &&
-        ((declaration as Record<string, unknown>).type as string).trim().length > 0
-      ) {
-        fieldDeclarations.set(
-          (declaration as Record<string, unknown>).name as string,
-          ((declaration as Record<string, unknown>).type as string).trim()
-        );
-      }
-    }
-  }
-  const grantedFields =
-    // biome-ignore lint/correctness/noUnsafeOptionalChaining: The preceding guard establishes this optional value before access.
-    Array.isArray(streamGrant?.fields) && (streamGrant?.fields as unknown[]).length > 0
-      ? new Set(streamGrant?.fields as unknown[])
-      : null;
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const rangeFilters = (query.range_filters || {}) as Record<string, unknown>;
-  const search = (query.search || {}) as Record<string, unknown>;
-  const lexicalFields = new Set(Array.isArray(search.lexical_fields) ? (search.lexical_fields as unknown[]) : []);
-  const semanticFields = new Set(Array.isArray(search.semantic_fields) ? (search.semantic_fields as unknown[]) : []);
-  const aggregations = (query.aggregations || {}) as Record<string, unknown>;
-
-  return Object.fromEntries(
-    Object.entries(properties).map(([field, fieldSchema]) => {
-      const schemaObj = (fieldSchema && typeof fieldSchema === "object" ? fieldSchema : {}) as Record<string, unknown>;
-      const granted = !grantedFields || grantedFields.has(field);
-      const rangeOperators = Array.isArray(rangeFilters[field]) ? (rangeFilters[field] as unknown[]) : null;
-      // Optional declared presentation type, sourced either from the JSON
-      // Schema extension (`schema.properties[field].x_pdpp_type`) or from a
-      // sandbox-shaped field declaration (`fields[]` or `schema.fields[]`,
-      // with `{ name, type, semantic_class }`). Surfaced as an additive `type`
-      // on the field_capabilities entry only; it does not influence any filter,
-      // search, aggregation, grant, or retrieval decision below.
-      const declaredType =
-        typeof schemaObj.x_pdpp_type === "string" && (schemaObj.x_pdpp_type as string).trim().length > 0
-          ? (schemaObj.x_pdpp_type as string).trim()
-          : fieldDeclarations.get(field) || null;
-      const declaredRole =
-        typeof schemaObj.x_pdpp_role === "string" && (schemaObj.x_pdpp_role as string).trim().length > 0
-          ? (schemaObj.x_pdpp_role as string).trim()
-          : null;
-      return [
-        field,
-        {
-          ...(declaredType ? { type: declaredType } : {}),
-          ...(declaredRole ? { role: declaredRole } : {}),
-          aggregation: buildFieldAggregationCapabilities(aggregations, field, granted),
-          granted,
-          lexical_search: buildFieldCapabilityFlag({
-            declared: lexicalFields.has(field),
-            granted,
-          }),
-          schema: fieldSchema,
-          semantic_search: buildFieldCapabilityFlag({
-            declared: semanticFields.has(field),
-            granted,
-          }),
-          ...(streamGrant === null
-            ? {
-                exact_filter: buildFieldCapabilityFlag({
-                  declared: isExactFilterableSchema(schemaObj),
-                  granted,
-                }),
-                range_filter: buildFieldCapabilityFlag({
-                  declared: Boolean(rangeOperators),
-                  granted,
-                  operators: rangeOperators || undefined,
-                }),
-              }
-            : {}),
-        },
-      ];
-    })
-  );
-}
-
-function buildStreamMetadataEntry({
-  manifestStream,
-  streamGrant = null,
-  grantStreams = [] as Record<string, unknown>[],
-  freshness = null as ReturnType<typeof buildFreshness> | null,
-  grantedConnections = null as unknown[] | null,
-  manifestStreamNames = null as Set<string> | null,
-}: {
-  manifestStream: Record<string, unknown>;
-  streamGrant?: Record<string, unknown> | null;
-  grantStreams?: Record<string, unknown>[];
-  freshness?: ReturnType<typeof buildFreshness> | null;
-  grantedConnections?: unknown[] | null;
-  manifestStreamNames?: Set<string> | null;
-}) {
-  const projectedManifestStream = streamGrant ? projectManifestStreamForGrant(streamGrant) : manifestStream;
-  const expandStreamGrant = streamGrant ? { ...streamGrant, grantStreams } : null;
-  const entry: Record<string, unknown> = {
-    consent_time_field: projectedManifestStream.consent_time_field,
-    cursor_field: projectedManifestStream.cursor_field,
-    expand_capabilities: buildExpandCapabilities(projectedManifestStream, expandStreamGrant, manifestStreamNames),
-    field_capabilities: buildFieldCapabilities(projectedManifestStream, streamGrant),
-    freshness: freshness ?? buildFreshness(null),
-    name: projectedManifestStream.name,
-    object: "stream_metadata",
-    primary_key: normalizePrimaryKey(projectedManifestStream.primary_key),
-    query: projectedManifestStream.query || {},
-    relationships: projectedManifestStream.relationships || [],
-    schema: projectedManifestStream.schema,
-    selection: projectedManifestStream.selection,
-    semantics: projectedManifestStream.semantics,
-    views: projectedManifestStream.views || [],
-  };
-  if (streamGrant) {
-    entry.instance_ids = Array.isArray(streamGrant.instance_ids) ? [...streamGrant.instance_ids] : [];
-    if (Array.isArray(streamGrant.resources)) {
-      entry.resources = [...streamGrant.resources];
-    }
-    if (streamGrant.time_constraint && typeof streamGrant.time_constraint === "object") {
-      entry.time_constraint = structuredClone(streamGrant.time_constraint);
-    }
-  }
-  if (Array.isArray(grantedConnections)) {
-    entry.granted_connections = grantedConnections;
-  }
-  return entry;
-}
-
-function projectManifestStreamForGrant(streamGrant: Record<string, unknown>): Record<string, unknown> {
-  // Resolved grants retain authorization facts, not live schema definitions.
-  // Do not copy property schemas, requiredness, $defs, query affordances, or
-  // relationships from the current declaration into a client projection.
-  // A future grant shape can retain a typed schema snapshot explicitly; until
-  // then, empty field schemas are the only honest projection.
-  const fields = Array.isArray(streamGrant.fields)
-    ? (streamGrant.fields as unknown[]).filter((field): field is string => typeof field === "string")
-    : [];
-  const grantedFields = new Set(fields);
-  const schema: Record<string, unknown> = {
-    additionalProperties: false,
-    properties: Object.fromEntries([...grantedFields].map((field) => [field, {}])),
-    type: "object",
-  };
-  const timeConstraint =
-    streamGrant.time_constraint && typeof streamGrant.time_constraint === "object"
-      ? (streamGrant.time_constraint as Record<string, unknown>)
-      : null;
-  const frozenTimeField = typeof timeConstraint?.field === "string" ? timeConstraint.field : undefined;
-  return {
-    name: streamGrant.name,
-    schema,
-    ...(frozenTimeField ? { consent_time_field: frozenTimeField } : {}),
-  };
-}
-// Emit one `expand_capabilities` entry per enabled parent-stream relation (a
-// `query.expand[]` capability backed by a `relationships[]` declaration),
-// including relations whose target stream is unreadable under the current
-// request. Declared-but-unreadable relations stay visible with `usable: false`
-// and a `reason` enum value so a console can tell "no relation declared" apart
-// from "relation declared but not readable here".
-//
-// `manifestStreamNames`, when provided, is the set of streams the loaded
-// manifest declares; a relation pointing at a stream outside that set is
-// surfaced as `related_stream_unknown` rather than silently dropped.
-function buildExpandCapabilities(
-  manifestStream: Record<string, unknown> | null | undefined,
-  streamGrant: Record<string, unknown> | null = null,
-  manifestStreamNames: Set<string> | null = null
-) {
-  const rawRelationships = Array.isArray(manifestStream?.relationships)
-    ? (manifestStream?.relationships as Record<string, unknown>[])
-    : [];
-  const relationships = new Map(rawRelationships.map((relationship) => [relationship.name as string, relationship]));
-  const rawGrantStreams = streamGrant?.grantStreams as Record<string, unknown>[] | undefined;
-  const grantedStreams = Array.isArray(rawGrantStreams)
-    ? new Set(rawGrantStreams.map((stream) => stream.name as string))
-    : null;
-
-  const query = (manifestStream?.query || {}) as Record<string, unknown>;
-  const expandList = Array.isArray(query.expand) ? (query.expand as Record<string, unknown>[]) : [];
-
-  return expandList
-    .map((capability) => {
-      const relationship = relationships.get(capability.name as string);
-      if (!relationship) {
-        return null;
-      }
-      const targetStream = relationship.stream as string;
-      const known = !manifestStreamNames || manifestStreamNames.has(targetStream);
-      const granted = known && (!grantedStreams || grantedStreams.has(targetStream));
-      const usable = known && granted;
-      const entry: Record<string, unknown> = {
-        cardinality: relationship.cardinality,
-        granted,
-        name: capability.name,
-        // `stream` (back-compat) and `target_stream` both name the related child
-        // stream; the canonical, self-describing name is `target_stream`.
-        stream: targetStream,
-        target_stream: targetStream,
-        usable,
-      };
-      if (relationship.foreign_key) {
-        // The field on the child carrying the parent's key. `child_parent_key_field`
-        // is the canonical name; `foreign_key` stays as a back-compat alias with
-        // the identical value.
-        entry.child_parent_key_field = relationship.foreign_key;
-        entry.foreign_key = relationship.foreign_key;
-      }
-      if (capability.default_limit !== undefined) {
-        entry.default_limit = capability.default_limit;
-      }
-      if (capability.max_limit !== undefined) {
-        entry.max_limit = capability.max_limit;
-      }
-      if (!usable) {
-        entry.reason = known ? "related_stream_not_granted" : "related_stream_unknown";
-      }
-      return entry;
-    })
-    .filter(Boolean);
-}
-
-// biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
-function buildDiscoveryUrl(path: string, connectorId: string | null = null) {
-  const connectorQuery = connectorId ? `?connector_id=${encodeURIComponent(connectorId)}` : "";
-  return `${path}${connectorQuery}`;
-}
-
-function buildStreamDiscoveryCapabilities({
-  connectorId = null as string | null,
-  stream,
-}: {
-  connectorId?: string | null;
-  stream: Record<string, unknown>;
-}) {
-  const encodedStream = encodeURIComponent(stream.name as string);
-  const query = (stream.query || {}) as Record<string, unknown>;
-  const rangeFilters = query.range_filters;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const expand = query.expand;
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const aggregations = query.aggregations;
-  const hasAggregations = hasObjectEntries(aggregations);
-
-  return {
-    aggregate: hasAggregations,
-    aggregate_url: hasAggregations ? buildDiscoveryUrl(`/v1/streams/${encodedStream}/aggregate`, connectorId) : null,
-    changes_since: true,
-    exact_filters: true,
-    expand: Array.isArray(expand) && expand.length > 0,
-    metadata_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}`, connectorId),
-    range_filters: hasObjectEntries(rangeFilters),
-    records: true,
-    records_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}/records`, connectorId),
-    stream_metadata: true,
-  };
-}
-
-function buildStreamDiscoverySummary({
-  connectorId = null as string | null,
-  stream,
-  summary = null as Record<string, unknown> | null,
-  freshnessEvidence = null as Parameters<typeof buildConnectorAwareFreshness>[0],
-}: {
-  connectorId?: string | null;
-  stream: Record<string, unknown>;
-  summary?: Record<string, unknown> | null;
-  freshnessEvidence?: Parameters<typeof buildConnectorAwareFreshness>[0];
-}) {
-  const lastUpdated = (summary?.last_updated as string | null | undefined) || null;
-  return {
-    capabilities: buildStreamDiscoveryCapabilities({ connectorId, stream }),
-    freshness: buildConnectorAwareFreshness(freshnessEvidence, lastUpdated),
-    last_updated: lastUpdated,
-    name: stream.name,
-    object: "stream",
-    record_count: summary?.record_count || 0,
-  };
-}
-
-function mergeStreamSummary(
-  current: Record<string, unknown> | undefined,
-  next: Record<string, unknown>
-): Record<string, unknown> {
-  const currentUpdated = typeof current?.last_updated === "string" ? current.last_updated : null;
-  const nextUpdated = typeof next.last_updated === "string" ? next.last_updated : null;
-  return {
-    last_updated: !currentUpdated || (nextUpdated && nextUpdated > currentUpdated) ? nextUpdated : currentUpdated,
-    name: next.name,
-    object: "stream",
-    record_count: Number(current?.record_count || 0) + Number(next.record_count || 0),
-  };
-}
-
-async function listSubjectVisibleStreamSummaries({
-  storageBinding,
-  manifest,
-  grant,
-  ownerSubjectId,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant: Record<string, unknown> | null;
-  ownerSubjectId: string | null;
-}): Promise<Record<string, unknown>[]> {
-  const manifestStreams = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const effectiveGrant = grant ?? {
-    streams: manifestStreams.flatMap((stream) =>
-      typeof stream.name === "string" && stream.name ? [{ name: stream.name }] : []
-    ),
-  };
-  const grantStreams = Array.isArray(effectiveGrant.streams)
-    ? (effectiveGrant.streams as Record<string, unknown>[])
-    : [];
-  const typedGrant = {
-    ...effectiveGrant,
-    streams: grantStreams.filter((streamGrant) => typeof streamGrant.name === "string" && streamGrant.name),
-  } as unknown as Parameters<typeof listStreamsByResolvedBindings>[0];
-  const rows = await listStreamsByResolvedBindings(
-    typedGrant,
-    manifest as Parameters<typeof listStreamsByResolvedBindings>[1],
-    async (streamGrant) => {
-      try {
-        const resolved = await resolveReadRequestBindings({
-          grant: typedGrant,
-          ownerRead: grant === null,
-          ...(ownerSubjectId ? { ownerSubjectId } : {}),
-          requestParams: {},
-          storageBinding: storageBinding as unknown as NonNullable<
-            Parameters<typeof resolveReadRequestBindings>[0]["storageBinding"]
-          >,
-          streamName: streamGrant.name,
-        });
-        return resolved.bindings;
-      } catch (error) {
-        if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
-          return [];
-        }
-        throw error;
-      }
-    }
-  );
-  const summaries = new Map<string, Record<string, unknown>>();
-  for (const summary of rows) {
-    summaries.set(summary.name, mergeStreamSummary(summaries.get(summary.name), { ...summary }));
-  }
-  return [...summaries.values()];
-}
-
-async function buildConnectorSchemaItem({
-  source,
-  storageBinding,
-  manifest,
-  grant = null as Record<string, unknown> | null,
-  ownerSubjectId = null as string | null,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant?: Record<string, unknown> | null;
-  ownerSubjectId?: string | null;
-}) {
-  const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
-  const rawStreamSummaries = await listSubjectVisibleStreamSummaries({
-    grant,
-    manifest,
-    ownerSubjectId,
-    source,
-    storageBinding,
-  });
-  const streamSummaries = rawStreamSummaries as Record<string, unknown>[];
-  const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
-  const grantStreamsArr = Array.isArray(grant?.streams) ? (grant?.streams as Record<string, unknown>[]) : [];
-  const grantStreamByName = grant
-    ? new Map(grantStreamsArr.map((streamGrant) => [streamGrant.name as string, streamGrant]))
-    : null;
-  const manifestStreamsArr = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const visibleStreams: Record<string, unknown>[] = grant
-    ? (grantStreamsArr
-        .map((streamGrant) => manifestStreamsArr.find((stream) => stream.name === streamGrant.name))
-        .filter(Boolean) as Record<string, unknown>[])
-    : manifestStreamsArr;
-  const grantStreams = grantStreamsArr;
-  // Streams the loaded manifest declares — lets the expand-capabilities builder
-  // distinguish "target stream not granted" from "target stream unknown".
-  const manifestStreamNames = new Set(manifestStreamsArr.map((stream) => stream.name as string));
-  const freshnessEvidence = await getConnectorFreshnessEvidence({
-    manifest,
-    storageBinding,
-  });
-
-  const streams = await Promise.all(
-    visibleStreams.map(async (manifestStream) => {
-      const streamName = manifestStream.name as string;
-      const summary = summaryByName.get(streamName);
-      const lastUpdated = (summary?.last_updated as string | null | undefined) || null;
-      const streamGrant = grantStreamByName ? grantStreamByName.get(streamName) || null : null;
-      let grantedConnections: unknown[] | null = null;
-      if (connectorId && ownerSubjectId) {
-        const authorizedInstanceIds = Array.isArray(streamGrant?.instance_ids)
-          ? (streamGrant.instance_ids as string[])
-          : [];
-        grantedConnections = await listGrantedConnectionsForStream({
-          authorizedInstanceIds: grant ? authorizedInstanceIds : null,
-          connectorId,
-          ownerSubjectId,
-        });
-      }
-      return buildStreamMetadataEntry({
-        freshness: buildConnectorAwareFreshness(freshnessEvidence, lastUpdated),
-        grantedConnections,
-        grantStreams,
-        manifestStream,
-        manifestStreamNames,
-        streamGrant,
-      });
-    })
-  );
-
-  const item: Record<string, unknown> = {
-    object: "connector",
-    source,
-    stream_count: streams.length,
-    streams,
-  };
-  if (connectorId) {
-    item.connector_key = connectorId;
-    item.connector_id = connectorId;
-  }
-  return item;
-}
-
-async function buildConnectorDiscoveryItem({
-  source,
-  storageBinding,
-  manifest,
-  grant = null as Record<string, unknown> | null,
-  ownerSubjectId = null as string | null,
-}: {
-  source: { kind?: string; id?: string } | null | undefined;
-  storageBinding: StorageBinding;
-  manifest: Record<string, unknown>;
-  grant?: Record<string, unknown> | null;
-  ownerSubjectId?: string | null;
-}) {
-  const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
-  const rawSummaries = await listSubjectVisibleStreamSummaries({
-    grant,
-    manifest,
-    ownerSubjectId,
-    source,
-    storageBinding,
-  });
-  const streamSummaries = rawSummaries as Record<string, unknown>[];
-  const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
-  const manifestStreamsArr = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
-  const grantStreamsArr = Array.isArray(grant?.streams) ? (grant?.streams as Record<string, unknown>[]) : [];
-  const visibleStreams: Record<string, unknown>[] = grant
-    ? (grantStreamsArr
-        .map((streamGrant) => manifestStreamsArr.find((stream) => stream.name === streamGrant.name))
-        .filter(Boolean) as Record<string, unknown>[])
-    : manifestStreamsArr;
-  const freshnessEvidence = await getConnectorFreshnessEvidence({
-    manifest,
-    storageBinding,
-  });
-
-  const item: Record<string, unknown> = {
-    object: "connector",
-    source,
-    stream_count: visibleStreams.length,
-    streams: visibleStreams.map((stream) =>
-      buildStreamDiscoverySummary({
-        connectorId,
-        freshnessEvidence,
-        stream,
-        summary: summaryByName.get(stream.name as string) || null,
-      })
-    ),
-  };
-
-  if (connectorId) {
-    item.connector_key = connectorId;
-    item.connector_id = connectorId;
-  }
-
-  return item;
-}
-
 /**
  * Options threaded through `decorateBlobRefValue`/`decorateRecordBlobRefs`.
  * `withBlobSize` is opt-in and defaults to false/unchanged behavior:
@@ -5090,6 +4554,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     allowUnauthenticatedWhenDisabled: allowUnauthenticatedOwnerWhenDisabled,
     loginRateLimit: ownerAuthConfig.loginRateLimit,
     providerName,
+    // Same resolver as OAuth metadata: PDPP_REFERENCE_ORIGIN on a hosted server,
+    // otherwise the configured public URL, then the request.
+    resolvePublicOrigin: (req) =>
+      resolvePublicUrl(
+        req as unknown as Parameters<typeof resolvePublicUrl>[0],
+        opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL)
+      ),
+    // Created on first use under PDPP_DATA_DIR, so a server that never pairs a desktop writes nothing.
+    instanceIdentity: createInstanceIdentityProvider(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   });
   app.use((..._args: never[]) => {
     const [req, res, next] = _args as unknown as [ReqLike, ResLike, () => void];
@@ -5357,6 +4830,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
   });
 
+  // One resolver for the AS issuer: the metadata `issuer` and the RFC 9207
+  // `iss` on authorization responses both come from here, so they cannot drift.
+  const resolveExplicitAsIssuer = () =>
+    opts.asIssuer ||
+    opts.asPublicUrl ||
+    (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+    null;
+  const resolveAsIssuer = (req: unknown) =>
+    resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], resolveExplicitAsIssuer());
+
   // AS `/.well-known/oauth-authorization-server` is mounted via
   // `server/routes/root-and-discovery.ts` per OpenSpec change
   // `split-reference-server-by-route-family`. Behaviour-preserving
@@ -5373,11 +4856,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     rejectUntrustedMetadataHost: rejectUntrustedMetadataHost as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["rejectUntrustedMetadataHost"],
-    resolveExplicitIssuer: () =>
-      opts.asIssuer ||
-      opts.asPublicUrl ||
-      (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
-      null,
+    resolveExplicitIssuer: resolveExplicitAsIssuer,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5520,6 +4999,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           >,
         }
       : {}),
+    resolveIssuer: resolveAsIssuer as unknown as Parameters<typeof mountAsAuthorize>[1]["resolveIssuer"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -5947,12 +5427,29 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ? R
         : never;
     },
+    getRunRecordOutcomes: (runId: string) => getRunRecordOutcomes(runId),
     getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
     getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
     handleError,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
+  // Owner-only statement of the Collection Profile this runtime implements, with what is outstanding.
+  app.get(
+    "/_ref/collection-profile",
+    ownerAuth.requireOwnerSession,
+    (_req: unknown, res: { json: (body: unknown) => unknown }) => {
+      res.json({ object: "collection_profile_support", ...REFERENCE_COLLECTION_PROFILE_SUPPORT });
+    }
+  );
+  // Owner-only diagnostic read of a run's OBSERVATION record (Collection Profile 0.2.0 Section 5.10).
+  mountRefRunObservations(app, {
+    createRequestConnectorInstanceStore,
+    getOwnerSubjectId,
+    handleError,
+    pdppError,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefRunObservations>[1]);
 
   // Run-interaction streaming companion (reference-only). The store and
   // companion factory live in this AS app so the mint route, the SSE viewer
@@ -6913,6 +6410,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     getOwnerSubjectId,
     handleError,
     pdppError,
+    readinessResolver: createBrowserEnrollmentReadinessResolver({
+      installService: connectorInstallService,
+      registeredManifest: async (connectorKey) =>
+        resolveRegisteredConnectorManifest(connectorKey) as Promise<Record<string, unknown> | null>,
+    }),
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveRegisteredConnectorManifest,
     setReferenceTraceId,
@@ -7063,7 +6565,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ensureReferenceConnectorCatalogEntry,
     generateReferenceSecret,
     generateSpineId,
+    getExpectedArtifactDigest: readLocalCollectorArtifactDigest,
     getConnectorManifest: (connectorId: string) => getConnectorManifest(connectorId),
+    // The local server executes the installed, signature-verified release.
+    // Resolve its profile and artifact digest together for the authorized
+    // connector instance so a catalog refresh cannot splice two releases.
+    getRegisteredCollectionProfileRelease: (connectorId: string) => readLocalCollectorRelease(connectorId),
     getDefaultConnectorDetailGapStore,
     getOwnerSubjectId,
     getSemanticCapabilityIdentity,
@@ -7072,8 +6579,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     hashDeviceSecret,
     ingestRecord,
     isDeviceSemanticAttemptSupported: supportsDeviceSemanticAttemptDeadline,
-    listLocalCoverageDiagnostics,
-    maintainRecordIndexes,
+      maintainRecordIndexes,
     makeConnectorInstanceSourceBindingKey,
     pdppError,
     prepareDeviceFinalRecords,
@@ -7288,6 +6794,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    resolveIssuer: resolveAsIssuer,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 
@@ -7460,6 +6967,17 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
   const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  // The service challenge arrives with the public Host, which the host check
+  // below does not know, so it is registered first and gates on the owner's
+  // approval itself. Only a host row that answers on this listener supplies a verifier.
+  if (opts.reachability?.serviceVerifier) {
+    const { service } = opts.reachability;
+    mountServiceChallenge(
+      app as unknown as Parameters<typeof mountServiceChallenge>[0],
+      opts.reachability.serviceVerifier,
+      (authority) => service?.approvesChallengeAuthority(authority) ?? false
+    );
+  }
   app.use(((req: ReqLike, res: ResLike, next: () => void) => {
     const decision = evaluateReachabilityRequest(req, reachabilityContract, {
       hosted,
@@ -7511,6 +7029,38 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
+  // POST /v1/blobs auth: a live run-scoped upload credential, bound to one
+  // connector instance, or else the ordinary owner bearer. The credential is
+  // recognised only here; every other route authenticates through
+  // `requireToken`, where it is an unknown bearer and gets 401.
+  const requireBlobUploadAuth = (req: ReqLike, res: ResLike, next: () => void) => {
+    const auth = req.headers?.authorization;
+    const presented = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const binding = presented ? (opts.blobUploadCredentials?.verify(presented) ?? null) : null;
+    if (!binding) {
+      return requireToken(req, res, () => requireOwner(req, res, next));
+    }
+    const requestedConnectorId = resolveSingleConnectorIdQueryValue(req.query?.connector_id);
+    const requestedInstanceId = resolveSingleConnectorIdQueryValue(req.query?.connector_instance_id);
+    const connectorMatches =
+      requestedConnectorId !== null &&
+      (canonicalConnectorKey(requestedConnectorId) ?? requestedConnectorId) ===
+        (canonicalConnectorKey(binding.connectorId) ?? binding.connectorId);
+    if (!(connectorMatches && requestedInstanceId === binding.connectorInstanceId)) {
+      return pdppError(
+        res,
+        403,
+        "permission_error",
+        "Run upload credential is bound to a different connector instance"
+      );
+    }
+    req.tokenInfo = {
+      active: true,
+      pdpp_token_kind: "run_blob_upload",
+      subject_id: binding.ownerSubjectId,
+    };
+    next();
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7675,6 +7225,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectState,
     requireClient,
     requireCoreEndpointToken,
+    requireBlobUploadAuth,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -8433,6 +7984,48 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionIntent>[1]);
 
+  const ownerConnectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      ...installedConnectorManifestRegistration,
+      removeActivation: removeConnectorActivation,
+      assertUninstallAllowed: async (connectorId) => {
+        const activeRun = isPostgresStorageBackend()
+          ? (await postgresQuery<{ run_id: string }>(
+              "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+              [connectorId]
+            )).rows[0]
+          : getDb()
+              .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+              .get<{ run_id: string }>(connectorId);
+        if (activeRun) {
+          throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+            code: "connector_run_active",
+          });
+        }
+        const ids = isPostgresStorageBackend()
+          ? (await postgresQuery<{ connector_instance_id: string }>(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+              [connectorId]
+            )).rows.map((row) => row.connector_instance_id)
+          : getDb().prepare(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+            ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+        if (ids.length) {
+          const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+          error.code = "connector_in_use";
+          error.connection_ids = ids;
+          throw error;
+        }
+      },
+    });
+
+  const ownerConnectorReadinessResolver = createBrowserEnrollmentReadinessResolver({
+    installService: ownerConnectorInstallService,
+    registeredManifest: async (connectorKey) =>
+      (await getConnectorManifest(connectorKey)) as Record<string, unknown> | null,
+  });
+
   // GET /v1/owner/connector-templates is the bearer-authed owner-agent template
   // catalog. It separates connector implementation metadata from configured
   // connection instances, embeds related connection summaries, and reports
@@ -8448,6 +8041,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleError,
     listRegisteredConnectorIds,
     projectStorageDisplayName,
+    readinessResolver: ownerConnectorReadinessResolver,
     requireOwner,
     requireToken,
     resolveResource: (req: unknown) =>
@@ -8465,60 +8059,34 @@ function buildRsApp(opts: ServerOpts = {}) {
     // `connector_implementation`; drop the cached list so the next read shows it.
     onImplementationChanged: invalidateConnectorSummariesCache,
     pdppError,
+    readinessResolver: ownerConnectorReadinessResolver,
     requireOwner,
     requireToken,
-    service:
-      opts.connectorInstallService ??
-      createConnectorInstallService({
-        ...installedConnectorManifestRegistration,
-        removeActivation: removeConnectorActivation,
-        assertUninstallAllowed: async (connectorId) => {
-          const activeRun = isPostgresStorageBackend()
-            ? (await postgresQuery<{ run_id: string }>(
-                "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
-                [connectorId]
-              )).rows[0]
-            : getDb()
-                .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
-                .get<{ run_id: string }>(connectorId);
-          if (activeRun) {
-            throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
-              code: "connector_run_active",
-            });
-          }
-          const ids = isPostgresStorageBackend()
-            ? (await postgresQuery<{ connector_instance_id: string }>(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
-                [connectorId]
-              )).rows.map((row) => row.connector_instance_id)
-            : getDb().prepare(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
-              ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
-          if (ids.length) {
-            const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
-            error.code = "connector_in_use";
-            error.connection_ids = ids;
-            throw error;
-          }
-        },
-      }),
+    service: ownerConnectorInstallService,
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
-  // Owner-authenticated HTTP routes for both remote-access providers
-  // (config read/write/inspect). See routes/owner-remote-access.ts for the
-  // full rationale, including how ngrok's authtoken handoff and native
-  // tunnel supervision stay split across this route and the Tauri host.
+  // RS owner routes authenticate explicit bearer credentials. Cookie-only
+  // mutations are not admitted here; the session-side facade checks CSRF pairs.
+  const requireReachabilityMutationCsrf = (req: ReqLike, res: ResLike, next: () => void) => {
+    if (!/^Bearer\s+\S+$/i.test(String(req.headers?.authorization ?? ""))) {
+      pdppError(res, 403, "csrf_required", "Cookie mutations require the owner session CSRF guard.");
+      return;
+    }
+    next();
+  };
+  // One long-lived service is injected by the trusted host supervisor.
+  mountOwnerReachability(app, {
+    service: opts.reachability?.service ?? null,
+    passwordSet: opts.reachability?.passwordSet,
+    statePaths: opts.reachability?.statePaths,
+    operations: opts.reachabilityOperations ?? new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    setups: new ReachabilitySetups(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-setups")),
+    usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),
+    requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
+  } as unknown as Parameters<typeof mountOwnerReachability>[1]);
   mountOwnerRemoteAccess(app, {
-    contract: reachabilityContract,
-    handleError,
-    pdppError,
-    requireOwner,
-    requireToken,
-    ownerPasswordOwnerSet: () =>
-      ownerPasswordOwnerSet(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
-    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
-      resolveOwnerLive(opts).bump("remote-access")
-    ),
+    service: opts.reachability?.service ?? null,
+    requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
   } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
 
   // Owner-authenticated HTTP routes for the generic desktop app-config blob
@@ -8744,6 +8312,9 @@ export async function startServer(opts: ServerOpts = {}) {
     ...(opts.postgresBootstrapLockTimeoutMs === undefined
       ? {}
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
+    ...(opts.testOnlyAlreadyAdmittedPostgresChildAttachment === undefined
+      ? {}
+      : { testOnlyAlreadyAdmittedChildAttachment: opts.testOnlyAlreadyAdmittedPostgresChildAttachment }),
     log: (msg: string) => logger.info(msg),
   });
   const uninstallRecoveryStore = createConnectorInstallStore();
@@ -9061,6 +8632,7 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  const blobUploadCredentials = opts.blobUploadCredentials ?? createRunBlobUploadCredentialRegistry();
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9138,6 +8710,7 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
     runtimeContext,
+    blobUploadCredentialHooks: blobUploadCredentials,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
       registerNonce: (args) => runTargetRegistry.registerNonce(args),
@@ -9501,12 +9074,40 @@ export async function startServer(opts: ServerOpts = {}) {
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
+  const reachability = opts.reachability ?? await startHostReachability({
+    dataDir: runtimeDataDir, bindHost, env: process.env, owner: ownerAuthSubjectId,
+    passwordConfigured: Boolean(earlyOwnerAuthConfig.password),
+    profile: opts.reachabilityProfile, rsPort: requestedRsPort,
+  }).catch((err) => {
+    logger.warn({ code: (err as { code?: string }).code }, "Remote access host is unavailable");
+    return undefined;
+  });
+  const reachabilityOperations = new ReachabilityOperations(
+    path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"),
+    !!reachability?.service
+  );
+  // A crash or SIGKILL leaves the last owner's route behind. Close it with its
+  // retained handle before any start is accepted. The call raises the start
+  // fence synchronously and returns at once; readiness does not wait for the
+  // close, only a Turn on does (refused until the pass settles).
+  void reachability?.service
+    ?.reconcileAfterRestart(REACHABILITY_RESTART_RECONCILE_DEADLINE_MS, reachabilityOperations)
+    .then((restart) => {
+      if (restart.confirmed.length || restart.unconfirmed.length) {
+        logger.info(
+          { confirmed: restart.confirmed.length, unconfirmed: restart.unconfirmed.length },
+          "reachability restart reconcile finished"
+        );
+      }
+    })
+    .catch(() => logger.warn("reachability restart reconcile failed"));
   const rsApp = buildRsApp({
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    blobUploadCredentials,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9533,6 +9134,8 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
+    reachability,
+    reachabilityOperations,
     reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
@@ -9562,6 +9165,9 @@ export async function startServer(opts: ServerOpts = {}) {
   runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
   logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
+  if (!opts.reachability) {
+    void reachability?.service?.recoverFromLibrary().catch(() => logger.warn("reachability library recovery remains unknown"));
+  }
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
 
   // HNSW is a derived acceleration structure. Its durable builder is bounded,
@@ -9583,6 +9189,7 @@ export async function startServer(opts: ServerOpts = {}) {
     : schedulePolyfillManifestReconciliation({
         enabled: reconcilePolyfillManifestsEnabled,
         logger,
+        ...(opts.polyfillManifestsDir === undefined ? {} : { manifestsDir: opts.polyfillManifestsDir }),
         ...(opts.reconcilePolyfillManifestsImpl === undefined
           ? {}
           : { reconcile: opts.reconcilePolyfillManifestsImpl }),
@@ -9653,7 +9260,7 @@ export async function startServer(opts: ServerOpts = {}) {
           ownerAuthSubjectId,
           canonicalId
         );
-        return instances.map((instance) => instance.connectorInstanceId);
+        return listServerRunnableConnectorInstanceIds(instances);
       },
       listConnectors: async () => {
         const manifests = await collectValidRegisteredConnectorManifests({
@@ -9685,6 +9292,7 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   await schedulerManager.start();
   const startupBackfillAbortController = new AbortController();
+  const startupBackfillGeneration = currentStorageGeneration();
   const startupBackfillDone = manifestReconciliationDone
     .then(() =>
       collectRetrievalStartupBackfillManifests({
@@ -9694,6 +9302,7 @@ export async function startServer(opts: ServerOpts = {}) {
     )
     .then((manifests) =>
       scheduleRetrievalStartupBackfill({
+        generation: startupBackfillGeneration,
         logger,
         manifests,
         signal: startupBackfillAbortController.signal,
@@ -9760,6 +9369,7 @@ export async function startServer(opts: ServerOpts = {}) {
         onRound: (summary: SweepSummary, round: number) => {
           if (
             ((summary as unknown as Record<string, unknown>).repaired as number) > 0 ||
+            ((summary as unknown as Record<string, unknown>).failed as number) > 0 ||
             ((summary as unknown as Record<string, unknown>).skipped as number) > 0 ||
             summary.incomplete
           ) {
@@ -9796,7 +9406,27 @@ export async function startServer(opts: ServerOpts = {}) {
   // on the next periodic tick; LIST renders `not yet observed
   // (backfilling)` for any run not yet in run_history in the meantime,
   // never a spine fallback.
-  const startupRunHistoryBackfillDone = new Promise<void>((resolve) => {
+  const startupRunHistoryActorBackfillDone = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      // biome-ignore lint/complexity/noVoid: The side effect is intentionally fire-and-forget by this runtime contract.
+      void runStartupRunHistoryActorBackfillToCompletion({
+        batchSize: STARTUP_RUN_HISTORY_ACTOR_BACKFILL_BATCH_SIZE,
+        maxRounds: STARTUP_RUN_HISTORY_ACTOR_BACKFILL_MAX_ROUNDS,
+      })
+        .then((summary) => {
+          if (summary.filled > 0 || !summary.complete) {
+            logger.info(summary, "startup run-history actor backfill observation");
+          }
+        })
+        .catch((err) => {
+          // Rows left NULL are treated as unknown provenance, which fails closed for
+          // coverage; the next boot continues.
+          logger.warn({ err }, "startup run-history actor backfill failed; the next boot will retry");
+        })
+        .finally(resolve);
+    });
+  });
+  const startupRunHistoryRowBackfillDone = new Promise<void>((resolve) => {
     setImmediate(() => {
       // biome-ignore lint/complexity/noVoid: The side effect is intentionally fire-and-forget by this runtime contract.
       void runStartupRunHistoryBackfillToCompletion({
@@ -9825,6 +9455,10 @@ export async function startServer(opts: ServerOpts = {}) {
         .finally(resolve);
     });
   });
+  const startupRunHistoryBackfillDone = Promise.all([
+    startupRunHistoryRowBackfillDone,
+    startupRunHistoryActorBackfillDone,
+  ]).then(() => undefined);
   if (opts.awaitStartupBackfill === true) {
     await startupBackfillDone;
   }
@@ -9871,6 +9505,7 @@ export async function startServer(opts: ServerOpts = {}) {
     releaseDeliveryWorkerLease(0);
   });
   rsServer.once("close", () => {
+    if (!opts.reachability) reachability?.service?.closeObservers();
     releaseDeliveryWorkerLease(1);
   });
   return {
@@ -9907,6 +9542,13 @@ export async function startServer(opts: ServerOpts = {}) {
     // evidence-sweep round — see connector-maintenance-sweep.ts).
     stopConnectorMaintenanceSweep,
     stopPostgresDerivedIndexMaintenance,
+    // Closes the routes this host owns. The CLI shutdown path awaits it before
+    // storage closes; it is bounded and idempotent.
+    stopReachability: async () => {
+      if (!opts.reachability && reachability?.service) {
+        await reachability.service.shutdown(REACHABILITY_SHUTDOWN_DEADLINE_MS, reachabilityOperations);
+      }
+    },
   };
 }
 
@@ -10054,6 +9696,9 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
 
   if (runtimeConfig.dynamic) {
     options.browserSurfaceAllocator = createBrowserSurfaceAllocator({
+      baseUrl: runtimeConfig.dynamic.allocatorUrl,
+    });
+    options.browserSurfaceAllocatorReadiness = createAllocatorReadinessCheck({
       baseUrl: runtimeConfig.dynamic.allocatorUrl,
     });
     // This is a non-secret endpoint identity used only to keep independent
@@ -10447,6 +10092,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {
@@ -10970,6 +10616,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: StartServerResult["stopClientEventDeliveryWorker"] | null;
     stopConnectorMaintenanceSweep: StartServerResult["stopConnectorMaintenanceSweep"] | null;
     stopPostgresDerivedIndexMaintenance: StartServerResult["stopPostgresDerivedIndexMaintenance"] | null;
+    stopReachability: StartServerResult["stopReachability"] | null;
   } = {
     abortStartupBackfill: null,
     asServer: null,
@@ -10983,6 +10630,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: null,
     stopConnectorMaintenanceSweep: null,
     stopPostgresDerivedIndexMaintenance: null,
+    stopReachability: null,
   };
   const exitOnSignal = (signal: string) => async () => {
     if (shuttingDown) {
@@ -11040,6 +10688,12 @@ if (isMainModule(import.meta.url, process.argv[1])) {
           finish();
         }
       });
+    // Close the remote-access route this process owns. It runs beside the HTTP
+    // drain, is bounded by REACHABILITY_SHUTDOWN_DEADLINE_MS, and must settle
+    // before storage closes so its journal writes land.
+    const reachabilityClosed = (server.stopReachability?.() ?? Promise.resolve()).catch((err) => {
+      cliLogger.warn({ err }, "remote access route close failed during shutdown");
+    });
     const httpDrains = [closeTimeout(server.asServer), closeTimeout(server.rsServer)];
     // Signal the startup retrieval backfill to wind down ALONGSIDE the
     // HTTP drain. Without this, a backfill mid-`upsertMany` keeps the
@@ -11096,7 +10750,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     // rely on. Sidekiq draws the same line between *quiet* and *drain*.
     // Chromium residue is still cleaned on next boot by
     // polyfill-connectors/src/profile-lock.ts (Layer C).
-    await Promise.allSettled([...httpDrains, Promise.race([awaitStartupTasks, backfillDeadline])]);
+    await Promise.allSettled([...httpDrains, reachabilityClosed, Promise.race([awaitStartupTasks, backfillDeadline])]);
     // See shutdownStorageClose's own doc comment for the drain-gates-close
     // invariant and why exit(1) here does not mean the in-flight job
     // finishes safely -- only that this process is not the one that raced
@@ -11120,6 +10774,8 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   startServer({
     ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
     logger: cliLogger,
+    // A standalone server process hosts remote access itself; a desktop supervisor, when present, takes precedence.
+    reachabilityProfile: "server",
   })
     .then((result) => {
       server.asServer = result.asServer;
@@ -11134,6 +10790,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
       server.stopClientEventDeliveryWorker = result.stopClientEventDeliveryWorker;
       server.stopConnectorMaintenanceSweep = result.stopConnectorMaintenanceSweep;
       server.stopPostgresDerivedIndexMaintenance = result.stopPostgresDerivedIndexMaintenance;
+      server.stopReachability = result.stopReachability;
     })
     .catch((err) => {
       closePostgresStorage().finally(() => closeDb());

@@ -38,15 +38,19 @@ function isFailureStatus(status: string | null | undefined): boolean {
 }
 
 export function deriveReferenceFreshness(input: DeriveReferenceFreshnessInput): ReferenceFreshness {
-  const capturedAt = isoOrNull(input.lastSuccessfulRunAt) ?? isoOrNull(input.recordLastUpdatedAt);
-  const lastAttemptedAt = isoOrNull(input.lastAttemptedAt);
-  const lastSuccessfulTime = timeOrNull(input.lastSuccessfulRunAt);
-  const lastAttemptedTime = timeOrNull(input.lastAttemptedAt);
   const nowTime = timeOrNull(input.now ?? new Date()) ?? Date.now();
-  const maxStalenessMs =
-    typeof input.maximumStalenessSeconds === "number" && Number.isFinite(input.maximumStalenessSeconds)
-      ? input.maximumStalenessSeconds * 1000
-      : null;
+  const usableTime = (value: string | null | undefined): number | null => {
+    const time = timeOrNull(value);
+    return time !== null && time <= nowTime ? time : null;
+  };
+  const lastSuccessfulTime = usableTime(input.lastSuccessfulRunAt);
+  const lastAttemptedTime = usableTime(input.lastAttemptedAt);
+  const capturedTime = lastSuccessfulTime ?? usableTime(input.recordLastUpdatedAt);
+  const capturedAt = isoOrNull(capturedTime);
+  const lastAttemptedAt = isoOrNull(lastAttemptedTime);
+  const seconds = input.maximumStalenessSeconds;
+  const policyMs = typeof seconds === "number" && seconds >= 0 ? seconds * 1000 : NaN;
+  const maxStalenessMs = Number.isFinite(policyMs) ? policyMs : null;
 
   let status: ReferenceFreshness["status"] = "unknown";
   const latestAttemptFailedAfterSuccess =
@@ -56,9 +60,8 @@ export function deriveReferenceFreshness(input: DeriveReferenceFreshnessInput): 
 
   if (latestAttemptFailedAfterSuccess) {
     status = "stale";
-  } else if (capturedAt && maxStalenessMs !== null) {
-    const capturedTime = timeOrNull(capturedAt);
-    status = capturedTime !== null && nowTime - capturedTime <= maxStalenessMs ? "current" : "stale";
+  } else if (capturedTime !== null && maxStalenessMs !== null) {
+    status = nowTime - capturedTime <= maxStalenessMs ? "current" : "stale";
   }
 
   const freshness: ReferenceFreshness = { status };

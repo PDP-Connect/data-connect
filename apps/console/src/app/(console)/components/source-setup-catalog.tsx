@@ -12,6 +12,7 @@ import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
+import { readinessBlockNote } from "../lib/connector-readiness-copy.ts";
 import {
   connectorLookupKey,
   isUninstallableCatalogEntry,
@@ -144,16 +145,13 @@ function SourceAcquisitionPaths({ paths }: { paths: readonly ConnectorAcquisitio
  * Development-tier method line, resolved before the `not_available_here`
  * short-circuit below. `sourceSetupAvailability` reports `not_available_here`
  * for every Development entry regardless of whether it renders an add
- * action (see `sourceSetupAction`'s scaffold check), so that check alone
+ * action (see `sourceSetupAction`'s disposition check), so that check alone
  * would print "No proven setup path is available" directly above a real
  * "Add account" button for a self-testable entry -- contradicting the
  * action right next to it.
  */
 function developmentMethodLine(entry: ConnectorCatalogEntry): string {
-  if (entry.isKnownScaffold) {
-    return "Not built yet: nobody has written this connector's collection code.";
-  }
-  return "Setup path implemented, not yet proven against a live account.";
+  return readinessBlockNote(entry.readiness) ?? "Setup path implemented, not yet proven against a live account.";
 }
 
 function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: number): string {
@@ -242,7 +240,7 @@ function ExistingSourceLinks({
             >
               <div className="min-w-0">
                 <p className="flex items-center gap-2 pdpp-caption font-medium text-foreground">
-                  <ConnectorMark className="size-5 shrink-0" icon={icon} name={source.displayName} />
+                  <ConnectorMark connectorId={connectorKey} icon={icon} name={source.displayName} />
                   {source.displayName}
                 </p>
                 <p className="pdpp-caption text-muted-foreground">
@@ -466,6 +464,7 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
+  const readinessNote = readinessBlockNote(entry.readiness);
   const {
     installModel,
     noSetupPath,
@@ -488,7 +487,7 @@ function SourceSetupCard({
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <ConnectorMark className="size-8 shrink-0" icon={entry.icon} name={entry.displayName} />
+          <ConnectorMark connectorId={entry.connectorKey} icon={entry.icon} name={entry.displayName} />
           <h3 className="pdpp-title text-foreground">{entry.displayName}</h3>
           {/* Current support / blocked fact, kept distinct from the next action. */}
           {status.label ? (
@@ -509,11 +508,12 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {entry.isKnownScaffold ? (
-          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
-            This connector's collection code is not built yet.
+        {readinessNote ? (
+          <span className="pdpp-caption mb-2 block text-muted-foreground" data-testid="connector-readiness-note">
+            {readinessNote}
           </span>
-        ) : noSetupPath ? (
+        ) : null}
+        {noSetupPath ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
             Not installable: no setup path is available here.
           </span>
@@ -735,8 +735,11 @@ export function SourceSetupCatalog({
         </div>
       ) : (
         <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
-          No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or
-          connector key.
+          {query.trim() ? (
+            <>No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or connector key.</>
+          ) : (
+            "No connectors are available to add."
+          )}
         </p>
       )}
     </Section>

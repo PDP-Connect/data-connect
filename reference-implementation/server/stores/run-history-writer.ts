@@ -77,6 +77,12 @@ export function isRunHistoryRelevantEventType(eventType: string | null | undefin
 }
 
 export interface RunHistorySpineEvent {
+  /**
+   * The event's actor_type. A terminal event's value is stored as the run's
+   * provenance (`run_history.actor_type`), e.g. `local_device` for a run a
+   * device terminal commit recorded.
+   */
+  readonly actorType: string;
   readonly connectorId: string | null;
   readonly connectorInstanceId: string | null;
   readonly data: Record<string, unknown>;
@@ -125,6 +131,15 @@ function toTerminalStatus(eventType: string, status: string): string {
 // `readRunTerminalEventData` spine read on GET (G1).
 const FACTS_JSON_KEYS = [
   "collection_facts",
+  // The per-connection collection revision a local terminal run committed at
+  // (server/stores/collection-revision-store.ts). The coverage projection
+  // binds the run's proof to it.
+  "collection_revision",
+  // The run's place in run order: the sequence issued at its start and the
+  // storage epoch it was recorded in. A proof is eligible only while it is
+  // the connection's run-order marker in the current epoch.
+  "run_sequence",
+  "storage_epoch",
   "needs_input",
   // Preserve presence separately from the schema's records_emitted DEFAULT 0.
   // A missing runtime field is not evidence of zero yield.
@@ -343,6 +358,8 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
     failureReason,
     terminalReason,
     factsJson,
+    event.actorType,
+    event.actorType,
     event.runId,
     event.connectorInstanceId,
   ]);
@@ -364,6 +381,7 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
     failureReason,
     terminalReason,
     factsJson,
+    event.actorType,
   ]);
 }
 
@@ -413,8 +431,8 @@ export async function writePostgresRunHistoryForSpineEvent(
     await client.query(
       `INSERT INTO run_history(
          run_id, connector_instance_id, connector_id, trigger_kind, source_json,
-         status, known_gaps_json, started_at, attempt
-       ) VALUES($1, $2, $3, $4, $5::jsonb, 'running', '[]'::jsonb, $6, 1)
+         status, known_gaps_json, started_at, attempt, scheduler_managed
+       ) VALUES($1, $2, $3, $4, $5::jsonb, 'running', '[]'::jsonb, $6, 1, false)
        ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
       [
         event.runId,
@@ -450,9 +468,11 @@ export async function writePostgresRunHistoryForSpineEvent(
          connector_error_json = $4::jsonb,
          failure_reason = $5,
          terminal_reason = $6,
-         facts_json = $7::jsonb
-     WHERE run_id = $8
-       AND connector_instance_id = $9
+         facts_json = $7::jsonb,
+         actor_type = $8,
+         scheduler_managed = CASE WHEN $8 = 'local_device' THEN false ELSE scheduler_managed END
+     WHERE run_id = $9
+       AND connector_instance_id = $10
        AND status = 'running'`,
     [
       terminalStatus,
@@ -462,6 +482,7 @@ export async function writePostgresRunHistoryForSpineEvent(
       failureReason,
       terminalReason,
       factsJson,
+      event.actorType,
       event.runId,
       event.connectorInstanceId,
     ]
@@ -474,8 +495,8 @@ export async function writePostgresRunHistoryForSpineEvent(
     `INSERT INTO run_history(
        run_id, connector_instance_id, connector_id, trigger_kind, source_json,
        status, known_gaps_json, started_at, completed_at, records_emitted,
-       connector_error_json, failure_reason, terminal_reason, facts_json, attempt
-     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, 1)
+       connector_error_json, failure_reason, terminal_reason, facts_json, actor_type, attempt, scheduler_managed
+     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14, 1, false)
      ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
     [
       event.runId,
@@ -491,6 +512,7 @@ export async function writePostgresRunHistoryForSpineEvent(
       failureReason,
       terminalReason,
       factsJson,
+      event.actorType,
     ]
   );
 }

@@ -16,6 +16,8 @@ import test from "node:test";
 
 import { startServer } from "../server/index.ts";
 
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
 function closeServer(server: StartedServer): Promise<unknown> {
@@ -38,7 +40,7 @@ function closeServer(server: StartedServer): Promise<unknown> {
 }
 
 function manifest(version: string, streamName: string): Record<string, unknown> {
-  return {
+  return withFixtureSourceDeclaration({
     capabilities: { human_interaction: ["credentials"] },
     connector_id: "eqv",
     connector_key: "eqv",
@@ -60,7 +62,7 @@ function manifest(version: string, streamName: string): Record<string, unknown> 
       },
     ],
     version,
-  };
+  });
 }
 
 async function withServer(run: (asUrl: string) => Promise<void>): Promise<void> {

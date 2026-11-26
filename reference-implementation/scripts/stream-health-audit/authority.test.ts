@@ -504,7 +504,6 @@ test("accepts canonical RI producer reasons but rejects unknown reasons", () => 
     "credentials_required",
     "collection_succeeded_import_complete",
     "coverage_complete_unfillable_accounted",
-    "coverage_unknown_stale_collector",
     "credentials_not_applicable_file_import",
     "freshness_not_applicable_complete",
     "projection_superseded_by_definition_change",

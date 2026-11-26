@@ -442,6 +442,17 @@ function lineTextAt(source: string, index: number): string {
   return source.slice(start, end === -1 ? source.length : end).trim();
 }
 
+/**
+ * The one-time connector-id rename migration, exempt from rule (1) only.
+ * A migration that renames stored rows must name what it renames: it holds
+ * the four old -> new id pairs as private data, runs once at boot, and nothing
+ * at runtime reads them. It gates no connector and resolves no identity. The
+ * exemption is this exact file and this exact rule; every other rule still
+ * applies to it, and a rename that a later release needs belongs in its own
+ * migration, not in an extension of this one.
+ */
+const RENAME_MIGRATION_FILES = new Set(["reference-implementation/server/connector-id-rename-migration.ts"]);
+
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]*_(CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN|API_KEY|ACCESS_TOKEN|PASSWORD)$/;
 const ABSOLUTE_URL_HOST_RE = /^https?:\/\/([^/\s:]+)/;
 
@@ -519,12 +530,14 @@ export function scanFile(
 
   const isSharedLibraryFile = relPath.startsWith(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`);
   violations.push(
-    ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile).map((v) => ({
-      file: v.file,
-      line: v.line,
-      rule: v.rule,
-      snippet: v.snippet,
-    }))
+    ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile)
+      .filter((v) => !(RENAME_MIGRATION_FILES.has(relPath) && v.rule === "hardcoded-connector-identity-literal"))
+      .map((v) => ({
+        file: v.file,
+        line: v.line,
+        rule: v.rule,
+        snippet: v.snippet,
+      }))
   );
   violations.push(...scanFileDataLoads(absPath, relPath, repoRoot, connectorKeys, validationKinds, sanctionedSiteHits));
 

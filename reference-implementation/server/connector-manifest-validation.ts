@@ -1,3 +1,5 @@
+import { BindingDeclarationError, normalizeBindingDeclarations } from "../runtime/binding-declarations.ts";
+import { collectionProfileDeclarationProblem } from "../runtime/collection-profile-support.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,16 +12,24 @@
  * logic.
  */
 
-import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
 import { MAX_SIGN_IN_PATTERN_LENGTH } from "../runtime/browser-surface/sign-in-proof.ts";
-import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
+import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
+import { isServerOwnedEnvironmentKey } from "./server-owned-environment.ts";
+import { sanitizeSvg } from "../vendor/brand-react/src/sanitize-svg.ts";
+import { hexColorOrNull } from "../vendor/brand-react/src/hex-color.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
 } from "./polyfill-connectors-runtime.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
+import {
+  canonicalConnectorKey,
+  canonicalConnectorKeyFromManifest,
+  connectorIdMustBeKeyShaped,
+  isConnectorKey,
+} from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
+import { resolveConfiguredExpandLimits } from "./record-expand-helpers.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
 // Inline copy — isNonEmptyString is used 30+ times in auth.js so moving it
@@ -185,19 +195,47 @@ export function invalidConnectorManifest(message: string, code = "invalid_reques
 }
 
 /**
+ * Prepare a developer-local artifact for the host's full manifest validator.
+ *
+ * Unknown URL identities are not inferred into connector keys. The artifact
+ * must declare its own key; this copy uses that key as the operational id only
+ * for validation. The returned projection is not a trusted or retained source
+ * identity, and callers must keep the original manifest unchanged.
+ */
+export function projectLocalConnectorArtifactForManifestValidation(
+  manifest: Record<string, unknown>
+): Record<string, unknown> {
+  const connectorId = manifest.connector_id;
+  const connectorKey = manifest.connector_key;
+  if (!isNonEmptyString(connectorId)) {
+    throw invalidConnectorManifest("Collection Profile manifest must declare connector_id.");
+  }
+  if (typeof connectorKey !== "string" || !isConnectorKey(connectorKey)) {
+    throw invalidConnectorManifest("Collection Profile manifest must declare a valid connector_key.");
+  }
+  const normalizedKey = connectorKey.trim();
+  const recognizedKey = canonicalConnectorKey(connectorId);
+  if (recognizedKey !== null && isConnectorKey(recognizedKey) && recognizedKey !== normalizedKey) {
+    throw invalidConnectorManifest("connector_key must match the canonical key for connector_id");
+  }
+  if (recognizedKey === null && connectorId.trim() !== normalizedKey && !URL.canParse(connectorId)) {
+    throw invalidConnectorManifest("connector_id must be an absolute URI or its declared connector_key");
+  }
+  return { ...manifest, connector_id: normalizedKey };
+}
+
+/**
  * Collection Profile declaration gate (profile Sections 3.1 and 3.4):
  * `protocol_version` names a supported profile version, every
- * `protocol_capabilities` name is known, and a capability added in 0.2.0
- * comes with `protocol_version` 0.2.0. This server has always admitted a
- * manifest without `protocol_version`; it is checked as a 0.1.0 manifest.
+ * `protocol_capabilities` name is known, a capability added in 0.2.0 comes
+ * with `protocol_version` 0.2.0, and any stream with `coverage_stores` also
+ * declares the elective RUN_COVERAGE_V1 extension. This server has always
+ * admitted a manifest without `protocol_version`; it is checked as 0.1.0.
  */
 function validateCollectionProfileDeclaration(manifest: Record<string, unknown>, code: string): void {
-  const error = collectionProfileDeclarationError(
-    manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version,
-    manifest.protocol_capabilities
-  );
-  if (error !== null) {
-    throw invalidConnectorManifest(error, code);
+  const problem = collectionProfileDeclarationProblem(manifest);
+  if (problem !== null) {
+    throw invalidConnectorManifest(problem, code);
   }
 }
 
@@ -284,13 +322,6 @@ export const REFRESH_POLICY_ALLOWED_KEYS = new Set([
 // production code, but the read-site clamp holds even if it does.
 export const REFRESH_POLICY_MAX_COOLDOWN_CYCLES_RANGE = { max: 24, min: 1 } as const;
 export const REFRESH_POLICY_MAX_RECOVERY_ATTEMPTS_RANGE = { max: 20, min: 1 } as const;
-export const RUNTIME_REQUIREMENT_BINDINGS = new Set([
-  "browser",
-  "desktop_session",
-  "filesystem",
-  "interactive",
-  "network",
-]);
 export const STREAM_AVAILABILITY_STATES = new Set(["supported", "unsupported_in_mode", "experimental", "deprecated"]);
 export const STREAM_AVAILABILITY_ALLOWED_KEYS = new Set(["future_modes", "mode", "reason", "state"]);
 export const STREAM_COVERAGE_POLICIES = new Set([
@@ -327,50 +358,39 @@ const SUPPORTED_RANGE_OPERATORS = new Set(["gte", "gt", "lte", "lt"]);
 const EXTERNAL_TOOL_ALLOWED_KEYS = new Set(["detect", "install_hint", "license", "min_version", "name", "purpose"]);
 const EXTERNAL_TOOL_DETECT_ALLOWED_KEYS = new Set(["args", "executable", "executable_env_override", "exit_code"]);
 
-// Validates `runtime_requirements.bindings` (order-preserving). Returns `false`
-// when `bindings` is absent — the original validator returns from the whole
-// function in that case, so the caller must NOT go on to external_tools (a
-// runtime_requirements object without bindings is accepted verbatim). Returns
-// `true` once bindings are present and fully validated.
-function validateRuntimeBindings(req: Record<string, unknown>, code: string): boolean {
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
+// Validates `runtime_requirements.bindings` with the shared canonical validator
+// (runtime/binding-declarations.ts), the same one `runConnector` runs before spawn.
+// An absent map is valid. A present one must satisfy the canonical schema and
+// the grammar rules, or registration refuses it with the validator's message.
+function validateRuntimeBindings(req: Record<string, unknown>, code: string): void {
+  try {
+    normalizeBindingDeclarations(req.bindings);
+  } catch (error) {
+    if (error instanceof BindingDeclarationError) {
+      throw invalidConnectorManifest(error.message, code);
+    }
+    throw error;
+  }
   const bindings = req.bindings;
-  if (bindings === undefined || bindings === null) {
-    return false;
+  if (typeof bindings !== "object" || bindings === null) {
+    return;
   }
-  if (typeof bindings !== "object" || Array.isArray(bindings)) {
-    throw invalidConnectorManifest("runtime_requirements.bindings must be an object when declared", code);
-  }
-  const bindingsObj = bindings as Record<string, unknown>;
-  const unknownBindings = Object.keys(bindingsObj).filter((binding) => !RUNTIME_REQUIREMENT_BINDINGS.has(binding));
-  if (unknownBindings.length) {
+  const browser = (bindings as Record<string, unknown>).browser;
+  const signInPattern =
+    typeof browser === "object" && browser !== null
+      ? (browser as Record<string, unknown>).sign_in_url_pattern
+      : undefined;
+  if (
+    signInPattern !== undefined &&
+    (typeof signInPattern !== "string" ||
+      signInPattern.trim().length === 0 ||
+      signInPattern.trim().length > MAX_SIGN_IN_PATTERN_LENGTH)
+  ) {
     throw invalidConnectorManifest(
-      `runtime_requirements.bindings has unsupported keys: ${unknownBindings.join(", ")}`,
+      `runtime_requirements.bindings.browser.sign_in_url_pattern must be a non-empty string of at most ${MAX_SIGN_IN_PATTERN_LENGTH} characters`,
       code
     );
   }
-  for (const [binding, requirement] of Object.entries(bindingsObj)) {
-    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) {
-      throw invalidConnectorManifest(`runtime_requirements.bindings.${binding} must be an object`, code);
-    }
-    const reqObj = requirement as Record<string, unknown>;
-    if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
-      throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
-    }
-    const signInPattern = binding === "browser" ? reqObj.sign_in_url_pattern : undefined;
-    if (
-      signInPattern !== undefined &&
-      (typeof signInPattern !== "string" ||
-        signInPattern.trim().length === 0 ||
-        signInPattern.trim().length > MAX_SIGN_IN_PATTERN_LENGTH)
-    ) {
-      throw invalidConnectorManifest(
-        `runtime_requirements.bindings.browser.sign_in_url_pattern must be a non-empty string of at most ${MAX_SIGN_IN_PATTERN_LENGTH} characters`,
-        code
-      );
-    }
-  }
-  return true;
 }
 
 function validateExternalToolDetectExitCode(detect: Record<string, unknown>, index: number, code: string): void {
@@ -567,6 +587,12 @@ function validateLocalPathEntry(entry: unknown, index: number, code: string): vo
       code
     );
   }
+  if (typeof obj.env_override === "string" && isServerOwnedEnvironmentKey(obj.env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.paths[${index}].env_override ${obj.env_override} is a server-owned environment variable`,
+      code
+    );
+  }
   if (obj.required_for_readiness !== undefined && typeof obj.required_for_readiness !== "boolean") {
     throw invalidConnectorManifest(
       `runtime_requirements.local_paths.paths[${index}].required_for_readiness must be a boolean`,
@@ -606,6 +632,12 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
       code
     );
   }
+  if (typeof obj.home_env_override === "string" && isServerOwnedEnvironmentKey(obj.home_env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.home_env_override ${obj.home_env_override} is a server-owned environment variable`,
+      code
+    );
+  }
   if (!Array.isArray(obj.paths)) {
     throw invalidConnectorManifest("runtime_requirements.local_paths.paths must be an array", code);
   }
@@ -617,10 +649,16 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
 const TUNING_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
 
 // Validates `runtime_requirements.tuning_environment`: the operator tuning
-// knobs a connector reads. A first-party manifest may only declare keys in its
-// own PDPP_<KEY>_ namespace; the runtime would drop any other key at spawn, so
-// the mistake fails here instead of silently at run time.
-function validateTuningEnvironment(manifest: Record<string, unknown>, req: Record<string, unknown>, code: string) {
+// knobs a connector reads. A manifest may only declare keys in its own
+// PDPP_<KEY>_ namespace and never a server-owned name; the runtime would drop
+// any other key at spawn, so the mistake fails here instead of silently at run
+// time.
+function validateTuningEnvironment(
+  manifest: Record<string, unknown>,
+  req: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[]
+) {
   const declared = req.tuning_environment;
   if (declared === undefined) {
     return;
@@ -629,7 +667,7 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
     throw invalidConnectorManifest("runtime_requirements.tuning_environment must be an array when declared", code);
   }
   // The same identity registration stores and the runtime spawns with.
-  const firstPartyKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
+  const ownKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
   const seen = new Set<string>();
   for (const [index, key] of declared.entries()) {
     if (typeof key !== "string" || !TUNING_ENVIRONMENT_KEY.test(key)) {
@@ -642,9 +680,15 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
       throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
     }
     seen.add(key);
-    if (firstPartyKey !== null && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
+    if (isServerOwnedEnvironmentKey(key)) {
       throw invalidConnectorManifest(
-        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${firstPartyKey} tuning namespace`,
+        `runtime_requirements.tuning_environment[${index}] ${key} is a server-owned environment variable`,
+        code
+      );
+    }
+    if (ownKey !== null && !ownsTuningKey(ownKey, key, installedConnectorKeys)) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace, or that namespace is shared with or nested in another installed connector's`,
         code
       );
     }
@@ -655,7 +699,11 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
 // Full manifest validation keeps main's hardened `detect.executable` contract;
 // runtime-requirements-only calls keep the branch's direct-helper compatibility
 // for legacy unit coverage.
-export function validateRuntimeRequirements(manifest: Record<string, unknown>, code: string): void {
+export function validateRuntimeRequirements(
+  manifest: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[] = []
+): void {
   const requirements = manifest.runtime_requirements;
   if (requirements === undefined || requirements === null) {
     return;
@@ -664,10 +712,8 @@ export function validateRuntimeRequirements(manifest: Record<string, unknown>, c
     throw invalidConnectorManifest("runtime_requirements must be an object when declared", code);
   }
   const req = requirements as Record<string, unknown>;
-  validateTuningEnvironment(manifest, req, code);
-  if (!validateRuntimeBindings(req, code)) {
-    return;
-  }
+  validateTuningEnvironment(manifest, req, code, installedConnectorKeys);
+  validateRuntimeBindings(req, code);
   validateExternalTools(req, code, { allowLegacyCommand: !Array.isArray(manifest.streams) });
   validateLocalPaths(req, code);
 }
@@ -807,6 +853,37 @@ function validateRefreshPolicyInternalConsistency(pol: Record<string, unknown>, 
   const contradictions = refreshPolicyContradictions(pol);
   if (contradictions.length > 0) {
     throw invalidConnectorManifest(`capabilities.refresh_policy is self-contradictory: ${contradictions[0]}`, code);
+  }
+}
+
+// Section 3.4: `capabilities.human_interaction` is an optional array of distinct
+// values from this closed set. An INTERACTION.kind outside it is refused at run time.
+const HUMAN_INTERACTION_VALUES = new Set(["credentials", "otp", "manual_action"]);
+
+function validateHumanInteractionCapability(manifest: Record<string, unknown>, code: string): void {
+  const { capabilities } = manifest;
+  if (typeof capabilities !== "object" || capabilities === null || Array.isArray(capabilities)) {
+    return;
+  }
+  const values = (capabilities as Record<string, unknown>).human_interaction;
+  if (values === undefined) {
+    return;
+  }
+  if (!Array.isArray(values)) {
+    throw invalidConnectorManifest("capabilities.human_interaction must be an array when declared", code);
+  }
+  const seen = new Set<unknown>();
+  for (const value of values) {
+    if (!HUMAN_INTERACTION_VALUES.has(value as string)) {
+      throw invalidConnectorManifest(
+        `capabilities.human_interaction value ${JSON.stringify(value)} must be one of: credentials, otp, manual_action`,
+        code
+      );
+    }
+    if (seen.has(value)) {
+      throw invalidConnectorManifest(`capabilities.human_interaction repeats ${String(value)}`, code);
+    }
+    seen.add(value);
   }
 }
 
@@ -1047,185 +1124,18 @@ export function validateManifestSensitivity(manifest: Record<string, unknown>, c
 // ---------------------------------------------------------------------------
 
 const MANIFEST_ICON_ALLOWED_KEYS = new Set(["kind", "svg", "color"]);
-const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
-// A brand glyph is shapes, not behavior: this is the complete element and
-// attribute vocabulary an icon needs. Everything else — script, foreignObject,
-// iframe, use, image, animate/animateTransform/set, style, a, and every
-// href/xlink:href variant — is deliberately absent. There is no fetch, no
-// script execution, and no navigation surface reachable from an SVG built
-// only from this vocabulary.
-const SVG_ALLOWED_ELEMENTS = new Set([
-  "svg",
-  "g",
-  "path",
-  "circle",
-  "rect",
-  "ellipse",
-  "line",
-  "polyline",
-  "polygon",
-  "title",
-  "defs",
-]);
-const SVG_ALLOWED_ATTRIBUTES = new Set([
-  "viewbox",
-  "xmlns",
-  "width",
-  "height",
-  "fill",
-  "stroke",
-  "stroke-width",
-  "stroke-linecap",
-  "stroke-linejoin",
-  "d",
-  "cx",
-  "cy",
-  "r",
-  "rx",
-  "ry",
-  "x",
-  "y",
-  "x1",
-  "y1",
-  "x2",
-  "y2",
-  "points",
-  "opacity",
-  "fill-rule",
-  "clip-rule",
-  "transform",
-]);
-// Any of these substrings inside an attribute value is grounds for outright
-// rejection regardless of which attribute carries it — a shape-only icon has
-// no legitimate use for a URL scheme or a CSS url() reference.
-const SVG_ATTRIBUTE_VALUE_DENY_RE = /javascript:|data:|url\(/i;
-const SVG_MAX_LENGTH = 10_000;
-
-// Tokenizes top-level XML/SVG markup into tags and the text between them.
-// Deliberately dumb: this only needs to walk `<tag ...>`, `<tag ... />`, and
-// `</tag>` shapes far enough to hand each one to the allowlist checks below —
-// it is not a general XML parser and does not need to be, since anything it
-// cannot make sense of is rejected rather than passed through.
-const SVG_TAG_RE = /<([^>]*)>/g;
-// A single `name="value"` or `name='value'` pair inside a tag's attribute list.
-const SVG_ATTR_RE = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-// The element/tag name at the start of a tag body (after any leading `/`).
-const SVG_TAG_NAME_RE = /^([a-zA-Z_:][-a-zA-Z0-9_:.]*)/;
-
-interface ParsedSvgTag {
-  attrs: Map<string, string>;
-  attrsExhaustive: boolean;
-  closing: boolean;
-  name: string;
-  selfClosing: boolean;
-}
-
-function parseSvgTag(raw: string): ParsedSvgTag | null {
-  let body = raw.trim();
-  const closing = body.startsWith("/");
-  if (closing) {
-    body = body.slice(1).trim();
-  }
-  const selfClosing = body.endsWith("/");
-  if (selfClosing) {
-    body = body.slice(0, -1).trim();
-  }
-  const nameMatch = SVG_TAG_NAME_RE.exec(body);
-  const rawName = nameMatch?.[1];
-  if (!rawName) {
-    return null;
-  }
-  const name = rawName.toLowerCase();
-  const attrSource = body.slice(rawName.length);
-  const attrs = new Map<string, string>();
-  SVG_ATTR_RE.lastIndex = 0;
-  let match = SVG_ATTR_RE.exec(attrSource);
-  while (match) {
-    const [, rawAttrName, doubleQuoted, singleQuoted] = match;
-    if (rawAttrName) {
-      attrs.set(rawAttrName.toLowerCase(), doubleQuoted ?? singleQuoted ?? "");
-    }
-    match = SVG_ATTR_RE.exec(attrSource);
-  }
-  // Anything left over after stripping every recognized `name="value"` pair
-  // means the attribute list contains something the tokenizer could not
-  // classify (an unmatched `<`/`>`, a stray quote, an unquoted value) — that
-  // markup is rejected rather than silently dropped.
-  const attrsExhaustive = attrSource.replace(SVG_ATTR_RE, "").trim().length === 0;
-  return { attrs, attrsExhaustive, closing, name, selfClosing };
-}
-
-// Validates one already-tokenized tag against the element/attribute
-// allowlist (order-preserving). Split out of assertSvgIsAllowlisted so the
-// latter only handles tokenizing the markup and tracking the bare-<svg>-root
-// invariant; this handles the per-tag allowlist gate.
-function assertTagIsAllowlisted(parsed: ParsedSvgTag, code: string): void {
-  if (!parsed.attrsExhaustive) {
-    throw invalidConnectorManifest("icon.svg contains malformed markup", code);
-  }
-  if (!SVG_ALLOWED_ELEMENTS.has(parsed.name)) {
-    throw invalidConnectorManifest(`icon.svg contains a disallowed element: ${parsed.name}`, code);
-  }
-  for (const [attrName, attrValue] of parsed.attrs) {
-    if (!SVG_ALLOWED_ATTRIBUTES.has(attrName)) {
-      throw invalidConnectorManifest(`icon.svg contains a disallowed attribute: ${attrName}`, code);
-    }
-    if (SVG_ATTRIBUTE_VALUE_DENY_RE.test(attrValue)) {
-      throw invalidConnectorManifest(`icon.svg attribute ${attrName} contains a disallowed value`, code);
-    }
-  }
-}
-
-/**
- * Validates that `svg` uses only the shape-only element/attribute vocabulary
- * declared above. This is the SOLE XSS defense for manifest-declared icons —
- * `icon.svg` reaches the DOM via dangerouslySetInnerHTML in
- * packages/pdpp-brand-react/src/connector-icon.tsx, and this function is the
- * single choke point that markup must pass through first. It is a strict
- * ALLOWLIST (reject anything not explicitly permitted), not a denylist —
- * nothing here enumerates attack vectors, because there is no elements/
- * attributes vocabulary through which script execution, external fetches, or
- * navigation are reachable in the first place.
- */
+// `icon.svg` is untrusted markup that reaches the DOM through
+// dangerouslySetInnerHTML. The console renders it only when `sanitizeSvg` accepts it,
+// so the server asks the same function instead of keeping its own allowlist:
+// one vocabulary, one verdict. Imported by relative path because the staged
+// reference stack resolves only LOCAL_PACKAGES, not workspace packages.
 function assertSvgIsAllowlisted(svg: string, code: string): void {
-  if (svg.length > SVG_MAX_LENGTH) {
-    throw invalidConnectorManifest(`icon.svg must not exceed ${SVG_MAX_LENGTH} characters`, code);
-  }
-  SVG_TAG_RE.lastIndex = 0;
-  const tags: ParsedSvgTag[] = [];
-  let sawSvgRoot = false;
-  let cursor = 0;
-  let match = SVG_TAG_RE.exec(svg);
-  while (match) {
-    // Text strictly between tags is inert (SVG has no text-execution sink in
-    // this vocabulary — <title> content is the only text ever rendered, and
-    // it is not markup), but a bare `<` or `>` outside a well-formed tag is
-    // grounds for rejection rather than silent tolerance.
-    if (match.index !== cursor && svg.slice(cursor, match.index).includes("<")) {
-      throw invalidConnectorManifest("icon.svg contains malformed markup", code);
-    }
-    cursor = SVG_TAG_RE.lastIndex;
-    const parsed = parseSvgTag(match[1] ?? "");
-    if (!parsed) {
-      throw invalidConnectorManifest("icon.svg contains malformed markup", code);
-    }
-    assertTagIsAllowlisted(parsed, code);
-    if (parsed.name === "svg" && !parsed.closing) {
-      sawSvgRoot = true;
-    }
-    tags.push(parsed);
-    match = SVG_TAG_RE.exec(svg);
-  }
-  if (cursor < svg.length && svg.slice(cursor).includes("<")) {
-    throw invalidConnectorManifest("icon.svg contains malformed markup", code);
-  }
-  if (!sawSvgRoot) {
-    throw invalidConnectorManifest("icon.svg must be a bare <svg> element", code);
-  }
-  const [rootTag] = tags;
-  if (rootTag?.name !== "svg" || rootTag.closing) {
-    throw invalidConnectorManifest("icon.svg must be a bare <svg> element", code);
+  if (sanitizeSvg(svg) === null) {
+    throw invalidConnectorManifest(
+      "icon.svg must be one bare <svg> element built only from allowed shape elements and attributes",
+      code
+    );
   }
 }
 
@@ -1261,7 +1171,7 @@ export function validateManifestIcon(manifest: Record<string, unknown>, code: st
   }
   const svg = iconObj.svg.trim();
   assertSvgIsAllowlisted(svg, code);
-  if (iconObj.color !== undefined && !(isNonEmptyString(iconObj.color) && HEX_COLOR_RE.test(iconObj.color))) {
+  if (iconObj.color !== undefined && hexColorOrNull(iconObj.color) === null) {
     throw invalidConnectorManifest("icon.color must be a hex color (e.g. #1ED760) when declared", code);
   }
 }
@@ -1308,6 +1218,13 @@ function validateExpandCapabilityLimits({
   ) {
     throw invalidConnectorManifest(
       `Stream '${streamName}' query.expand entry '${cap?.name as string}' default_limit must be less than or equal to max_limit`,
+      code
+    );
+  }
+  // Reads resolve limits with this resolver; accept only declarations it accepts.
+  if (cap && resolveConfiguredExpandLimits(cap) === null) {
+    throw invalidConnectorManifest(
+      `Stream '${streamName}' query.expand entry '${cap.name as string}' limits must be safe integers`,
       code
     );
   }
@@ -2201,29 +2118,43 @@ function validateManifestStream({
 export function validateConnectorManifest(
   manifest: Record<string, unknown> = {},
   code = "invalid_request",
-  opts: { skipCollectionProfileCheck?: boolean; skipCursorFieldSortCheck?: boolean } = {}
+  opts: {
+    /** Canonical keys of the installed connectors, for the tuning-namespace rule. */
+    installedConnectorKeys?: readonly string[];
+    skipCollectionProfileCheck?: boolean;
+    skipCursorFieldSortCheck?: boolean;
+  } = {}
 ): void {
   const hasConnectorId = isNonEmptyString(manifest.connector_id);
   const hasConnectorKey = isNonEmptyString(manifest.connector_key);
+  declaredLegacySourceIds(manifest);
   if (!(hasConnectorId || hasConnectorKey)) {
     throw invalidConnectorManifest("connector_key or connector_id is required", code);
   }
   if (hasConnectorKey && !isConnectorKey(manifest.connector_key)) {
     throw invalidConnectorManifest("connector_key must be a non-empty slug-like key, not a URL", code);
   }
+  const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
   if (hasConnectorId && hasConnectorKey) {
     const connectorId = (manifest.connector_id as string).trim();
     const connectorKey = (manifest.connector_key as string).trim();
-    const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
-    if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorKey) {
-      throw invalidConnectorManifest("connector_key must match the canonical key for connector_id", code);
-    }
-    if (!canonicalFromConnectorId && connectorId !== connectorKey) {
+    if (canonicalFromConnectorId !== connectorKey) {
+      // A registry URL or a legacy alias rewrites to a key; a bare id keeps its own spelling.
+      if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorId) {
+        throw invalidConnectorManifest("connector_key must match the canonical key for connector_id", code);
+      }
       throw invalidConnectorManifest(
         "connector_id must match connector_key; use manifest_uri for registry or document provenance",
         code
       );
     }
+  }
+  if (
+    manifest.connector_id !== undefined &&
+    connectorIdMustBeKeyShaped(manifest.connector_id) &&
+    !isConnectorKey(canonicalFromConnectorId)
+  ) {
+    throw invalidConnectorManifest("connector_id must resolve to a valid connector key", code);
   }
   if (isNonEmptyString(manifest.provider_id)) {
     throw invalidConnectorManifest(
@@ -2244,7 +2175,8 @@ export function validateConnectorManifest(
   if (!opts.skipCollectionProfileCheck) {
     validateCollectionProfileDeclaration(manifest, code);
   }
-  validateRuntimeRequirements(manifest, code);
+  validateRuntimeRequirements(manifest, code, opts.installedConnectorKeys);
+  validateHumanInteractionCapability(manifest, code);
   validateRefreshPolicyCapability(manifest, code);
   validateDeclaredReasonTokensCapability(manifest, code);
   validateProvenCapability(manifest, code);
@@ -2266,4 +2198,14 @@ export function validateConnectorManifest(
     validateManifestStream({ code, manifestStreamsByName, opts, seenStreamNames, stream });
   }
   validateCheckpointDependencyAcyclic(manifestStreamsByName, code);
+}
+
+/** Explicit identities owned by this manifest; provenance never supplies an identity. */
+export function declaredLegacySourceIds(manifest: Record<string, unknown>): readonly string[] {
+  const ids = manifest.legacy_source_ids;
+  if (ids === undefined) return [];
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string" || /\s/.test(id) || !URL.canParse(id)) || new Set(ids).size !== ids.length) {
+    throw invalidConnectorManifest("legacy_source_ids must be a unique array of absolute URIs");
+  }
+  return ids as string[];
 }

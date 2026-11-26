@@ -61,6 +61,7 @@ import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const BACKGROUND_SAFE_MANIFEST = {
   capabilities: {
@@ -246,33 +247,36 @@ async function registerFixtureConnectorInstance(options: {
 }
 
 function minimalNestedAuthManifest(connectorKey: string): Record<string, unknown> {
-  return {
-    capabilities: {
-      auth: { kind: "custom", required: [["NESTED_PRIMARY_TOKEN", "NESTED_SECONDARY_TOKEN"]] },
-      refresh_policy: {
-        background_safe: true,
-        interaction_posture: "none",
-        rationale: "Test fixture for connector environment policy coverage.",
-        recommended_interval_seconds: 60,
-        recommended_mode: "automatic",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        auth: { kind: "custom", required: [["NESTED_PRIMARY_TOKEN", "NESTED_SECONDARY_TOKEN"]] },
+        refresh_policy: {
+          background_safe: true,
+          interaction_posture: "none",
+          rationale: "Test fixture for connector environment policy coverage.",
+          recommended_interval_seconds: 60,
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: connectorKey,
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
     },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: connectorKey,
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorKey}` }
+  );
 }
 
 test("connector platform env keeps cross-host execution inputs without ambient secrets", () => {
@@ -349,7 +353,7 @@ test("connector fragments reject platform and run controls in every casing", () 
   });
   assert.equal(allowed.CONNECTION_SECRET, "allowed");
 
-  for (const name of ["PATH", "PDPP_OWNER_TOKEN", "PDPP_RS_URL", "PDPP_CONNECTOR_ID"]) {
+  for (const name of ["PATH", "PDPP_OWNER_TOKEN", "PDPP_BLOB_UPLOAD_TOKEN", "PDPP_RS_URL", "PDPP_CONNECTOR_ID"]) {
     for (const variant of [name, name.toLowerCase(), `${name.slice(0, 1)}${name.slice(1).toLowerCase()}`]) {
       assert.throws(
         () =>
@@ -520,13 +524,13 @@ const STORE_FIXTURES: Record<string, StoreFixture> = {
   reddit: {
     expectedEnv: {
       REDDIT_PASSWORD: "stored-reddit-password",
-      REDDIT_USERNAME: "dondochaka",
+      REDDIT_USERNAME: "janedoe",
     },
     recovered: {
       credentialKind: "username_password",
       secret: JSON.stringify({
         password: "stored-reddit-password",
-        username: "dondochaka",
+        username: "janedoe",
       }),
     },
     sourceBinding: null,
@@ -908,6 +912,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
               return Promise.resolve(null);
             },
           },
+          installedConnectorKeys: [],
           manifest: BACKGROUND_SAFE_MANIFEST,
           ownerToken: "owner-token",
           rsUrl: "http://localhost.invalid",
@@ -938,6 +943,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       ownerToken: "owner-token",
       rsUrl: "http://localhost.invalid",
@@ -986,6 +992,7 @@ test("connector stderr progress and retained diagnostics redact secret and proxy
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       onProgress: (message) => progress.push(message),
       ownerToken: "owner-token",
@@ -1024,33 +1031,39 @@ test("connector stderr progress and retained diagnostics redact secret and proxy
   });
 
   try {
-    await registerManifest(`http://localhost:${server.asPort}`, {
-      ...BACKGROUND_SAFE_MANIFEST,
-      capabilities: {
-        refresh_policy: {
-          background_safe: true,
-          interaction_posture: "none",
-          rationale: "Test fixture for stderr redaction coverage.",
-          recommended_interval_seconds: 60,
-          recommended_mode: "automatic",
-        },
-      },
-      connector_id: "stderr-server-test",
-      connector_key: "stderr-server-test",
-      display_name: "Stderr server test",
-      manifest_uri: "https://registry.pdpp.dev/connectors/stderr-server-test",
-      protocol_version: "0.1.0",
-      streams: [
+    await registerManifest(
+      `http://localhost:${server.asPort}`,
+      withFixtureSourceDeclaration(
         {
-          name: "items",
-          primary_key: ["id"],
-          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-          selection: { fields: true, resources: true },
-          semantics: "mutable_state",
+          ...BACKGROUND_SAFE_MANIFEST,
+          capabilities: {
+            refresh_policy: {
+              background_safe: true,
+              interaction_posture: "none",
+              rationale: "Test fixture for stderr redaction coverage.",
+              recommended_interval_seconds: 60,
+              recommended_mode: "automatic",
+            },
+          },
+          connector_id: "stderr-server-test",
+          connector_key: "stderr-server-test",
+          display_name: "Stderr server test",
+          manifest_uri: "https://registry.pdpp.dev/connectors/stderr-server-test",
+          protocol_version: "0.1.0",
+          streams: [
+            {
+              name: "items",
+              primary_key: ["id"],
+              schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+              selection: { fields: true, resources: true },
+              semantics: "mutable_state",
+            },
+          ],
+          version: "0.1.0",
         },
-      ],
-      version: "0.1.0",
-    });
+        { sourceId: "https://registry.pdpp.dev/connectors/stderr-server-test" }
+      )
+    );
     await registerFixtureConnectorInstance({
       connectorId: "stderr-server-test",
       connectorInstanceId: "cin_stderr_server",
@@ -1098,6 +1111,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
     PDPP_CAPTURE_ON_FAILURE: "1",
     PDPP_CAPTURE_ROOT_DIR: "/captures",
     PDPP_FORCE_CONTAINER: "1",
+    PDPP_BLOB_UPLOAD_TOKEN: "stale-parent-blob-token",
     PDPP_OWNER_TOKEN: "stale-parent-owner-token",
     PDPP_RUN_ID: "stale-parent-run-id",
     PDPP_TRACE: "1",
@@ -1111,6 +1125,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
     "PDPP_CONNECTOR_ID",
     "PDPP_CONNECTOR_INSTANCE_ID",
     "PDPP_OWNER_TOKEN",
+    "PDPP_BLOB_UPLOAD_TOKEN",
     "PDPP_RS_URL",
     "PDPP_REFERENCE_BASE_URL",
     "PDPP_RUN_ID",
@@ -1146,6 +1161,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
           connectorId: "env-isolation-test",
           connectorInstanceId: "cin_env_isolation",
           connectorPath,
+          installedConnectorKeys: [],
           manifest: {
             ...BACKGROUND_SAFE_MANIFEST,
             setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
@@ -1182,10 +1198,12 @@ test("connector children receive run-scoped capabilities without unrelated paren
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: {
         ...BACKGROUND_SAFE_MANIFEST,
         setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
       },
+      blobUploadToken: "run-scoped-blob-token",
       ownerToken: "run-scoped-owner-token",
       rsUrl: "http://127.0.0.1:7663",
       staticSecretEnv: {
@@ -1211,7 +1229,11 @@ test("connector children receive run-scoped capabilities without unrelated paren
       PDPP_CAPTURE_ON_FAILURE: "1",
       PDPP_CAPTURE_ROOT_DIR: "/captures",
       PDPP_FORCE_CONTAINER: "1",
-      PDPP_OWNER_TOKEN: "run-scoped-owner-token",
+      // The child holds the run-scoped blob credential and never the owner
+      // bearer, neither the runtime's nor a stale one from the parent env.
+      // Older connectors read the same credential under the old name.
+      PDPP_BLOB_UPLOAD_TOKEN: "run-scoped-blob-token",
+      PDPP_OWNER_TOKEN: "run-scoped-blob-token",
       PDPP_REFERENCE_BASE_URL: null,
       PDPP_RS_URL: "http://127.0.0.1:7663",
       PDPP_RUN_ID: null,
@@ -1271,7 +1293,13 @@ test("a store row suppresses credentials_required on the scheduled path (and its
             connectorInstanceId: "cin_github_test",
             connectorPath,
             intervalMs: 60_000,
-            manifest: BACKGROUND_SAFE_MANIFEST,
+            manifest: {
+              ...BACKGROUND_SAFE_MANIFEST,
+              capabilities: {
+                ...BACKGROUND_SAFE_MANIFEST.capabilities,
+                human_interaction: ["credentials"],
+              },
+            },
             ownerSubjectId: "scheduler_creds_required_user",
             ownerToken,
           },

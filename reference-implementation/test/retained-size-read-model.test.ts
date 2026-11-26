@@ -541,7 +541,7 @@ test("ref.dataset.summary.streams: connector_id query forwards as connectorId fi
     },
     {
       computed_at: "2026-05-19T12:00:00.000Z",
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       consent_time_field: null,
       dirty_record_time_bounds: false,
       earliest_ingested_at: null,

@@ -28,6 +28,7 @@
  */
 
 import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import {
   deriveSourceDisplayNameFallback,
   formatConnectorNameForDisplay,
@@ -557,12 +558,12 @@ function listKindForDisplayName(displayName: string, kind: string): string | nul
   }
   // Whole-label containment alone reads the owner's own name for a connection
   // as unrelated to the connector whenever the manifest spells the product more
-  // fully than he does. `peregrine Codex` does not contain `OpenAI Codex CLI`,
-  // so /sources rendered "peregrine Codex OpenAI Codex CLI" — the connector
+  // fully than he does. `workstation Codex` does not contain `OpenAI Codex CLI`,
+  // so /sources rendered "workstation Codex OpenAI Codex CLI" — the connector
   // named twice, once in his words and once in the registry's.
   //
   // Matching on any MEANINGFUL word fixes that without hiding a kind the name
-  // genuinely omits: `peregrine` shares no word with `Signal Desktop`, so that
+  // genuinely omits: `workstation` shares no word with `Signal Desktop`, so that
   // connection still gets its kind and stays legible.
   const displayWords = new Set(display.split(" "));
   const kindWords = kindLabel.split(" ").filter((word) => word.length > 2 && !GENERIC_KIND_WORDS.has(word));
@@ -593,7 +594,11 @@ function sourceScopeForSummary(summary: RefConnectorSummary, revoked: boolean): 
 
 export function toSourceInstanceView(
   summary: RefConnectorSummary,
-  options: { fallbackDisambiguator?: string | null; manifests?: readonly SourceManifestLike[] } = {}
+  options: {
+    connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+    fallbackDisambiguator?: string | null;
+    manifests?: readonly SourceManifestLike[];
+  } = {}
 ): SourceInstanceView {
   const connectorId = summary.connector_id;
   const connectionId = summary.connection_id;
@@ -617,7 +622,10 @@ export function toSourceInstanceView(
   const collectionFactsByStream = new Map(
     [...indexCollectionReportByStream(summary.collection_report)].map(([stream, entry]) => [
       stream,
-      formatStreamCollectionFacts(entry, { connectorNotInstalled }),
+      formatStreamCollectionFacts(entry, {
+        connectorNotInstalled,
+        coverageAsOf: summary.coverage_as_of ?? null,
+      }),
     ])
   );
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
@@ -727,7 +735,7 @@ export function toSourceInstanceView(
     connectorNotInstalled,
     detailHref: sourceDetailHrefFor(routeId, summary),
     displayName,
-    icon: manifest?.icon ?? null,
+    icon: options.connectorIcons?.[connectorId] ?? manifest?.icon ?? null,
     id: routeId,
     sourceScope,
     isLocalDevicePush,
@@ -874,7 +882,10 @@ export function collapseSetupFailedSources(instances: readonly SourceInstanceVie
  */
 export function toSourcesView(
   summaries: RefConnectorSummary[],
-  options: { manifests?: readonly SourceManifestLike[] } = {}
+  options: {
+    connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+    manifests?: readonly SourceManifestLike[];
+  } = {}
 ): SourceInstanceView[] {
   const visibleSummaries = summaries;
   const fallbackCountByConnector = new Map<string, number>();

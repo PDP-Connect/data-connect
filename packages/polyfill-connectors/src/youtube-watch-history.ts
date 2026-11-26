@@ -4,13 +4,13 @@
 /**
  * Shared parser for the Google Takeout "YouTube and YouTube Music" watch
  * history export (watch-history.json). Two connectors read the exact same
- * file format for the exact same reason to change: `google_takeout`, which
+ * file format for the exact same reason to change: `google-takeout`, which
  * reads it as one stream among several inside a general Takeout archive,
  * and `youtube`, which reads it as its own dedicated manual import (D9 in
  * docs/migration/connector-cutover/CONTRACTS.md). A change to Google's
  * export shape is one edit here, not two connectors drifting independently.
  *
- * Moved out of connectors/google_takeout/parsers.ts (see git history for
+ * Moved out of connectors/google-takeout/parsers.ts (see git history for
  * the pre-extraction version) with behavior preserved exactly: same hash
  * derivation, same field mapping, same null-on-missing-timestamp rule.
  */

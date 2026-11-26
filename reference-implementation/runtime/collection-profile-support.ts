@@ -1,0 +1,103 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Admission of a manifest's Collection Profile declaration, shared by the
+// registration gate (server/connector-manifest-validation.ts) and the run
+// path (runtime/index.ts) so both apply one rule set.
+//
+// Normative source: data-connectors docs spec sections 3.4 (protocol_version
+// and capabilities) and 3.8 (diagnostic_descriptors). A manifest that declares
+// diagnostic_descriptors or OBSERVATION declares protocol_version 0.2.0.
+
+import {
+  COLLECTION_PROFILE_VERSIONS,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
+  collectionProfileDeclarationError,
+  OBSERVATION_CAPABILITY,
+  STREAM_EVIDENCE_CAPABILITY,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
+import { RUNTIME_BINDING_SUPPORT } from "./binding-declarations.ts";
+import { type DiagnosticDescriptors, ObservationContractError, validateDiagnosticDescriptors } from "./observations.ts";
+
+const sorted = <T>(values: Iterable<T>): readonly T[] => Object.freeze([...values].sort());
+
+/**
+ * What the runtime supplies for `runtime_requirements.bindings`, derived from
+ * `RUNTIME_BINDING_SUPPORT`, the set placement checks a manifest against. This
+ * is a view of that set and holds no list of its own, so the document served to
+ * the owner cannot disagree with what the runtime refuses or places.
+ */
+const BINDING_SUPPORT_DOCUMENT = Object.freeze({
+  constraint_kinds: sorted(RUNTIME_BINDING_SUPPORT.constraintKinds),
+  features: sorted(RUNTIME_BINDING_SUPPORT.features),
+  interface_versions: Object.freeze(
+    Object.fromEntries(
+      [...RUNTIME_BINDING_SUPPORT.interfaceVersions]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([kind, versions]) => [kind, sorted(versions)])
+    )
+  ),
+  kinds: sorted(RUNTIME_BINDING_SUPPORT.kinds),
+});
+
+/** Implemented wire features, with outstanding full-profile obligations disclosed. */
+export const REFERENCE_COLLECTION_PROFILE_SUPPORT = Object.freeze({
+  bindings: BINDING_SUPPORT_DOCUMENT,
+  compatible_protocol_versions: Object.freeze([...COLLECTION_PROFILE_VERSIONS]),
+  conformance: Object.freeze({ outstanding: Object.freeze(["binding_authority"]), status: "partial" }),
+  protocol_capabilities: Object.freeze([DETAIL_COVERAGE_KEY_SETS_CAPABILITY, OBSERVATION_CAPABILITY, HOST_BLOB_CAPABILITY, STREAM_EVIDENCE_CAPABILITY]),
+  protocol_version: "0.2.0",
+});
+
+/**
+ * `failure_reason` of a run refused before spawn because the manifest's
+ * Collection Profile declaration or required capabilities cannot be honored
+ * (Section 3.4: the runtime must not start that connector).
+ */
+export const PROTOCOL_CAPABILITY_UNSUPPORTED_FAILURE_REASON = "protocol_capability_unsupported";
+
+export interface CollectionProfileDeclaration {
+  readonly descriptors: DiagnosticDescriptors;
+  readonly observationDeclared: boolean;
+}
+
+/**
+ * Returns the first problem with the declaration, as a bounded message, or
+ * null when it is admissible. The message names the rule, never the
+ * manifest's value.
+ */
+export function collectionProfileDeclarationProblem(manifest: Record<string, unknown>): string | null {
+  const version = manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version;
+  if (!(COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(version)) {
+    return "protocol_version must be one of 0.1.0, 0.2.0";
+  }
+  const capabilityProblem = collectionProfileDeclarationError(version, manifest.protocol_capabilities, Array.isArray(manifest.streams) && manifest.streams.some((stream: unknown) => stream !== null && typeof stream === "object" && Object.hasOwn(stream, "coverage_stores")));
+  if (capabilityProblem !== null) {
+    return capabilityProblem;
+  }
+  if (manifest.diagnostic_descriptors !== undefined && version !== "0.2.0") {
+    return "diagnostic_descriptors require protocol_version 0.2.0";
+  }
+  try {
+    validateDiagnosticDescriptors(manifest.diagnostic_descriptors);
+  } catch (error) {
+    if (error instanceof ObservationContractError) {
+      return `diagnostic_descriptors rejected: ${error.code}`;
+    }
+    throw error;
+  }
+  return null;
+}
+
+/**
+ * Reads an admitted declaration. Call only after `collectionProfileDeclarationProblem`
+ * returns null; descriptor validation has then already passed.
+ */
+export function readCollectionProfileDeclaration(manifest: Record<string, unknown>): CollectionProfileDeclaration {
+  const capabilities = Array.isArray(manifest.protocol_capabilities) ? manifest.protocol_capabilities : [];
+  return {
+    descriptors: validateDiagnosticDescriptors(manifest.diagnostic_descriptors),
+    observationDeclared: capabilities.includes(OBSERVATION_CAPABILITY),
+  };
+}
