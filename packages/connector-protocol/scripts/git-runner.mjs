@@ -30,11 +30,11 @@ export async function isolatedGitEnv(env = process.env) {
 /**
  * The one way the package artifact scripts and their test fixture start git.
  * The repository is chosen by `cwd` alone; the caller's repository-location
- * variables never reach the child.
+ * variables never reach the child, whether inherited or passed in `env`.
  */
-export async function runGit(args, { cwd, ...options }) {
+export async function runGit(args, { cwd, env, ...options }) {
   if (!cwd) {
     throw new Error("runGit needs a cwd: the repository is chosen by cwd, not by the environment");
   }
-  return execFile("git", args, { ...options, cwd, env: await isolatedGitEnv() });
+  return execFile("git", args, { ...options, cwd, env: await isolatedGitEnv(env) });
 }
