@@ -335,3 +335,41 @@ test("a source that never connected offers only retry and removal", async () => 
   assert.match(text, /Takes Claude Code workstation off your list\. There is nothing to erase\./);
   assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again/);
 });
+
+test("management questions show their sentence once with compact confirmation controls", async () => {
+  for (const state of ["dialog-reset", "dialog-disconnect", "dialog-delete"]) {
+    const document = (await renderDemo(state)).window.document;
+    const panel = document.querySelector('[role="alertdialog"]');
+    assert.ok(panel);
+    assert.match(panel.className, /max-w-xl/);
+    const sentence = panel.querySelector('[id$="-sentence"]')?.textContent;
+    assert.ok(sentence);
+    assert.equal((document.body.textContent ?? "").split(sentence).length, 2, state);
+    const buttons = [...panel.querySelectorAll("button")];
+    assert.equal(buttons.at(-1)?.textContent, "Cancel");
+    assert.equal(buttons.at(-1)?.parentElement, buttons[0]?.parentElement);
+    assert.match(buttons[0]?.parentElement?.className ?? "", /flex-row-reverse/);
+    if (state === "dialog-delete") assert.equal(buttons[0]?.getAttribute("data-variant"), "destructive");
+    if (state === "dialog-disconnect") assert.equal(buttons[0]?.getAttribute("data-variant"), "ghost");
+  }
+});
+
+test("settings show one explanation per choice, a narrow number, and only useful controls", async () => {
+  const document = (await renderDemo("settings-choices")).window.document;
+  const settings = document.querySelector("#configuration");
+  assert.ok(settings);
+  assert.equal((settings.textContent ?? "").split("How many days of messages to copy.").length, 2);
+  assert.match(settings.textContent ?? "", /Last changed/);
+  assert.ok(![...settings.querySelectorAll("button")].some((node) => node.textContent === "Cancel"));
+  assert.match(settings.querySelector('input[type="number"]')?.className ?? "", /!w-28/);
+  const pending = (await renderDemo("settings-question")).window.document.querySelector("#configuration");
+  assert.match(pending?.textContent ?? "", /You gave this reason/);
+  assert.ok([...pending?.querySelectorAll("button") ?? []].some((node) => node.textContent === "Don't change"));
+});
+
+
+test("the unmeasured-completeness practice state uses the shared plain sentence and sync button", async () => {
+  const document = (await renderDemo("unmeasured-completeness")).window.document;
+  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /DataConnect can't yet tell whether it got everything/);
+  assert.ok([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "Sync now"));
+});

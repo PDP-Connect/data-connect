@@ -101,6 +101,7 @@ function ConfigEditor({
   const [reason, setReason] = useState("");
   const [showReasonError, setShowReasonError] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const [dismissed, setDismissed] = useState<number | null>(null);
   /** A revision the server actually persisted, awaiting owner confirmation. */
   const [persisted, setPersisted] = useState<ConfigRevisionWire | null>(null);
   const [stale, setStale] = useState<{ actualRevision: number | null; message: string } | null>(null);
@@ -119,7 +120,8 @@ function ConfigEditor({
   const commit = useMemo(() => describeCommit(changes), [changes]);
   const fieldErrors = useMemo(() => validateDraft(schema, draft), [schema, draft]);
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
-  const pending = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
+  const proposal = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
+  const pending = proposal?.revision === dismissed ? null : proposal;
 
   const resetToSummary = useCallback(() => {
     setStep("edit");
@@ -232,7 +234,7 @@ function ConfigEditor({
       ) : null}
 
       {pending ? (
-        <PendingProposal isPending={isPending} onConfirm={onConfirm} revision={pending} schema={schema} />
+        <PendingProposal isPending={isPending} onConfirm={onConfirm} onDecline={() => { setDismissed(pending.revision); setPersisted(null); }} revision={pending} schema={schema} />
       ) : null}
 
       {step === "summary" ? (
@@ -249,6 +251,7 @@ function ConfigEditor({
           }}
           onChange={(key, value) => setDraft((prev) => setDraftValue(prev, key, value))}
           onReview={() => setStep("review")}
+          edited={changes.length > 0}
           reviewDisabled={changes.length === 0 || hasFieldErrors}
           schema={schema}
         />
@@ -328,6 +331,7 @@ function DraftEditor({
   onChange,
   onReview,
   reviewDisabled,
+  edited,
   schema,
 }: {
   draft: ConfigDraft;
@@ -336,6 +340,7 @@ function DraftEditor({
   onChange: (key: string, value: ConfigValue) => void;
   onReview: () => void;
   reviewDisabled: boolean;
+  edited: boolean;
   schema: NonNullable<ConnectionConfigWire["options_schema"]>;
 }) {
   // `null` here asks only for the schema's grouping and order, not for values:
@@ -347,7 +352,6 @@ function DraftEditor({
       {groups.map(([group, rowsInGroup]) => (
         <fieldset className="flex flex-col gap-3" key={group.id}>
           <legend className="pdpp-body font-medium text-foreground">{group.title}</legend>
-          <p className="pdpp-caption text-muted-foreground">{group.description}</p>
           {rowsInGroup.map((row) => (
             <OptionControl
               error={errors[row.optionKey] ?? null}
@@ -363,9 +367,9 @@ function DraftEditor({
         <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button" variant="ghost">
           Save
         </IcButton>
-        <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
+        {edited ? <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
           Cancel
-        </IcButton>
+        </IcButton> : null}
       </div>
     </div>
   );
@@ -451,7 +455,7 @@ function ValueControl(props: ControlProps) {
 function IntegerControl({ controlId, onChange, option, value }: ControlProps) {
   return (
     <IcInput
-      className="w-40"
+      className="!w-28"
       id={controlId}
       max={option.maximum ?? undefined}
       min={option.minimum ?? undefined}
@@ -603,11 +607,13 @@ function ReviewChanges({
 function PendingProposal({
   isPending,
   onConfirm,
+  onDecline,
   revision,
   schema,
 }: {
   isPending: boolean;
   onConfirm: (revision: number) => void;
+  onDecline: () => void;
   revision: ConfigRevisionWire;
   schema: NonNullable<ConnectionConfigWire["options_schema"]>;
 }) {
@@ -634,11 +640,12 @@ function PendingProposal({
             );
           })}
       </dl>
-      <p className="pdpp-caption text-muted-foreground">Reason: “{revision.source_of_change}”</p>
-      <div>
+      <p className="pdpp-caption text-muted-foreground">{revision.origin === "owner" ? "You" : describeAgentActor(revision.set_by)} gave this reason: “{revision.source_of_change}”</p>
+      <div className="flex gap-2">
         <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
           {isPending ? "Confirming…" : "Confirm"}
         </IcButton>
+        <IcButton disabled={isPending} onClick={onDecline} size="sm" type="button" variant="ghost">Don't change</IcButton>
       </div>
     </div>
   );

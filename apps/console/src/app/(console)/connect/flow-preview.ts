@@ -8,7 +8,7 @@ export const previewStates = {
   launch: ["opening", "could-not-open", "busy", "lost-contact"],
   browser: ["card", "card-plain", "card-error", "opening", "browser-step", "browser-code", "browser-code-rejected", "browser-trouble", "stop-question", "signed-in", "needs-details", "needs-details-rejected", "approve"],
   details: ["empty", "rejected"],
-  status: ["copying", "needs-you", "connected-missing-some", "timed-out", "busy", "stopped", "failed"],
+  status: ["copying", "needs-you", "connected-missing-some", "timed-out", "busy", "stopped", "failed", "never-started"],
   provider: ["plain", "already-have-one", "could-not-start"],
 } as const;
 
@@ -41,9 +41,9 @@ export function previewStatus(state: string): ConnectionSetupStatus {
     account_identity: null, connection_id: flowPreview.connectionId, connector_id: "northwind", created_at: null,
     credential: { captured_at: null, credential_kind: null, present: false, rotated_at: null },
     display_name: "Northwind", health_state: "healthy", import_receipt: null,
-    last_error: state === "failed" ? { reason: "The service could not be reached.", remediation: "Something went wrong while copying your data." } : null,
+    last_error: state === "never-started" ? { reason: "The sign-in page could not be opened.", remediation: "Try again." } : state === "failed" ? { reason: "The service could not be reached.", remediation: "Something went wrong while copying your data." } : null,
     object: "connection_setup_status", pending: copying, running: copying,
-    run: { finished_at: null, records_emitted: null, reported_records_emitted: null, run_id: flowPreview.runId, started_at: null, status: copying ? "active" : "completed" },
+    run: { finished_at: null, records_emitted: null, reported_records_emitted: null, run_id: flowPreview.runId, started_at: null, status: state === "never-started" ? "surface_failed" : copying ? "active" : "completed" },
     setup_kind: "browser_session", setup_material: { captured_at: null, kind: "browser_session", label: "Sign-in", present: false },
     setup_state: copying ? "first_sync_running" : state === "needs-you" ? "awaiting_browser_login" : state === "connected-missing-some" ? "active" : "first_sync_failed",
     status: "active", terminal_setup_disposition: null, updated_at: null,
@@ -52,10 +52,10 @@ export function previewStatus(state: string): ConnectionSetupStatus {
 
 export function previewFacts(state: string): FirstSyncFacts {
   return {
-    kinds: state === "copying" ? null : flowPreview.kinds,
+    kinds: state === "copying" || state === "never-started" ? null : flowPreview.kinds,
     schedule: null,
     signedIn: state === "copying",
-    runStatus: state === "busy" ? "deferred" : undefined,
+    runStatus: state === "never-started" ? "surface_failed" : state === "busy" ? "deferred" : undefined,
     failureReason: state === "timed-out" ? "assistance_timed_out" : state === "stopped" ? "owner_cancelled" : null,
     gaps: state === "connected-missing-some" ? [{ kind: "skip_result", stream: "returns", reason: "unavailable", message: "Northwind could not send returns.", recovery_hint: { retryable: true } }] : [],
   };

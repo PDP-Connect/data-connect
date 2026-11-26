@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Link from "next/link";
+import { buttonVariants } from "@pdpp/brand-react";
 import { findCatalogEntry, readAddSourceCatalog } from "../add/add-source-catalog-read.ts";
 import { addSourceHref, isConnectableEntry } from "../add/add-source-list-model.ts";
 
@@ -12,8 +13,11 @@ export async function AddAnotherAccount({ connectorKey }: { connectorKey: string
   const entry = findCatalogEntry(catalog, connectorKey);
   if (!entry || !isConnectableEntry(entry, catalog.lifecycleFor(entry), catalog.catalogTransientlyUnavailable)) return null;
   return (
-    <Link className="inline-flex min-h-11 items-center text-sm text-primary hover:underline" href={addSourceHref(entry.connectorKey)}>
+    <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+      <p className="pdpp-body">Add another {entry.displayName} account</p>
+      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHref(entry.connectorKey)}>
       Add another {entry.displayName} account
     </Link>
+    </div>
   );
 }

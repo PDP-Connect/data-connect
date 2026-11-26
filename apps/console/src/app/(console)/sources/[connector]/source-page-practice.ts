@@ -10,6 +10,7 @@ import {
 import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
+  "unmeasured-completeness",
 	"unknown-count",
   "atlas",
 	...Array.from({ length: 24 }, (_, i) => `status-${i + 1}`),
@@ -145,7 +146,15 @@ export function buildSourcePracticeModel(
 			source: { ...model.source, collection_report: [entry] },
 		};
 	}
-	if (state === "unknown-count") model.streams = model.streams.map((stream) => stream.name === "messages" ? { ...stream, record_count: 999, count_state: "stale" } : { ...stream, record_count: null, count_state: "known_zero" });
+	if (state === "unmeasured-completeness") {
+    const verdict: NonNullable<ConnectorPageModel["connectionRenderedVerdict"]> = {
+      ...model.source.rendered_verdict!,
+      pill: { label: "Not measured", tone: "grey" },
+      required_actions: [{ affects: ["messages"], audience: "maintainer" as const, kind: "code_fix" as const, cta: "Some data from this source isn't being measured yet", surface: { kind: "maintainer" as const }, satisfied_when: { kind: "none" as const }, terminal: false, urgency: "soon" as const }],
+    };
+    model = { ...model, connectionRenderedVerdict: verdict, source: { ...model.source, last_run: model.source.last_successful_run, owner_state: { ...model.source.owner_state!, resolver: "blocked_maintainer" }, rendered_verdict: verdict } };
+  }
+  if (state === "unknown-count") model.streams = model.streams.map((stream) => stream.name === "messages" ? { ...stream, record_count: 999, count_state: "stale" } : { ...stream, record_count: null, count_state: "known_zero" });
 	if (state.startsWith("settings-")) {
 		const revision: ConfigRevisionWire = {
 			collection_boundary_fingerprint: null,
@@ -165,7 +174,7 @@ export function buildSourcePracticeModel(
 			status: "proposed",
 		};
 		model.configuration = {
-			active_revision: null,
+			active_revision: state === "settings-choices" ? { ...revision, status: "active" } : null,
 			base_epoch: 0,
 			base_revision: 0,
 			connection_id: model.connectionId,

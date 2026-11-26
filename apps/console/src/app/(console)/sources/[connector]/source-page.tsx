@@ -826,6 +826,7 @@ function ConnectorPageView({
   const hasDeviceLocalRemediation = primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const partial = source.collection_report?.some((entry) => typeof entry.collected === "number" && typeof entry.considered === "number" && entry.collected < entry.considered) || gaps.length > 0;
+  const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && typeof entry.collected === "number" && typeof entry.considered === "number" && entry.collected < entry.considered));
   if (hasDeviceLocalRemediation) {
     const device = sourceInstances[0];
     const deviceName = device?.display_name ?? device?.local_binding_name;
@@ -833,10 +834,10 @@ function ConnectorPageView({
     stateSentence = { text: `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.`, slot: null };
   } else if (running) {
     stateSentence = { text: "Syncing now.", slot: null };
-  } else if (partial && [19, 20, 21].includes(sourceStatus.row)) {
+  } else if (partial && markedMissing && [19, 20, 21].includes(sourceStatus.row)) {
     const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
     stateSentence = { text: `Synced${when ? ` ${when}` : ""}. Some of it didn't come.`, slot: null };
-  } else if ([14, 15, 16].includes(sourceStatus.row) && !partial) {
+  } else if (([14, 15, 16].includes(sourceStatus.row) && !markedMissing) || (partial && !markedMissing && [19, 20, 21].includes(sourceStatus.row))) {
     stateSentence = { text: `${displayName} synced, but DataConnect could not copy some of it.`, slot: null };
   } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
     stateSentence = { text: `Something stopped ${displayName} from syncing.`, slot: null };
@@ -886,7 +887,7 @@ function ConnectorPageView({
 
       {revoked && !setupFailed ? <RevokedConnectionSection revokedAt={overview.revokedAt ?? null} /> : null}
 
-      {!/synced|syncing|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="mb-6 text-sm text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
+      {!/synced|syncing|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="pdpp-body mb-6 text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
       <Suspense fallback={null}>
         <SourceUpdateSlot demoModel={updateDemo} displayName={displayName} updates={updates} version={null} />
       </Suspense>
@@ -935,7 +936,7 @@ function ConnectorPageView({
             />
           </Section>
 
-      <p className="mb-8 text-sm text-muted-foreground"><Link href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? "?demo=technical" : ""}`}>Technical details</Link></p>
+      <p className="mb-8 text-sm text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? "?demo=technical" : ""}`}>Technical details</Link></p>
     </RecordroomShellWithPalette>
   );
 }
@@ -953,15 +954,16 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
   return <>
     {present.length ? <DataList>{present.map((stream) => {
       const report = source.collection_report?.find((entry) => entry.stream === stream.name);
-      const partial = report && typeof report.collected === "number" && typeof report.considered === "number" && report.collected < report.considered;
-      const more = report?.forward_disposition === "resumable";
+      const gap = gaps.find((item) => item.stream === stream.name);
+      const partial = Boolean(gap) || (report && typeof report.collected === "number" && typeof report.considered === "number" && report.collected < report.considered);
+      const more = report ? report.forward_disposition === "resumable" : gap?.recovery_hint?.retryable === true;
       const recordCount = knownStreamRecordCount(stream);
       const count = recordCount === null ? null : `${recordCount.toLocaleString()} records`;
       const sentence = partial
         ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : `${count ? `${count}. ` : ""}Some could not be copied.`
         : count;
-      const newest = recordDateLabel(stream.last_updated);
-      const cause = gaps.find((gap) => gap.stream === stream.name)?.message;
+      const newest = recordCount === 0 ? null : recordDateLabel(stream.last_updated);
+      const cause = gap?.message;
       return <li key={stream.name}>
         <Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
           <span className="flex min-w-0 flex-col gap-1">
@@ -1007,7 +1009,7 @@ async function OtherAccounts({ connectionId, connectorId }: { connectionId: stri
 
 function OtherAccountsLine({ accounts }: { accounts: readonly { connectionId: string; displayName: string }[] }) {
   return <p className="mb-6 text-sm text-muted-foreground">Also connected: {accounts.map((account, index) => <span key={account.connectionId}>
-    {index ? ", " : ""}<Link href={`/sources/${encodeURIComponent(account.connectionId)}`}>{account.displayName}</Link>
+    {index ? ", " : ""}<Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(account.connectionId)}`}>{account.displayName}</Link>
   </span>)}</p>;
 }
 
@@ -1681,6 +1683,7 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
 function syncFailureSentence(reason: string | null): string | null {
   if (reason === "assistance_timed_out") return "The sign-in was not finished. Start again when you are ready.";
   if (reason === "local collector outbox has dead-lettered rows") return "The computer that holds this data could not send some records.";
+  if (reason === "provider_unavailable") return "The service could not be reached. Try again later.";
   if (reason === "credential_invalid" || reason === "credentials_invalid") return "Sign in again to keep syncing.";
   return null;
 }
@@ -1802,14 +1805,14 @@ function ConnectionIdentityLine({
  */
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
-    <div className="mt-6 flex flex-col items-start gap-2">
-      <form action={pauseConnectionAction}>
+    <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+      <div><p className="pdpp-body">Pause syncing</p><p className="pdpp-body text-muted-foreground">Stops checking for now. Your records and sign-in are kept.</p></div>
+      <form className="shrink-0" action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-pause-connection" size="sm" type="submit" variant="ghost">
           Pause syncing
         </IcButton>
       </form>
-      <p className="pdpp-caption text-muted-foreground">Stops checking for now. Your records and sign-in are kept.</p>
     </div>
   );
 }
@@ -1898,7 +1901,7 @@ export function ScheduleSummary({ displayName, schedule, scheduleError, sourceIn
   const deviceName = device?.display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);
   return <Section title="Schedule" action={<Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
-    {text ? <p className="text-sm text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
+    {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
     {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}
     {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}
   </Section>;
@@ -1917,8 +1920,9 @@ function CredentialRepairLinks({
 }) {
   if (setupFailed) return null;
   return storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate ? (
-    <div className="mt-4 flex flex-col gap-2">
-      <Link className="text-sm text-primary hover:underline" href={storedCredentialUpdateHref}>Update sign-in details</Link>
+    <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+      <p className="pdpp-body">Update sign-in details</p>
+      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={storedCredentialUpdateHref}>Update sign-in details</Link>
     </div>
   ) : null;
 }

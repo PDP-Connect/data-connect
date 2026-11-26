@@ -93,26 +93,27 @@ function ActionRow({
 	sentence,
 	onClick,
 	children,
+  open,
+  destructive = false,
 }: {
+  open: boolean;
+  destructive?: boolean;
 	label: string;
 	sentence: string;
 	onClick: () => void;
 	children?: ReactNode;
 }) {
 	return (
-		<div className="flex flex-col items-start gap-2">
-			<IcButton
-				className="text-destructive"
-				onClick={onClick}
-				size="sm"
-				type="button"
-				variant="ghost"
-			>
-				{label}
-			</IcButton>
-			<p className="pdpp-caption text-muted-foreground">{sentence}</p>
-			{children}
-		</div>
+		<div>
+      {!open ? <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+        <div className="min-w-0">
+          <p className={destructive ? "pdpp-body text-destructive" : "pdpp-body"}>{label}</p>
+          <p className="pdpp-body text-muted-foreground">{sentence}</p>
+        </div>
+        <IcButton className="shrink-0 !whitespace-normal text-left" onClick={onClick} size="sm" type="button" variant={destructive ? "destructive" : "ghost"}>{label}</IcButton>
+      </div> : null}
+      {children}
+    </div>
 	);
 }
 
@@ -132,7 +133,7 @@ function ActionQuestion({
 		<div
 			aria-describedby={`${id}-sentence`}
 			aria-labelledby={`${id}-title`}
-			className="grid w-full gap-3 rounded-md border border-border p-4"
+			className="grid w-full max-w-xl gap-3 rounded-md border border-border p-4"
 			onKeyDown={(event) => {
 				if (event.key === "Escape") onCancel();
 			}}
@@ -146,17 +147,15 @@ function ActionQuestion({
 				{sentence}
 			</p>
 			{children}
-			<IcButton
-				autoFocus
-				onClick={onCancel}
-				size="sm"
-				type="button"
-				variant="ghost"
-			>
-				Cancel
-			</IcButton>
 		</div>
 	);
+}
+
+function QuestionButtons({ children, onCancel }: { children: ReactNode; onCancel: () => void }) {
+  return <div className="flex flex-row-reverse justify-start gap-2">
+    {children}
+    <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">Cancel</IcButton>
+  </div>;
 }
 
 function ResetSourceForm({
@@ -178,14 +177,14 @@ function ResetSourceForm({
 	const label = "Copy everything again";
 	const sentence = sourceRemovalCopy.reset(displayName);
 	return (
-		<ActionRow label={label} sentence={sentence} onClick={() => setOpen(true)}>
+		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
 			{open ? (
 				<ActionQuestion
 					label={label}
 					sentence={sentence}
 					onCancel={() => setOpen(false)}
 				>
-					<IcButton
+					<QuestionButtons onCancel={() => setOpen(false)}><IcButton
 						disabled={isPending}
 						onClick={() => {
 							setMessage(null);
@@ -204,10 +203,10 @@ function ResetSourceForm({
 						}}
 						size="sm"
 						type="button"
-						variant="destructive"
+						variant="ghost"
 					>
 						{isPending ? "Starting…" : label}
-					</IcButton>
+					</IcButton></QuestionButtons>
 				</ActionQuestion>
 			) : null}
 			{message ? (
@@ -230,7 +229,7 @@ function RevokeForm({
 	const label = "Disconnect and keep the records";
 	const sentence = sourceRemovalCopy.disconnect(displayName);
 	return (
-		<ActionRow label={label} sentence={sentence} onClick={() => setOpen(true)}>
+		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
 			{open ? (
 				<ActionQuestion
 					label={label}
@@ -240,9 +239,9 @@ function RevokeForm({
 					<form action={revokeConnectionAction}>
 						<input name="connection_id" type="hidden" value={connectionId} />
 						<input name="confirm_revoke" type="hidden" value="yes" />
-						<IcButton size="sm" type="submit" variant="destructive">
+						<QuestionButtons onCancel={() => setOpen(false)}><IcButton size="sm" type="submit" variant="ghost">
 							{label}
-						</IcButton>
+						</IcButton></QuestionButtons>
 					</form>
 				</ActionQuestion>
 			) : null}
@@ -273,7 +272,7 @@ function DeleteForm({
 		setTyped("");
 	};
 	return (
-		<ActionRow label={label} sentence={sentence} onClick={() => setOpen(true)}>
+		<ActionRow label={label} sentence={sentence} open={open} destructive={!neverConnected} onClick={() => setOpen(true)}>
 			{open ? (
 				<ActionQuestion label={label} sentence={sentence} onCancel={close}>
 					<form action={deleteConnectionAction} className="grid gap-3">
@@ -300,14 +299,14 @@ function DeleteForm({
 								value={typed}
 							/>
 						</label> : null}
-						<IcButton
+						<QuestionButtons onCancel={close}><IcButton
 							disabled={!confirmed}
 							size="sm"
 							type="submit"
 							variant="destructive"
 						>
 							{activeRunId ? "Stop the sync and delete" : label}
-						</IcButton>
+						</IcButton></QuestionButtons>
 					</form>
 				</ActionQuestion>
 			) : null}

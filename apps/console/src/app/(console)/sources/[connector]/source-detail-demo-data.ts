@@ -628,7 +628,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
   const recentRuns = row === 11 && sourceRun
     ? [{ ...model.recentRuns[0]!, event_count: sourceRun.event_count, failure_reason: null, first_at: sourceRun.first_at, last_at: sourceRun.last_at, run_id: sourceRun.run_id, status: sourceRun.status }]
     : row === 12
-      ? model.recentRuns
+      ? model.recentRuns.map((run) => ({ ...run, failure_reason: "provider_unavailable" }))
       : [];
   const health = source.connection_health && !includePendingDetails
     ? { ...source.connection_health, conditions: [], detail_gap_backlog: null }

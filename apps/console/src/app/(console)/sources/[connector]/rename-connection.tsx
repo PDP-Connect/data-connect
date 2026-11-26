@@ -90,7 +90,9 @@ export function RenameConnection({ connectionId, currentLabel, typeName }: Props
 
   if (!editing) {
     return (
-      <span className="inline-flex flex-col items-start gap-1">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+        <p className="pdpp-body">Rename</p>
+        <div className="shrink-0">
         <IcButton
           aria-label="Rename"
           className="relative before:absolute before:inset-[-10px] before:content-['']"
@@ -103,7 +105,8 @@ export function RenameConnection({ connectionId, currentLabel, typeName }: Props
           Rename
         </IcButton>
         {toast ? <Toast message={toast.message} tone={toast.tone} /> : null}
-      </span>
+        </div>
+      </div>
     );
   }
 

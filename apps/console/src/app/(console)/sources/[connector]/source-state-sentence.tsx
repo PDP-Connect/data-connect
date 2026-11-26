@@ -23,10 +23,10 @@ export function SourceStateSentenceText({
       data-status-row={status.row}
       data-testid="source-state-sentence"
     >
-      <SourceStatusText className="text-base" status={{ ...status, words: statusSentence }} />
-      {secondText ? <><span> </span><span className="block text-muted-foreground text-sm">{secondText}</span></> : null}
+      <SourceStatusText className="!text-[length:var(--text-body)]" status={{ ...status, words: statusSentence }} />
+      {secondText ? <><span> </span><span className="block pdpp-body text-muted-foreground">{secondText}</span></> : null}
       {sentence.slot === "what_is_kept_and_what_set_up_again_does" ? (
-        <span className="block text-muted-foreground text-sm">
+        <span className="block pdpp-body text-muted-foreground">
           Future syncing stops. Your records stay. Set up again starts a new setup for this data source.
         </span>
       ) : null}

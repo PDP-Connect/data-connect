@@ -1247,7 +1247,7 @@ function OutboxStallRemediationPanel({
             ) : (
               <div className="flex min-w-0 items-center gap-2 py-1">
                 <code
-                  className={plain ? "pdpp-caption min-w-0 flex-1 break-all whitespace-pre-wrap font-mono text-foreground" : "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"}
+                  className={plain ? "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-foreground !break-normal" : "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"}
                   data-testid="diagnostics-outbox-remediation-command"
                 >
                   {step.command}

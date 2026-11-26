@@ -29,7 +29,7 @@ export default async function TechnicalPage({
 			: await loadConnectorPageModel(decodeURIComponent(connector));
 	return (
 		<RecordroomShellWithPalette>
-			<PageHeader title={`Technical details for ${model.displayName}`} />
+			<PageHeader breadcrumbs={[{ href: "/sources", label: "Data sources" }, { href: `/sources/${encodeURIComponent(model.connectionId)}`, label: model.displayName }, { href: `/sources/${encodeURIComponent(model.connectionId)}/technical`, label: "Technical details" }]} title={`Technical details for ${model.displayName}`} />
 			<p className="mb-4 text-muted-foreground">
 				Ids, logs and measurements for whoever is helping you with a problem.
 			</p>

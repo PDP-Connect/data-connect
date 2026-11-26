@@ -78,7 +78,7 @@ const REPAIR_CREDENTIAL_ACTION_LINKS_TO_REPAIR =
 const RESUME_ACTION_POSTS_RESUME = /statusAction\?\.kind === "resume"\) \{\s*return <ResumeConnectionButton/;
 const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused \|\| archived \|\| oneTime\) && overview\.connectionStatus === "active"/;
 const PAUSE_CONNECTION_SECTION_POSTS_PAUSE =
-  /function PauseConnectionSection\([\s\S]{0,600}<form action=\{pauseConnectionAction\}>/;
+  /function PauseConnectionSection\([\s\S]{0,600}<form[^>]*action=\{pauseConnectionAction\}>/;
 
 test("detail-page rendered reauth routes and labels by the server-owned action surface", async () => {
   const src = await readFile(DETAIL_PAGE, "utf8");

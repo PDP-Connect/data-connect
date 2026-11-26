@@ -64,11 +64,11 @@ function SourceUpdateSection({ displayName, model }: { displayName: string; mode
   const [updated, setUpdated] = useState(false);
   return (
     <div className="mb-6">
-      <p className="text-sm text-muted-foreground">
+      <p className="pdpp-body text-muted-foreground">
         An update for {displayName} is ready.
       </p>
       {model.otherSources.length > 0 ? (
-        <p className="mt-1 text-sm text-muted-foreground">It also updates {formatNames(model.otherSources)}.</p>
+        <p className="pdpp-body mt-1 text-muted-foreground">It also updates {formatNames(model.otherSources)}.</p>
       ) : null}
       <div className="mt-3 flex flex-col items-start gap-2">
         <IcButton
@@ -93,7 +93,7 @@ function SourceUpdateSection({ displayName, model }: { displayName: string; mode
         >
           {pending ? "Updating…" : "Update"}
         </IcButton>
-        {updated ? <span className="text-sm text-muted-foreground">Updated. Refreshing…</span> : null}
+        {updated ? <span className="pdpp-body text-muted-foreground">Updated. Refreshing…</span> : null}
         {error ? (
           <div className="text-sm text-destructive" role="alert">
             <p>{ACTION_ERROR_COPY}</p>
