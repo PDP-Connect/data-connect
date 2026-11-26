@@ -9152,6 +9152,9 @@ export async function startServer(opts: ServerOpts = {}) {
     controller,
     ownerLive: resolveOwnerLive(opts),
     ownerAuthPassword: opts.ownerAuthPassword,
+    // The recovery-code route re-asks for the owner password; it reads the same store and verifier sign-in uses.
+    ownerPasswordVerifierStore: ownerPasswordStore,
+    ownerAuthPasswordVerifier: ownerPasswordVerifier ?? undefined,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
