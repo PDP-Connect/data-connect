@@ -19,6 +19,7 @@ export interface DeviceAttemptStreamFacts {
 
 export interface DeviceAttemptContext {
   readonly manifestFingerprint: string;
+  readonly retiredCoverageDiagnostic: boolean;
   readonly semanticCapabilityIdentity: string;
   readonly streams: Readonly<Record<string, DeviceAttemptStreamFacts>>;
 }

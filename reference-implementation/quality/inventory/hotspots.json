@@ -1,6 +1,6 @@
 {
   "generated_from": {
-    "repo_root": "/home/tnunamak/.tmp/hone-quality-0823/reference-implementation",
+    "repo_root": "reference-implementation",
     "repo_sha": "60612118bfd2171fdccfc0a1dcf29fefd7d88484",
     "window": "6 months ago",
     "cog_threshold": 5,
@@ -1486,15 +1486,6 @@
       "nogo": false
     },
     {
-      "file": "server/run-summary-read-model.ts",
-      "loc": 303,
-      "churn": 4,
-      "cog": 4,
-      "coupling": 0,
-      "score": 20,
-      "nogo": false
-    },
-    {
       "file": "runtime/scheduler-domain-types.ts",
       "loc": 500,
       "churn": 10,
@@ -1644,15 +1635,6 @@
       "churn": 5,
       "cog": 1,
       "coupling": 5,
-      "score": 15,
-      "nogo": false
-    },
-    {
-      "file": "server/aggregate-request-validation.ts",
-      "loc": 371,
-      "churn": 3,
-      "cog": 4,
-      "coupling": 0,
       "score": 15,
       "nogo": false
     },
@@ -1999,15 +1981,6 @@
       "nogo": false
     },
     {
-      "file": "server/record-projection-read-model.ts",
-      "loc": 206,
-      "churn": 3,
-      "cog": 2,
-      "coupling": 0,
-      "score": 9,
-      "nogo": false
-    },
-    {
       "file": "server/routes/ref-provider-app-config.ts",
       "loc": 335,
       "churn": 2,
@@ -2278,15 +2251,6 @@
       "nogo": false
     },
     {
-      "file": "server/schema-coercion.ts",
-      "loc": 116,
-      "churn": 3,
-      "cog": 1,
-      "coupling": 2,
-      "score": 7,
-      "nogo": false
-    },
-    {
       "file": "server/search-fanout.ts",
       "loc": 53,
       "churn": 3,
@@ -2373,15 +2337,6 @@
       "churn": 4,
       "cog": 0,
       "coupling": 6,
-      "score": 6,
-      "nogo": false
-    },
-    {
-      "file": "server/comparable-sort.ts",
-      "loc": 125,
-      "churn": 3,
-      "cog": 1,
-      "coupling": 0,
       "score": 6,
       "nogo": false
     },
@@ -2701,15 +2656,6 @@
       "nogo": false
     },
     {
-      "file": "server/aggregate-time-buckets.ts",
-      "loc": 129,
-      "churn": 3,
-      "cog": 0,
-      "coupling": 4,
-      "score": 4,
-      "nogo": false
-    },
-    {
       "file": "server/attention-urgency.ts",
       "loc": 45,
       "churn": 2,
@@ -2724,15 +2670,6 @@
       "churn": 4,
       "cog": 0,
       "coupling": 1,
-      "score": 4,
-      "nogo": false
-    },
-    {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "loc": 161,
-      "churn": 1,
-      "cog": 3,
-      "coupling": 0,
       "score": 4,
       "nogo": false
     },
@@ -3129,15 +3066,6 @@
       "churn": 1,
       "cog": 1,
       "coupling": 2,
-      "score": 2,
-      "nogo": false
-    },
-    {
-      "file": "server/record-aggregation.ts",
-      "loc": 404,
-      "churn": 1,
-      "cog": 1,
-      "coupling": 1,
       "score": 2,
       "nogo": false
     },

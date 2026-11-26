@@ -65,6 +65,12 @@ export const POSTGRES_MIGRATION_LEDGER_TABLE = "storage_migration_ledger";
  */
 export const LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID = "local_device_connector_canonicalization_v1";
 
+/**
+ * Stable id for the run_history device-run provenance repair: device terminal
+ * runs carry `scheduler_managed = false`. Both backends ledger it under this id.
+ */
+export const RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID = "run_history_device_run_provenance_v1";
+
 export type PostgresMigrationStatus = "blocked" | "complete" | "pending" | "running";
 
 export interface PostgresMigrationLedgerRow {

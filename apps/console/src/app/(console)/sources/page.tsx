@@ -36,6 +36,7 @@ import {
 } from "../components/connector-summary-page.tsx";
 import { isPagedRequest, parseConnectorSummaryPageState } from "../components/connector-summary-pager.ts";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
+import { buildConnectorIconMap } from "../lib/connector-icon-map.ts";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
@@ -117,11 +118,16 @@ export default async function RecordsIndexPage({
   }
 
   let manifests: Awaited<ReturnType<typeof listConnectorManifests>>;
+  let connectorIcons: Awaited<ReturnType<typeof buildConnectorIconMap>>;
   let page: Awaited<ReturnType<typeof fetchSourcesPage>>;
   try {
-    const [pageResult, connectorManifests] = await Promise.all([fetchSourcesPage(pageState), listConnectorManifests()]);
+    const [pageResult, connectorManifests] = await Promise.all([
+      fetchSourcesPage(pageState),
+      listConnectorManifests(),
+    ]);
     page = pageResult;
     manifests = connectorManifests;
+    connectorIcons = await buildConnectorIconMap(manifests, []);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -145,7 +151,7 @@ export default async function RecordsIndexPage({
 
   const summaries = [...page.items];
   const runtimeAdvisory: SourcesRuntimeAdvisory | null = buildSourcesRuntimeAdvisory(page.runtime);
-  const instances = toSourcesView(summaries, { manifests });
+  const instances = toSourcesView(summaries, { connectorIcons, manifests });
   // The poller is mounted unconditionally; `running` (derived from any active
   // run) only selects the fast vs. idle cadence. Named `runningCount` to match
   // the records-poller mount invariant.

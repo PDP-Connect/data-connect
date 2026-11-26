@@ -27,13 +27,10 @@ module.exports = webpackRequire
  * `resolveFrom` is the base the bundled module resolves the package from: null
  * for the process cwd (the fixed runtime), or an absolute file path (the
  * build-time `import.meta.url` webpack wrote into the shipped bundle).
- * `predicate` is the roster predicate the module exports: "supported"
- * (isSupportedBrowserCollectorConnector) or "scaffold"
- * (isKnownScaffoldConnector).
  */
 export function writeConsoleServerBundle(
   runtimeDirectory,
-  { predicate = "supported", resolveFrom = null } = {}
+  { resolveFrom = null } = {}
 ) {
   const serverDirectory = join(runtimeDirectory, ".next", "server")
   mkdirSync(join(serverDirectory, "chunks"), { recursive: true })
@@ -57,14 +54,8 @@ exports.modules = {
         throw error
       }
     }
-    const roster = optional("@pdpp/polyfill-connectors/connector-conformance-roster")
     optional("@pdpp/polyfill-connectors/static-secret-credential-capture")
     optional("@pdpp/polyfill-connectors/credential-probe")
-    const ready = roster?.PRODUCTION_READY_CONNECTORS ?? {}
-    const scaffolds = roster?.KNOWN_SCAFFOLD_CONNECTORS ?? []
-    exports.predicate = ${JSON.stringify(predicate)} === "supported"
-      ? connector => Object.hasOwn(ready, connector)
-      : connector => scaffolds.includes(connector)
   },
 }
 `
@@ -72,7 +63,7 @@ exports.modules = {
 }
 
 /**
- * Writes package.json and the three modules the console bundle reads into
+ * Writes package.json and the two modules the console bundle reads into
  * `packageDirectory` (an `@pdpp/polyfill-connectors` directory).
  */
 export function writeConnectorPackageModules(packageDirectory) {
@@ -84,8 +75,6 @@ export function writeConnectorPackageModules(packageDirectory) {
         name: "@pdpp/polyfill-connectors",
         type: "module",
         exports: {
-          "./connector-conformance-roster":
-            "./src/connector-conformance-roster.js",
           "./credential-probe": "./src/credential-probe.js",
           "./static-secret-credential-capture":
             "./src/static-secret-credential-capture.js",
@@ -94,10 +83,6 @@ export function writeConnectorPackageModules(packageDirectory) {
       null,
       2
     )}\n`
-  )
-  writeFileSync(
-    join(packageDirectory, "src", "connector-conformance-roster.js"),
-    'export const PRODUCTION_READY_CONNECTORS = { reddit: { testFile: "reddit.test.ts" } }\nexport const KNOWN_SCAFFOLD_CONNECTORS = ["anthropic"]\n'
   )
   writeFileSync(
     join(packageDirectory, "src", "credential-probe.js"),

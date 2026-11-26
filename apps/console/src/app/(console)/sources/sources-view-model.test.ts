@@ -886,43 +886,43 @@ test("toSourceInstanceView keeps connector type when the source title does not i
   assert.deepEqual(view.passportFields[0], { k: "type", mono: false, value: "Amazon" });
 });
 
-// Observed live on /sources 2026-08-27: "peregrine Codex OpenAI Codex CLI".
-// The owner names a connection in his words ("peregrine Codex"); the manifest
+// Observed live on /sources 2026-08-27: "workstation Codex OpenAI Codex CLI".
+// The owner names a connection in his words ("workstation Codex"); the manifest
 // spells the product more fully ("OpenAI Codex CLI"). Whole-label containment
 // finds no overlap between those two strings and appends the kind, so the page
 // names the same connector twice. Its sibling on the same machine reads
-// correctly only because "peregrine Claude Code" happens to contain "Claude
+// correctly only because "workstation Claude Code" happens to contain "Claude
 // Code" verbatim.
 test("toSourceInstanceView drops the connector type when the title already names it in fewer words", () => {
   const view = toSourceInstanceView(
     summary({
       connector_display_name: "OpenAI Codex CLI",
       connector_id: "codex",
-      display_name: "peregrine Codex",
+      display_name: "workstation Codex",
     })
   );
 
-  assert.equal(view.displayName, "peregrine Codex");
+  assert.equal(view.displayName, "workstation Codex");
   assert.equal(
     view.listKind,
     null,
-    'appending here renders "peregrine Codex OpenAI Codex CLI" — the connector named twice'
+    'appending here renders "workstation Codex OpenAI Codex CLI" — the connector named twice'
   );
 });
 
 // The other half of the same rule: suppressing on a shared word must not hide a
-// kind the title genuinely omits. "peregrine" alone identifies a machine, not a
+// kind the title genuinely omits. "workstation" alone identifies a machine, not a
 // connector, so the kind is the only thing making the row legible.
 test("toSourceInstanceView keeps the connector type when the title shares no word with it", () => {
   const view = toSourceInstanceView(
     summary({
       connector_display_name: "Signal Desktop",
       connector_id: "signal",
-      display_name: "peregrine",
+      display_name: "workstation",
     })
   );
 
-  assert.equal(view.displayName, "peregrine");
+  assert.equal(view.displayName, "workstation");
   assert.equal(view.listKind, "Signal Desktop", "a bare hostname needs its connector type to mean anything");
 });
 

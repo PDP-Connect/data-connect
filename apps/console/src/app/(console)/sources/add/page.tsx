@@ -11,10 +11,12 @@ import { existingSourcesByConnectorCatalog } from "../../components/existing-sou
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
 import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
-import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../lib/owner-token.ts";
+import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
+import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
 import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
@@ -44,51 +46,45 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   const params = await searchParams;
   let catalog: ConnectorCatalogEntry[] = [];
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
+  let existingSourcesTruncated = false;
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
   let installCatalogBusySnapshotId: string | null = null;
   let installCatalogTransientlyUnavailable = false;
-  let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
+  let installSkippedEntries = 0;
+  let localSources: NonNullable<ConnectorInstallSnapshot["localSources"]> = [];
   let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./add-source-demo-data.ts");
     ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
   } else {
     try {
-      const installSnapshotPromise = getConnectorInstallSnapshot().catch((err: unknown) => {
-        // The console can remain usable against a pre-install-route reference
-        // server during the RI rollout. No lifecycle claim is shown in that
-        // case; other failures remain visible to the existing page error path.
-        if (err instanceof ResourceServerHttpError && err.status === 404) {
-          return null;
-        }
-        return Promise.reject(err);
-      });
+      // `null` means a reference server that predates the install routes
+      // (during the RI rollout): no lifecycle claim is shown. Other failures
+      // remain visible to the existing page error path.
       const [manifests, templates, installSnapshot] = await Promise.all([
         listConnectorManifests(),
         listOwnerConnectorTemplates(),
-        installSnapshotPromise,
+        getConnectorInstallSnapshot(),
       ]);
-      connectorIcons = Object.fromEntries(
-        manifests.flatMap((manifest) => [
-          [manifest.connector_id, manifest.icon] as const,
-          ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-        ])
-      );
-      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
+      connectorIcons = await buildConnectorIconMap(manifests, templates);
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []).map((entry) => ({
+        ...entry,
+        icon: catalogEntryIcon(entry, connectorIcons),
+      }));
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;
       installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
+      installSkippedEntries = installSnapshot?.skippedEntries ?? 0;
       installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
       localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
-      // EXACT per-connector existing-sources lookup — one `GET
-      // /_ref/connections?connector_id=` call per catalog entry (bounded by
-      // the registered connector-type catalog size, a few dozen, never by
-      // fleet size). Replaces the rejected one-arbitrary-fleet-page
-      // `complete`/`existingSourcesIncomplete` stopgap entirely: each
-      // connector's existing-sources list is exact by construction, so
-      // there is no incompleteness signal left to surface.
-      existingSourcesByConnector = await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey));
+      // Existing sources come from one walk of the owner's connections:
+      // ceil(owner connections / 100) sequential `GET /_ref/connectors`
+      // requests, then a selection by catalog connector. The cost follows the
+      // owner's connection count, not the catalog size. A refused continuation
+      // page leaves the rows read so far and sets `truncated`.
+      ({ byConnector: existingSourcesByConnector, truncated: existingSourcesTruncated } =
+        await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey)));
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
@@ -127,6 +123,14 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   return (
     <RecordroomShellWithPalette>
       <AddSourceHeader />
+      {existingSourcesTruncated ? (
+        <div className="rr-s-toast" data-tone="warning" role="status" style={{ marginBottom: 12 }}>
+          <p>
+            Some existing sources could not be loaded, so this list may be missing some of them. Check Sources before
+            adding another copy.
+          </p>
+        </div>
+      ) : null}
       <SourceSetupCatalog
         action={dashboardRoutes.section.addSource}
         catalog={catalog}
@@ -134,6 +138,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         installCatalogBusySnapshotId={installCatalogBusySnapshotId}
         installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
         installLifecycleByConnector={installLifecycleByConnector}
+        installSkippedEntries={installSkippedEntries}
         query={sourceQuery}
       />
       <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />

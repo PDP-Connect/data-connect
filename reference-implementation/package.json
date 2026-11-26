@@ -34,7 +34,12 @@
     "./operations/rs-records-delete": "./operations/rs-records-delete/index.ts",
     "./operations/rs-records-ingest": "./operations/rs-records-ingest/index.ts",
     "./operations/rs-protected-resource-metadata": "./operations/rs-protected-resource-metadata/index.ts",
-    "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts"
+    "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts",
+    "./reachability-projection": "./server/reachability/projection.ts",
+    "./reachability-console-proof": "./server/reachability/console-proof.ts",
+    "./reachability-service-proof": "./server/reachability/service-proof.ts",
+    "./reachability-service-challenge": "./server/reachability/service-challenge.ts",
+    "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {
     "pdpp": "./cli/index.ts"
@@ -48,7 +53,6 @@
     "dev:trace-gc": "sh -c 'mkdir -p ../tmp/node-reports && node --env-file-if-exists=../.env.local --import ./server/dev-env-defaults.ts --report-on-fatalerror --report-uncaught-exception --report-exclude-env --report-exclude-network --report-directory=../tmp/node-reports --trace-gc --trace-gc-verbose server/index.ts'",
     "example-client": "node examples/third-party-app/server.ts",
     "fix": "ultracite fix",
-    "generate:connector-registry": "node --experimental-strip-types scripts/generate-connector-registry.ts",
     "provision:test-database": "node --experimental-strip-types scripts/provision-test-database.ts",
     "server": "sh -c 'PDPP_REFERENCE_OPERATIONAL_DEFAULTS=${PDPP_REFERENCE_OPERATIONAL_DEFAULTS:-1} node --env-file-if-exists=../.env.local server/index.ts'",
     "test": "node --import tsx ../scripts/test-scratch/run-command.ts -- scripts/test-sandboxed.sh --cpu 800 --mem 16G -- node scripts/run-tests.ts",
@@ -71,6 +75,7 @@
   "dependencies": {
     "@fastify/formbody": "^9.0.1",
     "@huggingface/transformers": "^4.3.1",
+    "@ngrok/ngrok": "1.7.0",
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#06ed284e1b7ee92b2ebab6bc8ef25f0ae392f84a",
     "@pdpp/collector-runtime": "*",
     "@pdpp/connector-protocol": "*",
@@ -78,6 +83,7 @@
     "@pdpp/mcp-server": "*",
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "@streamparser/json": "^0.0.26",
+    "@tnunamak/gozar": "0.5.6",
     "@types/pg": "8.23.1",
     "ajv": "^8.20.0",
     "better-sqlite3": "^13.0.3",
@@ -91,7 +97,7 @@
     "ofx-js": "^1.1.2",
     "p-queue": "^10.0.0",
     "p-retry": "^8.0.0",
-    "patchright": "1.64.1",
+    "patchright": "1.63.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.23.1",
     "pino": "^10.4.0",

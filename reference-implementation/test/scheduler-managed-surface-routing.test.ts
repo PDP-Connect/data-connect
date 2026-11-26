@@ -738,6 +738,7 @@ test("T3: waiting_for_browser_surface status maps to skipped RunRecord (not fail
       const [record] = completedRuns;
       assert.ok(record, "a completed run record was captured");
       assert.equal(record.status, "skipped", "waiting_for_browser_surface must produce a skipped RunRecord");
+      assert.equal(record.runId, undefined);
       assert.ok(
         typeof record.error === "string" && record.error.includes("browser_surface_unavailable"),
         `error should include browser_surface_unavailable, got: ${record.error}`
@@ -803,52 +804,93 @@ test("T3c: run_already_active controller contention maps to skipped RunRecord", 
   }
 });
 
-// ── T3b: surface_failed and browser_surface_probe_failed also → SKIP ───────
+// Surface startup failure is actionable, unlike ordinary capacity waits.
 
-test("T3b: surface_failed status also maps to skipped RunRecord", async () => {
-  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-"));
-  try {
-    const connectorPath = writeDummyConnector(tmpDir);
-    const completedRuns: RunRecord[] = [];
-
-    const scheduler = createScheduler({
-      connectors: [
-        {
-          connectorId: "chatgpt",
-          connectorInstanceId: "chatgpt",
-          connectorPath,
-          intervalMs: 25,
-          manifest: BACKGROUND_SAFE_MANIFEST,
-          maxRetries: 0,
-          ownerSubjectId: "owner-managed",
-          ownerToken: "owner-token",
-        },
-      ],
-      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
-      onRunComplete: (record) => completedRuns.push(record),
-      rsUrl: "http://localhost.invalid",
-      runManagedConnectorViaController: () => ({
-        run_id: `run_${Date.now()}`,
-        status: "surface_failed",
-        trace_id: "trace-probe",
-      }),
-    });
-
+for (const details of [false, true]) {
+  test(`surface_failed preserves terminal identity (details=${details})`, async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-"));
     try {
-      scheduler.start();
-      await waitFor(() => completedRuns.length >= 1, 5000);
-      scheduler.stop();
+      const connectorPath = writeDummyConnector(tmpDir);
+      const completedRuns: RunRecord[] = [];
+      let controllerCalls = 0;
+      let humanCalls = 0;
+      const persistedLastRuns: string[] = [];
+      const schedulerStore = {
+        ...anchorStore("chatgpt", 0),
+        listLastRunTimes: () => [],
+        upsertLastRunTime: (instanceId: string) => {
+          persistedLastRuns.push(instanceId);
+        },
+      };
 
-      const [record] = completedRuns;
-      assert.ok(record, "a completed run record was captured");
-      assert.equal(record.status, "skipped", "surface_failed must produce a skipped RunRecord");
+      const scheduler = createScheduler({
+        schedulerStore,
+        connectors: [
+          {
+            connectorId: "chatgpt",
+            connectorInstanceId: "chatgpt",
+            connectorPath,
+            intervalMs: 60_000,
+            manifest: BACKGROUND_SAFE_MANIFEST,
+            maxRetries: 2,
+            ownerSubjectId: "owner-managed",
+            ownerToken: "owner-token",
+          },
+        ],
+        onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+        markNeedsHuman: () => {
+          humanCalls += 1;
+        },
+        onRunComplete: (record) => completedRuns.push(record),
+        rsUrl: "http://localhost.invalid",
+        runManagedConnectorViaController: () => {
+          controllerCalls += 1;
+          return {
+            ...(details
+              ? {
+                  browser_surface_failure: { code: "allocator_unavailable", message: "Surface allocation rejected" },
+                  connector_error: { message: "Surface allocation rejected" },
+                  failure_reason: "allocator_failure",
+                  terminal_reason: "authentication_error" as const,
+                }
+              : {}),
+            run_id: "run_surface_start_failure",
+            status: "surface_failed",
+            trace_id: "trace-probe",
+          };
+        },
+      });
+
+      try {
+        scheduler.start();
+        await waitFor(() => completedRuns.length >= 1, 5000);
+        scheduler.stop();
+
+        const [record] = completedRuns;
+        assert.ok(record, "a completed run record was captured");
+        assert.equal(record.status, "failed");
+        assert.equal(record.runId, "run_surface_start_failure");
+        assert.equal(record.traceId, "trace-probe");
+        assert.equal(record.failureReason, details ? "allocator_failure" : "surface_start_failed");
+        assert.equal(record.terminalReason, details ? "authentication_error" : null);
+        assert.deepEqual(record.connectorError, details ? { message: "Surface allocation rejected" } : null);
+        assert.equal(
+          record.error,
+          details
+            ? "browser_surface_failed: allocator_unavailable: Surface allocation rejected"
+            : "browser_surface_failed: surface_failed"
+        );
+        assert.equal(controllerCalls, 1, "surface failures must not retry");
+        assert.equal(humanCalls, 0, "surface failures must not mark authentication repair");
+        assert.deepEqual(persistedLastRuns, ["chatgpt"], "a failed start counts as an attempt, so the next tick waits the interval");
+      } finally {
+        scheduler.stop();
+      }
     } finally {
-      scheduler.stop();
+      rmSync(tmpDir, { force: true, recursive: true });
     }
-  } finally {
-    rmSync(tmpDir, { force: true, recursive: true });
-  }
-});
+  });
+}
 
 // ── T3d: deferred → SKIP not failure (the live bug this closes) ────────────
 //
@@ -902,6 +944,7 @@ test("T3d: deferred status maps to skipped RunRecord (not failure-retry) -- the 
       const [record] = completedRuns;
       assert.ok(record, "a completed run record was captured");
       assert.equal(record.status, "skipped", "deferred must produce a skipped RunRecord, not failed");
+      assert.equal(record.runId, undefined);
       assert.ok(
         typeof record.error === "string" && record.error.includes("browser_surface_unavailable"),
         `error should include browser_surface_unavailable, got: ${record.error}`

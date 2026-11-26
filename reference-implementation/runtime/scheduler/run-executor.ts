@@ -23,7 +23,7 @@
  * guard → preRunGate → launchRun), pre-run gate, or dispatch governor.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   BROWSER_SURFACE_LEASE_STATUSES,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -87,6 +87,9 @@ export interface RunExecutorDeps {
     | null;
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
+  blobUploadCredentialHooks?: import("../scheduler-domain-types.ts").SchedulerOptions["blobUploadCredentialHooks"];
+  /** Optional launch seam for bounded executor tests; production uses the runtime. */
+  runConnectorImpl?: typeof invokeRunConnector;
   getState: GetStateHandler;
   handleGrantFailureDisable: (reason: string | null | undefined, connectorInstanceId: string) => void;
   isManagedConnector: IsManagedConnectorHandler;
@@ -115,6 +118,13 @@ export interface RunExecutorDeps {
     | null
     | undefined;
   setState: SetStateHandler;
+  /**
+   * Timer functions the attempt watchdog arms. Optional: defaults to the
+   * global timers, so callers that do not care are unaffected. A test injects a
+   * manual implementation to fire the watchdog at a chosen point instead of
+   * racing a real wall-clock budget against process startup.
+   */
+  watchdogTimers?: WatchdogTimers;
 }
 
 // ─── Public interface ─────────────────────────────────────────────────────────
@@ -292,6 +302,7 @@ interface RunConnectorCall {
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
   automationMode?: RunAutomationMode;
+  blobUploadToken?: string | null;
   cancelSignal?: AbortSignal | null;
   collectionMode: "full_refresh" | "incremental";
   connectorId: string;
@@ -356,6 +367,25 @@ async function invokeRunConnector(call: RunConnectorCall): Promise<RunConnectorR
 
 // ─── Attempt watchdog ─────────────────────────────────────────────────────────
 
+/**
+ * The watchdog's only timer need: run `callback` after `ms`, and be able to
+ * cancel it. `setTimeout` returns the canceller, so the seam owns no handle
+ * type and an implementation is never forced to fabricate a Node timer.
+ */
+export interface WatchdogTimers {
+  setTimeout: (callback: () => void, ms: number) => () => void;
+}
+
+// The production default. `unref` keeps a pending watchdog from holding the
+// process open on its own.
+const GLOBAL_WATCHDOG_TIMERS: WatchdogTimers = {
+  setTimeout: (callback, ms) => {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return () => clearTimeout(handle);
+  },
+};
+
 interface AttemptWatchdog {
   cancel: () => void;
   clear: () => void;
@@ -383,15 +413,29 @@ function isBoundedWallClock(maxRunWallClockMs: number): boolean {
   return Number.isFinite(maxRunWallClockMs) && maxRunWallClockMs > 0;
 }
 
-export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdog {
+// `setTimeout` cannot delay past 2^31 - 1 ms: Node fires it almost at once.
+// `budget * 4` can also overflow to Infinity, which reads as "unbounded", so a
+// huge finite budget would silently lose its ceiling.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+function clampTimerDelay(ms: number): number {
+  return Math.min(ms, MAX_TIMER_DELAY_MS);
+}
+
+export function createAttemptWatchdog(
+  maxRunWallClockMs: number,
+  timers: WatchdogTimers = GLOBAL_WATCHDOG_TIMERS
+): AttemptWatchdog {
   const cancellation = new AbortController();
   let timedOut = false;
-  let timer: NodeJS.Timeout | null = null;
+  let cancelTimer: (() => void) | null = null;
   // Local-only work no longer has provider progress to reset the primary
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
   // a connector that stops making progress cannot survive until restart.
-  const localOnlyPhaseMaxRunWallClockMs = maxRunWallClockMs * 4;
+  const localOnlyPhaseMaxRunWallClockMs = isBoundedWallClock(maxRunWallClockMs)
+    ? clampTimerDelay(maxRunWallClockMs * 4)
+    : maxRunWallClockMs;
   // Set once a connector reports `phase_boundary: "local_only_phase_started"`
   // and never cleared for the rest of this attempt. `maxRunWallClockMs` is
   // sized for provider-rate-limited walks (external API pagination); once a
@@ -408,15 +452,18 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     if (!isBoundedWallClock(maxRunWallClockMs) || timedOut || localOnlyPhase || cancellation.signal.aborted) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, maxRunWallClockMs);
-    timer.unref?.();
+    }, clampTimerDelay(maxRunWallClockMs));
   };
+
+  // Suppression is only real while a primary timer could still fire: with an
+  // opt-out budget, after the watchdog fired, or after an owner cancel there is
+  // nothing to suppress, and the caller must not record that it did.
+  const canSuppressPrimaryBudget = () =>
+    isBoundedWallClock(maxRunWallClockMs) && !timedOut && !cancellation.signal.aborted;
 
   const armLocalOnlyPhaseCeiling = () => {
     if (
@@ -426,14 +473,11 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     ) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, localOnlyPhaseMaxRunWallClockMs);
-    timer.unref?.();
+    }, clampTimerDelay(localOnlyPhaseMaxRunWallClockMs));
   };
 
   if (isBoundedWallClock(maxRunWallClockMs)) {
@@ -447,17 +491,13 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
       }
     },
     clear() {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
+      cancelTimer?.();
+      cancelTimer = null;
     },
     markProgress(extra) {
-      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase) {
+      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase && canSuppressPrimaryBudget()) {
         localOnlyPhase = true;
-        if (timer) {
-          clearTimeout(timer);
-        }
+        cancelTimer?.();
         armLocalOnlyPhaseCeiling();
         // TRUE only on the latching call — the caller emits the durable trace.
         return true;
@@ -753,7 +793,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     admitRunConnection,
     approvedEnvironmentBindings,
     approvedProxyConnectorIds,
+    blobUploadCredentialHooks,
     getState,
+    runConnectorImpl = invokeRunConnector,
     handleGrantFailureDisable,
     isManagedConnector,
     logger: baseLogger = NOOP_RUN_BASE_LOGGER,
@@ -772,6 +814,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     runManagedConnectorViaController,
     schedulerStore,
     setState,
+    watchdogTimers,
   } = deps;
 
   async function appendRunHistoryBestEffort(record: RunRecord, connectorId: string): Promise<void> {
@@ -1028,6 +1071,42 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     });
   }
 
+  // Per-attempt blob upload credential for runs this scheduler launches through
+  // `runConnector` directly. Controller-routed runs mint their own.
+  function mintAttemptBlobUploadToken(schedule: ConnectorSchedule, call: RunConnectorCall, runId: string): string | null {
+    if (!blobUploadCredentialHooks) {
+      return null;
+    }
+    const token = randomBytes(32).toString("hex");
+    try {
+      blobUploadCredentialHooks.register({
+        connectorId: schedule.connectorId,
+        connectorInstanceId: schedule.connectorInstanceId ?? schedule.connectorId,
+        ownerSubjectId: call.ownerSubjectId,
+        runId,
+        token,
+      });
+    } catch {
+      // Do not expose arbitrary hook errors or continue without upload authority.
+      throw Object.assign(new Error("blob_upload_credential_unavailable"), {
+        failure_reason: "permission_error",
+        terminal_reason: "permission_error" as const,
+        run_id: runId,
+        trace_id: call.traceContext?.trace_id ?? null,
+      });
+    }
+    return token;
+  }
+
+  function revokeAttemptBlobUploadToken(runId: string): void {
+    try {
+      blobUploadCredentialHooks?.revoke({ runId });
+    } catch {
+      // Cleanup remains best-effort, but a failed revoke must be observable.
+      console.error(`[scheduler] blob upload credential revoke failed for ${runId}`);
+    }
+  }
+
   // The durable active-run lease + wall-clock watchdog for one attempt. Wraps the
   // caller's RunConnectorCall so `onStarted` persists an active-run row and
   // `onProgress` feeds the watchdog; `clear()` (run in runSingleAttempt's finally)
@@ -1046,7 +1125,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const { connectorId, connectorInstanceId = connectorId } = schedule;
     const originalOnProgress = call.onProgress;
     const activeRunStore = selectActiveRunStore();
-    const watchdog = createAttemptWatchdog(maxRunWallClockMs);
+    const watchdog = createAttemptWatchdog(maxRunWallClockMs, watchdogTimers);
     // A cryptographically strong UUID keeps this fallback globally
     // collision-resistant: run_id is the sole uniqueness key for the durable
     // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
@@ -1068,6 +1147,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
 
     const leasedCall: RunConnectorCall = {
       ...call,
+      blobUploadToken: null,
       cancelSignal: watchdog.signal,
       onProgress: (msg) => {
         const suppressedWallClock = watchdog.markProgress(extractPhaseBoundary(msg));
@@ -1099,9 +1179,16 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     };
 
     const clear = async (): Promise<void> => {
-      unregisterCancellationBox.value?.();
-      unregisterCancellationBox.value = null;
-      watchdog.clear();
+      try {
+        unregisterCancellationBox.value?.();
+      } catch {
+        console.error(`[scheduler] cancellation unregister failed for ${runId}`);
+      } finally {
+        unregisterCancellationBox.value = null;
+        watchdog.clear();
+        // Also revoke if register partly mutated its registry before throwing.
+        revokeAttemptBlobUploadToken(runId);
+      }
       if (admitted && activeRunStore) {
         await Promise.resolve(activeRunStore.deleteActiveRun(connectorInstanceId, runId)).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -1136,7 +1223,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           ),
         };
       }
-      const result = await invokeRunConnector(lease.call);
+      lease.call.blobUploadToken = mintAttemptBlobUploadToken(schedule, lease.call, lease.call.runId!);
+      const result = await runConnectorImpl(lease.call);
       if (watchdog.timedOut()) {
         return { error: runTimedOutError(result, maxRunWallClockMs), kind: "give-up" };
       }
@@ -1347,6 +1435,19 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
 
       if (runNowResult === null) {
         return null;
+      }
+
+      // Startup failure is actionable; capacity waits below remain skips.
+      if (runNowResult.status === "surface_failed") {
+        const failure = runNowResult.browser_surface_failure;
+        persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+        return recordAndNotifyDurably({
+          ...buildManagedRunTerminalRecord(connectorId, connectorInstanceId, startedAt, runNowResult, attempt),
+          error: failure
+            ? `browser_surface_failed: ${failure.code}: ${failure.message}`
+            : "browser_surface_failed: surface_failed",
+          failureReason: runNowResult.failure_reason ?? "surface_start_failed",
+        });
       }
 
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {

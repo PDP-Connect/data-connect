@@ -7,7 +7,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
+import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "../runtime/undeclared-tuning-environment.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 
@@ -29,7 +29,7 @@ test("every transitional entry is a shipped first-party connector that owns its 
   for (const [connectorKey, keys] of Object.entries(UNDECLARED_TUNING_ENVIRONMENT)) {
     assert.ok(shipped.has(connectorKey), `${connectorKey} is not a shipped first-party connector`);
     for (const key of keys) {
-      assert.equal(tuningEnvironmentKeyOwner(key), connectorKey, `${key} is not owned by ${connectorKey}`);
+      assert.ok(ownsTuningKey(connectorKey, key), `${key} is not owned by ${connectorKey}`);
     }
   }
 });
@@ -52,7 +52,7 @@ function sourceFiles(dir: string): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name !== "node_modules" && entry.name !== "generated") {
+      if (entry.name !== "node_modules") {
         out.push(...sourceFiles(path));
       }
     } else if (/\.(?:ts|js|mjs)$/.test(entry.name) && !/\.test\.(?:ts|js|mjs)$/.test(entry.name)) {
@@ -69,6 +69,7 @@ test("the reference server reads no key inside a first-party connector tuning na
   // namespaces disjoint from the server's own configuration. Comment lines are
   // skipped: they document a key, they do not read it.
   const owned = new Set(Object.values(UNDECLARED_TUNING_ENVIRONMENT).flat());
+  const vendoredKeys = [...shippedManifestsByKey().keys()];
   const collisions: string[] = [];
   for (const dir of ["server", "runtime"]) {
     for (const file of sourceFiles(join(REFERENCE_ROOT, dir))) {
@@ -77,8 +78,8 @@ test("the reference server reads no key inside a first-party connector tuning na
         .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
         .join("\n");
       for (const [key] of code.matchAll(/\bPDPP_[A-Z0-9_]+\b/g)) {
-        const owner = tuningEnvironmentKeyOwner(key);
-        if (owner !== null && !owned.has(key)) {
+        const owner = vendoredKeys.find((connectorKey) => ownsTuningKey(connectorKey, key));
+        if (owner !== undefined && !owned.has(key)) {
           collisions.push(`${relative(REFERENCE_ROOT, file)}: ${key} (namespace of ${owner})`);
         }
       }

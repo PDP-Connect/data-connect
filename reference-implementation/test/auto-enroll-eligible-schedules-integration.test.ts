@@ -291,8 +291,8 @@ test(
   "a background-unsafe manual manifest neither auto-enrolls nor accepts an enabled owner schedule",
   withTmpDb(async () => {
     const manifest = testManifest("manual");
-    const connectorId = manifest.connector_id as string;
-    await registerConnector(manifest);
+    // An unlisted registry URL is stored under its short key, like a listed one.
+    const connectorId = await registerConnector(manifest);
     const controller = createController({});
     const summary = await autoEnrollEligibleSchedules({
       controller,
@@ -307,6 +307,11 @@ test(
       message: "Connector refresh policy is not background-safe; automatic scheduling is disabled.",
     });
     assert.equal(await controller.getSchedule(connectorId), null, "rejected scheduling must not persist a row");
+    // The stored manifest's policy is honored for a connector whose key is in no
+    // generated list. A disabled schedule is still accepted.
+    const paused = await controller.upsertSchedule(connectorId, { enabled: false, interval_seconds: 21_600 });
+    assert.equal(paused.schedule.enabled, false);
+    assert.equal((await controller.getSchedule(connectorId))?.interval_seconds, 21_600);
   })
 );
 
@@ -314,8 +319,7 @@ test(
   "a background-safe connector accepts an explicit owner schedule when default enrollment is disabled",
   withTmpDb(async () => {
     const manifest = testManifest();
-    const connectorId = manifest.connector_id as string;
-    await registerConnector(manifest);
+    const connectorId = await registerConnector(manifest);
     const controller = createController({});
     const summary = await autoEnrollEligibleSchedules({
       controller,

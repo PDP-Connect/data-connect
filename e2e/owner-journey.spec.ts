@@ -218,7 +218,7 @@ test("settings renders Remote access with three honest, non-empty postures", asy
     "expected a 'Remote access posture' radiogroup on Settings"
   ).toBeVisible()
 
-  const expectedPostures = ["Off", "My devices only", "Public URL"]
+  const expectedPostures = ["Off", "Local network (LAN)", "Public URL"]
   for (const postureName of expectedPostures) {
     const postureRow = postureGroup.locator("label").filter({
       has: page.getByRole("radio", { name: postureName }),

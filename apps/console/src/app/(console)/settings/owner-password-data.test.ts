@@ -87,3 +87,34 @@ test("the console accepts the RI's desktop source without any desktop flags of i
   riSource = "desktop"
   assert.equal(await loadOwnerPasswordSource(), "desktop")
 })
+
+test("outside the managed desktop a password always counts as set", async () => {
+  delete process.env.PDPP_MANAGED_DESKTOP_HOST
+  const { loadOwnerPasswordSet } = await loadOwnerPasswordData()
+  assert.equal(await loadOwnerPasswordSet(), true)
+})
+
+test("on the managed desktop the owner-set marker decides", async () => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { OWNER_PASSWORD_OWNER_SET_MARKER_FILE } = await import(
+    "pdpp-reference-implementation/owner-password-owner-set"
+  )
+  const dir = await mkdtemp(join(tmpdir(), "owner-set-"))
+  const saved = { host: process.env.PDPP_MANAGED_DESKTOP_HOST, dir: process.env.PDPP_DATA_DIR }
+  process.env.PDPP_MANAGED_DESKTOP_HOST = "1"
+  process.env.PDPP_DATA_DIR = dir
+  const { loadOwnerPasswordSet } = await loadOwnerPasswordData()
+  try {
+    assert.equal(await loadOwnerPasswordSet(), false)
+    await writeFile(join(dir, OWNER_PASSWORD_OWNER_SET_MARKER_FILE), JSON.stringify({ version: 1 }))
+    assert.equal(await loadOwnerPasswordSet(), true)
+  } finally {
+    for (const [name, value] of [["PDPP_MANAGED_DESKTOP_HOST", saved.host], ["PDPP_DATA_DIR", saved.dir]] as const) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    await rm(dir, { recursive: true, force: true })
+  }
+})

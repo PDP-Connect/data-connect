@@ -33,8 +33,10 @@ const INVALID_DONE_STATUS = /invalid DONE status/;
 const PROTOCOL_VERSION_NAMED = /protocol_version/;
 const OBSERVATION_NEEDS_020 = /OBSERVATION require protocol_version 0\.2\.0/;
 const DIAGNOSTIC_DESCRIPTORS_NEEDS_020 = /diagnostic_descriptors require protocol_version 0\.2\.0/;
+const CAPABILITIES_MALFORMED = /protocol_capabilities must be an array/;
+const DESCRIPTORS_REJECTED = /diagnostic_descriptors rejected/;
+const MANIFEST_PREFIX = /^Connector manifest /;
 const UNDECLARED_STEP = /descriptor_undeclared_step/;
-const BLOB_REFUSED = /BLOB/;
 // A refusal before spawn carries a stable code the scheduler and console can key on.
 const CAPABILITY_REFUSAL_REASON = "protocol_capability_unsupported";
 const RETRYABLE_FIELD = /DONE\.error\.retryable/;
@@ -248,8 +250,8 @@ test("declared 0.2.0 OBSERVATION facts are accepted and the run succeeds", async
     assert.ok(start.protocol_capabilities.includes("OBSERVATION"), "START advertises the implemented message");
     assert.equal(
       start.protocol_capabilities.includes("DETAIL_COVERAGE_KEY_SETS"),
-      false,
-      "the runtime must not promise key-set extension credit rules it does not implement"
+      true,
+      "the runtime implements key-set extension credit rules"
     );
     const record = await persistedRecord("run_c020_accept");
     assert.ok(record, "the run's bounded diagnostic record must be persisted");
@@ -426,7 +428,10 @@ test("a malformed line never reaches the trace or the run error, whatever its ty
     const traceText = readdirSync(traceDir)
       .map((name) => readFileSync(join(traceDir, name), "utf8"))
       .join("\n");
-    assert.ok(traceText.includes("pdpp-runtime-trace"), "the trace file must exist, so the absence below is meaningful");
+    assert.ok(
+      traceText.includes("pdpp-runtime-trace"),
+      "the trace file must exist, so the absence below is meaningful"
+    );
     assert.equal(traceText.includes(SECRET_MARKER), false, "an unparseable line must not be traced verbatim");
     assert.equal(JSON.stringify(outcome).includes(SECRET_MARKER), false, "the run error must not carry the line");
     assert.equal(outcome.ok, false, "an unparseable line that names no OBSERVATION is still a protocol violation");
@@ -549,6 +554,144 @@ test("OBSERVATION or diagnostic_descriptors without protocol_version 0.2.0 are r
   });
 });
 
+// The admission matrix at the run boundary (runConnector). A rejected manifest
+// must never spawn the child and never open an observation record; an admitted
+// one spawns. A reader boolean alone would not show either.
+const NO_DESCRIPTORS = { diagnostic_descriptors: undefined };
+const NO_CAPABILITIES = { protocol_capabilities: undefined };
+const ADMISSION_MATRIX: readonly {
+  readonly name: string;
+  readonly overrides: Record<string, unknown>;
+  readonly rejected: RegExp | null;
+}[] = [
+  // Silent legacy: no 0.2.0 declaration of any kind.
+  {
+    name: "legacy: empty declaration",
+    overrides: { ...NO_DESCRIPTORS, ...NO_CAPABILITIES, protocol_version: undefined },
+    rejected: null,
+  },
+  {
+    name: "legacy: 0.1.0",
+    overrides: { ...NO_DESCRIPTORS, ...NO_CAPABILITIES, protocol_version: "0.1.0" },
+    rejected: null,
+  },
+  {
+    name: "legacy: 0.1.0 with empty capabilities",
+    overrides: { ...NO_DESCRIPTORS, protocol_capabilities: [], protocol_version: "0.1.0" },
+    rejected: null,
+  },
+  // OBSERVATION needs 0.2.0.
+  {
+    name: "OBSERVATION with a missing version",
+    overrides: { ...NO_DESCRIPTORS, protocol_version: undefined },
+    rejected: OBSERVATION_NEEDS_020,
+  },
+  {
+    name: "OBSERVATION with 0.1.0",
+    overrides: { ...NO_DESCRIPTORS, protocol_version: "0.1.0" },
+    rejected: OBSERVATION_NEEDS_020,
+  },
+  // 0.2.0 admits OBSERVATION with valid or missing descriptors.
+  { name: "0.2.0 OBSERVATION with valid descriptors", overrides: {}, rejected: null },
+  { name: "0.2.0 OBSERVATION with missing descriptors", overrides: NO_DESCRIPTORS, rejected: null },
+  { name: "0.2.0 without capabilities", overrides: NO_CAPABILITIES, rejected: null },
+  // Malformed capabilities are never silently accepted.
+  {
+    name: "capabilities is a string",
+    overrides: { protocol_capabilities: "OBSERVATION" },
+    rejected: CAPABILITIES_MALFORMED,
+  },
+  {
+    name: "capabilities is an object",
+    overrides: { protocol_capabilities: { OBSERVATION: true } },
+    rejected: CAPABILITIES_MALFORMED,
+  },
+  {
+    name: "capabilities is null",
+    overrides: { protocol_capabilities: null },
+    rejected: CAPABILITIES_MALFORMED,
+  },
+  {
+    name: "capabilities has a non-string element",
+    overrides: { protocol_capabilities: ["OBSERVATION", 7] },
+    rejected: CAPABILITIES_MALFORMED,
+  },
+  {
+    name: "capabilities has an unknown name",
+    overrides: { protocol_capabilities: ["NOT_A_CAPABILITY"] },
+    rejected: CAPABILITIES_MALFORMED,
+  },
+  // Null and unknown versions are never silently accepted.
+  {
+    name: "null version",
+    overrides: { ...NO_DESCRIPTORS, ...NO_CAPABILITIES, protocol_version: null },
+    rejected: PROTOCOL_VERSION_NAMED,
+  },
+  { name: "unknown version", overrides: { protocol_version: "9.9.9" }, rejected: PROTOCOL_VERSION_NAMED },
+  { name: "non-string version", overrides: { protocol_version: 2 }, rejected: PROTOCOL_VERSION_NAMED },
+  // Malformed descriptors under 0.2.0.
+  {
+    name: "descriptors is an array",
+    overrides: { diagnostic_descriptors: [] },
+    rejected: DESCRIPTORS_REJECTED,
+  },
+  {
+    name: "descriptors is a string",
+    overrides: { diagnostic_descriptors: "steps" },
+    rejected: DESCRIPTORS_REJECTED,
+  },
+  {
+    name: "descriptors is null",
+    overrides: { diagnostic_descriptors: null },
+    rejected: DESCRIPTORS_REJECTED,
+  },
+  {
+    name: "descriptors has steps that is not an array",
+    overrides: { diagnostic_descriptors: { steps: {} } },
+    rejected: DESCRIPTORS_REJECTED,
+  },
+  {
+    name: "descriptors has an extra member",
+    overrides: { diagnostic_descriptors: { extra: [] } },
+    rejected: DESCRIPTORS_REJECTED,
+  },
+  // diagnostic_descriptors need 0.2.0 even without OBSERVATION.
+  {
+    name: "empty descriptors on 0.1.0 without OBSERVATION",
+    overrides: { ...NO_CAPABILITIES, diagnostic_descriptors: {}, protocol_version: "0.1.0" },
+    rejected: DIAGNOSTIC_DESCRIPTORS_NEEDS_020,
+  },
+  {
+    name: "empty descriptors on a missing version without OBSERVATION",
+    overrides: { ...NO_CAPABILITIES, diagnostic_descriptors: {}, protocol_version: undefined },
+    rejected: DIAGNOSTIC_DESCRIPTORS_NEEDS_020,
+  },
+];
+
+for (const [index, row] of ADMISSION_MATRIX.entries()) {
+  test(`collection profile admission matrix: ${row.name}`, async () => {
+    const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
+    const runId = `run_c020_matrix_${index}`;
+    try {
+      const outcome = await runStub(stub, runId, manifest(row.overrides));
+      if (row.rejected === null) {
+        assert.equal(outcome.ok, true, `must be admitted: ${outcome.ok ? "" : outcome.message}`);
+        assert.equal(existsMarker(stub.markerPath), true, "an admitted manifest spawns the child");
+        return;
+      }
+      assert.equal(outcome.ok, false, "must be rejected, not silently accepted");
+      if (!outcome.ok) {
+        assert.match(outcome.message, row.rejected);
+        assert.match(outcome.message, MANIFEST_PREFIX);
+      }
+      assert.equal(existsMarker(stub.markerPath), false, "the child must not execute");
+      assert.equal(await persistedRecord(runId), null, "no observation record may be opened");
+    } finally {
+      rmSync(stub.dir, { force: true, recursive: true });
+    }
+  });
+}
+
 test("an expectation naming an undeclared step is rejected before spawn", async () => {
   const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
   try {
@@ -567,23 +710,13 @@ test("an expectation naming an undeclared step is rejected before spawn", async 
   }
 });
 
-test("a required BLOB capability is rejected before spawn, not waived", async () => {
+test("a required BLOB capability is admitted by the runtime that implements it", async () => {
   const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
   try {
-    const outcome = await runStub(
-      stub,
-      "run_c020_blob",
-      manifest({ diagnostic_descriptors: undefined, protocol_capabilities: ["BLOB"], protocol_version: "0.1.0" })
-    );
-    assert.equal(outcome.ok, false, "BLOB is not implemented, so a connector that requires it must not start");
-    if (!outcome.ok) {
-      assert.match(outcome.message, BLOB_REFUSED);
-      assert.equal(outcome.failureReason, CAPABILITY_REFUSAL_REASON);
-    }
-    assert.equal(existsMarker(stub.markerPath), false, "the child must not execute");
-  } finally {
-    rmSync(stub.dir, { force: true, recursive: true });
-  }
+    const outcome = await runStub(stub, "run_c020_blob", manifest({ diagnostic_descriptors: undefined, protocol_capabilities: ["BLOB"], protocol_version: "0.1.0" }));
+    assert.equal(outcome.ok, true);
+    assert.equal(existsMarker(stub.markerPath), true);
+  } finally { rmSync(stub.dir, { force: true, recursive: true }); }
 });
 
 test("a failed DONE that cites an accepted fact yields a connector-attributed diagnosis and keeps the original text", async () => {
@@ -690,10 +823,16 @@ test("a cancelled run stores no cause, even when its failed DONE cited an auth f
   const abort = new AbortController();
   try {
     // The owner's cancel lands after DONE was read and before the run closes.
-    await runStub(stub, "run_c020_cancelled", manifest(), {}, {
-      cancelSignal: abort.signal,
-      testOnlyTerminalProcessingFaultInjector: () => abort.abort(),
-    });
+    await runStub(
+      stub,
+      "run_c020_cancelled",
+      manifest(),
+      {},
+      {
+        cancelSignal: abort.signal,
+        testOnlyTerminalProcessingFaultInjector: () => abort.abort(),
+      }
+    );
     const record = await persistedRecord("run_c020_cancelled");
     assert.ok(record, "the diagnostic record must be persisted");
     assert.equal(record.diagnosis.category, "unknown");
@@ -738,7 +877,11 @@ test("a cancel that lands while the record is being stored cannot split the reco
     assert.ok(record, "the diagnostic record must be persisted");
     const page = await listSpineEventsPage("run", "run_c020_cancel_during_put", { limit: 500 });
     const terminal = page.events.map((event) => event.event_type);
-    assert.equal(terminal.includes("run.cancelled"), false, "a cancel after the record is sealed does not cancel the run");
+    assert.equal(
+      terminal.includes("run.cancelled"),
+      false,
+      "a cancel after the record is sealed does not cancel the run"
+    );
     assert.equal(terminal.includes("run.failed"), true);
     assert.equal(record.diagnosis.category, "auth_rejected");
     assert.deepEqual(record.diagnosis.basis, ["y1"]);

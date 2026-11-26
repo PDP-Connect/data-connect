@@ -11,13 +11,11 @@ import { after as afterTest, test } from "node:test";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
   buildCollectorStartMessage,
-  buildTerminalCollectionFacts,
   COLLECTOR_STDERR_MAX_BYTES,
   type CollectorConnectorSpec,
   CollectorStateReadError,
   DEFAULT_COLLECTOR_OUTBOX_POLICY,
   drainCollectorOutbox,
-  drainCollectorQueue,
   recoverAndSummarizeOutbox,
   runCollectorConnector,
   transformRecordsToCollectorEnvelopes,
@@ -34,7 +32,6 @@ import {
 } from "./local-device-client.ts";
 import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "./local-device-envelope.ts";
 import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "./local-device-outbox.ts";
-import { LocalDeviceQueue } from "./local-device-queue.ts";
 import {
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
   RuntimeCapabilityMismatchError,
@@ -50,6 +47,62 @@ import {
  * process.cwd()` module constant produced when tests ran from here.
  */
 const TEST_EXECUTION_ROOT = join(import.meta.dirname, "..");
+const RUN_COVERAGE_DECLARATION = {
+  collectionProfileVersion: "0.2.0",
+  coverageStoreStreams: ["messages"],
+  declaresCoverageStores: true,
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+} as const;
+
+async function assertCoverageFixtureRejected(input: {
+  coverage: unknown;
+  expectedError?: RegExp;
+  requestedStreams?: readonly string[];
+  resources?: CollectorConnectorSpec["resources"];
+  scope?: CollectorConnectorSpec["scope"];
+}): Promise<void> {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: ${JSON.stringify(input.coverage)} }) + "\\n");
+      `,
+    });
+    const requestedStreams = input.requestedStreams ?? ["messages"];
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-invalid-done-coverage",
+          manifestFingerprint: "a".repeat(64),
+          ...(input.resources ? { resources: input.resources } : {}),
+          ...RUN_COVERAGE_DECLARATION,
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          ...(input.scope ? { scope: input.scope, timeScopableStreams: requestedStreams } : {}),
+          streams: requestedStreams,
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-invalid-done-coverage",
+      }),
+      input.expectedError ?? /DONE coverage/
+    );
+    assert.equal(harness.terminalCommits.length, 0, "invalid assertions must not reach terminal persistence");
+  } finally {
+    await harness.close();
+  }
+}
 
 test("buildCollectorStartMessage emits a stream-only START with no owner credentials", () => {
   const start = buildCollectorStartMessage(["sessions", "messages"]);
@@ -68,20 +121,6 @@ test("buildCollectorStartMessage can request explicit stream backfills", () => {
     streamsToBackfill: ["attachments"],
     type: "START",
   });
-});
-
-test("buildTerminalCollectionFacts preserves raw coverage statuses without inventing a local policy", () => {
-  const facts = buildTerminalCollectionFacts(
-    new Map([
-      ["messages-store", { status: "collected", stream: "messages" }],
-      ["rules-store", { status: "deferred", stream: "rules" }],
-      ["rules-shadow", { status: "unaccounted", stream: "rules" }],
-    ])
-  );
-  assert.deepEqual(facts, [
-    { coverage_statuses: ["collected"], stream: "messages" },
-    { coverage_statuses: ["deferred", "unaccounted"], stream: "rules" },
-  ]);
 });
 
 test("buildCollectorStartMessage can scope a stream to explicit resources", () => {
@@ -108,6 +147,30 @@ test("buildCollectorStartMessage populates START.state only when prior state is 
   });
   assert.deepEqual(withState.state, { messages: { cursor: "m-1" } });
   assert.equal(withState.type, "START");
+});
+
+// Collection Profile Section 5.1: a runtime that requests version 1 evidence
+// supplies a non-empty collection_scope. A request without one would bind the
+// proof to no boundary, so the builder refuses it instead of sending it.
+test("buildCollectorStartMessage refuses a version 1 request without a collection scope", () => {
+  for (const collectionScope of [undefined, "", "  "]) {
+    assert.throws(
+      () => buildCollectorStartMessage(["messages"], [], null, {}, {}, [], collectionScope, 1),
+      /collection_scope/,
+      JSON.stringify(collectionScope)
+    );
+  }
+  assert.deepEqual(buildCollectorStartMessage(["messages"], [], null, {}, {}, [], "unscoped", 1), {
+    collection_scope: "unscoped",
+    run_coverage_version: 1,
+    scope: { streams: [{ name: "messages" }] },
+    type: "START",
+  });
+  assert.deepEqual(
+    buildCollectorStartMessage(["messages"], [], null, {}, {}, []),
+    { scope: { streams: [{ name: "messages" }] }, type: "START" },
+    "a START that requests no evidence needs no scope"
+  );
 });
 
 test("transformRecordsToCollectorEnvelopes uses the given connector id", () => {
@@ -202,103 +265,616 @@ test("runCollectorConnector gives changed emitted_at records a distinct local ba
   }
 });
 
-test("runCollectorConnector summarizes coverage completeness distinct from declared-stream success", async () => {
+test("runCollectorConnector commits a typed DONE coverage verdict without a diagnostics stream", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
-    // The connector reports a clean DONE for its declared stream while the
-    // coverage diagnostic shows a mix of accounted statuses — collected,
-    // excluded, deferred, and missing. Declared-stream success must not
-    // flatten that completeness picture (Section 5.2).
     const fixture = await writeFixtureConnector({
       script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
         });
-        const coverage = [
-          { store: "sessions", stream: "sessions", status: "collected", reason: "declared stream" },
-          { store: "auth", stream: null, status: "excluded", reason: "auth-adjacent" },
-          { store: "logs", stream: "logs", status: "deferred", reason: "redaction pending" },
-          { store: "downloads", stream: "downloads", status: "missing", reason: "not present" },
-        ];
         process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "sessions", key: "s-1",
-          data: { id: "s-1" }, emitted_at: new Date().toISOString(),
+          type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: {
+            version: 1, collection_scope: "unscoped",
+            streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }],
+          },
         }) + "\\n");
-        for (const c of coverage) {
-          process.stdout.write(JSON.stringify({
-            type: "RECORD", stream: "coverage_diagnostics", key: "coverage:" + c.store,
-            data: { id: "coverage:" + c.store, ...c }, emitted_at: new Date().toISOString(),
-          }) + "\\n");
-        }
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 5 }) + "\\n");
       `,
     });
-
     const result = await runCollectorConnector({
       baseUrl: harness.url,
       connector: {
         args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
         command: "node",
-        connector_id: "fixture-coverage",
-        protocol_capabilities: [],
+        connector_id: "fixture-typed-coverage",
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
-        streams: ["sessions", "coverage_diagnostics"],
+        streams: ["messages"],
       },
       deviceId: "device-1",
       deviceToken: "device-token",
       executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-coverage",
+      sourceInstanceId: "src-typed-coverage",
     });
-
-    // Declared-stream success is reported on `done`.
     assert.equal(result.done?.status, "succeeded");
-
-    // Completeness is a separate, non-failing signal.
-    assert.ok(result.completeness, "expected a completeness summary");
-    assert.equal(result.completeness?.storeCount, 4);
-    assert.equal(result.completeness?.fullyAccounted, true);
-    assert.deepEqual(result.completeness?.unaccountedStores, []);
-    assert.equal(result.completeness?.countsByStatus.collected, 1);
-    assert.equal(result.completeness?.countsByStatus.excluded, 1);
-    assert.equal(result.completeness?.countsByStatus.deferred, 1);
-    assert.equal(result.completeness?.countsByStatus.missing, 1);
-    assert.equal(result.completeness?.byStore.auth, "excluded");
-    assert.equal(result.completeness?.byStore.downloads, "missing");
-
-    // The summary must not carry paths, payloads, or the reason free-text.
-    const json = JSON.stringify(result.completeness);
-    assert.equal(json.includes("reason"), false);
-    assert.equal(json.includes("redaction pending"), false);
+    assert.equal(harness.terminalCommits.length, 1);
+    assert.equal(harness.terminalCommits[0]?.version, 2);
+    assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [
+      {
+        artifact_digest: `sha256:${"b".repeat(64)}`,
+        manifest_fingerprint: "a".repeat(64),
+        runtime_accounting: {
+          checkpoint_eligible: true,
+          detail_complete: true,
+          durable_admission: true,
+          outstanding_debt: 0,
+          stream_evidence_consistent: true,
+        },
+        scoped: true,
+        stores: [{ status: "collected", store: "messages" }],
+        stream: "messages",
+      },
+    ]);
   } finally {
     await harness.close();
   }
 });
 
-test("runCollectorConnector reports null completeness when no coverage diagnostic is observed", async () => {
+test("a later successful DONE without coverage replaces an acknowledged typed verdict", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  const queuePath = await tempQueuePath();
+  const run = async (coverage: boolean) => {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({
+          type: "DONE", status: "succeeded", records_emitted: 0,
+          ${coverage ? 'coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] },' : ""}
+        }) + "\\n");
+      `,
+    });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-coverage-replacement",
+        manifestFingerprint: "a".repeat(64),
+        protocol_capabilities: [],
+        // A negotiated run that omits coverage is an empty typed verdict (v2).
+        // An unnegotiated run commits a no-evidence v2 record, which replaces the receipt.
+        ...(coverage ? { ...RUN_COVERAGE_DECLARATION, runCoverageVersion: 1 } : {}),
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      sourceInstanceId: "src-coverage-replacement",
+    });
+  };
+  try {
+    await run(true);
+    await run(false);
+    assert.deepEqual(
+      harness.terminalCommits.map((commit) => commit.version),
+      [2, 2]
+    );
+    assert.deepEqual(harness.terminalCommits[1]?.terminal_facts, [], "the replacement carries no evidence");
+    const outbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "src-coverage-replacement" }), null);
+    } finally {
+      outbox.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector lets SKIP_RESULT defeat a collected DONE assertion", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
     const fixture = await writeFixtureConnector({
       script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
         });
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "messages", key: "m-1",
-          data: { id: "m-1" }, emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "SKIP_RESULT", stream: "messages", reason: "not_served",
+          message: "the source omitted one required item", boundary_claim: "provider_history_boundary" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "after-skip" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
       `,
     });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-skip-overrides-coverage",
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-skip-overrides-coverage",
+    });
+    const fact = (harness.terminalCommits[0]?.terminal_facts as Record<string, unknown>[] | undefined)?.[0];
+    assert.ok(fact, "successful run must leave an inspectable terminal verdict");
+    assert.deepEqual(fact.stores, [{ status: "partial", store: "messages" }]);
+    const accounting = fact.runtime_accounting as Record<string, unknown>;
+    assert.equal(accounting.detail_complete, false);
+    assert.equal(
+      accounting.checkpoint_eligible,
+      true,
+      "a coverage downgrade alone does not make an eligible checkpoint ineligible"
+    );
+    assert.ok(Number(accounting.outstanding_debt) > 0);
+    assert.deepEqual(harness.terminalCommits[0]?.state_delta, { messages: "after-skip" });
+  } finally {
+    await harness.close();
+  }
+});
 
+test("runCollectorConnector keeps a resolved rejected ingest receipt unacknowledged", async () => {
+  const queuePath = await tempQueuePath();
+  const sourceInstanceId = "src-rejected-receipt";
+  const batchId = `${sourceInstanceId}:batch-1`;
+  const records = transformRecordsToCollectorEnvelopes({
+    batchId,
+    batchSeq: 1,
+    connectorId: "fixture-rejected-receipt",
+    deviceId: "device-1",
+    messages: [
+      {
+        data: { id: "m-1" },
+        emitted_at: "2026-10-21T12:00:00.000Z",
+        key: "m-1",
+        stream: "messages",
+        type: "RECORD",
+      },
+    ],
+    sourceInstanceId,
+  });
+  const outbox = new LocalDeviceOutbox({ path: queuePath });
+  try {
+    outbox.enqueue({
+      id: buildLocalDeviceOutboxId({ kind: "record_batch", parts: [batchId], sourceInstanceId }),
+      kind: "record_batch",
+      payload: {
+        batchId,
+        batchSeq: 1,
+        connectorId: "fixture-rejected-receipt",
+        deviceId: "device-1",
+        records,
+        sourceInstanceId,
+      },
+      sourceInstanceId,
+    });
+    const client = {
+      ackLocalCollectorGap: async () => ({ ok: true }),
+      ingestBatch: async () => ({
+        accepted_record_count: 0,
+        object: "device_ingest_batch_result",
+        rejected_record_count: 1,
+        status: "accepted",
+      }),
+      putSourceInstanceState: async () => ({ ok: true }),
+    } as unknown as LocalDeviceClient;
+    const result = await drainCollectorOutbox({
+      client,
+      connectorId: "fixture-rejected-receipt",
+      holderId: "receipt-test",
+      outbox,
+      policy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxDrainIterations: 1 },
+      sourceInstanceId,
+    });
+    assert.equal(result.sent, 0, "a resolved receipt with rejections is not durable admission");
+    assert.equal(outbox.summary({ sourceInstanceId }).succeeded, 0, "the rejected batch must not be acknowledged");
+    assert.ok(outbox.summary({ sourceInstanceId }).ready + outbox.summary({ sourceInstanceId }).deadLetter > 0);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("runCollectorConnector withholds collected coverage after an HTTP receipt rejects a record", async () => {
+  const harness = await startCollectorHarness({ ingestFailureMode: "rejected-receipt", priorState: {} });
+  const queuePath = await tempQueuePath();
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1",
+          data: { id: "m-1" }, emitted_at: new Date().toISOString() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "m-1" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-rejected-http-receipt",
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxAttempts: 1, retryBackoffMs: 60_000 },
+      queuePath,
+      sourceInstanceId: "src-rejected-http-receipt",
+    });
+    const verify = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      const terminal = verify
+        .list({ sourceInstanceId: "src-rejected-http-receipt" })
+        .find((item) => item.kind === "terminal_run_commit");
+      assert.ok(terminal, "failed admission must retain an inspectable terminal result");
+      const payload = terminal.payload as TerminalRunCommitRequest;
+      const fact = payload.terminal_facts[0] as unknown as Record<string, unknown>;
+      const accounting = fact.runtime_accounting as Record<string, unknown>;
+      assert.equal(accounting.durable_admission, false);
+      assert.equal(accounting.checkpoint_eligible, false);
+      assert.ok(Number(accounting.outstanding_debt) > 0);
+      assert.deepEqual(payload.state_delta, {});
+      assert.equal(harness.terminalCommits.length, 0);
+      assert.equal(harness.stateOps.filter((operation) => operation.method === "PUT").length, 0);
+      assert.equal(harness.ingestedBatches.length, 0);
+      assert.equal(verify.summary({ sourceInstanceId: "src-rejected-http-receipt" }).succeeded, 0);
+    } finally {
+      verify.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector records withheld checkpoint accounting before a typed terminal commit", async () => {
+  const harness = await startCollectorHarness({ ingestFailureMode: "always-503", priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1",
+          data: { id: "m-1" }, emitted_at: new Date().toISOString() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "m-1" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    const queuePath = await tempQueuePath();
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-withheld-coverage-checkpoint",
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
+      queuePath,
+      sourceInstanceId: "src-withheld-coverage-checkpoint",
+    });
+    const verify = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      const terminal = verify
+        .list({ sourceInstanceId: "src-withheld-coverage-checkpoint" })
+        .find((item) => item.kind === "terminal_run_commit");
+      assert.ok(terminal, "the terminal evidence must remain durable while its predecessor retries");
+      const payload = terminal.payload as TerminalRunCommitRequest;
+      const fact = payload.terminal_facts[0] as unknown as Record<string, unknown>;
+      const accounting = fact.runtime_accounting as Record<string, unknown>;
+      assert.equal(accounting.checkpoint_eligible, false);
+      assert.equal(accounting.durable_admission, false);
+      assert.ok(Number(accounting.outstanding_debt) > 0);
+      assert.deepEqual(payload.state_delta, {}, "withheld stream state must not enter the terminal commit");
+      assert.equal(harness.terminalCommits.length, 0, "an unacknowledged commit is not published proof");
+      assert.equal(harness.stateOps.filter((operation) => operation.method === "PUT").length, 0);
+    } finally {
+      verify.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const [label, scope, expectedScope] of [
+  [
+    "bounded",
+    { since: "2026-10-01T00:00:00.000Z", source_roots: ["/notes"] },
+    "since=2026-10-01T00:00:00.000Z;roots=/notes",
+  ],
+  ["unscoped", undefined, "unscoped"],
+] as const) {
+  test(`runCollectorConnector sends version 1 and exact ${label} scope in the actual START`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const startPath = join(await createTempDir("pdpp-coverage-start-"), "start.json");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+          const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+          if (start.run_coverage_version === 1) {
+            done.coverage = { version: 1, collection_scope: start.collection_scope,
+              streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+          }
+          process.stdout.write(JSON.stringify(done) + "\\n");
+        `,
+      });
+      await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-coverage-negotiation",
+          enforcesSourceRoots: true,
+          manifestFingerprint: "a".repeat(64),
+          ...RUN_COVERAGE_DECLARATION,
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          ...(scope ? { scope } : {}),
+          sourceRootScopableStreams: ["messages"],
+          streams: ["messages"],
+          timeScopableStreams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: `src-coverage-negotiation-${label}`,
+      });
+      const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+      assert.equal(start.run_coverage_version, 1);
+      assert.equal(start.collection_scope, expectedScope);
+      assert.equal(harness.terminalCommits[0]?.collection_boundary, expectedScope);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+test("a connector that does not request coverage cannot submit a positive DONE verdict", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-unrequested-coverage",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-unrequested-coverage",
+      }),
+      /emitted unrequested DONE coverage/
+    );
+    assert.equal(harness.terminalCommits.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const [versionLabel, coverageVersion] of [
+  ["numeric v2", 2],
+  ["future string", "future"],
+  ["missing", undefined],
+] as const) {
+  test(`runCollectorConnector rejects ${versionLabel} DONE coverage versions`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          const coverage = { ${coverageVersion === undefined ? "" : `version: ${JSON.stringify(coverageVersion)},`}
+            collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] };
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0, coverage }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: "fixture-unknown-coverage-version",
+            manifestFingerprint: "a".repeat(64),
+            ...RUN_COVERAGE_DECLARATION,
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: "src-unknown-coverage-version",
+        }),
+        /DONE coverage version or collection scope is invalid/
+      );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+const validCoverageStream = {
+  scoped: true,
+  stores: [{ status: "collected", store: "messages" }],
+  stream: "messages",
+};
+
+for (const [label, coverage] of [
+  ["null payload", null],
+  ["array payload", []],
+  ["non-array stream list", { collection_scope: "unscoped", streams: "messages", version: 1 }],
+  ["empty store list", { collection_scope: "unscoped", streams: [{ ...validCoverageStream, stores: [] }], version: 1 }],
+  [
+    "unknown store status",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [{ status: "unknown", store: "messages" }] }],
+      version: 1,
+    },
+  ],
+  [
+    "nonboolean scoped flag",
+    { collection_scope: "unscoped", streams: [{ ...validCoverageStream, scoped: "yes" }], version: 1 },
+  ],
+  [
+    "empty store identifier",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [{ status: "collected", store: " " }] }],
+      version: 1,
+    },
+  ],
+  [
+    "duplicate stream",
+    { collection_scope: "unscoped", streams: [validCoverageStream, validCoverageStream], version: 1 },
+  ],
+  [
+    "duplicate store",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [validCoverageStream.stores[0], validCoverageStream.stores[0]] }],
+      version: 1,
+    },
+  ],
+] as const) {
+  test(`runCollectorConnector rejects malformed DONE coverage: ${label}`, async () => {
+    await assertCoverageFixtureRejected({ coverage });
+  });
+}
+
+test("runCollectorConnector rejects a DONE coverage scope echo that differs from actual START scope", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "not-the-start-scope", streams: [validCoverageStream], version: 1 },
+    scope: { since: "2026-10-01T00:00:00.000Z" },
+  });
+});
+
+test("runCollectorConnector rejects missing and extra DONE coverage streams", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "unscoped", streams: [validCoverageStream], version: 1 },
+    requestedStreams: ["messages", "sessions"],
+  });
+  await assertCoverageFixtureRejected({
+    coverage: {
+      collection_scope: "unscoped",
+      streams: [
+        validCoverageStream,
+        { scoped: true, stores: [{ status: "collected", store: "extra" }], stream: "unexpected" },
+      ],
+      version: 1,
+    },
+    requestedStreams: ["messages"],
+  });
+});
+
+test("a negotiation-aware connector omits DONE coverage when START has no feature request", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const startPath = join(await createTempDir("pdpp-legacy-coverage-start-"), "start.json");
+    const fixture = await writeFixtureConnector({
+      script: `
+        const fs = await import("node:fs/promises");
+        let input = "";
+        await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+          input += chunk;
+          if (input.includes("\\n")) resolve();
+        }));
+        const start = JSON.parse(input.split("\\n")[0]);
+        await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+        const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+        if (start.run_coverage_version === 1) {
+          done.coverage = { version: 1, collection_scope: start.collection_scope,
+            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+        }
+        process.stdout.write(JSON.stringify(done) + "\\n");
+      `,
+    });
     const result = await runCollectorConnector({
       baseUrl: harness.url,
       connector: {
         args: [fixture],
         command: "node",
-        connector_id: "fixture-no-coverage",
+        connector_id: "fixture-legacy-runtime-negotiation",
         protocol_capabilities: [],
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -307,13 +883,612 @@ test("runCollectorConnector reports null completeness when no coverage diagnosti
       deviceToken: "device-token",
       executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-no-coverage",
+      sourceInstanceId: "src-legacy-runtime-negotiation",
     });
+    const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+    assert.equal("run_coverage_version" in start, false);
+    assert.equal("collection_scope" in start, false, "legacy START shape must not add an unnegotiated field");
+    assert.equal(result.done?.status, "succeeded", "legacy collection remains usable");
+    const facts = harness.terminalCommits[0]?.terminal_facts;
+    assert.equal(Array.isArray(facts) && facts.length > 0, false, "omission cannot produce positive facts");
+  } finally {
+    await harness.close();
+  }
+});
 
-    // A run that does not request coverage reports absence as absence, not
-    // as "complete".
+// Collection Profile Section 5.1: `unscoped` must not remove a restriction in
+// START.scope. The scope string binds the time bound and the source roots, not
+// per-stream resources, so a START that narrows a stream to named resources
+// requests no store evidence.
+test("runCollectorConnector requests no coverage when START restricts a stream to named resources", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const startPath = join(await createTempDir("pdpp-coverage-resources-start-"), "start.json");
+    const fixture = await writeFixtureConnector({
+      script: `
+        const fs = await import("node:fs/promises");
+        let input = "";
+        await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+          input += chunk;
+          if (input.includes("\\n")) resolve();
+        }));
+        const start = JSON.parse(input.split("\\n")[0]);
+        await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+        const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+        if (start.run_coverage_version === 1) {
+          done.coverage = { version: 1, collection_scope: start.collection_scope,
+            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+        }
+        process.stdout.write(JSON.stringify(done) + "\\n");
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-resource-restricted-coverage",
+        manifestFingerprint: "a".repeat(64),
+        resources: { messages: ["C07JYF0U8BY"] },
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-resource-restricted-coverage",
+    });
+    const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(start.scope, { streams: [{ name: "messages", resources: ["C07JYF0U8BY"] }] });
+    assert.equal("run_coverage_version" in start, false, "a resource-restricted START requests no evidence");
+    assert.equal("collection_scope" in start, false);
+    assert.equal(result.done?.status, "succeeded", "the restricted run still collects");
+    assert.equal(harness.terminalCommits.length, 1, "the run still commits its terminal record");
+    assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [], "with no positive facts");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector rejects coverage sent for a START restricted to named resources", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "unscoped", streams: [validCoverageStream], version: 1 },
+    expectedError: /emitted unrequested DONE coverage/,
+    resources: { messages: ["C07JYF0U8BY"] },
+  });
+});
+
+/**
+ * A connector that records that it started, then answers START the way a
+ * conforming RUN_COVERAGE_V1 connector does: with coverage when START asks.
+ */
+async function writeEvidenceRequiringConnector(spawnedPath: string): Promise<string> {
+  const startPath = `${spawnedPath}.start`;
+  return await writeFixtureConnector({
+    script: `
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(${JSON.stringify(spawnedPath)}, "spawned");
+      let input = "";
+      await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+        input += chunk;
+        if (input.includes("\\n")) resolve();
+      }));
+      const start = JSON.parse(input.split("\\n")[0]);
+      await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+      const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+      if (start.run_coverage_version === 1) {
+        done.coverage = { version: 1, collection_scope: start.collection_scope,
+          streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+      }
+      process.stdout.write(JSON.stringify(done) + "\\n");
+    `,
+  });
+}
+
+// RUN_COVERAGE_V1 is elective. A run that cannot request evidence still starts
+// and writes no positive terminal fact.
+test("runCollectorConnector starts a RUN_COVERAGE_V1 connector when this run requests no evidence", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-run-coverage-elective-"), "spawned");
+    const fixture = await writeEvidenceRequiringConnector(spawnedPath);
+    for (const [label, evidence] of [
+      ["no store evidence configured", {}],
+      [
+        "START narrowed to named resources",
+        {
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          manifestFingerprint: "a".repeat(64),
+          resources: { messages: ["C07JYF0U8BY"] },
+          ...RUN_COVERAGE_DECLARATION,
+          runCoverageVersion: 1,
+        },
+      ],
+    ] as const) {
+      // biome-ignore lint/performance/noAwaitInLoops: each case is one isolated run against the same harness.
+      const result = await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-run-coverage-required",
+          ...RUN_COVERAGE_DECLARATION,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+          ...evidence,
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-run-coverage-required",
+      });
+      assert.equal(await readFile(spawnedPath, "utf8"), "spawned", `${label}: the connector started`);
+      const start = JSON.parse(await readFile(`${spawnedPath}.start`, "utf8")) as Record<string, unknown>;
+      assert.equal("run_coverage_version" in start, false, label);
+      assert.equal(result.done?.status, "succeeded", label);
+      const facts = harness.terminalCommits.at(-1)?.terminal_facts as Record<string, unknown>[] | undefined;
+      assert.equal(
+        facts?.some((fact) => Array.isArray(fact.stores)) ?? false,
+        false,
+        `${label}: no store evidence was recorded`
+      );
+    }
+    assert.equal(harness.terminalCommits.length, 2);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector refuses coverage_stores without RUN_COVERAGE_V1 before spawn", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-coverage-stores-capability-refused-"), "spawned");
+    const fixture = await writeEvidenceRequiringConnector(spawnedPath);
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          collectionProfileVersion: "0.2.0",
+          command: "node",
+          connector_id: "fixture-coverage-stores-capability-refused",
+          coverageStoreStreams: ["messages"],
+          declaresCoverageStores: true,
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-coverage-stores-capability-refused",
+      }),
+      /coverage_stores requires protocol_capabilities RUN_COVERAGE_V1/
+    );
+    await assert.rejects(readFile(spawnedPath, "utf8"));
+    assert.equal(harness.heartbeats.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector refuses Collection Profile 0.3.0 before spawn", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-profile-030-refused-"), "spawned");
+    const fixture = await writeEvidenceRequiringConnector(spawnedPath);
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          ...RUN_COVERAGE_DECLARATION,
+          collectionProfileVersion: "0.3.0",
+          connector_id: "fixture-profile-030-refused",
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-profile-030-refused",
+      }),
+      /protocol_version must be one of 0\.1\.0, 0\.2\.0/
+    );
+    await assert.rejects(readFile(spawnedPath, "utf8"));
+    assert.equal(harness.heartbeats.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector runs a RUN_COVERAGE_V1 connector when its START requests evidence", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-run-coverage-capability-ok-"), "spawned");
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [await writeEvidenceRequiringConnector(spawnedPath)],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-run-coverage-required",
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-run-coverage-supplied",
+    });
+    assert.equal(await readFile(spawnedPath, "utf8"), "spawned");
     assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.completeness, null);
+    const facts = harness.terminalCommits[0]?.terminal_facts as Record<string, unknown>[] | undefined;
+    assert.deepEqual(facts?.[0]?.stores, [{ status: "collected", store: "messages" }]);
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const includeState of [false, true]) {
+  test(`successful DONE without coverage retires earlier proof ${includeState ? "with" : "without"} STATE`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          ${includeState ? 'process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "run-b" }) + "\\n");' : ""}
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+        `,
+      });
+      await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-coverage-retirement",
+          manifestFingerprint: "a".repeat(64),
+          ...RUN_COVERAGE_DECLARATION,
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        runId: "run-b-no-coverage",
+        sourceInstanceId: "src-coverage-retirement",
+      });
+      assert.equal(harness.terminalCommits.length, 1, "successful omission must enqueue an explicit replacement");
+      const replacement = harness.terminalCommits[0] as unknown as TerminalRunCommitRequest;
+      assert.equal(replacement.version, 2);
+      assert.deepEqual(replacement.terminal_facts, []);
+      assert.deepEqual(replacement.state_delta, includeState ? { messages: "run-b" } : {});
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+// A runtime implementing this profile version commits an orderable terminal
+// run record for every successful run, negotiated or not, with or without
+// STATE. Without negotiated coverage it carries no evidence (version 2, empty
+// facts), which the server stores as unknown and which retires earlier proof.
+for (const includeState of [false, true]) {
+  test(`an unnegotiated successful run commits a no-evidence terminal record ${includeState ? "with" : "without"} STATE`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          ${includeState ? 'process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "run-b" }) + "\\n");' : ""}
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+        `,
+      });
+      const result = await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-unnegotiated-terminal-record",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        runId: "run-b-unnegotiated",
+        sourceInstanceId: "src-unnegotiated-terminal-record",
+      });
+      assert.equal(result.done?.status, "succeeded");
+      assert.equal(harness.terminalCommits.length, 1, "every successful run commits one terminal run record");
+      const record = harness.terminalCommits[0] as unknown as TerminalRunCommitRequest;
+      assert.equal(record.run_id, "run-b-unnegotiated");
+      assert.equal(record.version, 2);
+      assert.deepEqual(record.terminal_facts, [], "an unnegotiated run carries no coverage evidence");
+      assert.deepEqual(record.state_delta, includeState ? { messages: "run-b" } : {});
+      assert.deepEqual(
+        harness.stateOps.filter((op) => op.method === "PUT"),
+        [],
+        "STATE travels in the terminal record, not a separate checkpoint"
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+// A caller may reuse one run id across passes (for example a fixed
+// PDPP_RUN_ID). The server binds one terminal record to one run identity, so a
+// second pass of the same run must not send a second, different record.
+test("a pass that reuses an acknowledged run id commits no second terminal record", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const passScript = (emitState: boolean) => `
+      await new Promise((resolve) => {
+        let input = "";
+        process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+      });
+      ${emitState ? 'process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "pass-1" }) + "\\n");' : ""}
+      process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+    `;
+    const withState = await writeFixtureConnector({ script: passScript(true) });
+    const withoutState = await writeFixtureConnector({ script: passScript(false) });
+    const queuePath = await tempQueuePath();
+    const config = (fixture: string) => ({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-reused-run-id",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      runId: "run-reused",
+      sourceInstanceId: "src-reused-run-id",
+    });
+    const first = await runCollectorConnector(config(withState));
+    assert.equal(first.statePutFailed, false);
+    // The second pass of the same run differs from the first, so its record
+    // would be a second, conflicting record for one run identity.
+    const second = await runCollectorConnector(config(withoutState));
+    assert.equal(second.statePutFailed, false);
+    assert.equal(harness.terminalCommits.length, 1, "one run identity carries one terminal record");
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
+  test(`runCollectorConnector records no 0.2.0 positive when it cannot account for ${effectType}`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const startPath = join(await createTempDir(`pdpp-${effectType.toLowerCase()}-start-`), "start.json");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+          process.stdout.write(JSON.stringify({ type: ${JSON.stringify(effectType)}, stream: "messages" }) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: start.collection_scope, streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: "fixture-detail-no-admission",
+            manifestFingerprint: "a".repeat(64),
+            ...RUN_COVERAGE_DECLARATION,
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: "src-detail-no-admission",
+        }),
+        new RegExp(`unsupported ${effectType}`)
+      );
+      const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+      assert.equal(start.run_coverage_version, 1, "the extension was requested for this 0.2.0 run");
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
+  test(`runCollectorConnector rejects a valid concrete ${effectType} before terminal coverage`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const detailMessage =
+        effectType === "DETAIL_GAP"
+          ? {
+              detail_locator: { id: "m-1", kind: "message" },
+              reason: "rate_limited",
+              record_key: "m-1",
+              reference_only: true,
+              retryable: true,
+              status: "pending",
+              stream: "messages",
+              type: effectType,
+            }
+          : {
+              empty_keys: [],
+              gap_keys: ["b"],
+              hydrated_keys: ["a"],
+              reference_only: true,
+              required_keys: ["a", "b"],
+              state_stream: "messages",
+              stream: "message_details",
+              type: effectType,
+            };
+      const fixture = await writeFixtureConnector({
+        script: `
+          process.stdout.write(JSON.stringify(${JSON.stringify(detailMessage)}) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: `fixture-concrete-${effectType.toLowerCase()}`,
+            manifestFingerprint: "a".repeat(64),
+            ...RUN_COVERAGE_DECLARATION,
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: `src-concrete-${effectType.toLowerCase()}`,
+        }),
+        new RegExp(`unsupported ${effectType}`)
+      );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+for (const debtOutcome of ["gapped", "unaccounted"] as const) {
+  test(`runCollectorConnector fails closed for STREAM_EVIDENCE ${debtOutcome} counts`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const markerPath = join(await createTempDir("pdpp-stream-evidence-blocked-"), "spawned");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          await fs.writeFile(${JSON.stringify(markerPath)}, "spawned");
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1,
+            outcomes: { emitted: 0, unchanged: 0, gapped: ${debtOutcome === "gapped" ? 1 : 0},
+              unaccounted: ${debtOutcome === "unaccounted" ? 1 : 0} }, reference_only: true }) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: `fixture-stream-evidence-${debtOutcome}`,
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: `src-stream-evidence-${debtOutcome}`,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof RuntimeCapabilityMismatchError);
+          assert.deepEqual((error as RuntimeCapabilityMismatchError).missing, ["STREAM_EVIDENCE"]);
+          return true;
+        }
+      );
+      await assert.rejects(() => readFile(markerPath), /ENOENT/);
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+test("runCollectorConnector refuses a collected assertion with mismatched emitted count", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+      process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m1",
+        data: { id: "m1" }, emitted_at: new Date().toISOString() }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 2,
+        coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+          stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+    `,
+    });
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-count-mismatch",
+          manifestFingerprint: "a".repeat(64),
+          ...RUN_COVERAGE_DECLARATION,
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-count-mismatch",
+      }),
+      /contradicted emitted record count/
+    );
+    assert.equal(harness.terminalCommits.length, 0);
   } finally {
     await harness.close();
   }
@@ -438,7 +1613,7 @@ test("runCollectorConnector rejects failed terminal DONE, preserves records, and
     try {
       const items = outbox.list({ sourceInstanceId: "src-failed-done" });
       assert.equal(items.filter((item) => item.kind === "record_batch").length, 1);
-      assert.equal(items.filter((item) => item.kind === "checkpoint").length, 0);
+      assert.equal(items.filter((item) => item.kind === "checkpoint" || item.kind === "terminal_run_commit").length, 0);
       assert.equal(items.filter((item) => item.kind === "gap").length, 1);
     } finally {
       outbox.close();
@@ -484,7 +1659,9 @@ test("runCollectorConnector rejects a zero-exit child without DONE and never che
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
       assert.equal(
-        outbox.list({ sourceInstanceId: "src-missing-done" }).filter((item) => item.kind === "checkpoint").length,
+        outbox
+          .list({ sourceInstanceId: "src-missing-done" })
+          .filter((item) => item.kind === "checkpoint" || item.kind === "terminal_run_commit").length,
         0
       );
       assert.equal(
@@ -533,7 +1710,7 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
     });
     assert.equal(failed.statePutFailed, true);
     assert.equal(failed.flushedState, null);
-    assert.ok(failedHarness.stateOps.filter((operation) => operation.method === "PUT").length >= 1);
+    assert.equal(failedHarness.terminalCommits.length, 0, "the state write failed, so no terminal record committed");
   } finally {
     await failedHarness.close();
   }
@@ -558,11 +1735,9 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
       sourceInstanceId: "src-checkpoint-put-failure",
     });
     assert.equal(recovered.statePutFailed, false);
-    const puts = recoveredHarness.stateOps.filter((operation) => operation.method === "PUT");
-    assert.ok(puts.length >= 1, "the later runner must commit the durable predecessor checkpoint");
-    assert.deepEqual(puts[0]?.body, {
-      state: { messages: "cursor-after-put-failure" },
-    });
+    const commits = recoveredHarness.terminalCommits as unknown as TerminalRunCommitRequest[];
+    assert.ok(commits.length >= 1, "the later runner must commit the durable predecessor checkpoint");
+    assert.deepEqual(commits[0]?.state_delta, { messages: "cursor-after-put-failure" });
   } finally {
     await recoveredHarness.close();
   }
@@ -588,12 +1763,13 @@ test("runCollectorConnector auto-prunes over-retention succeeded rows after a cl
       script: ONE_RECORD_CONNECTOR_SCRIPT,
     });
     const baseConfig = {
-      // Keep only the single most-recent succeeded row. The bound is count-only
-      // — no age floor — so even the second pass's freshly-acknowledged batch
-      // makes pass 1's batch eligible the instant it falls outside the recent
-      // set. (v1 needed a `keepWithinDays: 0` age trick here; the corrected
-      // count-only bound does not.)
-      autoPrune: { keepRecentCount: 1 },
+      // Keep only the two most-recent succeeded rows: one pass's batch and its
+      // terminal run record. The bound is count-only — no age floor — so the
+      // second pass's freshly-acknowledged rows make pass 1's rows eligible the
+      // instant they fall outside the recent set. (v1 needed a
+      // `keepWithinDays: 0` age trick here; the corrected count-only bound does
+      // not.)
+      autoPrune: { keepRecentCount: 2 },
       baseUrl: harness.url,
       connector: {
         args: [fixture],
@@ -613,31 +1789,31 @@ test("runCollectorConnector auto-prunes over-retention succeeded rows after a cl
     const pass1 = await runCollectorConnector(baseConfig);
     assert.equal(pass1.done?.status, "succeeded");
     assert.equal(pass1.prunedSent.enabled, true);
-    // Pass 1 left exactly one acknowledged batch, which is inside keepRecentCount.
+    // Pass 1 left one acknowledged batch and its terminal run record, inside keepRecentCount.
     assert.equal(pass1.prunedSent.pruned, 0);
     // The returned summary reflects the post-prune state.
-    assert.equal(pass1.outboxSummary.succeeded, 1);
+    assert.equal(pass1.outboxSummary.succeeded, 2);
 
     const pass2 = await runCollectorConnector(baseConfig);
     assert.equal(pass2.done?.status, "succeeded");
     assert.equal(pass2.prunedSent.enabled, true);
-    // Pass 2 acknowledges a second batch; keepRecentCount=1 keeps it and prunes
-    // pass 1's batch — regardless of how recently pass 1 was acknowledged.
-    assert.equal(pass2.prunedSent.pruned, 1);
-    // The returned summary is post-prune: one row retained, not two.
-    assert.equal(pass2.outboxSummary.succeeded, 1);
+    // Pass 2 acknowledges a second batch and record; keepRecentCount=2 keeps them
+    // and prunes pass 1's rows — regardless of how recently pass 1 was acknowledged.
+    assert.equal(pass2.prunedSent.pruned, 2);
+    // The returned summary is post-prune: two rows retained, not four.
+    assert.equal(pass2.outboxSummary.succeeded, 2);
 
     // The final heartbeat the server received must also carry the post-prune
     // succeeded count, not the stale pre-prune tail.
     const lastHeartbeat = harness.heartbeats.at(-1);
-    assert.equal((lastHeartbeat?.outbox as { succeeded?: number } | undefined)?.succeeded, 1);
+    assert.equal((lastHeartbeat?.outbox as { succeeded?: number } | undefined)?.succeeded, 2);
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
       assert.equal(
         outbox.summary({ sourceInstanceId: "src-auto-prune" }).succeeded,
-        1,
-        "exactly the most-recent succeeded row is retained"
+        2,
+        "exactly the most-recent pass's succeeded rows are retained"
       );
     } finally {
       outbox.close();
@@ -732,8 +1908,8 @@ test("runCollectorConnector leaves succeeded rows intact when auto-prune is disa
     try {
       assert.equal(
         outbox.summary({ sourceInstanceId: "src-prune-disabled" }).succeeded,
-        2,
-        "both acknowledged batches are retained when prune is disabled"
+        4,
+        "both passes' acknowledged batches and terminal records are retained when prune is disabled"
       );
     } finally {
       outbox.close();
@@ -751,7 +1927,7 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
       script: ONE_RECORD_CONNECTOR_SCRIPT,
     });
     // No autoPrune override → default policy (keep the most-recent 10,000).
-    // A single clean run's one acknowledged batch is well inside the cap.
+    // A single clean run's acknowledged batch and terminal record are well inside the cap.
     const result = await runCollectorConnector({
       baseUrl: harness.url,
       connector: {
@@ -773,7 +1949,7 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
-      assert.equal(outbox.summary({ sourceInstanceId: "src-default-prune" }).succeeded, 1);
+      assert.equal(outbox.summary({ sourceInstanceId: "src-default-prune" }).succeeded, 2);
     } finally {
       outbox.close();
     }
@@ -826,58 +2002,6 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
   } finally {
     await harness.close();
   }
-});
-
-test("drainCollectorQueue marks sent and preserves retryable failures", async () => {
-  const queue = new LocalDeviceQueue({
-    path: await tempQueuePath(),
-    retryBackoffMs: () => 60_000,
-  });
-  const records = transformRecordsToCollectorEnvelopes({
-    batchId: "batch-1",
-    batchSeq: 1,
-    connectorId: "codex",
-    deviceId: "device-1",
-    messages: [
-      {
-        data: { id: "m-1" },
-        emitted_at: "2026-04-30T12:00:00.000Z",
-        key: "m-1",
-        stream: "messages",
-        type: "RECORD",
-      },
-    ],
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-1",
-    batchSeq: 1,
-    records,
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-2",
-    batchSeq: 2,
-    records,
-    sourceInstanceId: "src-1",
-  });
-
-  const sent: IngestBatchRequest[] = [];
-  const client = {
-    async ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
-      await Promise.resolve();
-      sent.push(request);
-      if (request.batch_id === "batch-2") {
-        throw new Error("temporary 503");
-      }
-      return { ok: true };
-    },
-  };
-
-  assert.equal(await drainCollectorQueue({ client, queue }), 1);
-  const items = await queue.list();
-  assert.equal(items.find((i) => i.batch_id === "batch-1")?.status, "sent");
-  assert.equal(items.find((i) => i.batch_id === "batch-2")?.status, "pending");
 });
 
 test("runCollectorConnector refuses a connector requiring a binding the collector lacks", async () => {
@@ -1276,6 +2400,56 @@ async function tempQueuePath(): Promise<string> {
   return join(await createTempDir("pdpp-collector-runner-"), "queue.json");
 }
 
+/** A record batch exactly as a collector that spelled the connector with underscores queued it. */
+function seedQueuedRecordBatch(input: {
+  connectorId: string;
+  queuePath: string;
+  sourceInstanceId: string;
+  suffix: string;
+}): string {
+  const batchId = `${input.sourceInstanceId}:${input.suffix}-batch`;
+  const records = transformRecordsToCollectorEnvelopes({
+    batchId,
+    batchSeq: 2,
+    connectorId: input.connectorId,
+    deviceId: "device-1",
+    messages: [
+      {
+        data: { id: `${input.suffix}:m-1` },
+        emitted_at: "2026-05-19T12:00:00.000Z",
+        key: `${input.suffix}:m-1`,
+        stream: "messages",
+        type: "RECORD",
+      },
+    ],
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  const id = buildLocalDeviceOutboxId({
+    kind: "record_batch",
+    parts: [batchId],
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  const outbox = new LocalDeviceOutbox({ path: input.queuePath });
+  try {
+    outbox.enqueue({
+      id,
+      kind: "record_batch",
+      payload: {
+        batchId,
+        batchSeq: 2,
+        connectorId: input.connectorId,
+        deviceId: "device-1",
+        records,
+        sourceInstanceId: input.sourceInstanceId,
+      },
+      sourceInstanceId: input.sourceInstanceId,
+    });
+  } finally {
+    outbox.close();
+  }
+  return id;
+}
+
 function seedDeadLetteredRecordBatch(input: {
   connectorId: string;
   deviceId?: string;
@@ -1328,45 +2502,6 @@ function seedDeadLetteredRecordBatch(input: {
     assert.ok(claim, "seeded batch must be claimable");
     outbox.deadLetter({
       error: input.error,
-      holder: "seed",
-      id: claim.id,
-      leaseEpoch: claim.lease_epoch,
-    });
-  } finally {
-    outbox.close();
-  }
-  return rowId;
-}
-
-function seedDeadLetteredTerminalCommit(input: {
-  connectorId: string;
-  queuePath: string;
-  sourceInstanceId: string;
-}): string {
-  const rowId = `${input.sourceInstanceId}:old-terminal`;
-  const outbox = new LocalDeviceOutbox({ path: input.queuePath });
-  try {
-    outbox.enqueue({
-      id: rowId,
-      kind: "terminal_run_commit",
-      payload: {
-        collection_boundary: "unscoped",
-        commit_id: "old-terminal-commit",
-        connector_id: input.connectorId,
-        connector_instance_id: "cin_fake",
-        device_id: "device-1",
-        run_id: "old-run",
-        source_instance_id: input.sourceInstanceId,
-        state_delta: {},
-        terminal_facts: [],
-        version: 1,
-      },
-      sourceInstanceId: input.sourceInstanceId,
-    });
-    const [claim] = outbox.claimReady({ holder: "seed", leaseMs: 60_000, sourceInstanceId: input.sourceInstanceId });
-    assert.ok(claim);
-    outbox.deadLetter({
-      error: "local device request failed: 400 invalid_request",
       holder: "seed",
       id: claim.id,
       leaseEpoch: claim.lease_epoch,
@@ -1448,14 +2583,16 @@ test("runCollectorConnector replays prior STATE into the connector's START.state
     const [ingest] = harness.ingestedBatches;
     assert.equal(ingest?.records?.[0]?.data?.prior_cursor, "m-prior");
 
-    // State was GET before ingest and PUT after.
+    // State was read before ingest and committed after, inside the run's terminal record.
     const { stateOps } = harness;
     assert.equal(stateOps[0]?.method, "GET");
-    const lastOp = stateOps.at(-1);
-    assert.equal(lastOp?.method, "PUT");
-    assert.deepEqual(lastOp?.body, {
-      state: { messages: "m-next" },
-    });
+    assert.deepEqual(
+      stateOps.filter((op) => op.method === "PUT"),
+      [],
+      "no separate checkpoint PUT"
+    );
+    const [commit] = harness.terminalCommits as unknown as TerminalRunCommitRequest[];
+    assert.deepEqual(commit?.state_delta, { messages: "m-next" });
   } finally {
     await harness.close();
   }
@@ -1584,6 +2721,7 @@ test("runCollectorConnector does not checkpoint when record work dead-letters", 
     assert.equal(result.flushedState, null);
     assert.equal(result.outboxSummary.deadLetter, 1);
     assert.equal(harness.stateOps.filter((op) => op.method === "PUT").length, 0);
+    assert.equal(harness.terminalCommits.length, 0);
     const blockedHeartbeat = harness.heartbeats.at(-1);
     assert.equal(blockedHeartbeat?.status, "blocked");
     const lastError = heartbeatLastError(blockedHeartbeat?.last_error);
@@ -1642,10 +2780,10 @@ test("runCollectorConnector drops out-of-scope STATE messages with a warning and
     });
 
     assert.deepEqual(result.flushedState, { messages: "m-1" });
-    const putOps = harness.stateOps.filter((op) => op.method === "PUT");
-    assert.equal(putOps.length, 1);
-    // The persisted body must not include the rogue stream.
-    assert.deepEqual(putOps[0]?.body, { state: { messages: "m-1" } });
+    const commits = harness.terminalCommits as unknown as TerminalRunCommitRequest[];
+    assert.equal(commits.length, 1);
+    // The persisted state must not include the rogue stream.
+    assert.deepEqual(commits[0]?.state_delta, { messages: "m-1" });
   } finally {
     await harness.close();
   }
@@ -1818,6 +2956,73 @@ test("Gmail attachment backfill cursor replays from durable STATE after restart"
       },
     });
     assert.equal(harness.ingestedBatches[1]?.records?.[0]?.data?.observed_prior_uid, 50);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector delivers a backlog queued under the underscore connector spelling once the server only accepts the manifest key", async () => {
+  const harness = await startCollectorHarness({ priorState: {}, requiredConnectorId: "claude-code" });
+  try {
+    const queuePath = await tempQueuePath();
+    // A collector from before the rename queued these. One is still waiting;
+    // one was dead-lettered by a server that had already stopped accepting the
+    // underscore spelling, and is then requeued the way `recover --apply` does.
+    seedQueuedRecordBatch({ connectorId: "claude_code", queuePath, sourceInstanceId: "src-1", suffix: "pending" });
+    const deadLetterId = seedDeadLetteredRecordBatch({
+      connectorId: "claude_code",
+      error: "local device request failed: 400 invalid_request connector_id does not match source_instance_id",
+      queuePath,
+      sourceInstanceId: "src-1",
+    });
+    const requeueOutbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(requeueOutbox.requeueDeadLetters({ sourceInstanceId: "src-1" }).requeued, 1);
+    } finally {
+      requeueOutbox.close();
+    }
+
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "claude-code",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      sourceInstanceId: "src-1",
+    });
+
+    assert.equal(harness.ingestedBatches.length, 2, "both queued batches reached the server");
+    assert.deepEqual(
+      harness.ingestedBatches.map((batch) => batch.connector_id),
+      ["claude-code", "claude-code"]
+    );
+    assert.equal(result.outboxSummary.ready, 0);
+    assert.equal(result.outboxSummary.deadLetter, 0);
+    const outbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(outbox.get(deadLetterId)?.status, "succeeded");
+    } finally {
+      outbox.close();
+    }
   } finally {
     await harness.close();
   }
@@ -2024,7 +3229,7 @@ test("runCollectorConnector: restored server cursor is not advanced by an older 
   }
 });
 
-test("runCollectorConnector validates the reference route before mutating durable outbox work", async () => {
+test("runCollectorConnector validates the reference route before draining or leasing pending outbox work", async () => {
   const harness = await startCollectorHarness({
     heartbeatStatus: 502,
     priorState: {},
@@ -2075,10 +3280,20 @@ test("runCollectorConnector validates the reference route before mutating durabl
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
       const summary = outbox.summary({ sourceInstanceId: "src-1" });
-      assert.equal(summary.ready, 1, "pending work must remain ready");
       assert.equal(summary.leased, 0, "pending work must not be leased");
       assert.equal(summary.retrying, 0, "pending work must not be marked retryable");
       assert.equal(summary.deadLetter, 0, "pending work must not be dead-lettered");
+      // The failed run adds one open failure gap. The seeded batch itself must stay ready.
+      assert.deepEqual(
+        outbox.listByKind({ kind: "record_batch", sourceInstanceId: "src-1" }).map((item) => item.status),
+        ["ready"],
+        "pending work must remain ready"
+      );
+      assert.deepEqual(
+        outbox.listByKind({ kind: "gap", sourceInstanceId: "src-1" }).map((item) => item.status),
+        ["ready"],
+        "the failed run leaves one open failure gap"
+      );
     } finally {
       outbox.close();
     }
@@ -2176,8 +3391,10 @@ test("runCollectorConnector fails backlog-skip pass when terminal heartbeat is r
         }),
       /local device request failed: 503/
     );
-    assert.equal(harness.heartbeats.at(-1)?.status, "retrying");
-    assert.equal(harness.heartbeats.at(-1)?.records_pending, 1);
+    // The refused pass leaves its open failure gap, so the corrective heartbeat reports blocked, and the
+    // gap counts beside the pending batch in records_pending.
+    assert.equal(harness.heartbeats.at(-1)?.status, "blocked");
+    assert.equal(harness.heartbeats.at(-1)?.records_pending, 2);
   } finally {
     await harness.close();
   }
@@ -2439,8 +3656,16 @@ interface CollectorHarnessOptions {
   heartbeatStatus?: number;
   /** Per-heartbeat status overrides. Entries are consumed in request order. */
   heartbeatStatuses?: number[];
-  ingestFailureMode?: "always-400" | "always-503";
+  ingestFailureMode?: "always-400" | "always-503" | "rejected-receipt";
   priorState?: Record<string, unknown> | null;
+  /**
+   * Make the ingest route enforce what the reference server enforces once
+   * connector ids are manifest keys: a batch naming any other spelling of the
+   * connector is rejected with 400, and `body_hash` must equal the hash of the
+   * collector envelopes rebuilt from the request's own connector id
+   * (`canonicalCollectorEnvelopeHash` in `ref-device-exporters.ts`).
+   */
+  requiredConnectorId?: string;
   /** When set, the GET state endpoint returns this status instead of 200. */
   stateReadStatus?: number;
   /** When set, a checkpoint STATE PUT returns this status without persisting. */
@@ -2570,8 +3795,17 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
     }
     if (url.includes("/terminal-run-commits")) {
       const commit = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>;
-      terminalCommits.push(commit);
       const request = commit as unknown as TerminalRunCommitRequest;
+      const stateDelta = isPlainObject(request.state_delta) ? request.state_delta : {};
+      // A terminal run commit writes its state delta in the same transaction,
+      // as the reference server does, so a failing state write fails it.
+      if (Object.keys(stateDelta).length > 0 && options.stateWriteStatus && options.stateWriteStatus >= 400) {
+        res.writeHead(options.stateWriteStatus, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "synthetic_state_write_failure" } }));
+        return;
+      }
+      terminalCommits.push(commit);
+      persistedState = { ...persistedState, ...stateDelta };
       sendJson(res, 200, {
         commit_id: request.commit_id,
         envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
@@ -2646,6 +3880,22 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
         res.end(JSON.stringify({ error: { code: "synthetic_bad_request" } }));
         return;
       }
+      if (options.requiredConnectorId) {
+        const rejection = rejectIngestLikeServer(parsed, options.requiredConnectorId);
+        if (rejection) {
+          sendJson(res, 400, { error: { code: rejection } });
+          return;
+        }
+      }
+      if (options.ingestFailureMode === "rejected-receipt") {
+        sendJson(res, 200, {
+          accepted_record_count: 0,
+          object: "device_ingest_batch_result",
+          rejected_record_count: (parsed as { records?: unknown[] }).records?.length ?? 0,
+          status: "accepted",
+        });
+        return;
+      }
       ingestedBatches.push(parsed as { records?: Array<{ data?: Record<string, unknown> }> });
       sendJson(res, 201, {
         accepted_record_count: (parsed as { records?: unknown[] }).records?.length ?? 0,
@@ -2673,6 +3923,32 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
     terminalCommits,
     url: `http://127.0.0.1:${address.port}`,
   };
+}
+
+/** The two device-ingest checks that a connector-id spelling change can trip. */
+function rejectIngestLikeServer(body: unknown, requiredConnectorId: string): string | null {
+  if (!isPlainObject(body) || body.connector_id !== requiredConnectorId) {
+    return "invalid_request";
+  }
+  const records = Array.isArray(body.records) ? (body.records as Record<string, unknown>[]) : [];
+  const envelopes = records.map((record) => {
+    const envelopeBody = {
+      connector_id: body.connector_id,
+      data: record.data,
+      emitted_at: record.emitted_at,
+      record_key: String(record.record_key),
+      stream: record.stream,
+    };
+    return {
+      batch_id: body.batch_id,
+      batch_seq: body.batch_seq,
+      body_hash: hashCanonicalJson(envelopeBody),
+      device_id: body.device_id,
+      source_instance_id: body.source_instance_id,
+      ...envelopeBody,
+    };
+  });
+  return body.body_hash === hashCanonicalJson(envelopes) ? null : "device_batch_hash_mismatch";
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -2790,6 +4066,128 @@ test("runCollectorConnector honors AbortSignal at the pre-spawn gate", async () 
     );
     // No spawn happened, so no ingest occurred either.
     assert.equal(harness.ingestedBatches.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+/**
+ * A refusal before any work is still an attempt for its lane. Each one must
+ * leave the lane's connector_child_failure barrier open, or an earlier covered
+ * receipt would keep standing for the lane.
+ */
+function assertPreflightRefusalOpensBarrier(queuePath: string, runId: string) {
+  const gaps = readGapRows(queuePath);
+  assert.deepEqual(
+    gaps.map((item) => item.status),
+    ["ready"],
+    "the refused attempt leaves one open failure gap"
+  );
+  assert.deepEqual(
+    gaps.map((item) => (item.payload as Record<string, unknown>).reason),
+    ["connector_child_failure"]
+  );
+  assert.deepEqual(
+    gaps.map((item) => (item.payload as Record<string, unknown>).firstSeenRunId),
+    [runId]
+  );
+}
+
+test("a run aborted before start leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const controller = new AbortController();
+    controller.abort(new Error("operator cancelled run"));
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          abortSignal: controller.signal,
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-aborted-barrier",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-aborted-before-start",
+          sourceInstanceId: "src-1",
+        }),
+      /operator cancelled run/
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-aborted-before-start");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a run with invalid provenance leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-provenance-barrier",
+            ...RUN_COVERAGE_DECLARATION,
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-invalid-provenance",
+          sourceInstanceId: "src-1",
+        }),
+      /optional store evidence requires a bound manifest fingerprint and artifact digest/
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-invalid-provenance");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a run refused at placement leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-placement-barrier",
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-placement-refused",
+          sourceInstanceId: "src-1",
+        }),
+      RuntimeCapabilityMismatchError
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-placement-refused");
   } finally {
     await harness.close();
   }
@@ -3109,23 +4507,26 @@ test("runCollectorConnector defers checkpoint until every streamed record batch 
     assert.equal(result.sentBatches, 0);
     assert.equal(result.flushedState, null);
     assert.equal(result.statePutFailed, false);
-    // Three durable record_batch rows plus one deferred checkpoint must
-    // remain in the outbox. With the backoff override, only the record
-    // rows are in the retrying subset.
+    // Three durable record_batch rows plus one deferred terminal run record
+    // (carrying the checkpoint) must remain in the outbox. With the backoff
+    // override, only the record rows are in the retrying subset.
     assert.equal(result.outboxSummary.ready, 4);
     assert.equal(result.outboxSummary.retrying, 3);
     assert.equal(result.outboxSummary.deadLetter, 0);
     const verify = new LocalDeviceOutbox({ path: queuePath });
     try {
-      const checkpointRows = verify.list({ sourceInstanceId: "src-1" }).filter((item) => item.kind === "checkpoint");
+      const checkpointRows = verify
+        .list({ sourceInstanceId: "src-1" })
+        .filter((item) => item.kind === "terminal_run_commit");
       assert.equal(checkpointRows.length, 1, "completed scan checkpoint must be durable even while records retry");
       assert.equal(checkpointRows[0]?.status, "ready");
     } finally {
       verify.close();
     }
-    // Server saw no checkpoint PUT — the durable checkpoint must not be
-    // sent before the record batches it summarizes are acknowledged.
+    // Server saw no checkpoint — the durable checkpoint must not be sent
+    // before the record batches it summarizes are acknowledged.
     assert.equal(harness.stateOps.filter((op) => op.method === "PUT").length, 0);
+    assert.equal(harness.terminalCommits.length, 0);
   } finally {
     await harness.close();
   }
@@ -3291,15 +4692,18 @@ test("runCollectorConnector persists complete-scan checkpoint across undrained b
     assert.equal(pass1.enqueuedBatches, 3);
     assert.equal(pass1.flushedState, null);
     assert.equal(harness.stateOps.filter((op) => op.method === "PUT").length, 0);
+    assert.equal(harness.terminalCommits.length, 0);
 
     const afterPass1 = new LocalDeviceOutbox({ path: queuePath });
     try {
       const items = afterPass1.list({ sourceInstanceId: "src-1" });
       assert.equal(items.filter((item) => item.kind === "record_batch").length, 3);
-      const checkpoints = items.filter((item) => item.kind === "checkpoint");
+      const checkpoints = items.filter((item) => item.kind === "terminal_run_commit");
       assert.equal(checkpoints.length, 1);
       assert.equal(checkpoints[0]?.status, "ready");
-      assert.deepEqual((checkpoints[0]?.payload as { state?: unknown } | undefined)?.state, { messages: "m-30" });
+      assert.deepEqual((checkpoints[0]?.payload as { state_delta?: unknown } | undefined)?.state_delta, {
+        messages: "m-30",
+      });
     } finally {
       afterPass1.close();
     }
@@ -3341,7 +4745,7 @@ test("runCollectorConnector persists complete-scan checkpoint across undrained b
     const pass2DataEvents = pass2Events.filter((event) => event !== "heartbeat");
     assert.deepEqual(
       pass2DataEvents.slice(0, 5),
-      ["ingest:ok", "ingest:ok", "ingest:ok", "state:PUT", "state:GET"],
+      ["ingest:ok", "ingest:ok", "ingest:ok", "terminal:commit", "state:GET"],
       `expected pass 2 to drain records, then checkpoint, then read state; saw ${pass2Events.join(",")}`
     );
   } finally {
@@ -3410,7 +4814,7 @@ test("runCollectorConnector leaves streamed batches durable when the child fails
       const items = outbox.list({ sourceInstanceId: "src-1" });
       // No checkpoint row was enqueued because STATE never reached the runner.
       assert.equal(
-        items.filter((item) => item.kind === "checkpoint").length,
+        items.filter((item) => item.kind === "checkpoint" || item.kind === "terminal_run_commit").length,
         0,
         "checkpoint must not be enqueued when child fails mid-stream"
       );
@@ -3425,6 +4829,7 @@ test("runCollectorConnector leaves streamed batches durable when the child fails
       outbox.close();
     }
     assert.equal(harness.stateOps.filter((op) => op.method === "PUT").length, 0);
+    assert.equal(harness.terminalCommits.length, 0);
   } finally {
     await harness.close();
   }
@@ -3609,6 +5014,379 @@ test("runCollectorConnector leaves a failure gap when prior backlog drains but t
   }
 });
 
+/** Durable gap rows for one source instance, read back from the outbox file. */
+function readGapRows(queuePath: string, sourceInstanceId = "src-1") {
+  const outbox = new LocalDeviceOutbox({ path: queuePath });
+  try {
+    return outbox.listByKind({ kind: "gap", sourceInstanceId });
+  } finally {
+    outbox.close();
+  }
+}
+
+/** One pass of source `src-1`. The fixture is spawned only if the pass reaches its scan. */
+function failureGapPassConfig(input: {
+  baseUrl: string;
+  connectorId: string;
+  fixture: string;
+  negotiateCoverage?: boolean;
+  queuePath: string;
+  runId: string;
+}) {
+  return {
+    baseUrl: input.baseUrl,
+    connector: {
+      args: [input.fixture],
+      command: "node",
+      connector_id: input.connectorId,
+      ...(input.negotiateCoverage
+        ? {
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            manifestFingerprint: "a".repeat(64),
+            ...RUN_COVERAGE_DECLARATION,
+            coverageStoreStreams: ["sessions", "coverage_diagnostics"],
+            runCoverageVersion: 1 as const,
+          }
+        : { protocol_capabilities: [] }),
+      runtime_requirements: { bindings: {} },
+      streams: ["sessions", "coverage_diagnostics"],
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: TEST_EXECUTION_ROOT,
+    queuePath: input.queuePath,
+    runId: input.runId,
+    sourceInstanceId: "src-1",
+  };
+}
+
+// Reads START, then exits without a record or DONE: the child fails mid-scan.
+const CHILD_FAILS_MID_SCAN_SCRIPT = `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.exit(7);
+      `;
+
+// A complete successful pass. It commits its coverage checkpoint, which is what recovers a failure gap.
+const COMPLETE_PASS_SCRIPT = `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.stdout.write(JSON.stringify({
+          type: "STATE",
+          stream: "coverage_diagnostics",
+          cursor: { fetched_at: new Date().toISOString() },
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "DONE",
+          status: "succeeded",
+          records_emitted: 0,
+        }) + "\\n");
+      `;
+
+test("runCollectorConnector leaves an open failure gap when the state read fails before the scan, and a complete pass recovers it", async () => {
+  // The state read is refused before the child spawns, so this pass fails before
+  // its scan starts. The device verdict counts only open outbox rows, so the
+  // failed pass must leave one, and the next complete pass must clear it.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const failing = await startCollectorHarness({ priorState: {}, stateReadStatus: 500 });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: failing.url,
+            connectorId: "fixture-state-read-gap",
+            fixture: neverSpawned,
+            queuePath,
+            runId: "run-state-read-failed",
+          })
+        ),
+      /failed to read prior state/
+    );
+  } finally {
+    await failing.close();
+  }
+  const open = readGapRows(queuePath);
+  assert.deepEqual(
+    open.map((item) => item.status),
+    ["ready"],
+    "the failed pass leaves one open failure gap"
+  );
+  assert.deepEqual(
+    open.map((item) => (item.payload as Record<string, unknown>).reason),
+    ["connector_child_failure"]
+  );
+
+  const complete = await startCollectorHarness({ priorState: {} });
+  try {
+    const completeFixture = await writeFixtureConnector({ script: COMPLETE_PASS_SCRIPT });
+    const result = await runCollectorConnector(
+      failureGapPassConfig({
+        baseUrl: complete.url,
+        connectorId: "fixture-state-read-gap",
+        fixture: completeFixture,
+        negotiateCoverage: true,
+        queuePath,
+        runId: "run-complete",
+      })
+    );
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(complete.gapAcks.length, 1, "the pre-scan drain delivers the open gap");
+    assert.equal(complete.gapRecoveries.length, 1, "the complete pass recovers the gap");
+    assert.equal(complete.gapRecoveries[0]?.reason, "connector_child_failure");
+  } finally {
+    await complete.close();
+  }
+  assert.deepEqual(readGapRows(queuePath), [], "recovery removes the gap row");
+});
+
+test("runCollectorConnector leaves an open failure gap when the second starting heartbeat fails before the scan", async () => {
+  // The first heartbeat and the state read succeed, so the pass has drained but
+  // has not spawned the child when the second starting heartbeat is refused. The
+  // corrective heartbeat must not report the lane healthy while the gap is open.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const harness = await startCollectorHarness({ heartbeatStatuses: [200, 500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: harness.url,
+          connectorId: "fixture-second-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-second-heartbeat-failed",
+        })
+      )
+    );
+  } finally {
+    await harness.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+  assert.equal(
+    harness.heartbeats.at(-1)?.status,
+    "blocked",
+    `the corrective heartbeat must be blocked; saw ${harness.heartbeats.map((h) => h.status).join(",")}`
+  );
+});
+
+test("runCollectorConnector leaves an open failure gap when the first heartbeat is refused", async () => {
+  // Nothing has been read or delivered yet. The gap is durable local evidence, so
+  // the failed pass records it even though no corrective heartbeat follows the
+  // refused one.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const harness = await startCollectorHarness({ heartbeatStatuses: [500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: harness.url,
+          connectorId: "fixture-first-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-first-heartbeat-failed",
+        })
+      )
+    );
+  } finally {
+    await harness.close();
+  }
+  assert.equal(harness.heartbeats.length, 1, "no corrective heartbeat follows a refused first heartbeat");
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the state read fails after the pre-scan drain, and a complete pass recovers it", async () => {
+  // Pass 1's child fails mid-scan and leaves an undelivered failure gap. Pass 2's
+  // pre-scan drain delivers that gap, so the server admits it and the local row
+  // is delivered. Pass 2 then fails at the state read. The failure is still open
+  // for the lane, so the delivered row must become open again. Otherwise the
+  // device reads the lane covered while the server still holds the gap open.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const second = await startCollectorHarness({ priorState: {}, stateReadStatus: 500 });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: second.url,
+            connectorId: "fixture-reopen-gap",
+            fixture: neverSpawned,
+            queuePath,
+            runId: "run-state-read-failed",
+          })
+        ),
+      /failed to read prior state/
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the delivered gap is open again"
+  );
+
+  const complete = await startCollectorHarness({ priorState: {} });
+  try {
+    const completeFixture = await writeFixtureConnector({ script: COMPLETE_PASS_SCRIPT });
+    const result = await runCollectorConnector(
+      failureGapPassConfig({
+        baseUrl: complete.url,
+        connectorId: "fixture-reopen-gap",
+        fixture: completeFixture,
+        negotiateCoverage: true,
+        queuePath,
+        runId: "run-complete-after-reopen",
+      })
+    );
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(complete.gapRecoveries.length, 1, "the complete pass recovers the reopened gap");
+  } finally {
+    await complete.close();
+  }
+  assert.deepEqual(readGapRows(queuePath), [], "recovery removes the gap row");
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the second starting heartbeat fails after the pre-scan drain", async () => {
+  // Same history as the state-read case above, but pass 2 fails at its second
+  // starting heartbeat, after its pre-scan drain delivered the earlier gap.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-heartbeat-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const second = await startCollectorHarness({ heartbeatStatuses: [200, 500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: second.url,
+          connectorId: "fixture-reopen-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-second-heartbeat-failed",
+        })
+      )
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the delivered gap is open again"
+  );
+  assert.equal(second.heartbeats.at(-1)?.status, "blocked");
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the child fails again mid-scan", async () => {
+  // Pass 2's pre-scan drain delivers pass 1's gap, and then its child fails mid-scan
+  // again. The second failure is the same lane failing, so it must reopen the gap.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-scan-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed-once",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+
+  const second = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: second.url,
+            connectorId: "fixture-reopen-scan-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed-twice",
+          })
+        ),
+      /connector exited 7/
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the second failure reopens the delivered gap"
+  );
+});
+
 test("runCollectorConnector flushes a partial trailing batch when the child fails mid-stream and still does not advance the checkpoint", async () => {
   // Emit one full batch plus a partial trailing batch (less than batchSize),
   // then exit non-zero before emitting STATE or DONE. The runner must throw,
@@ -3680,7 +5458,7 @@ test("runCollectorConnector flushes a partial trailing batch when the child fail
       assert.equal(totalRecords, 27, `expected all 27 parsed records durable, got ${totalRecords}`);
       // No checkpoint row was enqueued because STATE never reached the runner.
       assert.equal(
-        items.filter((item) => item.kind === "checkpoint").length,
+        items.filter((item) => item.kind === "checkpoint" || item.kind === "terminal_run_commit").length,
         0,
         "checkpoint must not be enqueued when child fails mid-stream"
       );
@@ -3688,6 +5466,7 @@ test("runCollectorConnector flushes a partial trailing batch when the child fail
       outbox.close();
     }
     assert.equal(harness.stateOps.filter((op) => op.method === "PUT").length, 0);
+    assert.equal(harness.terminalCommits.length, 0);
   } finally {
     await harness.close();
   }
@@ -3816,6 +5595,10 @@ test("runCollectorConnector recovers a stale-leased record batch and drains it w
       const recovered = items.find((item) => item.id === staleBatchId);
       assert.equal(recovered?.status, "succeeded", "the recovered batch must be marked succeeded");
       assert.equal(items.filter((item) => item.kind === "checkpoint").length, 0);
+      // The pass still commits its own terminal run record, with no state on top of the recovered batch.
+      const terminalRecords = items.filter((item) => item.kind === "terminal_run_commit");
+      assert.equal(terminalRecords.length, 1);
+      assert.deepEqual((terminalRecords[0]?.payload as { state_delta?: unknown } | undefined)?.state_delta, {});
     } finally {
       after.close();
     }
@@ -3926,77 +5709,6 @@ test("runCollectorConnector preserves terminal local-device dead letters", async
       const terminal = after.get(seededId);
       assert.equal(terminal?.status, "dead_letter");
       assert.equal(terminal?.last_error, "local device request failed: 400 invalid_request");
-    } finally {
-      after.close();
-    }
-  } finally {
-    await harness.close();
-  }
-});
-
-test("runCollectorConnector rebuilds a rejected terminal commit after a completed pass", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    const queuePath = await tempQueuePath();
-    const oldId = seedDeadLetteredTerminalCommit({
-      connectorId: "fixture-terminal-rebuild",
-      queuePath,
-      sourceInstanceId: "src-terminal-rebuild",
-    });
-    const fixture = await writeFixtureConnector({
-      script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
-        });
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "coverage_diagnostics", key: "coverage:messages",
-          data: { id: "coverage:messages", store: "messages", stream: "messages", status: "collected" },
-          emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({
-          type: "STATE", stream: "coverage_diagnostics", cursor: { fetched_at: new Date().toISOString() },
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
-      `,
-    });
-
-    const result = await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        command: "node",
-        connector_id: "fixture-terminal-rebuild",
-        protocol_capabilities: [],
-        runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath,
-      runId: "replacement-run",
-      sourceInstanceId: "src-terminal-rebuild",
-    });
-
-    assert.equal(result.skippedScanForBacklog, false);
-    assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.outboxSummary.deadLetter, 0);
-    assert.equal(harness.terminalCommits.length, 1, "the old terminal bytes must not be retried");
-    assert.equal(harness.terminalCommits[0]?.run_id, "replacement-run");
-    assert.notEqual(harness.terminalCommits[0]?.commit_id, "old-terminal-commit");
-    assert.equal(harness.ingestedBatches.length, 1, "the completed pass must retain and upload its record batch");
-
-    const after = new LocalDeviceOutbox({ path: queuePath });
-    try {
-      const old = after.get(oldId);
-      assert.equal(old?.status, "dead_letter", "old evidence remains retained, not deleted or rewritten");
-      assert.equal(after.isTerminalCommitSuperseded(oldId), true);
-      assert.equal(after.summary({ sourceInstanceId: "src-terminal-rebuild" }).deadLetter, 0);
-      assert.equal(
-        after.list({ sourceInstanceId: "src-terminal-rebuild" }).filter((item) => item.kind === "record_batch").length,
-        1
-      );
     } finally {
       after.close();
     }
@@ -4126,13 +5838,17 @@ test("runCollectorConnector drains a prior pass's enqueued backlog before scanni
     const pass2DataEvents = pass2Events.filter((event) => event !== "heartbeat");
     assert.deepEqual(
       pass2DataEvents.slice(0, 5),
-      ["ingest:ok", "ingest:ok", "ingest:ok", "state:PUT", "state:GET"],
+      ["ingest:ok", "ingest:ok", "ingest:ok", "terminal:commit", "state:GET"],
       `expected pass 2 to drain backlog and checkpoint before state read; saw ${pass2Events.join(",")}`
     );
     assert.deepEqual(pass2.priorState, { messages: "m-30" });
-    // Pass-2 child emitted no STATE of its own, so no new checkpoint
-    // PUT happens after the pre-scan durable checkpoint is flushed.
-    assert.equal(pass2.flushedState, null);
+    // Pass-2 child emitted no STATE of its own, so its own terminal record
+    // carries an empty state delta after the pre-scan checkpoint is flushed.
+    assert.deepEqual(pass2.flushedState, {});
+    assert.deepEqual(
+      (harness.terminalCommits.at(-1) as unknown as TerminalRunCommitRequest | undefined)?.state_delta,
+      {}
+    );
   } finally {
     await harness.close();
   }
@@ -4289,9 +6005,14 @@ test("drainCollectorOutbox stops between iterations when the duration budget is 
       ackLocalCollectorGap() {
         return Promise.reject(new Error("duration drain test must not ack gaps"));
       },
-      async ingestBatch() {
+      async ingestBatch(request) {
         await new Promise((resolve) => setTimeout(resolve, 40));
-        return { ok: true };
+        return {
+          accepted_record_count: request.records.length,
+          object: "device_ingest_batch_result" as const,
+          rejected_record_count: 0,
+          status: "accepted" as const,
+        };
       },
       putSourceInstanceState() {
         return Promise.reject(new Error("duration drain test must not send checkpoints"));
@@ -4372,9 +6093,14 @@ test("drainCollectorOutbox does not crash when batch-claimed work expires before
       ackLocalCollectorGap() {
         return Promise.reject(new Error("lease test must not ack gaps"));
       },
-      ingestBatch() {
+      ingestBatch(request) {
         now = new Date(now.getTime() + 40);
-        return Promise.resolve({ ok: true });
+        return Promise.resolve({
+          accepted_record_count: request.records.length,
+          object: "device_ingest_batch_result" as const,
+          rejected_record_count: 0,
+          status: "accepted" as const,
+        });
       },
       putSourceInstanceState() {
         return Promise.reject(new Error("lease test must not send checkpoints"));
@@ -4467,9 +6193,12 @@ async function startTogglableHarness(options: {
       return;
     }
     if (url.includes("/terminal-run-commits")) {
+      events.push({ label: "terminal:commit" });
       const commit = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>;
       terminalCommits.push(commit);
       const request = commit as unknown as TerminalRunCommitRequest;
+      // The commit writes its state delta, as the reference server does.
+      persistedState = { ...persistedState, ...(isPlainObject(request.state_delta) ? request.state_delta : {}) };
       sendJson(res, 200, {
         commit_id: request.commit_id,
         envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
@@ -5307,11 +7036,6 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
           cursor: "cursor-after-recovery",
         }) + "\\n");
         process.stdout.write(JSON.stringify({
-          type: "STATE",
-          stream: "coverage_diagnostics",
-          cursor: { fetched_at: new Date().toISOString() },
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({
           type: "DONE",
           status: "succeeded",
           records_emitted: 0,
@@ -5323,11 +7047,14 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
       baseUrl: harness.url,
       connector: {
         args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
         command: "node",
         connector_id: "fixture-recovered-gap",
-        protocol_capabilities: [],
+        manifestFingerprint: "a".repeat(64),
+        ...RUN_COVERAGE_DECLARATION,
+        runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
+        streams: ["messages"],
       },
       deviceId: "device-1",
       deviceToken: "device-token",
@@ -5339,10 +7066,6 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
 
     assert.equal(result.skippedScanForBacklog, false);
     assert.equal(result.flushedState?.messages, "cursor-after-recovery");
-    assert.equal(
-      typeof (result.flushedState?.coverage_diagnostics as { fetched_at?: unknown } | undefined)?.fetched_at,
-      "string"
-    );
     assert.equal(harness.gapRecoveries.length, 1);
     assert.equal(harness.gapRecoveries[0]?.reason, "policy_budget");
     assert.equal(harness.gapRecoveries[0]?.recovered_run_id, "run-recovered-gap-2");
@@ -5384,7 +7107,12 @@ function createTestClient(): Pick<
       stream: request.stream ?? "unknown",
       updated_at: new Date().toISOString(),
     }),
-    ingestBatch: async (_request: IngestBatchRequest) => ({ ok: true }),
+    ingestBatch: async (request: IngestBatchRequest) => ({
+      accepted_record_count: request.records.length,
+      object: "device_ingest_batch_result" as const,
+      rejected_record_count: 0,
+      status: "accepted" as const,
+    }),
     putSourceInstanceState: async (request: PutSourceInstanceStateRequest): Promise<SourceInstanceStateResponse> => ({
       connector_instance_id: "test-instance",
       device_id: "test-device",

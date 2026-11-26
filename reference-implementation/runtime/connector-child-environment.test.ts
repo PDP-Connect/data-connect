@@ -9,7 +9,9 @@ import {
   type ConnectorEnvironmentBinding,
   type ConnectorEnvironmentBindingSource,
   composeConnectorChildEnvironment,
+  ownsTuningKey,
   parseConnectorEnvironmentPolicy,
+  tuningNamespacePrefix,
 } from "./connector-child-environment.ts";
 
 const AMBIGUOUS_WINDOWS_ENV = /ambiguous Windows environment aliases/;
@@ -34,6 +36,7 @@ function compose(
     connectionEnv?: Record<string, string>;
     connectorId?: string;
     explicitRunEnv?: Record<string, string>;
+    installedConnectorKeys?: readonly string[];
     platform?: NodeJS.Platform;
   } = {}
 ): Record<string, string> {
@@ -52,6 +55,7 @@ function compose(
       : {}),
     connectorId: options.connectorId ?? "test-connector",
     explicitRunEnv: options.explicitRunEnv ?? {},
+    ...(options.installedConnectorKeys ? { installedConnectorKeys: options.installedConnectorKeys } : {}),
     manifest,
     platform: options.platform ?? "linux",
     sourceEnv,
@@ -325,7 +329,7 @@ test("proxy aliases require connector-scoped operator authority", () => {
   assert.equal(owner.PDPP_CHATGPT_DETAIL_INITIAL_CONCURRENCY_PROBE, undefined);
 });
 
-test("a first-party manifest declares tuning keys inside its own namespace only", () => {
+test("a manifest declares tuning keys inside its own namespace only", () => {
   const manifest = {
     runtime_requirements: {
       tuning_environment: [
@@ -368,11 +372,11 @@ test("a declaring manifest replaces the transitional tuning table, even when emp
 
 test("a third-party manifest cannot select an ambient tuning value without an operator binding", () => {
   const connectorId = "https://registry.example.com/connectors/database";
-  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_DATABASE_URL", "EXAMPLE_PAGE_SIZE"] } };
-  const sourceEnv = { EXAMPLE_PAGE_SIZE: "25", PDPP_DATABASE_URL: "postgres://secret" };
+  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_OWNER_TOKEN", "EXAMPLE_PAGE_SIZE"] } };
+  const sourceEnv = { EXAMPLE_PAGE_SIZE: "25", PDPP_OWNER_TOKEN: "owner-secret" };
 
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId }), {});
-  // Unknown bare identities get no namespace either.
+  // A bare identity gets no ambient key outside its own namespace either.
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
   assert.deepEqual(
     compose(manifest, sourceEnv, {
@@ -381,6 +385,31 @@ test("a third-party manifest cannot select an ambient tuning value without an op
     }),
     { EXAMPLE_PAGE_SIZE: "25" }
   );
+});
+
+test("a connector in no list receives a declared key in its own namespace and no other", () => {
+  const manifest = {
+    runtime_requirements: {
+      tuning_environment: ["PDPP_ACME_WIDGETS_PAGE_SIZE", "PDPP_OTHER_PAGE_SIZE", "EXAMPLE_PAGE_SIZE"],
+    },
+  };
+  const sourceEnv = { EXAMPLE_PAGE_SIZE: "3", PDPP_ACME_WIDGETS_PAGE_SIZE: "7", PDPP_OTHER_PAGE_SIZE: "9" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "acme-widgets" }), { PDPP_ACME_WIDGETS_PAGE_SIZE: "7" });
+});
+
+test("ownsTuningKey reads the connector's own PDPP_<KEY>_ namespace and nothing else", () => {
+  assert.equal(tuningNamespacePrefix("acme-widgets.v2"), "PDPP_ACME_WIDGETS_V2_");
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_PAGE_SIZE"), true);
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_"), false, "the bare prefix names no knob");
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS"), false);
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETSX_PAGE_SIZE"), false, "a neighbor's namespace");
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_OTHER_PAGE_SIZE"), false);
+  assert.equal(ownsTuningKey("acme-widgets", "EXAMPLE_PAGE_SIZE"), false);
+  // Reserved and proxy keys are never owned, even when the namespace matches.
+  assert.equal(ownsTuningKey("owner", "PDPP_OWNER_TOKEN"), false);
+  assert.equal(ownsTuningKey("run", "PDPP_RUN_ID"), false);
+  assert.equal(ownsTuningKey("http", "HTTP_PROXY"), false);
 });
 
 test("an operator binding overrides a declared tuning key", () => {
@@ -658,7 +687,22 @@ test("manifest-declared local path overrides cross the child boundary without am
   assert.equal(env.SECRET, undefined);
 });
 
-test("a tuning key belongs to the connector with the most specific namespace", () => {
+test("a local path override naming a server-owned variable never carries the server's value", () => {
+  const env = compose(
+    {
+      runtime_requirements: {
+        local_paths: {
+          home_env_override: "PDPP_OWNER_TOKEN",
+          paths: [{ env_override: "PDPP_DATABASE_URL" }],
+        },
+      },
+    },
+    { PDPP_DATABASE_URL: "postgres://secret", PDPP_OWNER_TOKEN: "owner-secret" }
+  );
+  assert.deepEqual(env, {});
+});
+
+test("a connector receives a neighbor's namespaced key only from its own namespace", () => {
   const manifest = {
     runtime_requirements: {
       tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
@@ -666,9 +710,37 @@ test("a tuning key belongs to the connector with the most specific namespace", (
   };
   const sourceEnv = { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20", PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" };
 
-  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps" }), { PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" });
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps-data-portability" }), {
     PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20",
+  });
+});
+
+test("a manifest keyed database never receives the server's PDPP_DATABASE_URL", () => {
+  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_DATABASE_URL", "PDPP_DATABASE_PAGE_SIZE"] } };
+  const sourceEnv = { PDPP_DATABASE_PAGE_SIZE: "5", PDPP_DATABASE_URL: "postgres://secret" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
+  assert.equal(ownsTuningKey("database", "PDPP_DATABASE_URL"), false);
+  assert.equal(ownsTuningKey("database", "pdpp_database_url"), false);
+  assert.equal(ownsTuningKey("widgets", "PDPP_WIDGETS_PAGE_SIZE"), true, "an ordinary namespace is unaffected");
+});
+
+test("the connector with the longest installed namespace owns a nested key", () => {
+  const installed = ["foo", "foo_bar"];
+  const foo = { runtime_requirements: { tuning_environment: ["PDPP_FOO_X", "PDPP_FOO_BAR_X"] } };
+  const fooBar = { runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  const sourceEnv = { PDPP_FOO_BAR_X: "nested", PDPP_FOO_X: "own" };
+
+  assert.deepEqual(compose(foo, sourceEnv, { connectorId: "foo", installedConnectorKeys: installed }), {
+    PDPP_FOO_X: "own",
+  });
+  assert.deepEqual(compose(fooBar, sourceEnv, { connectorId: "foo_bar", installedConnectorKeys: installed }), {
+    PDPP_FOO_BAR_X: "nested",
+  });
+  // With the longer connector not installed, nothing can tell its keys apart.
+  assert.deepEqual(compose(foo, sourceEnv, { connectorId: "foo", installedConnectorKeys: ["foo"] }), {
+    PDPP_FOO_BAR_X: "nested",
+    PDPP_FOO_X: "own",
   });
 });
 

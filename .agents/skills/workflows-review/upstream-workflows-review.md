@@ -48,16 +48,6 @@ Ensure that the code is ready for analysis (either in worktree or on current bra
 
  
 
-#### Protected Artifacts
-
- 
-The following paths are compound-engineering pipeline artifacts and must never be flagged for deletion, removal, or gitignore by any review agent:
-
-- `docs/plans/*.md` — Plan files created by `/workflows:plan`. These are living documents that track implementation progress (checkboxes are checked off by `/workflows:work`).
-- `docs/solutions/*.md` — Solution documents created during the pipeline.
-
-If a review agent flags any file in these directories for cleanup or removal, discard that finding during synthesis. Do not create a todo for it.
- 
 
 #### Parallel Agents to review the PR:
 
@@ -218,7 +208,6 @@ Remove duplicates, prioritize by severity and impact.
  
 
 - [ ] Collect findings from all parallel agents
-- [ ] Discard any findings that recommend deleting or gitignoring files in `docs/plans/` or `docs/solutions/` (see Protected Artifacts above)
 - [ ] Categorize by type: security, performance, architecture, quality, etc.
 - [ ] Assign severity levels: 🔴 CRITICAL (P1), 🟡 IMPORTANT (P2), 🔵 NICE-TO-HAVE (P3)
 - [ ] Remove duplicate or overlapping findings

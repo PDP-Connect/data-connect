@@ -60,7 +60,6 @@ const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
-const UNKNOWN_BLOB_MESSAGE_PATTERN = /Connector emitted unknown message type: BLOB/;
 const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (.+)$/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
@@ -1366,9 +1365,8 @@ test("a 0.1.0 manifest credits a hydrated key by assertion and cannot declare a 
 
 // Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
 // and a known required capability this runtime does not implement fails before
-// any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory, and OBSERVATION
-// and STREAM_EVIDENCE are implemented, so all three pass. BLOB is required and
-// unimplemented, so it is refused here before spawn.
+// any connector code runs. DETAIL_COVERAGE_KEY_SETS and RUN_COVERAGE_V1 are
+// elective; STREAM_EVIDENCE is implemented. BLOB is covered separately.
 test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1385,7 +1383,8 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
     [["OBSERVATION"], null, null],
-    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "BLOB"],
+    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], null, null],
+    [["RUN_COVERAGE_V1"], null, null],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1411,11 +1410,9 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
   }
 });
 
-// START.protocol_capabilities lists what this runtime implements (Section 5.1):
-// OBSERVATION (Section 5.10) and STREAM_EVIDENCE (Section 5.7). It does not list
-// the advisory DETAIL_COVERAGE_KEY_SETS, because it does not implement the
-// extension's crediting, so a connector falls back to hydrated_keys. BLOB is
-// unimplemented and never listed.
+// START.protocol_capabilities lists what this runtime implements (Section
+// 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
+// It also accepts OBSERVATION (Section 5.10) and ingests BLOB through the host spool.
 test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1429,52 +1426,72 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["OBSERVATION", "STREAM_EVIDENCE"]);
+    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"]);
   }, Promise.resolve());
 });
 
-// BLOB is required by a manifest that declares it, and this runtime does not
-// implement it. The gate refuses such a manifest before spawn, in 0.1.0 and 0.2.0,
-// whether or not the connector would emit a BLOB line. This replaces the former
-// spawn waiver. A connector that did not declare BLOB and emits one is rejected
-// at that line, as an unknown message type.
-const BLOB_REFUSED_PATTERN = /requires protocol capabilities this runtime does not support: BLOB$/;
-
-test("a manifest declaring BLOB is refused before spawn at 0.1.0 and 0.2.0, even when no BLOB would be emitted", async (t) => {
+test("reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const blobManifest010 = { ...MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.0" };
-  const blobManifest020 = { ...KEY_SETS_MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.1" };
-  await [blobManifest010, blobManifest020].reduce(async (previous, blobManifest) => {
-    await previous;
-    const refused = await runCapturingStart(
-      server,
-      ownerToken,
-      blobManifest,
-      holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
-    );
-    assert.equal(refused.start, null, `${blobManifest.protocol_version} BLOB manifest never reaches the connector`);
-    assert.match(String((refused.thrown as Error | null)?.message), BLOB_REFUSED_PATTERN);
-  }, Promise.resolve());
-});
-
-test("a connector that emits BLOB without declaring it is rejected at that line as an unknown message", async (t) => {
-  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-  t.after(() => closeServer(server));
-  const ownerToken = await registerAndAuthorize(server);
-
-  const blobLine = {
-    file: "blob-1.json",
-    key: "H",
-    mime_type: "application/json",
-    sha256: "a".repeat(64),
-    size_bytes: 2,
-    stream: "holdings",
-    type: "BLOB",
+  const manifest = {
+    ...MANIFEST,
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    streams: MANIFEST.streams.map((stream) => ({
+      ...stream,
+      coverage_stores: [`${stream.name}-store`],
+    })),
+    version: "1.1.0",
   };
-  const withBlob = await runCapturingStart(server, ownerToken, MANIFEST, [blobLine, ...holdingsRun([])]);
-  assert.ok(withBlob.start, "the connector received START");
-  const failure = withBlob.thrown instanceof Error ? withBlob.thrown.message : JSON.stringify(withBlob.result);
-  assert.match(failure, UNKNOWN_BLOB_MESSAGE_PATTERN);
+  assert.equal(isAdmitted(await registerManifest(server, manifest)), true, "the extension manifest is admitted");
+  const terminalMessages = holdingsRun([]).map((message) =>
+    message.type === "DONE"
+      ? {
+          ...message,
+          coverage: {
+            collection_scope: "unscoped",
+            streams: ["holdings", "activity"].map((stream) => ({
+              scoped: true,
+              stores: [{ status: "collected", store: `run-coverage-${stream}-store` }],
+              stream,
+            })),
+            version: 1,
+          },
+        }
+      : message
+  );
+  const run = await runCapturingStart(server, ownerToken, manifest, terminalMessages);
+  assert.equal(run.thrown, null);
+  assert.ok(run.start, "the connector received START");
+  assert.equal("run_coverage_version" in run.start, false);
+  assert.equal(run.result?.status, "succeeded");
+  const terminalRow = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(run.result?.run_id);
+  assert.ok(terminalRow, "the run has a terminal event");
+  assert.equal(JSON.stringify(JSON.parse(terminalRow.data_json)).includes("run-coverage-"), false);
+});
+
+test("reference runtime refuses 0.3.0 before spawn until the whole profile is implemented", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const outcome = await runCapturingStart(
+    server,
+    ownerToken,
+    {
+      ...MANIFEST,
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.3.0",
+      streams: MANIFEST.streams.map((stream) => ({ ...stream, coverage_stores: [`${stream.name}-store`] })),
+    },
+    holdingsRun([])
+  );
+  assert.equal(outcome.start, null, "the connector was not spawned");
+  assert.ok(outcome.thrown instanceof Error);
+  assert.match(outcome.thrown.message, /protocol_version must be one of 0\.1\.0, 0\.2\.0/);
 });

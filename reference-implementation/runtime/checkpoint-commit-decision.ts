@@ -175,6 +175,23 @@ function stateStreamOf(stream: string, input: Pick<CheckpointCommitInput, "state
   return input.stateStreamByStream.get(stream) || stream;
 }
 
+/**
+ * The data streams whose records a committed `stateStream` cursor vouches
+ * for: the stream itself, then every stream it owns (see stateStreamsOwning),
+ * in `dataStreams` order. STATE must make all of their buffered records
+ * durable before it stages the cursor.
+ */
+export function streamsCheckpointedBy(
+  stateStream: string,
+  dataStreams: Iterable<string>,
+  input: Pick<CheckpointCommitInput, "detailParentsByStream" | "stateStreamByStream">
+): string[] {
+  const owned = [...dataStreams].filter(
+    (stream) => stream !== stateStream && stateStreamsOwning(stream, input).has(stateStream)
+  );
+  return [stateStream, ...owned];
+}
+
 function missingCoverageReports(input: CheckpointCommitInput, stateStream: string): WithholdReason[] {
   const reports = input.coverageByStateStream.get(stateStream) || [];
   const reasons: WithholdReason[] = [];

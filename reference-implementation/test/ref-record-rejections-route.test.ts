@@ -162,6 +162,7 @@ test("list clamps page size, passes opaque cursor, and returns metadata only", a
       cursor: "opaque-cursor",
       limit: 2,
       ownerSubjectId: "owner-1",
+      runId: null,
     },
   ]);
   assert.equal(response.statusCode, null);
@@ -194,6 +195,26 @@ test("list clamps page size, passes opaque cursor, and returns metadata only", a
   assert.equal(JSON.stringify(response.body).includes("parser exploded"), false);
   assert.equal(JSON.stringify(response.body).includes("storage exploded"), false);
   assert.equal(JSON.stringify(response.body).includes('{"id":"bad"}'), false);
+});
+
+test("list passes run_id to the store and rejects a malformed run_id", async () => {
+  const { listCalls, routes } = mount();
+  const route = getRoute(routes, LIST_ROUTE);
+
+  await call(route, { connectorInstanceId: "connection-1" }, { cursor: "c1", run_id: "run-7" });
+  assert.deepEqual(
+    listCalls.map((c) => (c as { runId: string | null }).runId),
+    ["run-7"]
+  );
+
+  for (const bad of ["", ["run-7", "run-8"]]) {
+    const response = await call(route, { connectorInstanceId: "connection-1" }, { run_id: bad });
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(response.body, {
+      error: { code: "invalid_request", message: "run_id must be a non-empty string", param: "run_id" },
+    });
+  }
+  assert.equal(listCalls.length, 1, "a malformed run_id never reaches the store");
 });
 
 test("detail returns exact bounded payload after connection ownership is proven", async () => {

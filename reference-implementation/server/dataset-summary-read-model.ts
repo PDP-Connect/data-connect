@@ -389,16 +389,18 @@ export function getDatasetSummaryProjection(): DatasetSummaryProjection {
     };
   }
 
-  const summary = parseJson<DatasetSummary>(row.summary_json, EMPTY_SUMMARY);
+  const summary = parseJson<DatasetSummary | null>(row.summary_json, null);
   const metadata = parseJson<ProjectionMetadata | null>(row.metadata_json, null);
   const generation = Number(row.generation || 0);
-  if (metadata === null) {
+  if (summary === null || metadata === null) {
     return {
-      ...summary,
+      ...(summary ?? EMPTY_SUMMARY),
       generation,
       metadata: {
         computed_at: null,
-        last_error: "dataset summary projection metadata is unreadable",
+        last_error: summary === null
+          ? "dataset summary projection summary is unreadable"
+          : "dataset summary projection metadata is unreadable",
         rebuild_status: "failed",
         source_high_watermark: null,
         stale_since: nowIso(),
@@ -527,6 +529,17 @@ export function applyDatasetSummaryBlobDelta(delta: DatasetSummaryBlobDelta): vo
   }
 }
 
+const DIRTY_TIME_BOUNDS_REASON = "dirty record-time bounds could not be safely reconciled";
+
+/**
+ * Whether the projection is stale for a reason other than dirty record-time
+ * bounds. Repairing time bounds does not repair the counts or bytes behind
+ * such a reason, so only a full rebuild may clear it.
+ */
+function owesFullRebuild(metadata: ProjectionMetadata): boolean {
+  return metadata.state === "stale" && metadata.last_error !== null && metadata.last_error !== DIRTY_TIME_BOUNDS_REASON;
+}
+
 export function markDatasetSummaryProjectionStale(reason: string): void {
   assertSqliteBackendForDatasetSummary("markDatasetSummaryProjectionStale");
   try {
@@ -543,7 +556,8 @@ export function markDatasetSummaryProjectionStale(reason: string): void {
       {
         computed_at: current.metadata.computed_at,
         last_error:
-          current.metadata.last_error || sanitizeProjectionError(reason || "dataset summary projection is stale"),
+          (current.metadata.last_error !== DIRTY_TIME_BOUNDS_REASON && current.metadata.last_error) ||
+          sanitizeProjectionError(reason || "dataset summary projection is stale"),
         rebuild_status: current.metadata.rebuild_status || "idle",
         source_high_watermark: current.metadata.source_high_watermark || null,
         stale_since: current.metadata.stale_since || staleAt,
@@ -901,11 +915,7 @@ export async function reconcileDirtyDatasetSummaryRecordTimeBounds(
         // or the projection. Leave the dirty rows dirty for the next
         // pass and mark the projection stale (not failed) so the
         // operator surface keeps last-known values honestly.
-        markDatasetSummaryProjectionStale(
-          err instanceof Error
-            ? err.message || "dataset summary projection reconcile cancelled"
-            : "dataset summary projection reconcile cancelled"
-        );
+        markDatasetSummaryProjectionStale(DIRTY_TIME_BOUNDS_REASON);
         throw err;
       }
       markDatasetSummaryProjectionFailed(err);
@@ -952,6 +962,10 @@ function commitReconciledDatasetSummaryRows(
       retained_bytes: current.retained_bytes,
       top_connector_candidates: current.top_connector_candidates,
     };
+    if (owesFullRebuild(current.metadata)) {
+      writeDatasetSummaryProjection(summary, current.metadata, computedAt);
+      return;
+    }
     const metadata: ProjectionMetadata = stillDirty
       ? {
           computed_at: computedAt,

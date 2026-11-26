@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/claude_code",
+		"display": {
+			"name": "Claude Code"
+		}
+	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.0",
+	"version": "0.3.24",
 	"display_name": "Claude Code",
 	"brand": {
-		"icon": "icons/claude_code.svg",
+		"icon": "icon.svg",
 		"background_color": "#D97757"
 	},
 	"runtime_requirements": {
@@ -97,14 +103,25 @@
 					"message_count": {
 						"type": ["integer", "null"]
 					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
 					"user_type": {
 						"type": ["string", "null"]
 					},
 					"entrypoint": {
 						"type": ["string", "null"]
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["session", "subagent"]
+					},
+					"parent_session_id": {
+						"type": ["string", "null"]
 					}
 				},
-				"required": ["id"]
+				"required": ["id", "kind"]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "last_event_at",
@@ -114,6 +131,14 @@
 				"resources": true
 			},
 			"incremental": true,
+			"relationships": [
+				{
+					"name": "parent_session",
+					"stream": "sessions",
+					"foreign_key": "parent_session_id",
+					"cardinality": "has_one"
+				}
+			],
 			"query": {
 				"search": {
 					"lexical_fields": [
@@ -121,9 +146,11 @@
 						"cwd",
 						"git_branch",
 						"version",
+						"title",
 						"user_type",
 						"entrypoint"
-					]
+					],
+					"semantic_fields": ["title"]
 				},
 				"range_filters": {
 					"started_at": ["gte", "gt", "lte", "lt"],
@@ -186,9 +213,15 @@
 					},
 					"agent_id": {
 						"type": ["string", "null"]
+					},
+					"subagent_session_id": {
+						"type": ["string", "null"]
+					},
+					"has_pasted_content": {
+						"type": "boolean"
 					}
 				},
-				"required": ["id", "session_id"]
+				"required": ["id", "session_id", "has_pasted_content"]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "timestamp",
@@ -203,6 +236,12 @@
 					"name": "session",
 					"stream": "sessions",
 					"foreign_key": "session_id",
+					"cardinality": "has_one"
+				},
+				{
+					"name": "subagent_session",
+					"stream": "sessions",
+					"foreign_key": "subagent_session_id",
 					"cardinality": "has_one"
 				}
 			],
@@ -272,6 +311,27 @@
 						"type": ["string", "null"],
 						"format": "date-time",
 						"x_pdpp_role": "event-time"
+					},
+					"content_binary_reason": {
+						"type": ["string", "null"]
+					},
+					"blob_ref": {
+						"type": ["object", "null"],
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"],
+						"additionalProperties": true
+					},
+					"artifact_capture": {
+						"type": ["string", "null"],
+						"enum": ["captured", "failed", "unavailable", null]
+					},
+					"artifact_sha256": {
+						"type": ["string", "null"]
 					}
 				},
 				"required": ["id", "session_id"]
@@ -508,6 +568,140 @@
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
+			"name": "usage",
+			"required": true,
+			"description": "Aggregate Claude Code usage from ~/.claude/stats-cache.json: total sessions and messages, per-model token/cost totals, day-by-day activity, hour-of-day distribution, and the longest session.",
+			"compaction_class": "recurring_snapshot",
+			"compaction_class_note": "single aggregate record re-derived in full from stats-cache.json every run; never compactable, never re-alarms as growth accumulates.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your Claude Code usage",
+				"detail": "Total sessions and messages, per-model token and cost totals, daily activity, hour-of-day distribution, and your longest session."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"total_sessions": {
+						"type": ["integer", "null"]
+					},
+					"total_messages": {
+						"type": ["integer", "null"]
+					},
+					"first_session_date": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"last_computed_date": {
+						"type": ["string", "null"],
+						"format": "date"
+					},
+					"total_speculation_time_saved_ms": {
+						"type": ["integer", "null"]
+					},
+					"total_cost_usd_cents": {
+						"type": "integer"
+					},
+					"currency": {
+						"type": "string"
+					},
+					"models": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"model": { "type": "string" },
+								"input_tokens": { "type": "integer" },
+								"output_tokens": { "type": "integer" },
+								"cache_read_input_tokens": { "type": "integer" },
+								"cache_creation_input_tokens": { "type": "integer" },
+								"web_search_requests": { "type": "integer" },
+								"cost_usd_cents": { "type": "integer" },
+								"context_window": { "type": ["integer", "null"] },
+								"max_output_tokens": { "type": ["integer", "null"] }
+							}
+						}
+					},
+					"daily_activity": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"date": { "type": "string", "format": "date" },
+								"message_count": { "type": "integer" },
+								"session_count": { "type": "integer" },
+								"tool_call_count": { "type": "integer" }
+							}
+						}
+					},
+					"daily_model_tokens": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"date": { "type": "string", "format": "date" },
+								"tokens_by_model": { "type": "object" }
+							}
+						}
+					},
+					"hour_counts": {
+						"type": "object"
+					},
+					"longest_session": {
+						"type": ["object", "null"],
+						"properties": {
+							"session_id": { "type": ["string", "null"] },
+							"duration_seconds": { "type": ["integer", "null"] },
+							"message_count": { "type": ["integer", "null"] },
+							"timestamp": { "type": ["string", "null"], "format": "date-time" }
+						}
+					},
+					"source": {
+						"type": "string"
+					}
+				},
+				"required": [
+					"id",
+					"total_cost_usd_cents",
+					"currency",
+					"models",
+					"daily_activity",
+					"daily_model_tokens",
+					"hour_counts",
+					"source"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["source"]
+				},
+				"range_filters": {
+					"first_session_date": ["gte", "gt", "lte", "lt"],
+					"last_computed_date": ["gte", "gt", "lte", "lt"],
+					"total_sessions": ["gte", "gt", "lte", "lt"],
+					"total_messages": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["first_session_date"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "device_heartbeat"
+		},
+		{
 			"name": "file_history",
 			"description": "Metadata-only inventory for Claude Code file-history stores. Does not emit file-history payload content.",
 			"compaction_fingerprint": {
@@ -621,43 +815,6 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "mtime_epoch",
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"required": false,
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "device_heartbeat"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"description": "Safe coverage status for known Claude Code local stores, including excluded auth-adjacent stores without payloads or raw absolute paths.",
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"store": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string"
-					},
-					"reason": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
-					}
-				},
-				"required": ["id", "store", "status", "reason"]
-			},
-			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -815,6 +972,9 @@
 				},
 				{
 					"name": "slash_commands"
+				},
+				{
+					"name": "usage"
 				}
 			]
 		},

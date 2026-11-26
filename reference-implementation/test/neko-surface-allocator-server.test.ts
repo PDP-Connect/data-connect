@@ -1528,6 +1528,46 @@ test("stopSurface(idle_ttl) preserves the container so it can be restarted cheap
   assert.equal(docker.containers.has(containerId), true);
 });
 
+function gateContainerCreation(docker: FakeDocker): () => void {
+  let finishCreate: () => void = () => undefined;
+  docker.createGate = new Promise<void>((resolve) => {
+    finishCreate = resolve;
+  });
+  return finishCreate;
+}
+
+test("a repeated ensure for one surface id joins the start in flight instead of creating a second container", async () => {
+  const docker = new FakeDocker();
+  const finishCreate = gateContainerCreation(docker);
+  const service = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() });
+  const request = { connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" };
+
+  const first = service.ensureSurface(request);
+  const retry = service.ensureSurface(request);
+  finishCreate();
+  const [firstSurface, retrySurface] = await Promise.all([first, retry]);
+
+  assert.equal(docker.calls.filter((call) => call.path === "/containers/create").length, 1);
+  assert.equal(docker.containers.size, 1);
+  assert.equal(retrySurface.container_id, firstSurface.container_id);
+});
+
+test("a stop that arrives while its surface is being created removes the container once the start completes", async () => {
+  const docker = new FakeDocker();
+  const finishCreate = gateContainerCreation(docker);
+  const service = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() });
+
+  const start = service.ensureSurface({ connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" });
+  const stop = service.stopSurface({ reason: "surface_failed", surfaceId: "surface_1" });
+  finishCreate();
+  await start;
+  const stopped = await stop;
+
+  assertSurface(stopped);
+  assert.equal(stopped.health, "stopping");
+  assert.equal(docker.containers.size, 0);
+});
+
 test("ensureSurface replaces a RUNNING container that Docker marks unhealthy (wedged CDP carcass, never exits)", async () => {
   // Recurrence (ri-browser-surface-recurrence-v2): a dynamic ChatGPT/Amazon
   // surface can be leased + probed healthy, run, release, then have its CDP /
@@ -1628,8 +1668,9 @@ class FakeDocker implements DockerEngineTransport {
   networkConnectFailFor = new Set<string>();
   networkDisconnectFailFor = new Set<string>();
   ipAssignments = new Map<string, number>();
+  /** When set, container creation waits for it, so a test can act while a start is in flight. */
+  createGate: Promise<void> | undefined;
 
-  // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
   async requestJson(path: string, init: DockerEngineRequestInit = {}): Promise<unknown> {
     const call = { init: init as DockerCall["init"], path };
     this.calls.push(call);
@@ -1714,6 +1755,7 @@ class FakeDocker implements DockerEngineTransport {
         }));
     }
     if (path === "/containers/create") {
+      await this.createGate;
       if (this.createError !== undefined) {
         throw this.createError;
       }

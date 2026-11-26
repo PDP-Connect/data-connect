@@ -12,6 +12,7 @@
 
 import { optionalRuntimeScopeFields, readRuntimeSkipFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { CollectionRateSnapshot } from "../runtime/connection-health.ts";
+import { NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import type { RuntimeCollectionFact, RuntimeCollectionFacts } from "./ref-control.ts";
 
 const COLLECTION_RATE_NUMBER_FIELDS = [
@@ -40,6 +41,14 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
   if (typeof entry.stream !== "string" || !entry.stream) {
     return null;
   }
+  // A present-but-invalid count is unknown, not zero: dropping the stream reads
+  // as "no facts" downstream instead of as "no pending gaps".
+  const pending = Object.hasOwn(entry, "pending_detail_gaps")
+    ? readSafeNonNegativeInteger(entry.pending_detail_gaps)
+    : 0;
+  if (pending === null) {
+    return null;
+  }
   const coverageStatuses = readCoverageStatuses(entry.coverage_statuses);
   const fact: RuntimeCollectionFact = {
     checkpoint: typeof entry.checkpoint === "string" ? entry.checkpoint : null,
@@ -49,7 +58,7 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
     // never as a fabricated denominator or numerator.
     considered: readSafeNonNegativeInteger(entry.considered),
     covered: readSafeNonNegativeInteger(entry.covered),
-    pending_detail_gaps: readFiniteNumber(entry.pending_detail_gaps, 0),
+    pending_detail_gaps: pending,
     ...permanentDetailGapsField(entry.permanent_detail_gaps),
     ...(coverageStatuses ? { coverage_statuses: coverageStatuses } : {}),
     skipped: readRuntimeSkipFact(entry.skipped),
@@ -90,6 +99,12 @@ export function readCollectionFactsFromTerminalData(
   }
   const block = data.collection_facts;
   if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return null;
+  }
+  if (
+    (block as { coverage_eligibility_reason?: unknown }).coverage_eligibility_reason ===
+    NON_LOCAL_DEVICE_COVERAGE_REASON
+  ) {
     return null;
   }
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.

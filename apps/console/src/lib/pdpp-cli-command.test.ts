@@ -102,9 +102,9 @@ test("pdppLocalCollectorSetupCommand renders the guided one-command onboarding f
     pdppLocalCollectorSetupCommand({
       baseUrl: "http://127.0.0.1:7662",
       code: "abc-123",
-      connectorId: "claude_code",
+      connectorId: "claude-code",
     }),
-    "npx -y @pdpp/local-collector setup --base-url http://127.0.0.1:7662 --code abc-123 --connector claude_code"
+    "npx -y @pdpp/local-collector setup --base-url http://127.0.0.1:7662 --code abc-123 --connector claude-code"
   );
 });
 
@@ -126,10 +126,10 @@ test("pdppLocalCollectorSetupCommand ignores an empty device label and omits --s
     pdppLocalCollectorSetupCommand({
       baseUrl: "https://ref.example.com",
       code: "code-1",
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       deviceLabel: "   ",
     }),
-    "npx -y @pdpp/local-collector setup --base-url https://ref.example.com --code code-1 --connector claude_code"
+    "npx -y @pdpp/local-collector setup --base-url https://ref.example.com --code code-1 --connector claude-code"
   );
 });
 
@@ -137,7 +137,7 @@ test("pdppLocalCollectorSetupCommand never embeds a device token or other secret
   const rendered = pdppLocalCollectorSetupCommand({
     baseUrl: "https://ref.example.com",
     code: "code-1",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     sample: 20,
   });
   // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
@@ -146,8 +146,8 @@ test("pdppLocalCollectorSetupCommand never embeds a device token or other secret
 
 test("pdppCliCollectorRunCommand renders the canonical run form", () => {
   assert.equal(
-    pdppCliCollectorRunCommand({ baseUrl: "http://127.0.0.1:7662", connectorId: "claude_code" }),
-    "npx -y @pdpp/local-collector run --base-url http://127.0.0.1:7662 --connector claude_code"
+    pdppCliCollectorRunCommand({ baseUrl: "http://127.0.0.1:7662", connectorId: "claude-code" }),
+    "npx -y @pdpp/local-collector run --base-url http://127.0.0.1:7662 --connector claude-code"
   );
   assert.equal(
     pdppCliCollectorRunCommand({ baseUrl: "https://ref.example.com", connectorId: "codex" }),
@@ -161,8 +161,8 @@ test("pdppLocalCollectorDoctorCommand renders a local-only doctor form with no b
 
 test("pdppLocalCollectorDoctorCommand scopes to a connection id when one is known", () => {
   assert.equal(
-    pdppLocalCollectorDoctorCommand({ connectionId: "claude_code:laptop" }),
-    "npx -y @pdpp/local-collector doctor --connection-id claude_code:laptop"
+    pdppLocalCollectorDoctorCommand({ connectionId: "claude-code:laptop" }),
+    "npx -y @pdpp/local-collector doctor --connection-id claude-code:laptop"
   );
 });
 
@@ -193,12 +193,12 @@ test("pdppLocalCollectorRetryDeadLettersCommand appends --apply only when asked"
 
 test("pdppLocalCollectorRetryDeadLettersCommand scopes to a connection id and orders --connection-id before --apply", () => {
   assert.equal(
-    pdppLocalCollectorRetryDeadLettersCommand({ connectionId: "claude_code:laptop" }),
-    "npx -y @pdpp/local-collector retry-dead-letters --connection-id claude_code:laptop"
+    pdppLocalCollectorRetryDeadLettersCommand({ connectionId: "claude-code:laptop" }),
+    "npx -y @pdpp/local-collector retry-dead-letters --connection-id claude-code:laptop"
   );
   assert.equal(
-    pdppLocalCollectorRetryDeadLettersCommand({ apply: true, connectionId: "claude_code:laptop" }),
-    "npx -y @pdpp/local-collector retry-dead-letters --connection-id claude_code:laptop --apply"
+    pdppLocalCollectorRetryDeadLettersCommand({ apply: true, connectionId: "claude-code:laptop" }),
+    "npx -y @pdpp/local-collector retry-dead-letters --connection-id claude-code:laptop --apply"
   );
 });
 
@@ -219,10 +219,10 @@ test("local collector diagnostic commands never leak a filesystem path or base-u
   // URL — that would leak device-local internals into a remotely-rendered
   // command.
   for (const command of [
-    pdppLocalCollectorDoctorCommand({ connectionId: "claude_code:laptop" }),
-    pdppLocalCollectorStatusCommand({ connectionId: "claude_code:laptop" }),
-    pdppLocalCollectorRetryDeadLettersCommand({ connectionId: "claude_code:laptop" }),
-    pdppLocalCollectorRetryDeadLettersCommand({ apply: true, connectionId: "claude_code:laptop" }),
+    pdppLocalCollectorDoctorCommand({ connectionId: "claude-code:laptop" }),
+    pdppLocalCollectorStatusCommand({ connectionId: "claude-code:laptop" }),
+    pdppLocalCollectorRetryDeadLettersCommand({ connectionId: "claude-code:laptop" }),
+    pdppLocalCollectorRetryDeadLettersCommand({ apply: true, connectionId: "claude-code:laptop" }),
   ]) {
     assert.doesNotMatch(command, QUEUE_FLAG);
     assert.doesNotMatch(command, BASE_URL_FLAG);

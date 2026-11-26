@@ -11,6 +11,8 @@
 
 import {
   COLLECTION_PROFILE_VERSIONS,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
   collectionProfileDeclarationError,
   OBSERVATION_CAPABILITY,
   STREAM_EVIDENCE_CAPABILITY,
@@ -44,7 +46,7 @@ export const REFERENCE_COLLECTION_PROFILE_SUPPORT = Object.freeze({
   bindings: BINDING_SUPPORT_DOCUMENT,
   compatible_protocol_versions: Object.freeze([...COLLECTION_PROFILE_VERSIONS]),
   conformance: Object.freeze({ outstanding: Object.freeze(["binding_authority"]), status: "partial" }),
-  protocol_capabilities: Object.freeze([OBSERVATION_CAPABILITY, STREAM_EVIDENCE_CAPABILITY]),
+  protocol_capabilities: Object.freeze([DETAIL_COVERAGE_KEY_SETS_CAPABILITY, OBSERVATION_CAPABILITY, HOST_BLOB_CAPABILITY, STREAM_EVIDENCE_CAPABILITY]),
   protocol_version: "0.2.0",
 });
 
@@ -70,7 +72,7 @@ export function collectionProfileDeclarationProblem(manifest: Record<string, unk
   if (!(COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(version)) {
     return "protocol_version must be one of 0.1.0, 0.2.0";
   }
-  const capabilityProblem = collectionProfileDeclarationError(version, manifest.protocol_capabilities);
+  const capabilityProblem = collectionProfileDeclarationError(version, manifest.protocol_capabilities, Array.isArray(manifest.streams) && manifest.streams.some((stream: unknown) => stream !== null && typeof stream === "object" && Object.hasOwn(stream, "coverage_stores")));
   if (capabilityProblem !== null) {
     return capabilityProblem;
   }

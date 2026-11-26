@@ -108,6 +108,38 @@ function backoff(overrides: Partial<ConnectionBackoffEvidence> = {}): Connection
   };
 }
 
+// ─── Coverage: a connector's own report is not runtime evidence ───────────
+
+test("coverage: a connector-reported collection is unknown with a named cause, never complete or healthy", () => {
+  const snap = computeConnectionHealth(
+    input({
+      coverage: { axis: "unknown", unknownReportedCollected: true },
+      freshness: { axis: "fresh" },
+      run: run(),
+    })
+  );
+  assert.notEqual(snap.state, "healthy");
+  assert.equal(snap.axes.coverage, "unknown");
+  const condition = findCondition(snap, "SourceCoverageComplete");
+  assert.equal(condition?.status, "unknown");
+  assert.equal(condition?.reason, CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED);
+  assert.equal(condition?.origin, "connector");
+  assert.match(condition?.message ?? "", /connector reports/i);
+  assert.match(condition?.message ?? "", /not independently checked/i);
+  assert.equal(snap.forward_disposition, "complete");
+});
+
+test("coverage: unknown without the reported-collected cause stays unmeasured", () => {
+  const snap = computeConnectionHealth(
+    input({ coverage: { axis: "unknown" }, freshness: { axis: "fresh" }, run: run() })
+  );
+  assert.equal(snap.forward_disposition, "unmeasured");
+  assert.notEqual(
+    findCondition(snap, "SourceCoverageComplete")?.reason,
+    CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED
+  );
+});
+
 // ─── 1. Projection unreliable → unknown ───────────────────────────────────
 
 test("unknown: any unreliable required projection forces unknown and names the source", () => {
@@ -2169,7 +2201,7 @@ test("outbox axis: blocked status with no dead letters is a state-read stall", (
 });
 
 test("outbox axis: blocked status with a small open backlog, zero dead letters, zero pending, and a fresh heartbeat is idle (bounded-debris carve-out)", () => {
-  // Reproduces cin_992b0c94cebeb3066ba42a6e (peregrine / Signal Desktop):
+  // Reproduces cin_7c3e1d5a9b2f4086d1e0a3c7 (workstation / Signal Desktop):
   // collection genuinely succeeded (6,448 records, all batches accepted,
   // evidence fresh), but a single superseded-attempt gap-notification row
   // left backlog_open=1 behind. That row already uploaded successfully
@@ -2220,12 +2252,12 @@ test("outbox axis: a small open backlog does NOT get the debris carve-out when t
   // is evidence the collector stopped checking in, not that the server failed
   // to read its state. This assertion previously read `state_read_failed` and
   // encoded the owner-facing defect fixed on 2026-08-27 — see the
-  // Signal/peregrine test below.
+  // Signal/workstation test below.
   assert.equal(r.cause, "stale_heartbeat");
 });
 
 // Owner-reported 2026-08-27 on /sources: the Signal source (connection
-// cin_992b0c94cebeb3066ba42a6e, local_device on host "peregrine") rendered
+// cin_7c3e1d5a9b2f4086d1e0a3c7, local_device on host "workstation") rendered
 // "Can't collect · Freshness has not been measured yet." The connector was
 // never broken — it had accepted 7,780 records across 18 ingest batches, every
 // one HTTP 201, last at 2026-08-22T01:00:17Z. What changed is that the
@@ -2239,7 +2271,7 @@ test("outbox axis: a small open backlog does NOT get the debris carve-out when t
 // server could read it fine. The honest fact — and the only one that points at
 // the action that fixes it — is that the collector is no longer running on the
 // owner's own machine.
-test("outbox axis: the Signal/peregrine shape blames the stopped collector, not a server read failure", () => {
+test("outbox axis: the Signal/workstation shape blames the stopped collector, not a server read failure", () => {
   const r = deriveOutboxAxisFromHeartbeat(
     heartbeat({
       backlogOpenCount: 1,

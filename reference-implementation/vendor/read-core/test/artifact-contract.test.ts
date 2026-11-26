@@ -12,7 +12,7 @@ import { assertNpmBinding } from "../scripts/npm-runtime.ts";
 import { assertManifestTargets, assertPackedFiles } from "../scripts/validate-package.ts";
 import { assertExactRuntime, exactNodeVersion } from "../scripts/verify-node-22.14.ts";
 
-const buildCommandPattern = /"pnpm", \["exec", "tsc", "--project", "tsconfig\.build\.json"\]/;
+const buildCommandPattern = /"npx", \["--no-install", "tsc", "--project", "tsconfig\.build\.json"\]/;
 const forbiddenBuildCommandPattern = /--noEmit|copyFile/;
 const execPathPattern = /process\.execPath/;
 const floatingRuntimePattern = /node@22\.14\.0|npx|latest|lts\//;
@@ -35,7 +35,7 @@ test("the exact Node floor is an explicit matrix artifact gate", async () => {
   const matrixScript = await readFile(new URL("../scripts/verify-node-22.14.ts", import.meta.url), "utf8");
   assert.equal(
     manifest.scripts["verify:node-22.14"],
-    "pnpm build && node --experimental-strip-types scripts/verify-node-22.14.ts"
+    "npm run build && node --experimental-strip-types scripts/verify-node-22.14.ts"
   );
   assert.equal(manifest.main, undefined);
   assert.match(matrixScript, execPathPattern);

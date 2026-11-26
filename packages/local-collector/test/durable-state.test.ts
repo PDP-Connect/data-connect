@@ -2,10 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { chdir } from "node:process";
+// biome-ignore lint/correctness/noUnresolvedImports: Biome's Node module registry does not yet recognize node:sqlite; Node and tsc resolve the built-in module.
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseArgs, resolveInspectionOptions } from "../bin/pdpp-local-collector.ts";
 import {
@@ -195,14 +208,14 @@ test("the same source resolves to the same state across cwd and install roots", 
     try {
       chdir(cwdA);
       const first = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installA),
         sourceInstanceId: SOURCE_A,
         stateRoot,
       });
       chdir(cwdB);
       const second = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installB),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -211,7 +224,7 @@ test("the same source resolves to the same state across cwd and install roots", 
       assert.equal(first, second);
       assert.equal(
         first,
-        canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_A, stateRoot })
+        canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
       );
       assert.ok(first.startsWith(collectorStateDirectory(stateRoot)));
       assert.ok(!first.startsWith(installA));
@@ -220,11 +233,282 @@ test("the same source resolves to the same state across cwd and install roots", 
       assert.ok(!first.startsWith(cwdB));
       assert.notEqual(
         first,
-        canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_B, stateRoot })
+        canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_B, stateRoot })
       );
     } finally {
       chdir(previousCwd);
     }
+  });
+});
+
+test("a queue file named with the legacy underscore connector id is renamed once, with its sidecars; a new device gets the hyphen name", () => {
+  withTempRoot("pdpp-durable-state-underscore-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    assert.notEqual(hyphenPath, underscorePath);
+
+    // No file yet: a fresh device is given the hyphen-named path and nothing is created.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), false);
+
+    // An existing device holds the underscore-named queue: it moves to the hyphen name.
+    seedOutbox(underscorePath, SOURCE_A);
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), false);
+    assert.equal(existsSync(hyphenPath), true);
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1, "the queue's rows moved with the file");
+
+    // A second resolve has nothing to do.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+  });
+});
+
+test("an underscore-named queue beside the hyphen-named queue is left in place, with a warning while it holds pending rows", () => {
+  withTempRoot("pdpp-durable-state-underscore-both-", (root) => {
+    const stateRoot = join(root, "state");
+    const resolve = () =>
+      captureStderr(() => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }));
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A, "canonical-row");
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+
+    const first = resolve();
+    assert.equal(first.result, hyphenPath);
+    assert.match(first.stderr, /holds 1 pending row\(s\) for this source/);
+    assert.ok(first.stderr.includes(`--queue ${underscorePath}`));
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 1, "the legacy rows are neither moved nor deleted");
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1, "the canonical queue is not merged into");
+
+    // It warns on every run until the operator delivers the legacy rows.
+    assert.match(resolve().stderr, /holds 1 pending row/);
+
+    const drained = new DatabaseSync(underscorePath);
+    try {
+      drained.prepare("UPDATE local_device_outbox SET status = 'succeeded'").run();
+    } finally {
+      drained.close();
+    }
+    const quiet = resolve();
+    assert.equal(quiet.result, hyphenPath);
+    assert.equal(quiet.stderr, "");
+  });
+});
+
+test("an underscore-named file that is not a queue, beside a hyphen-named queue with rows, does not stop the hyphen one resolving", () => {
+  withTempRoot("pdpp-durable-state-underscore-unreadable-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A, "canonical-row");
+    writeFileSync(underscorePath, "this is not a SQLite database, but it is long enough to have a header\n");
+
+    const resolved = captureStderr(() =>
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
+    );
+    assert.equal(resolved.result, hyphenPath);
+    assert.match(resolved.stderr, /could not be read .* may still hold pending rows/);
+    assert.ok(resolved.stderr.includes(`--queue ${underscorePath}`));
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1);
+  });
+});
+
+// The empty-canonical rule ("an empty canonical file is not allowed to hide" a
+// legacy store, below) applies to an underscore-named queue too: an empty
+// hyphen queue cannot be proven authoritative while a file beside it might hold
+// this source's rows. A file that is not SQLite holds none, so it is skipped; a
+// file that cannot be opened might, so resolution fails closed and names it.
+test("an empty hyphen-named queue beside an underscore-named queue that cannot be opened fails closed", {
+  skip: process.platform === "win32" || process.getuid?.() === 0 ? "needs POSIX permissions and a non-root user" : false,
+}, () => {
+  withTempRoot("pdpp-durable-state-underscore-unopenable-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_B);
+    seedOutbox(underscorePath, SOURCE_A);
+    chmodSync(underscorePath, 0o000);
+    try {
+      captureStderr(() =>
+        assert.throws(
+          () => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+          (error: unknown) =>
+            error instanceof CollectorStateResolutionError &&
+            error.code === "legacy_state_unreadable" &&
+            error.message.includes(underscorePath)
+        )
+      );
+    } finally {
+      chmodSync(underscorePath, 0o600);
+    }
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 1, "the underscore-named queue is left as it was");
+  });
+});
+
+test("an empty hyphen-named queue beside an underscore-named file that is not SQLite resolves to the hyphen one", () => {
+  withTempRoot("pdpp-durable-state-underscore-junk-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_B);
+    writeFileSync(underscorePath, "this is not a SQLite database, but it is long enough to have a header\n");
+
+    const resolved = captureStderr(() =>
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
+    );
+    assert.equal(resolved.result, hyphenPath);
+  });
+});
+
+function enqueueRow(outbox: LocalDeviceOutbox, id: string): void {
+  outbox.enqueue({ id, kind: "record_batch", payload: { id }, sourceInstanceId: SOURCE_A });
+}
+
+/** Put a queue in WAL mode, so committed rows can sit in the `-wal` file. */
+function useWriteAheadLog(path: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA journal_mode=WAL");
+  } finally {
+    db.close();
+  }
+}
+
+test("rows that exist only in an underscore-named queue's write-ahead log survive the rename", () => {
+  withTempRoot("pdpp-durable-state-underscore-wal-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(underscorePath, SOURCE_A, "row-1");
+    useWriteAheadLog(underscorePath);
+    // A second row committed to the log only. Copying the files while the writer is open
+    // reproduces the state a crashed or killed collector leaves behind.
+    const writer = new LocalDeviceOutbox({ path: underscorePath });
+    const crashed = join(root, "crashed.sqlite");
+    try {
+      enqueueRow(writer, "row-2");
+      assert.ok(statSync(`${underscorePath}-wal`).size > 0, "the new row is in the log, not the main file");
+      copyFileSync(underscorePath, crashed);
+      copyFileSync(`${underscorePath}-wal`, `${crashed}-wal`);
+    } finally {
+      writer.close();
+    }
+    rmSync(underscorePath);
+    for (const suffix of ["-wal", "-shm"]) {
+      rmSync(`${underscorePath}${suffix}`, { force: true });
+    }
+    mkdirSync(dirname(underscorePath), { recursive: true });
+    copyFileSync(crashed, underscorePath);
+    copyFileSync(`${crashed}-wal`, `${underscorePath}-wal`);
+
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), false);
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      assert.equal(existsSync(`${underscorePath}${suffix}`), false, `no ${suffix} is left under the old name`);
+    }
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 2, "the row that was only in the log moved with the queue");
+  });
+});
+
+test("an underscore-named queue held open by a running collector is not renamed", () => {
+  withTempRoot("pdpp-durable-state-underscore-held-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(underscorePath, SOURCE_A, "row-1");
+    useWriteAheadLog(underscorePath);
+    const running = new LocalDeviceOutbox({ path: underscorePath });
+    try {
+      enqueueRow(running, "row-2");
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+      assert.equal(existsSync(hyphenPath), false, "a queue a live process holds is not moved");
+      assert.equal(existsSync(underscorePath), true);
+    } finally {
+      running.close();
+    }
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 2, "no row was lost");
+    // Once the collector has exited, the next resolve moves it.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 2);
+  });
+});
+
+test("an underscore-named queue beside a hyphen-named one is left alone; the hyphen one wins", () => {
+  withTempRoot("pdpp-durable-state-underscore-both-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A);
+    seedOutbox(underscorePath, SOURCE_A);
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), true, "no data is deleted when both exist");
   });
 });
 
@@ -240,7 +524,7 @@ test("an explicit queue path wins before legacy discovery, including ambiguous s
     const resolved = resolveCollectorQueuePath({
       configuredPath: explicitPath,
       configuredPathIsExplicit: true,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       legacyRoots: [legacyA, legacyB],
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -248,7 +532,7 @@ test("an explicit queue path wins before legacy discovery, including ambiguous s
 
     assert.equal(resolved, explicitPath);
     assert.equal(
-      existsSync(canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_A, stateRoot })),
+      existsSync(canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })),
       false
     );
     assert.equal(sourceSummary(join(legacyA, "a.sqlite"), SOURCE_A), 1);
@@ -301,7 +585,7 @@ test("a unique legacy stable-state store remains discoverable in place and stays
     seedOutbox(legacyB, SOURCE_B);
 
     const resolvedA = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(join(root, "install")),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -328,14 +612,14 @@ test("a unique package-local legacy store is handed off atomically without delet
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A);
 
     const resolved = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -356,14 +640,14 @@ test("migration reconciles a legacy write that lands after the snapshot", () => 
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "before-snapshot");
 
     const resolved = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -381,7 +665,7 @@ test("migration retires a live WAL legacy writer before canonical installation",
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -397,7 +681,7 @@ test("migration retires a live WAL legacy writer before canonical installation",
     try {
       let canonicalWriter: LocalDeviceOutbox | undefined;
       const resolved = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -437,7 +721,7 @@ test("restart completes a handoff after failure between retirement and canonical
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -445,7 +729,7 @@ test("restart completes a handoff after failure between retirement and canonical
 
     assert.throws(() =>
       resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -458,7 +742,7 @@ test("restart completes a handoff after failure between retirement and canonical
     assert.equal(existsSync(legacyPath), true);
 
     const restarted = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -498,14 +782,14 @@ for (const [label, hookName] of [
       const installRoot = join(root, "npx-temp-package");
       const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
       const canonicalPath = canonicalCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         sourceInstanceId: SOURCE_A,
         stateRoot,
       });
       seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
 
       const input = {
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -523,7 +807,10 @@ for (const [label, hookName] of [
       assert.ok(stderr.includes(canonicalPath), "warning names the canonical path");
       assert.match(stderr, /--queue/);
       assert.match(stderr, /1 pending/);
-      assert.equal(readdirSync(dirname(canonicalPath)).some((name) => name.endsWith(".tmp")), false);
+      assert.equal(
+        readdirSync(dirname(canonicalPath)).some((name) => name.endsWith(".tmp")),
+        false
+      );
       assert.equal(existsSync(`${canonicalPath}.handoff.lock`), false);
     });
   });
@@ -535,13 +822,13 @@ test("a fence left by a crashed attempt is lifted when a canonical queue appears
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
     const base = {
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -576,14 +863,14 @@ test("a normal migration still migrates and fences the legacy source", () => {
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
     const { result: resolved, stderr } = captureStderr(() =>
       resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -610,7 +897,7 @@ test("migration fails closed when the legacy and canonical roots cross filesyste
       assert.throws(
         () =>
           resolveCollectorQueuePath({
-            connectorId: "claude_code",
+            connectorId: "claude-code",
             moduleUrl: modulePath(join(root, "npx-temp-package")),
             sourceInstanceId: SOURCE_A,
             stateRoot: crossFilesystemRoot,
@@ -669,7 +956,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.throws(
       () =>
         resolveCollectorQueuePath({
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           moduleUrl: modulePath(installRoot),
           sourceInstanceId: SOURCE_A,
           stateRoot,
@@ -680,7 +967,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.equal(existsSync(legacyB), true);
 
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -689,7 +976,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.throws(
       () =>
         resolveCollectorQueuePath({
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           moduleUrl: modulePath(installRoot),
           sourceInstanceId: SOURCE_A,
           stateRoot,

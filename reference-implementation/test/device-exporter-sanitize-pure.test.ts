@@ -95,9 +95,9 @@ test("sanitizeDeviceExporterDiagnostic: depth is capped at 4 with [REDACTED_DEPT
 });
 
 test("sanitizeDeviceExporterDiagnostic: unix home/user/root paths are redacted in strings", () => {
-  const out = asString(sanitizeDeviceExporterDiagnostic("open failed at /home/tim/.ssh/id_rsa please check"));
+  const out = asString(sanitizeDeviceExporterDiagnostic("open failed at /home/owner/.ssh/id_rsa please check"));
   assert.ok(out.includes("[REDACTED_PATH]"), "home path redacted");
-  assert.ok(!out.includes("/home/tim"), "raw home path must not survive");
+  assert.ok(!out.includes("/home/owner"), "raw home path must not survive");
 });
 
 test("sanitizeDeviceExporterDiagnostic: a redacted key wins even when its value is an object", () => {

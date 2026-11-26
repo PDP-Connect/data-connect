@@ -45,6 +45,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/browser-surface-readiness-generation-atomicity.test.ts",
   "test/browser-surface-replacement-correction-artifact.test.ts",
   "test/browser-surface-replacement-ledger-store.test.ts",
+  "test/changes-since-token-expiry.test.ts",
   "test/checkpoint-dependency-profile-conformance-postgres.test.ts",
   "test/checkpoint-withhold-store.test.ts",
   "test/client-connector-postgres-path.test.ts",
@@ -68,6 +69,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-observation-store.test.ts",
   // Registration identity boundary: Postgres is a fixture for the connectors row and its persist guard.
   "test/connector-source-identity-boundary.test.ts",
+  // Source identity move: Postgres is a fixture for the connectors, grants and handles rows it rewrites.
+  "test/connector-source-identity-move.test.ts",
   "test/connector-summary-dirty-hooks.test.ts",
   "test/connector-summary-evidence-canonical-count-cancel-isolation.test.ts",
   "test/connector-summary-evidence-direct-write-source-revision-detection.test.ts",
@@ -112,7 +115,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/legacy-upgrade-preservation-postgres.test.ts",
   "test/lexical-index-skip-unchanged-postgres.test.ts",
   "test/live-shadow-comparison.test.ts",
-  "test/local-coverage-state-parser-postgres.test.ts",
+  // Postgres is a fixture for the collection-revision fence read, not the schema bootstrap under test.
+  "test/local-device-coverage-state-commit-postgres.test.ts",
   "test/manual-upload-artifact-store-postgres.test.ts",
   "test/oauth-code-delivery-atomicity.test.ts",
   "test/owner-connection-delete-orphans.test.ts",
@@ -182,7 +186,11 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/run-connection-identity-postgres.test.ts",
   "test/runtime-cancel-ingest-commit-boundary-probe.test.ts",
   "test/runtime-cursor-audit-fact.test.ts",
+  // Manifest-drift checkpoint withholding over a disposable fixture; does not observe schema bootstrap.
+  "test/runtime-ingest-manifest-drift.test.ts",
   "test/runtime-record-rejection-system-journey.test.ts",
+  // Verifies child ingest before parent checkpoint commit, not schema bootstrap or migration.
+  "test/runtime-stream-collection-failed-commit.test.ts",
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
   "test/scheduler-store-reset-state-admission.test.ts",
@@ -229,6 +237,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/device-ingest-reservation-migration.test.ts",
   // Fences issuance writers while the cutover migration snapshots source tables.
   "test/issuance-cutover.test.ts",
+  // Drops the collection-revision columns and re-runs the bootstrap migration.
+  "test/local-device-coverage-revision-atomicity.test.ts",
   // Reopens old identity schemas and exercises migration rollback and recovery.
   "test/pairwise-grant-generation.test.ts",
   // Builds a prototype-shaped identity ledger before the real schema bootstrap.
@@ -248,14 +258,23 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-semantic-scope-index-idempotence.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
+  // Runs the retired-id rename and its ledger receipt on a from-scratch database.
+  "test/retired-connector-id-migration-postgres.test.ts",
   "test/rs-opaque-cursors.test.ts",
+  // Drops the actor_type column and re-runs the bootstrap migration.
+  "test/run-history-actor-provenance.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
+  "test/run-history-device-run-provenance-migration.test.ts",
+  // Exercises bounded boot retries and cursor recovery after run_history lock timeouts.
+  "test/run-history-device-run-provenance-migration-deadlines.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
   "test/semantic-index-skip-unchanged-postgres.test.ts",
   // Exercises additive semantic input-identity migration and real publication.
   "test/semantic-startup-backfill-catches-crash-abandoned-record.test.ts",
+  // Starts the actual server over retained state.
+  "test/startup-backfill-durable-retry.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

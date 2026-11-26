@@ -18,6 +18,7 @@
  */
 import { Endorse, Eyebrow, IcTimestamp, Monogram } from "@pdpp/brand-react";
 import "@pdpp/brand-react/components.css";
+import { ConnectorMark } from "../connector-mark.tsx";
 import type { StandingData } from "./standing-view-model.ts";
 
 function HeroLine({ line }: { line: StandingData["hero"]["line"] }) {
@@ -249,6 +250,9 @@ function AttentionBlock({
               {section.rows.map((row) => (
                 <div className={["rr-attn__row", `is-${section.tone}`].join(" ")} key={row.id}>
                   <a className="rr-attn__what" href={row.href}>
+                    {row.connectorId ? (
+                      <ConnectorMark spacing="after" connectorId={row.connectorId} name={row.what} />
+                    ) : null}
                     {row.what}
                   </a>
                   <span className="rr-attn__why">{row.why}</span>

@@ -4,9 +4,9 @@
 /**
  * Shared local-media blob hydration: bounded local file read, content
  * hashing, MIME-by-extension guessing, and blob upload via the runtime's
- * reference-blob-uploader — extracted from google_takeout's photos stream so
- * every filesystem-bound connector emitting media bytes (google_takeout,
- * apple_photos, and future ones) hydrates through one code path rather than
+ * reference-blob-uploader — extracted from google-takeout's photos stream so
+ * every filesystem-bound connector emitting media bytes (google-takeout,
+ * apple-photos, and future ones) hydrates through one code path rather than
  * re-implementing the same read/hash/upload/error-sanitize logic per
  * connector. Hydration status vocabulary and size-cap semantics originate
  * here; connector-specific record shape stays out of this module.
@@ -102,14 +102,14 @@ export function uploadMediaBlob(args: {
   stream: string;
 }): Promise<ReferenceBlobRef | null> {
   const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-  const ownerToken = process.env.PDPP_OWNER_TOKEN;
-  if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+  const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+  if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
     return Promise.resolve(null);
   }
   const uploader = makeReferenceBlobUploader({
     connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-    ownerToken,
     rsUrl,
+    uploadToken,
   });
   return uploader({
     connectorId: args.connectorId,

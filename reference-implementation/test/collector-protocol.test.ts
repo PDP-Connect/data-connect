@@ -6,7 +6,7 @@
 //
 // These are pure, deterministic helpers: an accepted-version classifier, a
 // header normalizer (string | string[] | undefined), and a mismatch-body
-// builder. Assertions pin the empty-string guard, the array-takes-first
+// builder. Assertions pin the empty-string guard, the singleton array
 // rule, the trim behavior, and the snapshot semantics of the accepted set.
 
 import { strict as assert } from "node:assert/strict";
@@ -49,8 +49,10 @@ test("readCollectorProtocolHeader reads and trims a string header", () => {
   assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: "2" }), "2");
 });
 
-test("readCollectorProtocolHeader takes the first element of an array header", () => {
-  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["  1 ", "2"] }), "1");
+test("readCollectorProtocolHeader accepts and trims a singleton array header", () => {
+  const version = readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["  1 "] });
+  assert.equal(version, "1");
+  assert.equal(isAcceptedCollectorProtocolVersion(version), true);
 });
 
 test("readCollectorProtocolHeader returns null for absent / blank / empty-array headers", () => {
@@ -75,4 +77,9 @@ test("buildCollectorProtocolMismatchBody copies the accepted set (not the same r
   // Mutating the returned array must not affect the caller's source array.
   body.accepted_versions.push("mutated");
   assert.deepEqual(accepted, ["1", "2"]);
+});
+
+test("readCollectorProtocolHeader rejects a repeated header", () => {
+  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: ["1", "2"] }), null);
+  assert.equal(readCollectorProtocolHeader({ [COLLECTOR_PROTOCOL_HEADER]: [] }), null);
 });

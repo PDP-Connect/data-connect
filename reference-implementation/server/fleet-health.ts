@@ -20,6 +20,7 @@ import {
   hasOwnerBlockingAction,
   isPassiveScheduledRecovery,
   cadenceLatenessIsSoleDegradation,
+  unknownIsOnlyReportedCollected,
 } from "../runtime/rendered-verdict.ts";
 import type { ConnectorSummary } from "./ref-control.ts";
 
@@ -317,13 +318,18 @@ function isActiveWork(summary: FleetSummary): boolean {
 
 function hasUnknownEvidence(summary: FleetSummary): boolean {
   const { connection_health: health, owner_state: ownerState } = summary;
+  // A connector's own coverage report that nothing contradicts is `unknown`
+  // on the wire but neutral for the owner: the fleet must not read it as
+  // missing evidence. The shared predicate keeps this, the console summary
+  // and the pill on one meaning.
+  const neutralReportedCollected = unknownIsOnlyReportedCollected(health);
   return (
     // `connection_health.state` is the canonical composition of whether an
     // axis applies. In particular, a normal server connection can carry an
     // intentionally inapplicable raw `outbox: "unknown"` while remaining
     // healthy. Do not recompose raw axes here.
-    evidenceFor(HEADLINE_EVIDENCE, health.state) === "unknown" ||
-    health.unknown_reasons.length > 0 ||
+    (!neutralReportedCollected && evidenceFor(HEADLINE_EVIDENCE, health.state) === "unknown") ||
+    (!neutralReportedCollected && health.unknown_reasons.length > 0) ||
     // These are independent composed dispositions, not raw axes. Keep their
     // fail-closed behavior until their owning projections fold them into the
     // headline state.
@@ -352,7 +358,15 @@ function reconcileFleetScope(
   inventory: readonly FleetConfiguredConnection[],
   summaries: readonly FleetSummary[]
 ): ReconciledFleetScope {
-  const summariesByConnectionId = new Map(summaries.map((summary) => [summary.connection_id, summary]));
+  const summariesByConnectionId = new Map<string, FleetSummary>();
+  const ambiguousSummaryIds = new Set<string>();
+  for (const summary of summaries) {
+    if (summariesByConnectionId.has(summary.connection_id)) {
+      ambiguousSummaryIds.add(summary.connection_id);
+    } else {
+      summariesByConnectionId.set(summary.connection_id, summary);
+    }
+  }
   const inventoryByConnectionId = new Map(inventory.map((connection) => [connection.connectorInstanceId, connection]));
   const assessed: FleetConnectionReference[] = [];
   const pausedLifecycle: FleetConnectionReference[] = [];
@@ -375,8 +389,20 @@ function reconcileFleetScope(
       setupPending.push(ref);
       continue;
     }
-    const summary = summariesByConnectionId.get(connection.connectorInstanceId);
-    if (scope !== "operational" || !summary) {
+    // Do not let input order decide which report represents an ambiguous connection.
+    // Every candidate is surfaced as unassessed in the summary pass below.
+    if (ambiguousSummaryIds.has(ref.connection_id)) {
+      continue;
+    }
+    // A summary assesses a connection only when it names the same connector
+    // and instance, not just the same connection id.
+    const summary = summariesByConnectionId.get(ref.connection_id);
+    if (
+      scope !== "operational" ||
+      !summary ||
+      summary.connector_instance_id !== ref.connector_instance_id ||
+      summary.connector_id !== ref.connector_id
+    ) {
       unassessed.push(ref);
       continue;
     }
@@ -385,7 +411,15 @@ function reconcileFleetScope(
   }
 
   for (const summary of summaries) {
-    if (!inventoryByConnectionId.has(summary.connection_id)) {
+    const connection = inventoryByConnectionId.get(summary.connection_id);
+    if (!connection) {
+      unassessed.push(summaryReference(summary));
+      continue;
+    }
+    // Duplicates make a connection unassessable only where it would be assessed;
+    // an excluded or setup-pending connection is reported by its lifecycle.
+    const scope = inventoryScope(connection);
+    if (ambiguousSummaryIds.has(summary.connection_id) && scope !== "excluded" && scope !== "setup_pending") {
       unassessed.push(summaryReference(summary));
     }
   }

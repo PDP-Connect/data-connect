@@ -131,7 +131,7 @@ const REDDIT_MANIFEST = {
   streams: [],
   version: "1.0.0",
 };
-const NON_SECRET_CONNECTOR = "claude_code";
+const NON_SECRET_CONNECTOR = "claude-code";
 const NON_SECRET_MANIFEST = {
   connector_id: NON_SECRET_CONNECTOR,
   name: "Claude Code",
