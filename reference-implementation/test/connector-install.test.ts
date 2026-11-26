@@ -2513,6 +2513,36 @@ test("a kept catalog preserves the rollback floor when its high-water write fail
   }
 });
 
+test("an undated catalog cannot replace a dated rollback floor or kept snapshot", async () => {
+  for (const undated of [[entry], { entries: [entry] }]) {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-undated-floor-"));
+    try {
+      const store = createFileConnectorInstallStore(dataDir);
+      const mark = "2026-11-03T00:00:00Z";
+      let next: readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot = { entries: [entry], generatedAt: mark };
+      const service = createConnectorInstallService({
+        catalogLoader: async () => next,
+        dataDir,
+        registerManifest: () => Promise.resolve(),
+        store,
+      });
+      await service.catalog();
+      const snapshotPath = join(dataDir, "connector-catalog-snapshot.json");
+      const kept = readFileSync(snapshotPath, "utf8");
+      next = undated;
+      await assert.rejects(() => service.catalog(), RE_ROLLBACK);
+      assert.equal(await store.getCatalogHighWater(), mark);
+      assert.equal(readFileSync(snapshotPath, "utf8"), kept);
+      next = { entries: [entry], generatedAt: "2026-11-02T00:00:00Z" };
+      await assert.rejects(() => service.catalog(), RE_ROLLBACK);
+      assert.equal(await store.getCatalogHighWater(), mark);
+      assert.equal(readFileSync(snapshotPath, "utf8"), kept);
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+});
+
 test("an invalid kept file or timestamp cannot raise the refresh rollback floor", async () => {
   for (const invalid of [
     { entries: [entry], generated_at: "not a date" },

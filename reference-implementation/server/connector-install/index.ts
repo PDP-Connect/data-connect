@@ -1121,10 +1121,9 @@ export function createConnectorInstallService(options: {
         throw new Error("Verified connector catalog has an invalid generated_at timestamp.");
       }
       if (
-        snapshot.generatedAt &&
         rollbackFloor &&
         Number.isFinite(Date.parse(rollbackFloor)) &&
-        Date.parse(snapshot.generatedAt) < Date.parse(rollbackFloor)
+        (!snapshot.generatedAt || Date.parse(snapshot.generatedAt) < Date.parse(rollbackFloor))
       ) {
         throw new Error("Catalog rollback refused by high-water mark.");
       }
