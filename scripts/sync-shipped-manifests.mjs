@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  renameSync,
   writeFileSync,
 } from "node:fs"
 import { homedir } from "node:os"
@@ -18,8 +19,6 @@ import { fileURLToPath } from "node:url"
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SNAPSHOT_DIR = join(ROOT, "reference-implementation", "test", "fixtures", "shipped-manifests")
-const CONNECTORS_DIR = join(SNAPSHOT_DIR, "connectors")
-const PROVENANCE_PATH = join(SNAPSHOT_DIR, "provenance.json")
 const REMOTE = process.env.DATA_CONNECTORS_REMOTE ?? "https://github.com/PDP-Connect/data-connectors.git"
 const SHA_PATTERN = /^[0-9a-f]{40}$/
 
@@ -67,20 +66,21 @@ function sourceManifestPaths(repo, commit) {
     .sort()
 }
 
-function snapshotDigests() {
+function snapshotDigests(snapshotDir) {
+  const connectorsDir = join(snapshotDir, "connectors")
   const digests = {}
-  for (const connector of readdirSync(CONNECTORS_DIR, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
-    const path = join(CONNECTORS_DIR, connector.name, "manifest.json")
-    const relativePath = relative(SNAPSHOT_DIR, path).split("\\").join("/")
+  for (const connector of readdirSync(connectorsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+    const path = join(connectorsDir, connector.name, "manifest.json")
+    const relativePath = relative(snapshotDir, path).split("\\").join("/")
     digests[relativePath] = sha256(readFileSync(path))
   }
   return Object.fromEntries(Object.entries(digests).sort(([left], [right]) => left.localeCompare(right)))
 }
 
-function checkSnapshot() {
-  const provenance = JSON.parse(readFileSync(PROVENANCE_PATH, "utf8"))
+function checkSnapshot(snapshotDir = SNAPSHOT_DIR) {
+  const provenance = JSON.parse(readFileSync(join(snapshotDir, "provenance.json"), "utf8"))
   if (!SHA_PATTERN.test(provenance.commit ?? "")) throw new Error("provenance commit must be a full 40-character SHA")
-  const actual = snapshotDigests()
+  const actual = snapshotDigests(snapshotDir)
   const expected = provenance.files
   if (!expected || JSON.stringify(actual) !== JSON.stringify(expected)) {
     const missing = Object.keys(expected ?? {}).filter((path) => !(path in actual))
@@ -113,26 +113,37 @@ function checkSnapshot() {
 function syncSnapshot(commit) {
   if (!SHA_PATTERN.test(commit ?? "")) throw new Error("usage: sync-shipped-manifests.mjs --commit <full-40-character-sha>")
   const source = sourceRepository(commit)
+  let staging
   try {
+    staging = mkdtempSync(join(dirname(SNAPSHOT_DIR), ".shipped-manifests-stage-"))
     const paths = sourceManifestPaths(source.cwd, commit)
     if (paths.length === 0) throw new Error(`no connectors/*/manifest.json files found at ${commit}`)
-    rmSync(CONNECTORS_DIR, { recursive: true, force: true })
-    mkdirSync(CONNECTORS_DIR, { recursive: true })
+
     const files = {}
     for (const sourcePath of paths) {
       const bytes = git(["show", `${commit}:${sourcePath}`], source.cwd)
       assertFullManifest(sourcePath, bytes)
-      const targetPath = join(SNAPSHOT_DIR, sourcePath)
+      const targetPath = join(staging, sourcePath)
       mkdirSync(dirname(targetPath), { recursive: true })
       writeFileSync(targetPath, bytes)
-      files[relative(SNAPSHOT_DIR, targetPath).split("\\").join("/")] = sha256(bytes)
+      files[relative(staging, targetPath).split("\\").join("/")] = sha256(bytes)
     }
     writeFileSync(
-      PROVENANCE_PATH,
+      join(staging, "provenance.json"),
       `${JSON.stringify({ repository: "PDP-Connect/data-connectors", commit, files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) }, null, 2)}\n`
     )
-    checkSnapshot()
+    checkSnapshot(staging)
+    const previous = `${staging}-previous`
+    renameSync(SNAPSHOT_DIR, previous)
+    try {
+      renameSync(staging, SNAPSHOT_DIR)
+    } catch (error) {
+      renameSync(previous, SNAPSHOT_DIR)
+      throw error
+    }
+    rmSync(previous, { recursive: true, force: true })
   } finally {
+    if (staging) rmSync(staging, { recursive: true, force: true })
     source.cleanup()
   }
 }
