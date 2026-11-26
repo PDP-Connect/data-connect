@@ -39,3 +39,10 @@ test("the menu shows one Advanced group label above Server, Collectors and Webho
     assert.ok(link > label, `${item.label} sits below the Advanced label`);
   }
 });
+
+test("Tokens belongs to Settings and does not select Server", async () => {
+  const { isNavItemActive } = await loadFrame();
+  assert.equal(isNavItemActive("/settings", "/deployment/tokens"), true);
+  assert.equal(isNavItemActive("/deployment", "/deployment/tokens"), false);
+  assert.equal(isNavItemActive("/deployment", "/deployment"), true);
+});

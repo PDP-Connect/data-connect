@@ -144,6 +144,10 @@ function isConnectSourceSetupRoute(pathname: string): boolean {
 // noun off root, so an exact match is required for the root and a prefix match
 // (segment-boundary aware) for the rest.
 export function isNavItemActive(href: string, pathname: string): boolean {
+  if (pathname.startsWith("/deployment/tokens")) {
+    if (href === "/deployment") return false;
+    if (href === "/settings") return true;
+  }
   if (href === "/") {
     return pathname === "/";
   }
@@ -226,7 +230,7 @@ function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: 
     return (
       <div className={nested ? "rr-nav-child" : undefined} key={item.href}>
         {"labelBefore" in item && item.labelBefore && item.labelBefore !== previousSibling?.labelBefore ? (
-          <div className="rr-side__group rr-side__group--nested">{item.labelBefore}</div>
+          <h3 className="rr-side__group rr-side__group--nested font-semibold uppercase tracking-wide">{item.labelBefore}</h3>
         ) : null}
         <Link
           aria-current={active ? "page" : undefined}
