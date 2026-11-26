@@ -160,6 +160,19 @@ test("a released route with confirmed cleanup reads Off, not unknown", () => {
   assert.equal(routeSentence(releasedRoute, "Off"), "Your address no longer works.");
 });
 
+test("unconfirmed cleanup on an ended route does not depend on a matching lifecycle", () => {
+  for (const routeState of ["released", "inactive", "stopped"]) {
+    const route: RouteDisplayInput = {
+      ...releasedRoute, routeState, cleanup: { state: "unconfirmed" },
+      verification: { ...releasedRoute.verification, status: "verified" },
+    };
+    const headline = routeHeadline(route, null, false);
+    assert.equal(headline, "Needs your action");
+    assert.equal(routeSentence(route, headline), "We couldn't confirm your address closed. It may still work.");
+    assert.match(routeSentence(route, "Off") ?? "", /couldn't confirm/);
+  }
+});
+
 test("released without confirmed cleanup keeps the lifecycle meaning; nothing is invented", () => {
   const unconfirmed = { ...releasedRoute, cleanup: { state: "unconfirmed" } };
   assert.equal(routeHeadline(unconfirmed, "stopping", false), "Turning off");

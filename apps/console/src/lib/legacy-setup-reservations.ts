@@ -3,8 +3,8 @@
 
 // One-time migration. Older consoles kept provider setups in browser storage.
 // The host now holds them, so each saved setup and draft is offered to the host
-// once and the browser copy is then removed. Delete this file when no old console
-// remains in use.
+// and checkpointed only after a settled Host outcome. Delete this file when no
+// old console remains in use.
 type Request = (
   path: string,
   body?: Record<string, unknown>
@@ -24,28 +24,67 @@ const fields = [
 
 type Legacy = Record<(typeof fields)[number], string>
 
-function readLegacy(storage: Pick<Storage, "getItem">): Legacy[] {
+type LegacyRow = { raw: string; value: unknown }
+
+function isLegacy(item: unknown): item is Legacy {
+  return !!item && typeof item === "object" &&
+    fields.every(key => {
+      const value = (item as Record<string, unknown>)[key]
+      return typeof value === "string" && value.length > 0
+    })
+}
+
+function readLegacy(raw: string | null): LegacyRow[] | null {
+  if (raw === null) return []
+  let values: unknown
   try {
-    const value: unknown = JSON.parse(storage.getItem(setupKey) ?? "[]")
-    if (!Array.isArray(value)) return []
-    return value.filter(
-      (item): item is Legacy =>
-        !!item &&
-        typeof item === "object" &&
-        fields.every(key => typeof item[key] === "string" && item[key].length > 0)
-    )
+    values = JSON.parse(raw)
   } catch {
-    return []
+    return null
   }
+  if (!Array.isArray(values)) return null
+  if (!values.length) return []
+
+  // JSON.parse validates syntax. Isolate each top-level token without writing
+  // it back through JSON.stringify, which could alter an unsupported value.
+  const rows: LegacyRow[] = []
+  let start = raw.indexOf("[") + 1
+  let depth = 0, quoted = false, escaped = false
+  for (let i = start; i < raw.length; i++) {
+    const c = raw[i]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (c === "\\") escaped = true
+      else if (c === '"') quoted = false
+    } else if (c === '"') quoted = true
+    else if (c === "[" || c === "{") depth++
+    else if (depth === 0 && (c === "," || c === "]")) {
+      rows.push({ raw: raw.slice(start, i).trim(), value: values[rows.length] })
+      start = i + 1
+      if (c === "]") break
+    } else if (c === "}" || c === "]") depth--
+  }
+  return rows
+}
+
+function checkpoint(storage: Store, original: LegacyRow) {
+  // Merge against the latest snapshot after the request. This is best effort
+  // and does not make localStorage an atomic cross-tab compare-and-set.
+  const live = readLegacy(storage.getItem(setupKey))
+  const index = live?.findIndex(row => row.raw === original.raw) ?? -1
+  if (!live || index < 0) return
+  live.splice(index, 1)
+  if (live.length) storage.setItem(setupKey, "[" + live.map(row => row.raw).join(",") + "]")
+  else storage.removeItem(setupKey)
 }
 
 type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">
 
 type LegacyDraft = { providerId: string; draftId: string; usage: string | null }
 
-function readLegacyDraft(storage: Pick<Storage, "getItem">): LegacyDraft | null {
+function readLegacyDraft(raw: string): LegacyDraft | null {
   try {
-    const value = JSON.parse(storage.getItem(draftKey) ?? "null") as Record<string, unknown> | null
+    const value = JSON.parse(raw) as Record<string, unknown> | null
     if (
       !value ||
       typeof value.providerId !== "string" ||
@@ -72,40 +111,43 @@ export async function migrateLegacySetupReservations(
   const result = { adopted: 0, dropped: 0, deferred: 0, cleanup: 0, draft: "none" as "none" | "sent" | "deferred" }
   if (!stores) return result
   const storage = stores.local
-  const pending: Legacy[] = []
-  for (const reservation of readLegacy(storage)) {
-    const answer = await request("/setups/adopt", { ...reservation })
-    if (!answer.ok) {
-      // The host did not answer. Keep the saved copy and try again next time.
-      pending.push(reservation)
+  const rows = readLegacy(storage.getItem(setupKey))
+  if (rows === null) result.deferred++
+  for (const row of rows ?? []) {
+    const reservation = row.value
+    if (!isLegacy(reservation)) {
       result.deferred++
-    } else if ((answer.data as { adopted?: boolean }).adopted) {
-      result.adopted++
-    } else if ((answer.data as { reason?: string }).reason === "needs_cleanup") {
-      // The host kept this second setup as a leftover to clean up.
-      result.cleanup++
-    } else {
-      result.dropped++
+      continue
     }
+    const answer = await request("/setups/adopt", Object.fromEntries(fields.map(key => [key, reservation[key]])))
+    const data = answer.ok ? adoption(answer.data) : null
+    if (data?.adopted === true) result.adopted++
+    else if (data?.adopted === false && data.reason === "needs_cleanup") result.cleanup++
+    else if (data?.adopted === false && (data.reason === "unknown" || data.reason === "ended" || data.reason === "cancelled")) result.dropped++
+    else {
+      result.deferred++
+      continue
+    }
+    checkpoint(storage, row)
   }
-  if (pending.length) storage.setItem(setupKey, JSON.stringify(pending))
-  else storage.removeItem(setupKey)
-  // The draft pointer names a draft the host may hold. It goes to the host
-  // and stays in the browser until the host answers: adopted, already has one,
-  // or says the draft is gone. A failed call keeps it for the next load.
-  const draft = readLegacyDraft(stores.session)
-  if (!draft) {
-    stores.session.removeItem(draftKey)
-  } else {
-    const answer = await request("/setups/adopt-draft", { ...draft })
-    if (answer.ok) {
-      stores.session.removeItem(draftKey)
-      result.draft = "sent"
-    } else {
-      result.draft = "deferred"
-    }
+
+  const rawDraft = stores.session.getItem(draftKey)
+  if (rawDraft === null) return result
+  const draft = readLegacyDraft(rawDraft)
+  result.draft = "deferred"
+  if (!draft) return result
+  const answer = await request("/setups/adopt-draft", { ...draft })
+  const data = answer.ok ? adoption(answer.data) : null
+  if (data?.adopted === true ||
+      (data?.adopted === false && (data.reason === "unknown" || data.reason === "service_has_draft"))) {
+    if (stores.session.getItem(draftKey) === rawDraft) stores.session.removeItem(draftKey)
+    result.draft = "sent"
   }
   return result
+}
+
+function adoption(value: unknown): { adopted?: unknown; reason?: unknown } | null {
+  return value !== null && typeof value === "object" ? value as { adopted?: unknown; reason?: unknown } : null
 }
 
 function browserStorage() {

@@ -75,8 +75,11 @@ async function inspect(home: string, dataDir: string, uid: number, statPath: Sta
     if (reason) paths.push({ path, reason, fixable: isFixable(stat, resolve(path), root, uid) });
     if (!stat.isDirectory() || (ancestors.has(path) && reason !== null)) blocked = true;
   }
+  // A blocked chain disables automatic repair, but must not turn an app-owned
+  // descendant into a terminal-command target behind its unsafe ancestor.
+  const command = fixCommand(paths);
   if (blocked) for (const item of paths) item.fixable = false;
-  return { paths, command: fixCommand(paths) };
+  return { paths, command };
 }
 
 export function fixCommand(paths: readonly UnsafePath[]): string | null {

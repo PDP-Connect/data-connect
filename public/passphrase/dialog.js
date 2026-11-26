@@ -4,24 +4,19 @@
 import { generatePassphrase, ownPasswordProblem } from "./generate.js";
 
 const SAVE_LABEL = "Save password and continue";
-const SUGGESTED_HINT =
-  "We made a strong one for you. Put it in your password manager; you will need it to sign in on your phone.";
 
 /**
  * The behavior of the native "Set owner password" window (`public/owner-password.html`).
- * The suggested passphrase is the default. "Use my own" swaps it for an empty field,
- * and "Use the suggested password" brings the same suggestion back. A password that is
- * too short is refused in the error box, the same place the shell's other refusals show.
+ * Fields are masked by default. "Suggest a password" fills both the new password and
+ * confirm fields and reveals them. Show/Hide toggles masking with aria-pressed.
  */
 export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate = generatePassphrase }) {
   const form = document.getElementById("password-form");
   const passwordInput = document.getElementById("password-input");
-  const fieldLabel = document.getElementById("field-label");
-  const fieldHint = document.getElementById("field-hint");
+  const confirmInput = document.getElementById("confirm-input");
   const toggleButton = document.getElementById("toggle-button");
   const copyButton = document.getElementById("copy-button");
-  const ownButton = document.getElementById("own-button");
-  const suggestedButton = document.getElementById("suggested-button");
+  const suggestButton = document.getElementById("suggest-button");
   const button = document.getElementById("submit-button");
   const errorBox = document.getElementById("error");
 
@@ -35,28 +30,14 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     errorBox.classList.remove("visible");
   }
 
-  // Copy is the confirmation of the suggestion, so there is no second field for it.
-  const suggested = generate();
-  function showSuggested() {
-    clearError();
-    passwordInput.readOnly = true;
-    passwordInput.value = suggested;
-    passwordInput.type = "text";
-    toggleButton.textContent = "Hide";
-    fieldLabel.textContent = "Your new password";
-    fieldHint.textContent = SUGGESTED_HINT;
-    copyButton.textContent = "Copy";
-    copyButton.hidden = false;
-    ownButton.hidden = false;
-    suggestedButton.hidden = true;
+  function reveal(shown) {
+    passwordInput.type = shown ? "text" : "password";
+    confirmInput.type = shown ? "text" : "password";
+    toggleButton.textContent = shown ? "Hide" : "Show";
+    toggleButton.setAttribute("aria-pressed", String(shown));
   }
-  showSuggested();
 
-  toggleButton.addEventListener("click", () => {
-    const hidden = passwordInput.type === "password";
-    passwordInput.type = hidden ? "text" : "password";
-    toggleButton.textContent = hidden ? "Hide" : "Show";
-  });
+  toggleButton.addEventListener("click", () => reveal(passwordInput.type === "password"));
 
   copyButton.addEventListener("click", async () => {
     try {
@@ -68,19 +49,13 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     }
   });
 
-  ownButton.addEventListener("click", () => {
+  suggestButton.addEventListener("click", () => {
     clearError();
-    passwordInput.readOnly = false;
-    passwordInput.value = "";
-    passwordInput.focus();
-    fieldLabel.textContent = "Your own password";
-    fieldHint.textContent = "At least 15 characters. Longer is safer.";
-    ownButton.hidden = true;
-    copyButton.hidden = true;
-    suggestedButton.hidden = false;
+    const suggestion = generate();
+    passwordInput.value = suggestion;
+    confirmInput.value = suggestion;
+    reveal(true);
   });
-
-  suggestedButton.addEventListener("click", showSuggested);
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -89,10 +64,15 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
 
   async function submitPassword() {
     const password = passwordInput.value;
+    const confirmation = confirmInput.value;
     clearError();
     const problem = ownPasswordProblem(password);
     if (problem) {
       showError(problem);
+      return;
+    }
+    if (password !== confirmation) {
+      showError("The passwords do not match.");
       return;
     }
     if (typeof invoke !== "function") {

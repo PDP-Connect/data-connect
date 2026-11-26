@@ -16,6 +16,8 @@ on:
       - "packages/connector-protocol/**"
       - "packages/collector-runtime/**"
       - "scripts/rust-test-path-filter.test.mjs"
+      - "scripts/ci/webkitgtk-cookie-probe.sh"
+      - "scripts/ci/webkitgtk-cookie-probe-test.sh"
       - "scripts/ensure-pdpp-runtime.js"
       - "scripts/is-main-module.js"
       - "scripts/resolve-connectors.js"
@@ -75,6 +77,9 @@ jobs:
 
       - name: Install PDPP runtime fixtures
         run: node scripts/ensure-pdpp-runtime.js
+
+      - name: Test WebKitGTK probe with synthetic fixtures
+        run: bash scripts/ci/webkitgtk-cookie-probe-test.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -146,9 +151,8 @@ jobs:
         # this ignored test builds a real webview on its own X display and
         # session bus and checks the Cookie header a local server receives.
         # Run the already-compiled test binary directly so the bound covers the
-        # run only, not Cargo or compilation. The probe script writes output to a
-        # file, and if the process outlives its RAN marker it records the process
-        # tree, thread states and symbol-only stacks before it kills only that tree.
+        # run only, not Cargo or compilation. The script keeps raw output in
+        # private scratch and reports only fixed summaries.
         working-directory: src-tauri
         run: |
           set -euo pipefail
@@ -164,34 +168,20 @@ jobs:
             CARGO_BUILD_JOBS=4 \
             CARGO_MANIFEST_DIR="$PWD" \
             TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}'
-          sudo apt-get install -y gdb
           test_bin="$(cargo test --lib --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.profile.test == true and .executable != null) | .executable' | tail -n 1)"
           test -x "$test_bin"
-          # Two CI runs stalled here (once before any phase, once after RAN) and
-          # 51 later probe runs did not. On a stall (exit 124) the probe records
-          # stacks first, then the step retries once: a rare stall leaves its
-          # evidence and a warning without failing the job. Any other failure
-          # is not retried.
+          # Preserve one retry for a bounded stall; no other failure is retried.
           for attempt in 1 2; do
             set +e
             timeout --signal=TERM --kill-after=5s 240s xvfb-run -a dbus-run-session -- \
-              ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" "$RUNNER_TEMP/webkitgtk-cookie-test.log" \
-              2>&1 | tee -a "$RUNNER_TEMP/webkitgtk-cookie-probe.log"
+              bash ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" 2>/dev/null
             code=$?
             set -e
             [ "$code" = 124 ] && [ "$attempt" = 1 ] || break
-            echo "::warning::WebKitGTK cookie test stalled; its stacks are in this step's log. Retrying once."
+            echo "::warning::WebKitGTK cookie test stalled; retrying once."
           done
           [ "$code" = 0 ] || {
             echo "::error::WebKitGTK cookie test failed (exit $code)"
-            exit 1
-          }
-          grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-            echo "::error::WebKitGTK cookie test did not print its RAN marker"
-            exit 1
-          }
-          grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-            echo "::error::WebKitGTK cookie test did not report a passing result"
             exit 1
           }

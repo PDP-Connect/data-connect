@@ -122,6 +122,7 @@ export async function startDesktopReachability(input: {
     "runtime.durable": known(false),
     "secrets.backend": known(isCredentialEncryptionConfigured()),
   };
+  await fixStatePaths(home, dataDir).catch(() => undefined);
   const service = await createReachabilityService({
     identity: { instanceId: createHash("sha256").update(dataDir).digest("hex"), bootId: randomUUID() },
     hostCapabilities,
