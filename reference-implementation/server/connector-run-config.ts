@@ -23,12 +23,9 @@
  * but "an unconfirmed collection boundary silently widened what a run
  * collected."
  *
- * Fail-closed, concretely: any error reading the store yields `null`, i.e. NO
- * connector options, i.e. the connector falls back to its own manifest
- * defaults via `readOptions`. It never yields a partially-read or
- * last-known-good config. A store that cannot be read has not proven the owner
- * confirmed anything, and "cannot prove" must collapse to "did not confirm" --
- * never to "assume the previous answer still holds."
+ * Fail-closed: invalid or unavailable authority rejects the resolver. Only a
+ * successful lookup with no active revision selects manifest defaults. Neither
+ * a lookup failure nor an invalid active configuration proves absence.
  *
  * Delivery: the resolved config becomes `START.connector_options`, the field
  * `packages/polyfill-connectors/src/connector-options.ts` has always read
@@ -44,14 +41,19 @@
  */
 
 import type { ConfigRevision, ConnectorInstanceConfigStore } from "./stores/connector-instance-config-store.ts";
-import { getDefaultConnectorInstanceConfigStore } from "./stores/connector-instance-config-store.ts";
+import {
+  getDefaultConnectorInstanceConfigStore,
+  InvalidActiveConfigJsonError,
+} from "./stores/connector-instance-config-store.ts";
 
 export interface ResolveRunConnectorOptionsInput {
   readonly connectorInstanceId: string | null | undefined;
   /**
-   * Reported when a revision is refused or a read fails, so an operator can
-   * see WHY a run collected against defaults instead of guessing. Never
-   * receives config values -- only the decision and its reason.
+   * Reported when a revision is applied, absent, or refused, or when a read
+   * fails, so an operator can see WHY a run was blocked or collected against
+   * defaults instead of guessing. Never receives config values -- only the
+   * decision and its reason. Reporting is best effort: a callback that throws
+   * cannot change the resolution or replace a typed refusal.
    */
   readonly onDecision?: (decision: RunConfigDecision) => void;
   /** Store seam; defaults to the backend-bound process store. */
@@ -62,13 +64,63 @@ export interface RunConfigDecision {
   readonly connectorInstanceId: string;
   /** Present only when a revision was applied. */
   readonly optionKind?: ConfigRevision["optionKind"];
-  readonly reason: "active_revision_applied" | "no_active_revision" | "store_unreadable";
+  readonly reason: "active_revision_applied" | "invalid_active_config" | "no_active_revision" | "store_unreadable";
   /** Present only when a revision was applied. */
   readonly revision?: number;
 }
 
+export type RunConfigBlockedReason = "missing_instance_identity" | "store_unreadable" | "invalid_active_config";
+const RUN_CONFIG_BLOCKED_CODE = "connector_run_config_blocked";
+
+export function describeRunConfigFailure(reason: unknown) {
+  switch (reason) {
+    case "invalid_active_config":
+      return {
+        code: RUN_CONFIG_BLOCKED_CODE,
+        message: "Confirm a replacement connector configuration before retrying.",
+        origin: "runtime",
+        retryable: false,
+      };
+    case "store_unreadable":
+      return {
+        code: RUN_CONFIG_BLOCKED_CODE,
+        message: "The connector configuration store could not be read.",
+        origin: "runtime",
+        retryable: true,
+      };
+    default:
+      return null;
+  }
+}
+
+export class RunConfigBlockedError extends Error {
+  readonly code = RUN_CONFIG_BLOCKED_CODE;
+
+  readonly reason: RunConfigBlockedReason;
+  readonly revision: number | undefined;
+
+  constructor(reason: RunConfigBlockedReason, revision?: number) {
+    super(describeRunConfigFailure(reason)?.message ?? "Connector run configuration could not be confirmed.");
+    this.name = "RunConfigBlockedError";
+    this.reason = reason;
+    this.revision = revision;
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+// Reporting must not decide the outcome: a throwing callback would otherwise
+// replace the typed refusal (or turn a lookup result into an unrelated error).
+function report(onDecision: ResolveRunConnectorOptionsInput["onDecision"], decision: RunConfigDecision): void {
+  try {
+    onDecision?.(decision);
+  } catch {
+    // Best effort only; the resolution below is already decided.
+  }
 }
 
 /**
@@ -79,42 +131,63 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * active, use manifest defaults", while an empty active revision means "the
  * owner confirmed an empty config." Collapsing them would make a confirmed
  * empty allowlist indistinguishable from never having configured anything.
+ *
+ * Rejects with `RunConfigBlockedError` -- never `null` -- when the lookup
+ * fails, the active config is malformed, or the instance identity is missing.
+ * The refusal does not depend on `onDecision`.
  */
 export async function resolveRunConnectorOptions(
   input: ResolveRunConnectorOptionsInput
 ): Promise<Record<string, unknown> | null> {
   const { connectorInstanceId, onDecision } = input;
   if (typeof connectorInstanceId !== "string" || connectorInstanceId.trim().length === 0) {
-    return null;
+    throw new RunConfigBlockedError("missing_instance_identity");
   }
-  const store = input.store ?? getDefaultConnectorInstanceConfigStore();
   let active: ConfigRevision | null;
   try {
+    const store = input.store ?? getDefaultConnectorInstanceConfigStore();
     active = await store.getActiveRevision(connectorInstanceId);
-  } catch {
-    // Fail closed. An unreadable store proves nothing about owner
-    // confirmation, so the run gets manifest defaults rather than a
-    // stale or partially-read boundary.
-    onDecision?.({ connectorInstanceId, reason: "store_unreadable" });
-    return null;
+  } catch (err) {
+    if (err instanceof InvalidActiveConfigJsonError) {
+      report(onDecision, { connectorInstanceId, reason: "invalid_active_config" });
+      // biome-ignore lint/style/useErrorCause: The refusal exposes only its safe reason and revision.
+      throw new RunConfigBlockedError("invalid_active_config", err.revision);
+    }
+    report(onDecision, { connectorInstanceId, reason: "store_unreadable" });
+    // biome-ignore lint/style/useErrorCause: Store errors can expose connection details.
+    throw new RunConfigBlockedError("store_unreadable");
   }
-  if (!active) {
+  if (active === null) {
     // Covers both "never configured" and "the only revision is still
     // proposed" -- getActiveRevision returns null for any non-active status.
-    onDecision?.({ connectorInstanceId, reason: "no_active_revision" });
+    report(onDecision, { connectorInstanceId, reason: "no_active_revision" });
     return null;
   }
   if (!isPlainObject(active.config)) {
     // A revision whose persisted config is not an object cannot be handed to
     // readOptions. Refuse it rather than coercing it into something shaped.
-    onDecision?.({ connectorInstanceId, reason: "store_unreadable" });
-    return null;
+    report(onDecision, { connectorInstanceId, reason: "invalid_active_config" });
+    throw new RunConfigBlockedError("invalid_active_config", active.revision);
   }
-  onDecision?.({
+  report(onDecision, {
     connectorInstanceId,
     optionKind: active.optionKind,
     reason: "active_revision_applied",
     revision: active.revision,
   });
   return active.config;
+}
+
+/** Derive the scheduler's repair gate from the active revision on every due tick. */
+export async function getRunConfigRepairAttention(connectorInstanceId: string) {
+  try {
+    await resolveRunConnectorOptions({ connectorInstanceId });
+    return null;
+  } catch (err) {
+    if (err instanceof RunConfigBlockedError && err.reason === "invalid_active_config") {
+      return { key: `invalid_active_config:${err.revision}`, reason: err.message };
+    }
+    // The launch remains fail-closed and owns retrying a store outage.
+    return null;
+  }
 }
