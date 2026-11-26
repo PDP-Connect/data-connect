@@ -996,19 +996,23 @@ export async function runSetup(options: CliOptions, deps: RunSetupDeps = {}): Pr
     throw new CollectorUsageError(unsupportedConnectorMessage(options.connector));
   }
 
+  // Resolve the destination before the one-time code is spent, with the same
+  // resolver and refusals as `connect`: an ambiguous name or a profile that
+  // declares another connector stops here, not after enrollment.
+  const destination = resolveConnectProfileDestination(options.profile ?? normalizedConnector, normalizedConnector);
+
   const enrollment = await enroll({
     baseUrl: options.baseUrl,
     code: options.code,
     ...(options.deviceLabel ? { deviceLabel: options.deviceLabel } : {}),
   });
 
-  const profileName = options.profile ?? normalizedConnector;
   const profilePath = writeLocalCollectorProfile({
     baseUrl: options.baseUrl,
     connectorId: normalizedConnector,
     deviceId: enrollment.device_id,
     deviceToken: enrollment.device_token,
-    name: profileName,
+    name: destination.fileName.replace(PROFILE_ENV_EXTENSION, ""),
     sourceInstanceId: enrollment.source_instance_id,
   });
 
@@ -1157,27 +1161,38 @@ export interface RunConnectDeps {
  */
 type RevokeExistingProfileFn = (input: { baseUrl: string; deviceId: string; deviceToken: string }) => Promise<unknown>;
 
+/** Where `connect` will write, and the credential it saw there when it decided to (null: no file). */
+interface ConnectDestination {
+  name: string;
+  path: string;
+  seen: ProfileIdentity | null;
+}
+
 /**
  * `connect`'s overwrite guard: refuse to clobber an existing profile at
  * `profileName` unless `--force` is given, and when it is, revoke that
  * profile's device credential server-side BEFORE returning — so the caller
  * only proceeds to consume the new one-time code once the old credential is
- * confirmed gone. Returns the profile name to write: the resolved destination
- * the guard checked, so the write lands where the next named lookup reads.
+ * confirmed gone. Returns the resolved destination the guard checked, so the
+ * write lands where the next named lookup reads, with the credential the guard
+ * saw there: the caller compares it again before it writes. The destination is
+ * resolved for the connector being connected, so a profile that declares
+ * another connector is refused before any revoke, even under `--force`.
  * Extracted out of {@link runConnect} to keep that
  * function's branching within the repo's cognitive-complexity budget; the
  * behavior (and its tests) are unchanged by the extraction.
  */
 async function guardConnectProfileOverwrite(
   profileName: string,
+  connector: string,
   force: boolean | undefined,
   revokeExistingProfile: RevokeExistingProfileFn
-): Promise<string> {
-  const destination = resolveConnectProfileDestination(profileName);
+): Promise<ConnectDestination> {
+  const destination = resolveConnectProfileDestination(profileName, connector);
   const destinationName = destination.fileName.replace(PROFILE_ENV_EXTENSION, "");
   const existingProfilePath = destination.path;
   if (!destination.exists) {
-    return destinationName;
+    return { name: destinationName, path: existingProfilePath, seen: null };
   }
   if (!force) {
     throw new CollectorUsageError(
@@ -1187,26 +1202,24 @@ async function guardConnectProfileOverwrite(
     );
   }
   const existingEnv = parseCollectorProfileEnv(readFileSync(existingProfilePath, "utf8"));
+  const seen = identityOfProfileEnv(existingEnv);
+  const checked: ConnectDestination = { name: destinationName, path: existingProfilePath, seen };
   // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
   const existingBaseUrl = existingEnv.PDPP_REFERENCE_BASE_URL?.trim();
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
-  const existingDeviceId = existingEnv.PDPP_LOCAL_DEVICE_ID?.trim();
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
-  const existingDeviceToken = existingEnv.PDPP_LOCAL_DEVICE_TOKEN?.trim();
-  if (!(existingBaseUrl && existingDeviceId && existingDeviceToken)) {
-    return destinationName;
+  if (!(existingBaseUrl && seen.deviceId && seen.deviceToken)) {
+    return checked;
   }
   try {
     await revokeExistingProfile({
       baseUrl: existingBaseUrl,
-      deviceId: existingDeviceId,
-      deviceToken: existingDeviceToken,
+      deviceId: seen.deviceId,
+      deviceToken: seen.deviceToken,
     });
   } catch (error) {
     const alreadyGone = error instanceof LocalDeviceHttpError && (error.status === 401 || error.status === 403);
     if (alreadyGone) {
       // Already revoked/invalid server-side: nothing further to revoke, safe to proceed.
-      return destinationName;
+      return checked;
     }
     const detail = error instanceof Error ? error.message : String(error);
     throw new CollectorUsageError(
@@ -1216,7 +1229,18 @@ async function guardConnectProfileOverwrite(
       { cause: error }
     );
   }
-  return destinationName;
+  return checked;
+}
+
+/**
+ * Stop when the destination no longer holds what the guard saw: a concurrent
+ * writer put a credential there that this command never revoked, and writing
+ * now would drop it. Nothing is written.
+ */
+function assertConnectDestinationUnchanged(destination: ConnectDestination, consequence: string): void {
+  if (!sameProfileIdentity(readProfileIdentity(destination.path), destination.seen)) {
+    throw new ProfileChangedError(destination.path, `Nothing was overwritten. ${consequence}`);
+  }
 }
 
 export async function runConnect(options: CliOptions, deps: RunConnectDeps = {}): Promise<ConnectOutput> {
@@ -1246,7 +1270,13 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
   }
 
   const profileName = options.profile ?? normalizedConnector;
-  const destinationProfileName = await guardConnectProfileOverwrite(profileName, options.force, revokeExistingProfile);
+  const destination = await guardConnectProfileOverwrite(
+    profileName,
+    normalizedConnector,
+    options.force,
+    revokeExistingProfile
+  );
+  assertConnectDestinationUnchanged(destination, "The one-time code was not consumed; run connect again.");
 
   const scopeChoice = resolveConnectScopeChoice(options);
   const nowIso = now();
@@ -1272,12 +1302,16 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
     throw error;
   }
 
+  assertConnectDestinationUnchanged(
+    destination,
+    "The one-time code was already used, so run connect again with a new code. The credential it enrolled was not saved."
+  );
   const profilePath = writeLocalCollectorProfile({
     baseUrl: options.baseUrl,
     connectorId: normalizedConnector,
     deviceId: enrollment.device_id,
     deviceToken: enrollment.device_token,
-    name: destinationProfileName,
+    name: destination.name,
     sourceInstanceId: enrollment.source_instance_id,
   });
 
@@ -1328,6 +1362,8 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
 export interface LogoutOutput {
   object: "local_collector_logout";
   path: string;
+  /** Present and true when the profile changed during the revoke call and was left intact. */
+  profile_changed?: true;
   removed: boolean;
   revoke_note: string;
   revoked: boolean;
@@ -1362,7 +1398,9 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const { path } = resolveRequestedProfile(profileDir, name);
+  // A command that names a connector resolves the name for that connector; a
+  // name-only command keeps the legacy-spelling rule.
+  const { path } = resolveRequestedProfile(profileDir, name, options.connector);
 
   if (!existsSync(path)) {
     return {
@@ -1375,7 +1413,8 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   if (options.localOnly) {
-    const result = removeLocalCollectorProfile({ name });
+    // No server call to wait for: delete the file already selected above.
+    const result = removeProfileFile(path);
     return {
       object: "local_collector_logout",
       ...result,
@@ -1402,6 +1441,7 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   const deviceId = env.PDPP_LOCAL_DEVICE_ID?.trim();
   // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches the established idiom in applyProfileEnv above.
   const deviceToken = env.PDPP_LOCAL_DEVICE_TOKEN?.trim();
+  const revoked: ProfileIdentity = { deviceId: deviceId ?? "", deviceToken: deviceToken ?? "" };
   if (!(baseUrl && deviceId && deviceToken)) {
     throw new CollectorUsageError(
       `logout found a local profile at ${path} that is missing device credentials needed to revoke it server-side. ` +
@@ -1426,13 +1466,10 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
       // (or was never valid for this device). There is nothing further a
       // retry could revoke, so proceeding to delete the local copy is safe
       // and keeps logout idempotent across repeated calls.
-      const result = removeLocalCollectorProfile({ name });
-      return {
-        object: "local_collector_logout",
-        ...result,
-        revoke_note: "Device credential was already revoked (or invalid) server-side; deleted local credentials.",
-        revoked: true,
-      };
+      return logoutResult(
+        removeProfileFileIfUnchanged(path, revoked),
+        "Device credential was already revoked (or invalid) server-side; deleted local credentials."
+      );
     }
     // Ambiguous failure — network error, timeout, or an unexpected server
     // response. Fail closed: keep local credentials so the operator can
@@ -1447,11 +1484,38 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
     );
   }
 
-  const result = removeLocalCollectorProfile({ name });
+  return logoutResult(
+    removeProfileFileIfUnchanged(path, revoked),
+    "Device credential revoked server-side; deleted local credentials."
+  );
+}
+
+/**
+ * The logout result after a revoke. The delete is bound to the credential that
+ * was revoked: when the file at that path now holds another credential, it is
+ * left in place and the result says so.
+ */
+function logoutResult(
+  removal: { path: string; profileChanged: boolean; removed: boolean },
+  deletedNote: string
+): LogoutOutput {
+  if (removal.profileChanged) {
+    return {
+      object: "local_collector_logout",
+      path: removal.path,
+      profile_changed: true,
+      removed: false,
+      revoke_note:
+        "Device credential revoked server-side, but the local profile changed while the revoke was pending, so it " +
+        "was left in place. It holds a different credential that was not revoked.",
+      revoked: true,
+    };
+  }
   return {
     object: "local_collector_logout",
-    ...result,
-    revoke_note: "Device credential revoked server-side; deleted local credentials.",
+    path: removal.path,
+    removed: removal.removed,
+    revoke_note: deletedNote,
     revoked: true,
   };
 }
@@ -2373,10 +2437,24 @@ function bundledProfileNames(): Array<{ current: string; legacy: string }> {
   });
 }
 
-/** The current name for a requested profile name; a legacy spelling maps to its connector's name, any other name is unchanged. */
-function canonicalProfileName(name: string): string {
+/**
+ * The current name for a requested profile name. A legacy spelling maps to its
+ * bundled connector's name, but only for that connector: a command that names
+ * another connector keeps the spelling literal, because the operator chose it
+ * as a profile name for that other connector. Without a connector (a
+ * name-only command) the spelling maps, as before. Any other name is unchanged.
+ */
+function canonicalProfileName(name: string, connector?: string | null): string {
   const base = name.trim().replace(PROFILE_ENV_EXTENSION, "");
-  return bundledProfileNames().find((names) => names.legacy === base)?.current ?? base;
+  const names = bundledProfileNames().find((candidate) => candidate.legacy === base);
+  if (!names) {
+    return base;
+  }
+  const requestedConnector = connector?.trim();
+  if (requestedConnector && normalizeConnectorId(requestedConnector) !== names.current) {
+    return base;
+  }
+  return names.current;
 }
 
 /**
@@ -2398,9 +2476,101 @@ export class AmbiguousProfileNameError extends CollectorUsageError {
 }
 
 /**
+ * A command asked for one connector but the profile file it selected declares
+ * another. Raised before any revoke, enrollment or write, even under `--force`:
+ * the file holds another connector's credential, so it is not this command's
+ * to replace, read or delete.
+ */
+export class ProfileConnectorMismatchError extends CollectorUsageError {
+  readonly declaredConnector: string;
+  readonly path: string;
+  readonly requestedConnector: string;
+
+  constructor(path: string, declaredConnector: string, requestedConnector: string) {
+    super(
+      `The profile at ${path} holds a ${declaredConnector} credential, not a ${requestedConnector} one. ` +
+        "Nothing was changed. Pass a different --profile name for this connector."
+    );
+    this.declaredConnector = declaredConnector;
+    this.path = path;
+    this.requestedConnector = requestedConnector;
+  }
+}
+
+/**
+ * The profile file changed between the moment a command read it and the moment
+ * it would delete or overwrite it. The command stops and leaves the file as it
+ * is: the credential now there was never the one the command acted on.
+ */
+export class ProfileChangedError extends CollectorUsageError {
+  readonly path: string;
+
+  constructor(path: string, detail: string) {
+    super(`The profile at ${path} changed while this command was running. ${detail}`);
+    this.path = path;
+  }
+}
+
+/** The device credential a profile file holds. */
+interface ProfileIdentity {
+  deviceId: string;
+  deviceToken: string;
+}
+
+/** The identity of the profile at `path`, or null when no file is there. */
+function readProfileIdentity(path: string): ProfileIdentity | null {
+  let contents: string;
+  try {
+    contents = readFileSync(path, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+    throw error;
+  }
+  return identityOfProfileEnv(parseCollectorProfileEnv(contents));
+}
+
+function identityOfProfileEnv(env: Record<string, string>): ProfileIdentity {
+  return {
+    // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
+    deviceId: env.PDPP_LOCAL_DEVICE_ID?.trim() ?? "",
+    // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
+    deviceToken: env.PDPP_LOCAL_DEVICE_TOKEN?.trim() ?? "",
+  };
+}
+
+function sameProfileIdentity(left: ProfileIdentity | null, right: ProfileIdentity | null): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  return left.deviceId === right.deviceId && left.deviceToken === right.deviceToken;
+}
+
+/** Refuse when `env` declares a connector other than the requested one. A profile that names none passes. */
+function assertProfileMatchesConnector(
+  path: string,
+  env: Record<string, string>,
+  connector: string | null | undefined
+): void {
+  const requested = connector?.trim();
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
+  const declared = env.PDPP_COLLECTOR_CONNECTOR?.trim();
+  if (requested && declared && normalizeConnectorId(declared) !== normalizeConnectorId(requested)) {
+    throw new ProfileConnectorMismatchError(path, normalizeConnectorId(declared), normalizeConnectorId(requested));
+  }
+}
+
+/**
  * Which profile file a requested name selects, decided from the files left on
  * disk after migration. Every command that takes a profile name (lookup,
- * `connect`'s guard and write, `logout`, removal) reads this one answer.
+ * `connect`'s guard and write, `setup`, `logout`, removal) reads this one
+ * answer. A command that acts for one connector passes it: a bundled legacy
+ * spelling then selects the canonical file only for the connector that owns
+ * it (for any other connector the name stays literal), and a selected file
+ * that declares a different connector is refused with
+ * {@link ProfileConnectorMismatchError}. A name-only command passes none and
+ * follows the rules below.
  *   a. A file with exactly the requested name is left (migration only leaves
  *      an underscore file that is custom, or one it could not safely merge):
  *      with no canonical file beside it, or when it names another connector,
@@ -2412,9 +2582,35 @@ export class AmbiguousProfileNameError extends CollectorUsageError {
  * {@link safeProfileFileName} stays literal so tests can still seed a real
  * legacy file.
  */
-function resolveMigratedProfileFile(profileDir: string, name: string): { fileName: string; path: string } {
+function resolveMigratedProfileFile(
+  profileDir: string,
+  name: string,
+  connector?: string | null
+): { fileName: string; path: string } {
+  const selected = selectMigratedProfileFile(profileDir, name, connector);
+  if (connector?.trim()) {
+    let contents: string | null = null;
+    try {
+      contents = readFileSync(selected.path, "utf8");
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw error;
+      }
+    }
+    if (contents !== null) {
+      assertProfileMatchesConnector(selected.path, parseCollectorProfileEnv(contents), connector);
+    }
+  }
+  return selected;
+}
+
+function selectMigratedProfileFile(
+  profileDir: string,
+  name: string,
+  connector?: string | null
+): { fileName: string; path: string } {
   const literalFileName = safeProfileFileName(name);
-  const canonicalName = canonicalProfileName(name);
+  const canonicalName = canonicalProfileName(name, connector);
   const canonicalFileName = `${canonicalName}.env`;
   const resolved = (fileName: string) => ({ fileName, path: join(profileDir, fileName) });
   if (canonicalFileName === literalFileName) {
@@ -2437,10 +2633,14 @@ function resolveMigratedProfileFile(profileDir: string, name: string): { fileNam
   throw new AmbiguousProfileNameError(name, literalPath, canonicalPath);
 }
 
-/** Migrate legacy files, then resolve the requested name. */
-function resolveRequestedProfile(profileDir: string, name: string): { fileName: string; path: string } {
-  migrateLegacyProfileFiles(profileDir, { profileName: name });
-  return resolveMigratedProfileFile(profileDir, name);
+/** Migrate legacy files, then resolve the requested name for the connector the command acts on, if it has one. */
+function resolveRequestedProfile(
+  profileDir: string,
+  name: string,
+  connector?: string | null
+): { fileName: string; path: string } {
+  migrateLegacyProfileFiles(profileDir, { connector, profileName: name });
+  return resolveMigratedProfileFile(profileDir, name, connector);
 }
 
 /**
@@ -2500,12 +2700,14 @@ export function migrateLegacyProfileFiles(
   options: {
     beforeInstall?: () => void;
     beforeRead?: () => void;
+    /** The connector the command acts on. A legacy spelling that belongs to another connector migrates nothing. */
+    connector?: string | null | undefined;
     profileName?: string | null | undefined;
     sourceInstanceId?: string | null | undefined;
   } = {}
 ): void {
   // The legacy spelling names the same profile, so it selects the same connector.
-  const requested = options.profileName ? canonicalProfileName(options.profileName) : null;
+  const requested = options.profileName ? canonicalProfileName(options.profileName, options.connector) : null;
   const requestedSource = options.sourceInstanceId?.trim() || null;
   const pending: LegacyProfileEntry[] = [];
   for (const { current, legacy } of bundledProfileNames()) {
@@ -2657,9 +2859,12 @@ function isFileExistsError(error: unknown): boolean {
  * Where `connect` writes the profile for `name`, and the file already there if
  * any. The overwrite guard and the write both use this one destination.
  */
-function resolveConnectProfileDestination(name: string): { exists: boolean; fileName: string; path: string } {
+function resolveConnectProfileDestination(
+  name: string,
+  connector: string
+): { exists: boolean; fileName: string; path: string } {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const { fileName, path } = resolveRequestedProfile(profileDir, name);
+  const { fileName, path } = resolveRequestedProfile(profileDir, name, connector);
   return { exists: existsSync(path), fileName, path };
 }
 
@@ -2738,13 +2943,17 @@ export function writeLocalCollectorProfile(input: WriteLocalCollectorProfileInpu
  * (not an error) when the profile was already absent, so `logout` is
  * idempotent.
  */
-export function removeLocalCollectorProfile(input: { name: string; profileDir?: string }): {
+export function removeLocalCollectorProfile(input: { connector?: string | null; name: string; profileDir?: string }): {
   path: string;
   removed: boolean;
 } {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const { path } = resolveRequestedProfile(profileDir, input.name);
+  const { path } = resolveRequestedProfile(profileDir, input.name, input.connector);
+  return removeProfileFile(path);
+}
+
+function removeProfileFile(path: string): { path: string; removed: boolean } {
   if (!existsSync(path)) {
     return { path, removed: false };
   }
@@ -2752,7 +2961,31 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
   return { path, removed: true };
 }
 
+/**
+ * Delete the profile file at exactly `path`, but only if it still holds the
+ * credential the caller read and revoked. A concurrent writer can replace the
+ * file while the revoke call is pending; the replacement was never revoked, so
+ * it is left in place and reported as changed. A file that is already gone is
+ * not a change: there is nothing left to delete.
+ */
+function removeProfileFileIfUnchanged(
+  path: string,
+  expected: ProfileIdentity
+): { path: string; profileChanged: boolean; removed: boolean } {
+  const current = readProfileIdentity(path);
+  if (current === null) {
+    return { path, profileChanged: false, removed: false };
+  }
+  if (!sameProfileIdentity(current, expected)) {
+    return { path, profileChanged: true, removed: false };
+  }
+  rmSync(path);
+  return { path, profileChanged: false, removed: true };
+}
+
 export function findLocalCollectorProfiles(input: {
+  /** The connector the command acts on. A named profile that declares another connector is refused. */
+  connector?: string | null;
   profileDir?: string;
   profileName?: string | null;
   sourceInstanceId?: string | null;
@@ -2760,9 +2993,13 @@ export function findLocalCollectorProfiles(input: {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
-  migrateLegacyProfileFiles(profileDir, { profileName: input.profileName, sourceInstanceId });
+  migrateLegacyProfileFiles(profileDir, {
+    connector: input.connector,
+    profileName: input.profileName,
+    sourceInstanceId,
+  });
   const files = input.profileName
-    ? [resolveMigratedProfileFile(profileDir, input.profileName).fileName]
+    ? [resolveMigratedProfileFile(profileDir, input.profileName, input.connector).fileName]
     : (() => {
         try {
           return readdirSync(profileDir)
@@ -2797,10 +3034,18 @@ export function findLocalCollectorProfiles(input: {
   return { matches, profile_dir: profileDir };
 }
 
+/** The connector the operator named with `--connector`; one that came from env or a profile is not a request. */
+function explicitConnector(options: CliOptions): string | null {
+  return options.explicitOptions?.has("--connector") === true ? (options.connector ?? null) : null;
+}
+
 function applyProfileEnv(options: CliOptions, profile: LocalCollectorProfile): CliOptions {
   const { env } = profile;
   const explicit = options.explicitOptions;
   const keep = (flag: string): boolean => explicit?.has(flag) === true;
+  if (keep("--connector")) {
+    assertProfileMatchesConnector(profile.path, env, options.connector);
+  }
   const profileQueuePath = Object.hasOwn(env, "PDPP_COLLECTOR_QUEUE") ? env.PDPP_COLLECTOR_QUEUE : undefined;
   const configuredQueuePath = hasExplicitQueuePath(options);
   const next: CliOptions = {
@@ -2845,6 +3090,7 @@ function resolveRecoveryOptions(options: CliOptions): {
   }
 
   const lookup = findLocalCollectorProfiles({
+    connector: explicitConnector(options),
     profileName: options.profile ?? null,
     sourceInstanceId,
   });
@@ -2886,6 +3132,7 @@ export function resolveInspectionOptions(options: CliOptions): CliOptions {
   }
 
   const lookup = findLocalCollectorProfiles({
+    connector: explicitConnector(options),
     profileName: options.profile ?? null,
     sourceInstanceId: sourceInstanceId ?? null,
   });
@@ -2943,6 +3190,7 @@ export function resolveRunProfileOptions(options: CliOptions): CliOptions {
     return options;
   }
   const lookup = findLocalCollectorProfiles({
+    connector: explicitConnector(options),
     profileName: options.profile ?? null,
     sourceInstanceId,
   });
