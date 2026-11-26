@@ -455,3 +455,12 @@ test("raw gap evidence stays intact under What went wrong on the technical page"
   assert.match(evidence?.textContent ?? "", /offset=480/);
   assert.match(evidence?.textContent ?? "", /machine_failure_/);
 });
+
+test("positive kinds never carry the whole-kind failure sentence", async () => {
+  for (const state of ["atlas", "partly-some-lost"]) {
+    const dom = await renderDemo(state);
+    const row = dom.window.document.querySelector('a[href$="/messages"]');
+    assert.doesNotMatch(row?.textContent ?? "", /DataConnect could not copy this/);
+    if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some could not be copied/);
+  }
+});

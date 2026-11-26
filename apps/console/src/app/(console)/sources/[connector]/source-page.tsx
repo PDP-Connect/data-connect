@@ -976,13 +976,11 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
         ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : lost ? `${count ? `${count}. ` : ""}Some could not be copied.` : count
         : count;
       const newest = recordCount === 0 ? null : recordDateLabel(stream.last_updated);
-      const cause = gap ? "DataConnect could not copy this." : null;
       return <li key={stream.name}>
         <Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
           <span className="flex min-w-0 flex-col gap-1">
             <span className="pdpp-body text-foreground">{label(stream.name)}</span>
             {sentence || newest ? <span className="pdpp-caption text-muted-foreground">{sentence}{sentence && newest ? " · " : ""}{newest ? `newest ${newest}` : ""}</span> : null}
-            {partial && !more && cause ? <span className="pdpp-caption text-muted-foreground">{cause}</span> : null}
           </span>
         </Link>
       </li>;
@@ -1688,7 +1686,7 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
               >
                 <span className="pdpp-caption flex items-center gap-2">
                   <span>{syncOutcome(r)}</span>
-                  {syncOutcome(r) === "Failed" ? <span>{syncFailureSentence(r.failure_reason) ?? "DataConnect could not copy this."}</span> : null}
+                  {syncOutcome(r) === "Failed" && syncFailureSentence(r.failure_reason) ? <span>{syncFailureSentence(r.failure_reason)}</span> : null}
                 </span>
                 <span className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums">
                   <span>{sourceTimeLabel(r.first_at) ?? "Time unavailable"}</span>
