@@ -716,7 +716,7 @@ export function ProviderSetup({
           <Button type="button" disabled={busy} onClick={() => void openAdmin(adminCopy.href)}>
             Open Tailscale admin
           </Button>
-          <Button type="button" disabled={busy} onClick={() => void checkAgain()}>
+          <Button variant="outline" type="button" disabled={busy} onClick={() => void checkAgain()}>
             Check again
           </Button>
         </div>
@@ -761,7 +761,7 @@ export function ProviderSetup({
             </Button>
           ) : null}
           {stage === "sign-in" ? (
-            <Button type="button" disabled={busy} onClick={() => void copySignIn(view)}>
+            <Button variant="outline" type="button" disabled={busy} onClick={() => void copySignIn(view)}>
               Copy sign-in link
             </Button>
           ) : null}
@@ -856,6 +856,7 @@ export function ProviderSetup({
           </Button>
         ) : null}
         <Button
+          variant="outline"
           type="button"
           disabled={busy}
           onClick={() => void change(() => send<SetupView>(readPath), false, "check")}
@@ -880,6 +881,7 @@ export function ProviderSetup({
         ) : null}
         {view && view.state !== "cancelled" ? (
           <Button
+            variant="outline"
             type="button"
             disabled={busy || disabled}
             onClick={() =>

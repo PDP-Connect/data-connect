@@ -153,9 +153,9 @@ test("the two ngrok passthrough ways have distinct plain names and facts", () =>
 
   assert.notEqual(tls.title, tcp.title);
   assert.equal(tls.title, "ngrok encrypted web address");
-  assert.equal(tls.line, "The connection stays encrypted until it reaches this computer.");
+  assert.equal(tls.line, "Needs an ngrok account. Check your plan for cost. The connection stays encrypted until it reaches this computer.");
   assert.equal(tcp.title, "ngrok network address");
-  assert.equal(tcp.line, "Uses an address without a domain name. The connection stays encrypted until it reaches this computer.");
+  assert.equal(tcp.line, "Needs an ngrok account. Check your plan for cost. Uses an address without a domain name. The connection stays encrypted until it reaches this computer.");
 });
 
 test("a missing prerequisite the owner can supply during setup does not block the way", () => {

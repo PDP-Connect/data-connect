@@ -52,12 +52,12 @@ const copy: Record<string, { title: string; line: string; group: GroupId }> = {
   "own-address": { title: "Your own address", line: "Needs a web address you already use.", group: "advanced" },
   "ngrok-tls-passthrough": {
     title: "ngrok encrypted web address",
-    line: "The connection stays encrypted until it reaches this computer.",
+    line: "Needs an ngrok account. Check your plan for cost. The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
   "ngrok-tcp-passthrough": {
     title: "ngrok network address",
-    line: "Uses an address without a domain name. The connection stays encrypted until it reaches this computer.",
+    line: "Needs an ngrok account. Check your plan for cost. Uses an address without a domain name. The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
   "tunnl-gg": { title: "Temporary hosted address", line: "Free. Needs no account.", group: "advanced" },
@@ -140,7 +140,9 @@ function missingFor(provider: Provider, capabilities: Capabilities, blocks: Bloc
   if (blocked) return blocked;
   const step = blockedStep(provider);
   if (step) return step;
-  return pickUsage(provider, capabilities) === null ? { text: unsupportedText } : null;
+  if (pickUsage(provider, capabilities) !== null) return null;
+  if (provider.providerId.startsWith("ngrok-") && Object.values(provider.availability).some(item => item.reason === "not-installed")) return { text: "Install ngrok on this computer before choosing this way." };
+  return { text: unsupportedText };
 }
 
 /**
