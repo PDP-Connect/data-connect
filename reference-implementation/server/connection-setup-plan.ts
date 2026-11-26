@@ -167,11 +167,9 @@ export interface ConnectorManifestLike {
       readonly legacy_bundle_field_aliases?: Readonly<Record<string, string>> | null;
     } | null;
     /**
-     * Proof claims the connector's own manifest makes. The RI reads them from
-     * a registered manifest only: a vendored one or one installed from the
-     * signed catalog, both reviewed before publication. A manifest from an
-     * unsigned developer-local folder is never registered, so its claims
-     * never reach the setup plan.
+     * Proof claims the connector's own manifest makes. The planner honors them
+     * only when the caller names a server-owned `ProofProvenance` for the
+     * manifest; the claim alone proves nothing.
      */
     readonly proven?: {
       readonly local_collector?: unknown;
@@ -314,29 +312,59 @@ export interface ConnectionSetupPlan {
 
 export const PROVIDER_AUTH_RUNBOOK_PATH = "docs/operator/add-connection.md";
 
-// Whether the connector's manifest claims that the provider-authorization
+/**
+ * Where the manifest handed to the planner was read from. The server sets it
+ * from the place it read the manifest; a manifest cannot carry it about itself.
+ *
+ *   `registered_catalog`    the registry of connectors the server has accepted
+ *                           (a vendored manifest, or one installed from the
+ *                           signed catalog), reviewed before publication.
+ *   `server_pinned_profile` a Collection Profile the server itself ships and
+ *                           pins for local collectors.
+ *
+ * Any other manifest (a developer-local folder, a client-supplied object, a
+ * self-description) has no provenance, and its `capabilities.proven` claims
+ * are ignored: a claim is evidence only when a server-owned source vouches
+ * for it. The planner takes `null` (or no value) to mean "no one vouches".
+ */
+export type ProofProvenance = "registered_catalog" | "server_pinned_profile";
+
+function isAttested(provenance: ProofProvenance | null | undefined): boolean {
+  return provenance === "registered_catalog" || provenance === "server_pinned_profile";
+}
+
+// Whether an attested manifest claims that the provider-authorization
 // lifecycle (initiate + callback + token-exchange + inventory gate) is
 // deterministically proven. Only such a connector may advertise
 // `open_provider_auth` as a supported next step. A connector must not declare
 // the claim until its connector-specific inventory/test adapter exists and is
 // proven.
-export function isProviderAuthLifecycleProven(manifest: ConnectorManifestLike | null | undefined): boolean {
-  return manifest?.capabilities?.proven?.provider_auth_lifecycle === true;
+export function isProviderAuthLifecycleProven(
+  manifest: ConnectorManifestLike | null | undefined,
+  provenance: ProofProvenance | null | undefined
+): boolean {
+  return isAttested(provenance) && manifest?.capabilities?.proven?.provider_auth_lifecycle === true;
 }
 
-// Whether the connector's manifest claims that the static-secret credential
+// Whether an attested manifest claims that the static-secret credential
 // flow (draft -> capture -> first ingest) has been proven end-to-end through a
 // live env-free container run. This is a proof gate, not a classification.
 // The manifest also carries the run_id/date/note evidence for the proof; this
 // module reads only the boolean.
-export function isStaticSecretLiveProven(manifest: ConnectorManifestLike | null | undefined): boolean {
-  return manifest?.capabilities?.proven?.static_secret_live?.proven === true;
+export function isStaticSecretLiveProven(
+  manifest: ConnectorManifestLike | null | undefined,
+  provenance: ProofProvenance | null | undefined
+): boolean {
+  return isAttested(provenance) && manifest?.capabilities?.proven?.static_secret_live?.proven === true;
 }
 
-// Whether the connector's manifest claims a proven local collector
+// Whether an attested manifest claims a proven local collector
 // (`capabilities.proven.local_collector`).
-export function isLocalCollectorProven(manifest: ConnectorManifestLike | null | undefined): boolean {
-  return manifest?.capabilities?.proven?.local_collector === true;
+export function isLocalCollectorProven(
+  manifest: ConnectorManifestLike | null | undefined,
+  provenance: ProofProvenance | null | undefined
+): boolean {
+  return isAttested(provenance) && manifest?.capabilities?.proven?.local_collector === true;
 }
 
 /**
@@ -748,6 +776,7 @@ type ConnectionSetupPlanContext = Readonly<{
   displayName: string;
   enrollmentKey: string;
   manifest: ConnectorManifestLike | null;
+  proofProvenance: ProofProvenance | null;
   setupModality: ConnectorSetupModality;
   validationMode: CredentialValidationMode;
 }>;
@@ -798,7 +827,7 @@ function buildManualUploadSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 }
 
 function buildLocalCollectorSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  if (isLocalCollectorProven(ctx.manifest)) {
+  if (isLocalCollectorProven(ctx.manifest, ctx.proofProvenance)) {
     return {
       catalogDisposition: "local_collector_enroll",
       connectorKey: ctx.connectorKey,
@@ -870,7 +899,7 @@ function buildBrowserBoundSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 }
 
 function buildStaticSecretSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  const liveProven = isStaticSecretLiveProven(ctx.manifest);
+  const liveProven = isStaticSecretLiveProven(ctx.manifest, ctx.proofProvenance);
   if (liveProven) {
     return {
       catalogDisposition: "static_secret_connect",
@@ -946,7 +975,7 @@ function buildStaticSecretSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 
 function buildProviderAuthorizationSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
   const deploymentBlocked = ctx.deploymentReadiness.state === "needs_config";
-  const lifecycleProven = !deploymentBlocked && isProviderAuthLifecycleProven(ctx.manifest);
+  const lifecycleProven = !deploymentBlocked && isProviderAuthLifecycleProven(ctx.manifest, ctx.proofProvenance);
   if (lifecycleProven) {
     return {
       catalogDisposition: "provider_auth_connect",
@@ -1052,6 +1081,11 @@ export function buildConnectionSetupPlan(args: {
   readonly configuredProviderAuthConnectorKeys?: readonly string[];
   readonly deploymentEnv?: DeploymentEnvLike;
   readonly manifest: ConnectorManifestLike | null;
+  /**
+   * Where the server read `manifest` from. Without it the manifest's proof
+   * claims are ignored and every proof-gated path stays gated.
+   */
+  readonly proofProvenance?: ProofProvenance | null;
 }): ConnectionSetupPlan {
   const rawConnectorKey = typeof args.connectorKey === "string" ? args.connectorKey.trim() : "";
   const connectorKey =
@@ -1092,6 +1126,7 @@ export function buildConnectionSetupPlan(args: {
     displayName,
     enrollmentKey,
     manifest: args.manifest,
+    proofProvenance: args.proofProvenance ?? null,
     setupModality,
     validationMode,
   };

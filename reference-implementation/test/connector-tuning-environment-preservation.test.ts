@@ -70,6 +70,7 @@ function childEnvironment(connector: ShippedConnector, sourceEnv: NodeJS.Process
   return composeConnectorChildEnvironment({
     connectorId: connector.connectorId,
     explicitRunEnv: {},
+    installedConnectorKeys: [],
     manifest: connector.manifest,
     platform: "linux",
     sourceEnv,

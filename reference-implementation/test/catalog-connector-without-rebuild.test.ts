@@ -277,10 +277,20 @@ test("setup plan (contract pin): a proof claim in the manifest decides the path,
   const claimed = buildConnectionSetupPlan({
     connectorKey: KEY,
     manifest: { ...local, capabilities: { ...base.capabilities, proven: { local_collector: true } } },
+    proofProvenance: "registered_catalog",
   });
   assert.equal(claimed.connectorModality, "local_collector");
   assert.equal(claimed.catalogDisposition, "local_collector_enroll");
   assert.equal(claimed.supportState, "supported");
+
+  // The same claim with no server-owned source vouching for the manifest
+  // (a developer-local folder, a self-description) earns nothing.
+  const selfDescribed = buildConnectionSetupPlan({
+    connectorKey: KEY,
+    manifest: { ...local, capabilities: { ...base.capabilities, proven: { local_collector: true } } },
+  });
+  assert.equal(selfDescribed.catalogDisposition, "local_collector_unproven");
+  assert.notEqual(selfDescribed.supportState, "supported");
 
   const unclaimed = buildConnectionSetupPlan({ connectorKey: KEY, manifest: local });
   assert.equal(unclaimed.connectorModality, "local_collector");

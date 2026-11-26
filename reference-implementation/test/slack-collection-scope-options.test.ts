@@ -40,6 +40,7 @@ function childEnv(sourceEnv: NodeJS.ProcessEnv): Record<string, string> {
   return composeConnectorChildEnvironment({
     connectorId: "slack",
     explicitRunEnv: {},
+    installedConnectorKeys: [],
     manifest: {},
     platform: "linux",
     sourceEnv: { PATH: "/usr/bin", ...sourceEnv },

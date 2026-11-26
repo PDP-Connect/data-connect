@@ -93,7 +93,7 @@ test("the shipped manifests that claim local collection enroll, and the others d
   const claimed: string[] = [];
   for (const file of files) {
     const manifest = JSON.parse(await readFile(`${manifestsDir}/${file}`, "utf8"));
-    const plan = buildConnectionSetupPlan({ manifest });
+    const plan = buildConnectionSetupPlan({ manifest, proofProvenance: "registered_catalog" });
     templates.push({
       connector_id: manifest.connector_id,
       setup_plan: { catalog_disposition: plan.catalogDisposition, enrollment_key: plan.enrollmentKey ?? null },

@@ -18,7 +18,7 @@ import { resolveCommittedManifestsDirForTests } from "./connector-manifests-dir.
 import {
   browserBoundRunbookEntries,
   browserCollectorEntries,
-  buildConnectorCatalog,
+  buildConnectorCatalog as buildConnectorCatalogFrom,
   buildOwnerConnectorCatalog,
   type CatalogManifestLike,
   catalogModalityFromManifest,
@@ -56,6 +56,19 @@ import {
   sourceSetupSecondaryAction,
   sourceSetupStatus,
 } from "./source-setup-presentation.ts";
+
+/**
+ * The manifests these tests feed in stand for the server's registered catalog,
+ * so the catalog is built with that provenance. The unattested path (no
+ * provenance) has its own tests that call `buildConnectorCatalogFrom` directly.
+ */
+function buildConnectorCatalog(
+  manifests: readonly CatalogManifestLike[],
+  configuredProviderAuthConnectorKeys: readonly string[] = [],
+  deploymentEnv?: Readonly<Record<string, string | undefined>>
+) {
+  return buildConnectorCatalogFrom(manifests, configuredProviderAuthConnectorKeys, deploymentEnv, "registered_catalog");
+}
 
 const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
 test("public connector tiers use the manifest declaration and exact public labels", () => {
@@ -911,6 +924,79 @@ test("owner catalog keeps server-authorized gates for listed-unproven and proof-
   assert.equal(sourceSetupStatus(proofGatedEntry).label, "Not available here");
   assert.equal(sourceSetupAction(proofGatedEntry), null);
   assert.equal(sourceSetupAvailability(proofGatedEntry), "not_available_here");
+});
+
+/** A manifest that claims live proof. Only the server's registered catalog may make that claim count. */
+function provenClaimingStaticSecretManifest(connectorKey: string): CatalogManifestLike {
+  return {
+    capabilities: { proven: { static_secret_live: { proven: true } }, public_listing: { tier: "supported" } },
+    connector_id: connectorKey,
+    display_name: connectorKey,
+    runtime_requirements: { bindings: { network: { required: true } } },
+    setup: {
+      credential_capture: {
+        fields: [{ env: ["ACME_API_TOKEN"], label: "API token", name: "api_token", required: true, secret: true }],
+        kind: "api_token",
+        label: "Acme API token",
+      },
+      modality: "static_secret",
+    },
+  } as CatalogManifestLike;
+}
+
+function provenClaimingLocalCollectorManifest(connectorKey: string): CatalogManifestLike {
+  return {
+    capabilities: { proven: { local_collector: true }, public_listing: { tier: "supported" } },
+    connector_id: connectorKey,
+    display_name: connectorKey,
+    runtime_requirements: { bindings: { filesystem: { required: true } } },
+  } as CatalogManifestLike;
+}
+
+test("owner catalog: presentation-only manifests describe no proven setup path, registered ones still do", () => {
+  const presentationOnly = [
+    provenClaimingStaticSecretManifest("presentation-secret"),
+    provenClaimingLocalCollectorManifest("presentation-collector"),
+  ];
+  const assertNoProvenPath = (catalog: ReturnType<typeof buildOwnerConnectorCatalog>) => {
+    for (const key of ["presentation-secret", "presentation-collector"]) {
+      const entry = catalog.find((candidate) => candidate.connectorKey === key);
+      assert.ok(entry, `${key}: presentation-only manifest is still offered as an install row`);
+      assert.notEqual(entry.supportState, "supported", `${key}: a manifest cannot attest its own proof`);
+      assert.notEqual(entry.disposition, "local_collector_enroll", `${key}: no proven local enrollment`);
+      assert.equal(isOwnerActionableEntry(entry), false, `${key}: not actionable`);
+      assert.notEqual(sourceSetupAvailability(entry), "available_now", `${key}: never offered as a ready setup`);
+    }
+    const secret = catalog.find((candidate) => candidate.connectorKey === "presentation-secret");
+    assert.notEqual(secret?.proofGate, null, "static-secret claim stays proof-gated");
+  };
+
+  // Empty-template path: the whole catalog is the manifest fallback.
+  assertNoProvenPath(buildOwnerConnectorCatalog(presentationOnly, []));
+
+  // Missing-template path: a registered template covers one connector, the
+  // presentation-only manifests are appended as fallbacks.
+  const registeredSecret = provenClaimingStaticSecretManifest("registered-secret");
+  const mixed = buildOwnerConnectorCatalog(
+    [registeredSecret, ...presentationOnly],
+    [
+      ownerTemplate({
+        connectorKey: "registered-secret",
+        connectorModality: "api_network",
+        disposition: "static_secret_connect",
+        nextStepKind: "capture_static_secret",
+        proofGate: null,
+        setupModality: "static_secret",
+        supportState: "supported",
+      }),
+    ]
+  );
+  assertNoProvenPath(mixed);
+  const registered = mixed.find((candidate) => candidate.connectorKey === "registered-secret");
+  assert.ok(registered, "registered template entry present");
+  assert.equal(registered.supportState, "supported", "the server's setup_plan still decides a registered connector");
+  assert.equal(registered.proofGate, null);
+  assert.equal(registered.disposition, "static_secret_connect");
 });
 
 test("owner catalog exposes browser owner-session actions without inventing an owner-agent REST action", () => {

@@ -420,7 +420,13 @@ export function mountOwnerConnectionIntent(app: AppLike, ctx: MountOwnerConnecti
         // an unknown connector.
         const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
         const manifest = localManifest ?? (await ctx.getConnectorManifest(connectorKey));
-        const plan = buildConnectionSetupPlan({ connectorKey, manifest });
+        const plan = buildConnectionSetupPlan({
+          connectorKey,
+          manifest,
+          // Both sources are server-owned: the profile the server pins for
+          // local collectors, or the registry.
+          proofProvenance: localManifest ? "server_pinned_profile" : "registered_catalog",
+        });
         const modality = plan.connectorModality;
         const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
 

@@ -55,7 +55,7 @@ function compose(
       : {}),
     connectorId: options.connectorId ?? "test-connector",
     explicitRunEnv: options.explicitRunEnv ?? {},
-    ...(options.installedConnectorKeys ? { installedConnectorKeys: options.installedConnectorKeys } : {}),
+    installedConnectorKeys: options.installedConnectorKeys ?? [],
     manifest,
     platform: options.platform ?? "linux",
     sourceEnv,
@@ -400,16 +400,16 @@ test("a connector in no list receives a declared key in its own namespace and no
 
 test("ownsTuningKey reads the connector's own PDPP_<KEY>_ namespace and nothing else", () => {
   assert.equal(tuningNamespacePrefix("acme-widgets.v2"), "PDPP_ACME_WIDGETS_V2_");
-  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_PAGE_SIZE"), true);
-  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_"), false, "the bare prefix names no knob");
-  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS"), false);
-  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETSX_PAGE_SIZE"), false, "a neighbor's namespace");
-  assert.equal(ownsTuningKey("acme-widgets", "PDPP_OTHER_PAGE_SIZE"), false);
-  assert.equal(ownsTuningKey("acme-widgets", "EXAMPLE_PAGE_SIZE"), false);
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_PAGE_SIZE", []), true);
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS_", []), false, "the bare prefix names no knob");
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETS", []), false);
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_ACME_WIDGETSX_PAGE_SIZE", []), false, "a neighbor's namespace");
+  assert.equal(ownsTuningKey("acme-widgets", "PDPP_OTHER_PAGE_SIZE", []), false);
+  assert.equal(ownsTuningKey("acme-widgets", "EXAMPLE_PAGE_SIZE", []), false);
   // Reserved and proxy keys are never owned, even when the namespace matches.
-  assert.equal(ownsTuningKey("owner", "PDPP_OWNER_TOKEN"), false);
-  assert.equal(ownsTuningKey("run", "PDPP_RUN_ID"), false);
-  assert.equal(ownsTuningKey("http", "HTTP_PROXY"), false);
+  assert.equal(ownsTuningKey("owner", "PDPP_OWNER_TOKEN", []), false);
+  assert.equal(ownsTuningKey("run", "PDPP_RUN_ID", []), false);
+  assert.equal(ownsTuningKey("http", "HTTP_PROXY", []), false);
 });
 
 test("an operator binding overrides a declared tuning key", () => {
@@ -720,9 +720,9 @@ test("a manifest keyed database never receives the server's PDPP_DATABASE_URL", 
   const sourceEnv = { PDPP_DATABASE_PAGE_SIZE: "5", PDPP_DATABASE_URL: "postgres://secret" };
 
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
-  assert.equal(ownsTuningKey("database", "PDPP_DATABASE_URL"), false);
-  assert.equal(ownsTuningKey("database", "pdpp_database_url"), false);
-  assert.equal(ownsTuningKey("widgets", "PDPP_WIDGETS_PAGE_SIZE"), true, "an ordinary namespace is unaffected");
+  assert.equal(ownsTuningKey("database", "PDPP_DATABASE_URL", []), false);
+  assert.equal(ownsTuningKey("database", "pdpp_database_url", []), false);
+  assert.equal(ownsTuningKey("widgets", "PDPP_WIDGETS_PAGE_SIZE", []), true, "an ordinary namespace is unaffected");
 });
 
 test("a connector keyed blob cannot claim the runtime's BLOB spool path", () => {
@@ -730,7 +730,7 @@ test("a connector keyed blob cannot claim the runtime's BLOB spool path", () => 
   const sourceEnv = { PDPP_BLOB_SPOOL_DIR: "/operator-controlled/spool" };
 
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "blob" }), {});
-  assert.equal(ownsTuningKey("blob", "PDPP_BLOB_SPOOL_DIR"), false);
+  assert.equal(ownsTuningKey("blob", "PDPP_BLOB_SPOOL_DIR", []), false);
 });
 
 test("the connector with the longest installed namespace owns a nested key", () => {
@@ -750,6 +750,20 @@ test("the connector with the longest installed namespace owns a nested key", () 
     PDPP_FOO_BAR_X: "nested",
     PDPP_FOO_X: "own",
   });
+});
+
+test("omitting the installed-connector inventory is a compile error, not an empty list", () => {
+  // The guard's namespace ownership needs the inventory. If these lines stop
+  // being errors, the type has made the inventory optional again and a caller
+  // can silently turn the guard off; `npm run typecheck` fails on the unused
+  // directive.
+  const withoutInventory = () =>
+    // @ts-expect-error installedConnectorKeys is required
+    composeConnectorChildEnvironment({ explicitRunEnv: {}, manifest: {}, platform: "linux", sourceEnv: {} });
+  assert.equal(typeof withoutInventory, "function");
+  // @ts-expect-error the inventory is required
+  const ownsWithoutInventory = () => ownsTuningKey("foo", "PDPP_FOO_BAR_X");
+  assert.equal(typeof ownsWithoutInventory, "function");
 });
 
 test("a connector key that names an Object.prototype member composes without tuning keys", () => {
