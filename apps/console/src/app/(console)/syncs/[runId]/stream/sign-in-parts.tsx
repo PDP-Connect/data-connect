@@ -5,7 +5,7 @@ import { RunInteractionForm } from "../interaction-form.tsx";
 import type { CredentialInteractionField } from "../credential-interaction.ts";
 import { NoAssistanceRunPoller } from "./no-assistance-run-poller.tsx";
 import type { ReactNode } from "react";
-import { ConnectHeader } from "../../../sources/add/connect-parts.tsx";
+import { ConnectHeader, ConnectWorkingMark } from "../../../sources/add/connect-parts.tsx";
 import type { ConnectorContext } from "./connector-context-resolution.ts";
 
 export function SignInFrame({ children, connector, title, step = true }: { children?: ReactNode; connector: ConnectorContext | null; title: string; step?: boolean }) {
@@ -13,7 +13,7 @@ export function SignInFrame({ children, connector, title, step = true }: { child
 }
 
 export function PreparingBrowserSurface({ connector, poll = true, runId }: { connector: ConnectorContext | null; poll?: boolean; runId: string }) {
-  return <SignInFrame connector={connector} title={`Opening ${connector?.displayName ?? "the data source"}…`}>{poll ? <NoAssistanceRunPoller runId={runId} /> : null}<p className="text-muted-foreground">This can take a minute. Keep this page open; the sign-in page will appear here.</p></SignInFrame>;
+  return <SignInFrame connector={connector} title={`Opening ${connector?.displayName ?? "the data source"}…`}><ConnectWorkingMark label="Opening" />{poll ? <NoAssistanceRunPoller runId={runId} /> : null}<p className="text-muted-foreground">This can take a minute. Keep this page open; the sign-in page will appear here.</p></SignInFrame>;
 }
 export function ExternalApprovalSurface({ connector, message, poll = true, runId }: { connector: ConnectorContext | null; message: string; poll?: boolean; runId: string }) {
   return <SignInFrame connector={connector} title={`Approve the sign-in to ${connector?.displayName ?? "the data source"}`}>{poll ? <NoAssistanceRunPoller runId={runId} /> : null}<p className="text-muted-foreground">{message}</p><p className="text-muted-foreground">DataConnect carries on by itself once you approve. There is nothing to do on this page.</p></SignInFrame>;

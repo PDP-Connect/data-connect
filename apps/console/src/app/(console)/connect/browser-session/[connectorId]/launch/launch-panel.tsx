@@ -7,7 +7,7 @@ import { buttonVariants, type ConnectorIconLike } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import { ConnectHeader, WentWrong } from "../../../../sources/add/connect-parts.tsx";
+import { ConnectHeader, ConnectWorkingMark, WentWrong } from "../../../../sources/add/connect-parts.tsx";
 import { flowPreview } from "../../../flow-preview.ts";
 
 interface LaunchState {
@@ -160,6 +160,7 @@ export function LaunchPresentation({ connectorId, displayName, icon, onRetry, st
   return <>
     <ConnectHeader connectorKey={connectorId} icon={icon} name={displayName} title={title} step="Step 1 of 2: sign in" />
     <section className="grid max-w-xl gap-4">
+      {state.starting ? <ConnectWorkingMark label={`Opening ${displayName}`} /> : null}
       {state.starting ? <p className="text-muted-foreground">This can take a minute. Keep this page open.</p> : null}
       {!state.starting && !state.networkLost && /busy|queued|deferred/i.test(state.error ?? "") ? <p className="text-muted-foreground">DataConnect is signing in to another service right now. Try again in a moment.</p> : null}
       {!state.starting ? <div className="flex flex-wrap gap-2"><button className={buttonVariants({ size: "sm", variant: "default" })} onClick={onRetry} type="button">{state.networkLost ? "Check again" : "Try again"}</button>{!state.networkLost ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">Back to all services</Link> : null}</div> : null}

@@ -6,9 +6,9 @@ import type { ConnectionSetupStatus } from "../lib/ref-client.ts";
 
 export const previewStates = {
   launch: ["opening", "could-not-open", "busy", "lost-contact"],
-  browser: ["card", "card-error", "opening", "browser-step", "browser-code", "browser-code-rejected", "browser-trouble", "stop-question", "signed-in", "needs-details", "approve"],
+  browser: ["card", "card-plain", "card-error", "opening", "browser-step", "browser-code", "browser-code-rejected", "browser-trouble", "stop-question", "signed-in", "needs-details", "needs-details-rejected", "approve"],
   details: ["empty", "rejected"],
-  status: ["copying-nothing-yet", "copying-some", "needs-you", "connected-missing-some", "timed-out", "busy", "stopped", "failed"],
+  status: ["copying", "needs-you", "connected-missing-some", "timed-out", "busy", "stopped", "failed"],
   provider: ["plain", "already-have-one", "could-not-start"],
 } as const;
 
@@ -36,7 +36,7 @@ export const flowPreview = {
 };
 
 export function previewStatus(state: string): ConnectionSetupStatus {
-  const copying = state.startsWith("copying-");
+  const copying = state === "copying";
   return {
     account_identity: null, connection_id: flowPreview.connectionId, connector_id: "northwind", created_at: null,
     credential: { captured_at: null, credential_kind: null, present: false, rotated_at: null },
@@ -52,11 +52,20 @@ export function previewStatus(state: string): ConnectionSetupStatus {
 
 export function previewFacts(state: string): FirstSyncFacts {
   return {
-    kinds: state === "copying-nothing-yet" ? null : flowPreview.kinds,
+    kinds: state === "copying" ? null : flowPreview.kinds,
     schedule: null,
-    signedIn: state.startsWith("copying-"),
+    signedIn: state === "copying",
     runStatus: state === "busy" ? "deferred" : undefined,
     failureReason: state === "timed-out" ? "assistance_timed_out" : state === "stopped" ? "owner_cancelled" : null,
     gaps: state === "connected-missing-some" ? [{ kind: "skip_result", stream: "returns", reason: "unavailable", message: "Northwind could not send returns.", recovery_hint: { retryable: true } }] : [],
   };
+}
+
+export function previewBrowserMessage(state: string): string {
+  if (state === "card-plain") return "";
+  if (state === "approve") return "Approve this sign-in in the Northwind app on your phone.";
+  if (state.startsWith("needs-details")) return "Enter your Northwind email and password.";
+  if (state.startsWith("browser-code")) return "Enter the 6-digit code Northwind sent to your phone.";
+  if (state === "card" || state === "card-error") return "Sign in with your Northwind email and password.";
+  return "Finish signing in to Northwind in the page above.";
 }

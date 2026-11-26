@@ -1585,7 +1585,7 @@ function LiveStreamSurface({
         <OrientationCard
           buttonLabel={`Open ${connectorName}`}
           isMinting={isMinting}
-          message={interactionMessage}
+          message={interactionMessage || `This is ${connectorName}'s own sign-in page, in a browser that DataConnect runs for you. When you are signed in, DataConnect carries on by itself.`}
           onAction={openBrowser}
           troubleMessage={status.display === "trouble" ? status.troubleMessage : null}
         />
@@ -5834,7 +5834,7 @@ function StreamInteractionDock({
           <h1 className="pdpp-heading flex items-center gap-2">{connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connectorName} /> : null}Sign in to {connectorName}</h1>
           <IcButton
             aria-expanded="true"
-            aria-label="Hide sign-in instructions"
+            aria-label="Hide instructions"
             className="shrink-0"
             onClick={() => setCollapsed(true)}
             size="sm"
@@ -5922,7 +5922,7 @@ export function ResolvedSurface({ connector, statusHref = "/sources", preview = 
     if (preview) return;
     return scheduleSignInContinuation(statusHref, (href) => router.replace(href));
   }, [preview, router, statusHref]);
-  return <SignInFrame connector={connector} title={`You're signed in to ${connector?.displayName ?? "the data source"}.`}><Link className={buttonVariants({ size: "sm", variant: "default" })} href={statusHref}>Continue</Link></SignInFrame>;
+  return <SignInFrame connector={connector} title={`You're signed in to ${connector?.displayName ?? "the data source"}.`}><IcButton onClick={() => router.replace(statusHref)} size="sm" type="button">Continue</IcButton></SignInFrame>;
 }
 
 // ─── Unsupported interaction kind (credentials / OTP) ────────────────────────

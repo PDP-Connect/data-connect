@@ -11,6 +11,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import {
 	ConnectHeader,
+	ConnectWorkingMark,
 	WentWrong,
 } from "../../../sources/add/connect-parts.tsx";
 import {
@@ -116,26 +117,8 @@ function Body({
 						minutes, or hours for a large account. You can close this page.
 						DataConnect keeps going.
 					</p>
-					{outcome.collected.length > 0 ? (
-						<>
-							<h2 className="pdpp-eyebrow">So far</h2>
-							<ArrivedList
-								collected={outcome.collected}
-								connectionId={connectionId}
-							/>
-						</>
-					) : null}
-					<div
-						aria-label="Copying"
-						className="h-0.5 max-w-xl overflow-hidden bg-muted"
-						role="status"
-					>
-						<div className="h-full w-1/3 animate-pulse bg-foreground/30 motion-reduce:animate-none" />
-					</div>
+					<ConnectWorkingMark label="Copying" />
 					<div className="flex flex-wrap gap-2">
-						{outcome.collected.length > 0 ? (
-							<LinkButton link={outcome.seeArrived} primary />
-						) : null}
 						<LinkButton link={outcome.addAnother} primary={false} />
 					</div>
 					{outcome.runId ? (
@@ -151,17 +134,17 @@ function Body({
 						connectionId={connectionId}
 					/>
 					<h2 className="pdpp-eyebrow">Didn't come</h2>
-					<ul className="grid gap-3">
+					<DataList ariaLabel="Didn't come">
 						{outcome.missing.map((gap) => (
-							<li key={gap.label}>
+							<li className="flex flex-col gap-1 px-3 py-3" key={gap.label}>
 								<p className="text-foreground">{gap.label}</p>
-								<p className="text-muted-foreground">
+								<p className="pdpp-caption text-muted-foreground">
 									{gap.message}
-									{gap.retryable ? " It will try again at the next sync." : ""}
+									{gap.retryable ? ` It will try again the next time DataConnect checks ${name}.` : ""}
 								</p>
 							</li>
 						))}
-					</ul>
+					</DataList>
 					<div className="flex flex-wrap gap-2">
 						<LinkButton link={outcome.primary} primary />
 						{outcome.retry ? (
@@ -178,7 +161,7 @@ function Body({
 					{outcome.reason ? (
 						<p className="text-muted-foreground">{outcome.reason}</p>
 					) : null}
-					<div>
+					<div className="flex flex-wrap gap-2">
 						<LinkButton link={outcome.retry} primary />
 						{outcome.secondary ? (
 							<LinkButton link={outcome.secondary} primary={false} />

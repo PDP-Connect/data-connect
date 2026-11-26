@@ -61,8 +61,6 @@ export type FirstSyncOutcome =
 	| {
 			readonly kind: "running";
 			readonly watch: OutcomeLink;
-			readonly collected: readonly CollectedKind[];
-			readonly seeArrived: OutcomeLink;
 			readonly runId: string | null;
 			readonly signIn: boolean;
 			readonly signedIn: boolean;
@@ -247,11 +245,6 @@ export function firstSyncOutcome(
 			: "/sources";
 		return {
 			kind: "running",
-			collected: collectedKinds(facts),
-			seeArrived: {
-				href: sourceRecordsHref(status),
-				label: "See what has arrived",
-			},
 			runId: runId ?? null,
 			signIn: status.setup_kind === "browser_session",
 			signedIn: facts.signedIn === true,

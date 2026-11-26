@@ -222,7 +222,7 @@ test("no-assistance poller explicitly transitions into current browser assistanc
 });
 
 test("resolved browser work offers Continue and never asks for tab close", () => {
-  assert.match(streamViewerSource, /href=\{statusHref\}>Continue/);
+  assert.match(streamViewerSource, /onClick=\{\(\) => router\.replace\(statusHref\)\}[^>]*>Continue/);
   assert.doesNotMatch(streamViewerSource, /close this tab/i);
   assert.doesNotMatch(streamViewerSource, WINDOW_CLOSE_RE);
 });

@@ -5,6 +5,7 @@ import { buttonVariants, IcInput, type ConnectorIconLike } from "@pdpp/brand-rea
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
+import { LoaderCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { accountCopy, cannotAddCopy, connectHeading, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
@@ -137,4 +138,9 @@ export function CannotBeAddedHere({ name, reason }: { name: string; reason?: str
       </div>
     </div>
   );
+}
+
+/** Quiet activity mark shared by opening and copying; still in reduced motion. */
+export function ConnectWorkingMark({ label }: { label: string }) {
+  return <div aria-label={label} role="status"><LoaderCircle aria-hidden="true" className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" /></div>;
 }

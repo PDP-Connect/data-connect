@@ -43,6 +43,7 @@ import {
 } from "../../lib/run-gaps.ts";
 import { getCollectedKinds, getCollectionTerminalEvent } from "./collected-kinds.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
+import { SignInDetailsSurface } from "./stream/sign-in-parts.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { RejectedRecordsSection } from "./rejected-records-section.tsx";
 import { projectCredentialInteraction } from "./credential-interaction.ts";
@@ -64,7 +65,7 @@ import {
   type TerminalRunStatus,
 } from "./run-terminal-status.ts";
 
-import { flowPreview, flowPreviewState } from "../../connect/flow-preview.ts";
+import { flowPreview, flowPreviewState, previewBrowserMessage } from "../../connect/flow-preview.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -106,7 +107,7 @@ export default async function RunDetailPage({
   const runId = decodeURIComponent(raw);
   const query = await searchParams;
   const preview = flowPreviewState("details", query);
-  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" serviceName={flowPreview.connector.displayName} message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.detailsRejected : undefined} runId={runId} /></RecordroomShellWithPalette>;
+  if (preview) return <SignInDetailsSurface connector={flowPreview.connector} fields={flowPreview.fields.map(field => ({ ...field, autocomplete: null }))} interactionId="sample-step" message={previewBrowserMessage("needs-details")} preview previewError={preview === "rejected" ? flowPreview.detailsRejected : undefined} runId={runId} />;
   const cursor = getCursor(query.cursor);
   const receiptsCursor = getCursor(query.receipts_cursor);
 

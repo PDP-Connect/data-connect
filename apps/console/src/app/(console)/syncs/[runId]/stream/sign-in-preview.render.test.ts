@@ -17,12 +17,14 @@ const router = { refresh() {}, replace(href: string) { visited.push(href); } };
 mock.module("next/navigation", { namedExports: { ...navigation, useRouter: () => router } });
 mock.module("../../../components/recordroom-shell-with-palette.tsx", { namedExports: { RecordroomShellWithPalette: ({ children }: { children: React.ReactNode }) => React.createElement("main", { "data-testid": "normal-frame" }, children) } });
 let root: import("react-dom/client").Root;
+let ResolvedSurface: typeof import("./stream-viewer.tsx").ResolvedSurface;
 let SignInPreview: typeof import("./sign-in-preview.tsx").SignInPreview;
 let LaunchPresentation: typeof import("../../../connect/browser-session/[connectorId]/launch/launch-panel.tsx").LaunchPresentation;
 let FirstSyncBody: typeof import("../../../connect/status/[connectionId]/first-sync-body.tsx").FirstSyncBody;
 let firstSyncOutcome: typeof import("../../../connect/status/[connectionId]/first-sync-outcome.ts").firstSyncOutcome;
 test.before(async () => {
   const { createRoot } = await import("react-dom/client");
+  ({ ResolvedSurface } = await import("./stream-viewer.tsx"));
   ({ SignInPreview } = await import("./sign-in-preview.tsx"));
   ({ LaunchPresentation } = await import("../../../connect/browser-session/[connectorId]/launch/launch-panel.tsx"));
   ({ FirstSyncBody } = await import("../../../connect/status/[connectionId]/first-sync-body.tsx"));
@@ -63,7 +65,7 @@ test("Page A, Page B and Page C put the step below the heading in the same heade
   const views = [
     React.createElement(LaunchPresentation, { connectorId: "northwind", displayName: "Northwind", onRetry() {}, state: { starting: true, networkLost: false, error: null } }),
     ...["card", "opening", "signed-in", "needs-details", "approve"].map(state => React.createElement(SignInPreview, { key: state, state })),
-    React.createElement(FirstSyncBody, { connectionId: flowPreview.connectionId, connectorId: "northwind", name: "Northwind", outcome: firstSyncOutcome(previewStatus("copying-nothing-yet"), "Northwind", previewFacts("copying-nothing-yet")), resumeAction() {} }),
+    React.createElement(FirstSyncBody, { connectionId: flowPreview.connectionId, connectorId: "northwind", name: "Northwind", outcome: firstSyncOutcome(previewStatus("copying"), "Northwind", previewFacts("copying")), resumeAction() {} }),
   ];
   for (const view of views) {
     await render(view);
@@ -76,6 +78,85 @@ test("Page A, Page B and Page C put the step below the heading in the same heade
   assert.ok(dom.window.document.querySelector('[data-testid="normal-frame"] form input[type="password"]'));
   assert.equal(dom.window.document.querySelectorAll("h1,h2").length, 1);
   assert.match(dom.window.document.body.textContent ?? "", /for this sign-in only. It does not keep them/);
+  await render(null);
+});
+
+test("copying has no live counts and uses the same moving mark as opening", async () => {
+  for (const state of ["copying"]) {
+    await render(React.createElement(FirstSyncBody, { connectionId: flowPreview.connectionId, connectorId: "northwind", name: "Northwind", outcome: firstSyncOutcome(previewStatus(state), "Northwind", previewFacts(state)), resumeAction() {} }));
+    assert.doesNotMatch(dom.window.document.body.textContent ?? "", /So far|See what has arrived/);
+    assert.ok(dom.window.document.querySelector('[role="status"] .animate-spin'));
+  }
+  await render(null);
+});
+
+test("all page practice states use honest copy and the plain card has its fallback", async () => {
+  for (const state of previewStates.browser.filter(state => !state.startsWith("browser-") && state !== "stop-question")) {
+    await render(React.createElement(SignInPreview, { key: state, state }));
+    assert.deepEqual(bannedCopyProblems(dom.window.document.body.innerHTML), [], state);
+    if (state === "card-plain") assert.match(dom.window.document.body.textContent ?? "", /This is Northwind's own sign-in page/);
+    if (state === "approve") assert.match(dom.window.document.body.textContent ?? "", /Northwind app on your phone/);
+    if (state === "needs-details-rejected") assert.match(dom.window.document.querySelector('[role="alert"]')?.textContent ?? "", /did not accept those sign-in details/);
+  }
+  await render(React.createElement(SignInPreview, { key: "code", state: "browser-code" }));
+  let dialog = dom.window.document.querySelector('[role="dialog"]');
+  const hide = dialog?.querySelector('button[aria-label="Hide instructions"]');
+  assert.ok(hide);
+  await React.act(async () => { hide.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  dialog = dom.window.document.querySelector('[role="dialog"]');
+  assert.equal(dialog?.querySelector("h1"), null);
+  const show = Array.from(dialog?.querySelectorAll("button") ?? []).find(button => button.textContent?.includes("Show instructions"));
+  assert.ok(show);
+  await React.act(async () => { show.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  assert.ok(dialog?.querySelector("h1"));
+  await render(null);
+});
+
+test("the real signed-in page continues after two seconds or immediately on Continue", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  visited.length = 0;
+  const href = "/connect/status/sample-account?run_id=sample-copy";
+  await render(React.createElement(ResolvedSurface, { connector: flowPreview.connector, runId: flowPreview.runId, statusHref: href }));
+  await React.act(async () => { t.mock.timers.tick(1999); });
+  assert.deepEqual(visited, []);
+  await React.act(async () => { t.mock.timers.tick(1); });
+  assert.deepEqual(visited, [href]);
+  await render(null);
+  visited.length = 0;
+  await render(React.createElement(ResolvedSurface, { connector: flowPreview.connector, runId: flowPreview.runId, statusHref: href }));
+  const button = Array.from(dom.window.document.querySelectorAll("button")).find(node => node.textContent === "Continue");
+  assert.ok(button);
+  await React.act(async () => { button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  assert.deepEqual(visited, [href]);
+  await render(null);
+  visited.length = 0;
+  await render(React.createElement(ResolvedSurface, { connector: flowPreview.connector, preview: true, runId: flowPreview.runId, statusHref: href }));
+  await React.act(async () => { t.mock.timers.tick(5000); });
+  assert.deepEqual(visited, []);
+  await render(null);
+});
+
+test("finished pages keep the shared heading wrapper, button gaps and missing-row indent", async () => {
+  for (const state of ["connected-missing-some", "stopped"]) {
+    await render(React.createElement(FirstSyncBody, { connectionId: flowPreview.connectionId, connectorId: "northwind", name: "Northwind", outcome: firstSyncOutcome(previewStatus(state), "Northwind", previewFacts(state)), resumeAction() {} }));
+    const header = dom.window.document.querySelector("header");
+    assert.ok(header);
+    assert.ok(header.querySelector("h1"));
+    assert.doesNotMatch(header.textContent ?? "", /Step /);
+    if (state === "connected-missing-some") {
+      const missingRow = dom.window.document.querySelector('[aria-label="Didn\'t come"] li');
+      assert.ok(missingRow);
+      assert.ok(missingRow.classList.contains("px-3"));
+      assert.match(missingRow.textContent ?? "", /the next time DataConnect checks Northwind/);
+    } else {
+      const start = Array.from(dom.window.document.querySelectorAll("a")).find(node => node.textContent === "Start again");
+      assert.ok(start);
+      const buttons = start.parentElement;
+      assert.ok(buttons);
+      assert.ok(buttons.classList.contains("gap-2"));
+      assert.ok(buttons.classList.contains("flex-wrap"));
+    }
+  }
   await render(null);
 });
 
