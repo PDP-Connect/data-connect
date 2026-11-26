@@ -12,7 +12,7 @@ export async function loadSyncHistory(params: Record<string,string | undefined>)
   const offset = await readPersonOffset();
   if (practiceEnabled(params.demo)) {
     const model = syncPractice(params.demo as string,offset);
-    if (model.history.mode === "days") model.history.data = model.history.data.filter(row => (!params.connection_id || row.connection_id === params.connection_id) && (params.only_problems !== "true" || row.failed+row.stopped+row.interrupted > 0));
+    if (model.history.mode === "days") model.history.data = model.history.data.filter(row => (!params.connection_id || row.connection_id === params.connection_id) && (params.only_problems !== "true" || row.failed+row.stopped+row.interrupted > 0 || Boolean(row.missing?.length)));
     if (params.connection_id) model.now = [];
     return { ...model, offset };
   }

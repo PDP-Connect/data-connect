@@ -6,6 +6,7 @@ import { classifyKnownGaps, extractKnownGapsFromEventData } from "../../lib/run-
 import { readPersonOffset } from "../../history/server-day.ts";
 import { historyRange } from "../../history/day-cut.ts";
 import { loadHistorySources, sourceName } from "../../history/load-sources.ts";
+import { historyKindName } from "../../history/source-names.ts";
 import { practiceEnabled } from "../../history/practice.ts";
 import { setupHref } from "../../connect/status/[connectionId]/connect-status-links.ts";
 import { resolveRunConnectionId } from "./run-detail-labels.ts";
@@ -36,9 +37,11 @@ export async function loadOneSync(id: string, params: Record<string,string | und
     at: status?.started_at ?? persisted?.started_at ?? events[0]?.occurred_at ?? null,
     started: status?.started_at ?? persisted?.started_at ?? null, completed: status?.completed_at ?? persisted?.completed_at ?? null,
     outcome, cause: status?.failure?.reason ?? status?.terminal_reason ?? persisted?.cause ?? null,
+    evidence: persisted?.evidence ?? {reason:status?.failure?.reason ?? status?.terminal_reason, error:status?.failure?.connector_error_message ?? status?.failure?.message},
+    kindNames: Object.fromEntries((kinds ?? []).map(row=>[row.kind,historyKindName(sources,connection,row.kind)])),
     rawError: status?.failure?.connector_error_message ?? status?.failure?.message ?? null,
     trigger: persisted?.trigger ?? null, total: persisted?.records ?? (kinds ? kinds.reduce((n,k)=>n+k.count,0) : null), kinds,
-    missing: gaps.filter(gap => gap.stream).map(gap => ({ name: recordKindName(gap.stream as string), canRetry: gap.recovery_hint?.retryable === true })), assistance,
+    missing: persisted?.missing?.map(gap=>({name:historyKindName(sources,connection,gap.stream),canRetry:gap.retryable})) ?? gaps.filter(gap => gap.stream).map(gap => ({ name: historyKindName(sources,connection,gap.stream ?? null), canRetry: gap.recovery_hint?.retryable === true })), assistance,
     retryHref: setup ? setupHref(setup) : connection ? `/sources/${encodeURIComponent(connection)}` : null,
   } };
 }
