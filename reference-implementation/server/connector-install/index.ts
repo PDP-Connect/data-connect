@@ -437,18 +437,13 @@ function assertStoredRecordMetadata(active: ConnectorInstallRecord): void {
   }
 }
 
-function assertStoredFileHashes(root: string, active: ConnectorInstallRecord): void {
-  const checks: readonly [string, string][] = [
-    [active.manifestPath, active.manifestSha256],
-    [active.entrypointPath, active.entrypointSha256],
-    [active.provenancePath, active.provenanceSha256],
-  ];
-  for (const [path, expected] of checks) {
-    const file = confinedFile(root, path);
-    if (!(file && DIGEST.test(expected)) || sha256(file) !== expected) {
-      throw new Error("Active connector bytes failed integrity verification.");
-    }
+function readVerifiedStoredFile(root: string, path: string, expected: string): Buffer {
+  const file = confinedFile(root, path);
+  const bytes = file && DIGEST.test(expected) ? readFileSync(file) : null;
+  if (bytes === null || sha256(bytes) !== expected) {
+    throw new Error("Active connector bytes failed integrity verification.");
   }
+  return bytes;
 }
 
 function acquireInstallLock(dataDir: string): DirectoryLock {
@@ -462,8 +457,8 @@ function acquireCatalogStateLock(dataDir: string): () => void {
     .release;
 }
 
-function sha256(path: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+function sha256(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function confinedFile(root: string, path: string): string | null {
@@ -662,12 +657,10 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
     throw new Error("Active connector root is outside the connector data directory.");
   }
   assertNoSymlinkComponents(normalizedRoot);
-  assertStoredFileHashes(normalizedRoot, active);
-  const manifestFile = confinedFile(normalizedRoot, active.manifestPath);
-  if (!manifestFile) {
-    throw new Error("Active connector manifest path is invalid.");
-  }
-  const manifest = parseProfileText(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+  const manifestBytes = readVerifiedStoredFile(normalizedRoot, active.manifestPath, active.manifestSha256);
+  readVerifiedStoredFile(normalizedRoot, active.entrypointPath, active.entrypointSha256);
+  readVerifiedStoredFile(normalizedRoot, active.provenancePath, active.provenanceSha256);
+  const manifest = parseProfileText(manifestBytes.toString("utf8")) as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifest);
   if (manifestKey !== active.connectorId) {
     throw new Error("Active connector manifest identity does not match its record.");
@@ -693,10 +686,14 @@ function withVerifiedSourceDeclaration(
     return manifest;
   }
   const file = confinedFile(root, SOURCE_DECLARATION_PATH);
-  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES || sha256(file) !== active.sourceDeclarationSha256) {
+  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES) {
     throw new Error("Active source declaration bytes failed integrity verification.");
   }
-  const declaration = snapshotSourceDeclaration(JSON.parse(readFileSync(file, "utf8")));
+  const bytes = readFileSync(file);
+  if (bytes.length > MAX_CONFIG_BYTES || sha256(bytes) !== active.sourceDeclarationSha256) {
+    throw new Error("Active source declaration bytes failed integrity verification.");
+  }
+  const declaration = snapshotSourceDeclaration(JSON.parse(bytes.toString("utf8")));
   if (manifest.source_declaration !== undefined && !isDeepStrictEqual(manifest.source_declaration, declaration)) {
     throw new Error(
       "Connector profile embeds a source declaration that conflicts with the verified source declaration."
@@ -723,7 +720,11 @@ function sourceDeclarationDigestOf(root: string): string | undefined {
   if (!file || lstatSync(file).size > MAX_CONFIG_BYTES) {
     throw new Error("Verified source declaration is invalid.");
   }
-  return sha256(file);
+  const bytes = readFileSync(file);
+  if (bytes.length > MAX_CONFIG_BYTES) {
+    throw new Error("Verified source declaration is invalid.");
+  }
+  return sha256(bytes);
 }
 
 function assertCatalogEntry(entry: ConnectorCatalogEntry, connectorId: string, digest?: string): void {
@@ -788,7 +789,11 @@ function readVerifiedRecord(
   if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
     throw new Error("Connector profile exceeds the 1 MiB RI limit.");
   }
-  const manifest: unknown = parseProfileText(readFileSync(manifestFile, "utf8"));
+  const manifestBytes = readFileSync(manifestFile);
+  if (manifestBytes.length > MAX_CONFIG_BYTES) {
+    throw new Error("Connector profile exceeds the 1 MiB RI limit.");
+  }
+  const manifest: unknown = parseProfileText(manifestBytes.toString("utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
   }
@@ -811,12 +816,12 @@ function readVerifiedRecord(
     connectorId: entry.connector_id,
     digest: entry.digest,
     entrypointPath,
-    entrypointSha256: sha256(entrypointFile),
+    entrypointSha256: sha256(readFileSync(entrypointFile)),
     manifest: manifestRecord,
     manifestPath,
-    manifestSha256: sha256(manifestFile),
+    manifestSha256: sha256(manifestBytes),
     provenancePath,
-    provenanceSha256: sha256(provenanceFile),
+    provenanceSha256: sha256(readFileSync(provenanceFile)),
     ...(sourceDeclarationSha256 === undefined ? {} : { sourceDeclarationSha256 }),
     registry: "ghcr.io",
     repository: `pdp-connect/connector/${entry.connector_key}`,
@@ -1686,7 +1691,7 @@ async function installPinnedArtifact(
   normalizeCoreInstallLayout(root, entry.connector_id, verifiedSourceDeclaration);
   return {
     configDigest,
-    sourceDeclarationSha256: `sha256:${createHash("sha256").update(verifiedSourceDeclaration).digest("hex")}`,
+    sourceDeclarationSha256: sha256(verifiedSourceDeclaration),
   };
 }
 
