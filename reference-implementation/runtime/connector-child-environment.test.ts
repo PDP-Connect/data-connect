@@ -725,6 +725,14 @@ test("a manifest keyed database never receives the server's PDPP_DATABASE_URL", 
   assert.equal(ownsTuningKey("widgets", "PDPP_WIDGETS_PAGE_SIZE"), true, "an ordinary namespace is unaffected");
 });
 
+test("a connector keyed blob cannot claim the runtime's BLOB spool path", () => {
+  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_BLOB_SPOOL_DIR"] } };
+  const sourceEnv = { PDPP_BLOB_SPOOL_DIR: "/operator-controlled/spool" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "blob" }), {});
+  assert.equal(ownsTuningKey("blob", "PDPP_BLOB_SPOOL_DIR"), false);
+});
+
 test("the connector with the longest installed namespace owns a nested key", () => {
   const installed = ["foo", "foo_bar"];
   const foo = { runtime_requirements: { tuning_environment: ["PDPP_FOO_X", "PDPP_FOO_BAR_X"] } };
