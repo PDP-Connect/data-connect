@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { unstable_rethrow } from "next/navigation";
+import { SupportCopy } from "../../components/support-copy.tsx";
 import type { Metadata } from "next";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { readAddSourceCatalog } from "../../sources/add/add-source-catalog-read.ts";
@@ -12,14 +14,16 @@ export const metadata: Metadata = { title: packagesCopy.heading };
 export const dynamic = "force-dynamic";
 
 export default async function DataSourcePackagesPage() {
-  const read = await readAddSourceCatalog();
-  const rows = buildPackageRows(read);
+  let rows: ReturnType<typeof buildPackageRows> = [];
+  let error: string | null = null;
+  try { rows = buildPackageRows(await readAddSourceCatalog()); }
+  catch (cause) { unstable_rethrow(cause); error = cause instanceof Error ? cause.message : String(cause); }
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <div className="mx-auto grid min-w-0 w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title={packagesCopy.heading} description="Each service has its own small piece of DataConnect. An update here applies to every account of that service." />
-        <PackageTable rows={rows} />
-      </main>
+        {error ? <div role="status"><p>Data source updates could not be loaded. Try again.</p><SupportCopy details={error} /></div> : <PackageTable rows={rows} />}
+      </div>
     </RecordroomShellWithPalette>
   );
 }
