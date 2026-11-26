@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import type { IncomingHttpHeaders } from "node:http";
@@ -20,7 +21,7 @@ const NORTHSTAR_SOURCE_DECLARATION = {
   declaration_version: "reference.native-config.northstar-hr.test",
   display: { name: "Northstar HR" },
   protocol_version: "0.1.0",
-  publisher: { id: "https://pdpp.dev/reference-implementation" },
+  publisher: { id: FIXTURE_PUBLISHER },
   source: { id: NORTHSTAR_PROVIDER_ID, kind: "provider_native" },
   streams: [
     {

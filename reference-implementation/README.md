@@ -49,7 +49,7 @@ The current reference is centered on one architectural claim:
   - Collection Profile runner and related runtime helpers
 - `cli/`
   - `pdpp` CLI for owner login, export, provider inspection, grant staging, and trace/timeline inspection
-- `manifests/`
+- `fixtures/seed-manifests/`
   - sample connector manifests plus the native `northstar-hr` manifest
 - `test/`
   - black-box integration, metadata, CLI, event-spine, and Collection Profile conformance tests
