@@ -777,14 +777,14 @@ export function resolveWebPushUrgency(payload: unknown): WebPushUrgency {
   return "high";
 }
 
-function interactionPushBody(sensitivity: InteractionSensitivity): string {
-  switch (sensitivity) {
-    case "external":
+function interactionPushBody(kind: string): string {
+  switch (kind) {
+    case "credentials":
       return "Open DataConnect to finish signing in.";
-    case "informational":
-      return "Open DataConnect to finish signing in.";
+    case "otp":
+      return "Open DataConnect to continue this sync.";
     default:
-      return "Open DataConnect to finish signing in.";
+      return "Open DataConnect to continue this sync.";
   }
 }
 
@@ -829,7 +829,7 @@ export function buildPendingInteractionPushPayload({
   // attach connector-supplied free text (`interaction.message`, `.schema`,
   // `.data`) by spreading the interaction object in.
   return Object.freeze({
-    body: interactionPushBody(sensitivity),
+    body: interactionPushBody(kind),
     connector_display_name: connectorDisplayName,
     interaction_id: interactionId,
     interaction_kind: kind,

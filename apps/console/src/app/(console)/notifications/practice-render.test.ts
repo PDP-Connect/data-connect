@@ -38,3 +38,51 @@ for (const practice of [
       assert.match(document.body.textContent!, /Check again/)
   })
 }
+
+test("an unsupported browser has a next step", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WebPushSettings, {
+      plain: true,
+      practice: "unsupported",
+      config: {
+        object: "web_push_config",
+        enabled: true,
+        public_key: "practice",
+        unavailable_reason: null,
+      },
+      subscriptions: [],
+    })
+  )
+  assert.match(html, /Chrome, Edge or Firefox/)
+})
+
+test("blocked practice markup does not depend on the rendering browser", () => {
+  const props = {
+    plain: true,
+    practice: "blocked",
+    config: {
+      object: "web_push_config" as const,
+      enabled: true,
+      public_key: "practice",
+      unavailable_reason: null,
+    },
+    subscriptions: [],
+  }
+  const first = renderToStaticMarkup(
+    React.createElement(WebPushSettings, props)
+  )
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator")
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { userAgent: "Chrome" },
+  })
+  try {
+    assert.equal(
+      renderToStaticMarkup(React.createElement(WebPushSettings, props)),
+      first
+    )
+  } finally {
+    if (original) Object.defineProperty(globalThis, "navigator", original)
+    else Reflect.deleteProperty(globalThis, "navigator")
+  }
+})

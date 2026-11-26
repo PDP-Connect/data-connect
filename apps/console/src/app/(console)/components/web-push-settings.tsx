@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, buttonVariants } from "@pdpp/brand-react";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import type { WebPushConfig, WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
@@ -375,13 +375,14 @@ export function unavailableSentence(reason: string, serverNotReady = false): str
     return "This server needs its notification keys set in its environment.";
   }
   const normalized = reason.toLowerCase();
+  if (normalized.includes("https") || normalized.includes("localhost")) return "Notifications need a secure address. Turn on remote access in Settings to get one.";
   if (normalized.includes("denied")) {
     return "Notifications are blocked in your browser or device settings; allow them there, then return here.";
   }
   if (normalized.includes("vapid") || normalized.includes("key") || normalized.includes("server")) {
     return "This server needs its notification keys set in its environment.";
   }
-  return "This browser can't receive notifications. Install DataConnect as an app on your phone or computer to get them.";
+  return "This browser can’t receive notifications. Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.";
 }
 
 export function receivingDeviceLabel(subscription: WebPushSubscriptionSummary, currentEndpoint: string | null): string {
@@ -609,6 +610,8 @@ function DiagnosticsDisclosure({
   );
 }
 
+const subscribeBrowser = () => () => {};
+
 export function WebPushSettings({
   config,
   subscriptions,
@@ -620,6 +623,7 @@ export function WebPushSettings({
   config: WebPushConfig;
   subscriptions: WebPushSubscriptionSummary[];
 }) {
+  const browserAgent = useSyncExternalStore(subscribeBrowser, () => navigator.userAgent, () => "");
   const [currentSubscriptions, setCurrentSubscriptions] = useState(subscriptions);
   const [device, dispatch] = useReducer(deviceReducer, INITIAL_DEVICE_STATE);
   const { status, endpoint, unavailable, permission, swState } = device;
@@ -831,19 +835,19 @@ export function WebPushSettings({
   );
 
   if (plain || practice) {
-    const blocked = practice ? practice === "blocked" : permission === "denied";
-    const insecure = practice ? practice === "insecure" : typeof window !== "undefined" && !window.isSecureContext;
+    const insecure = practice ? practice === "insecure" : unavailable === "Web Push needs HTTPS or localhost.";
+    const blocked = !insecure && (practice ? practice === "blocked" : permission === "denied");
     const unsupported = practice ? ["unsupported", "insecure"].includes(practice) : Boolean(unavailable) && !blocked;
     const on = practice ? ["on", "devices"].includes(practice) : enabled;
     const otherDevices = practice === "devices" ? [{ endpoint: "practice-phone", device_label: "Phone" }, { endpoint: "practice-tablet", device_label: "Tablet" }] : receivingDevices.filter((row) => row.endpoint !== endpoint);
     return <section aria-label="Notification settings" className="grid gap-4">
       {!config.enabled ? <p>Notifications are not available on this install yet.</p> : blocked ? <>
         <p>This browser is blocking notifications from DataConnect.</p>
-        <p className="text-sm text-muted-foreground">{notificationSettingsSteps(typeof navigator === "undefined" ? "" : navigator.userAgent)[0]}<br />{notificationSettingsSteps(typeof navigator === "undefined" ? "" : navigator.userAgent)[1]}</p>
+        <p className="text-sm text-muted-foreground">{notificationSettingsSteps(browserAgent)[0]}<br />{notificationSettingsSteps(browserAgent)[1]}</p>
         <IcButton variant="ghost" disabled={Boolean(practice)} onClick={() => window.location.reload()}>Check again</IcButton>
       </> : unsupported ? <>
         <p>This browser can’t receive notifications.</p>
-        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings">Turn on remote access</a> to get one.</p> : null}
+        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings">Turn on remote access</a> to get one.</p> : <p>Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.</p>}
       </> : !practice && checking ? <p role="status">Checking this device…</p> : on ? <>
         <p>On for this browser.</p>
         <div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={sendTest} variant="ghost">Send a test</IcButton><IcButton disabled={busy || Boolean(practice)} onClick={() => endpoint && setConfirmingEndpoint(endpoint)} variant="ghost">Turn off</IcButton></div>

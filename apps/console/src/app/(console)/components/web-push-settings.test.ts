@@ -236,7 +236,7 @@ test("dashboard Web Push status changes are announced as live status regions", a
 test("notification availability uses plain words and explains the next step", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
   assert.match(src, /export function unavailableSentence/);
-  assert.match(src, /This browser can't receive notifications\. Install DataConnect as an app on your phone or computer to get them\./);
+  assert.match(src, /This browser can’t receive notifications\. Use Chrome, Edge or Firefox/);
   assert.match(src, /notifications are blocked in your browser or device settings; allow them there, then return here/i);
   // Round 4 item 6: the server provides its keys through environment settings.
   assert.match(src, /This server needs its notification keys set in its environment\./);
@@ -277,7 +277,7 @@ test("notification list states keep visible words plain and show only receiving 
 
   // DIRECTION.md, Notifications: unavailable browsers get one plain explanation with a next step.
   const failedText = unavailableSentence("This browser does not support service workers.");
-  assert.match(failedText, /This browser can't receive notifications/);
+  assert.match(failedText, /This browser can’t receive notifications/);
   assert.doesNotMatch(failedText, BANNED_VISIBLE_WORDS);
 });
 
