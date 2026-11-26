@@ -17,9 +17,9 @@ test("Gozar home must leave room for its resolver socket inside the AF_UNIX limi
   assert.doesNotThrow(() => requireUsableSocketHome(ok));
   assert.throws(() => requireUsableSocketHome(`${ok}a`), { code: "host_path_too_long" });
   // A typical Linux profile with the real app layout is fine.
-  assert.doesNotThrow(() => requireUsableSocketHome("/home/tnunamak/.local/share/dev.dataconnect/unified/reachability"));
+  assert.doesNotThrow(() => requireUsableSocketHome("/home/owner/.local/share/dev.dataconnect/unified/reachability"));
   // The failing walk profile (131-byte socket path) is rejected, with a public code.
-  const long = `/home/tnunamak/.tmp/pr679-walk/profile-pkg-1794981390/.local/share/dev.dataconnect/unified/reachability`;
+  const long = `/home/owner/.cache/app-walk/profile-pkg-1794981390/.local/share/dev.dataconnect/unified/reachability`;
   assert.equal(Buffer.byteLength(long + SOCKET_TAIL) > 103, true);
   assert.throws(() => requireUsableSocketHome(long), (error: unknown) => {
     assert.equal(publicReachabilityError(error).code, "host_path_too_long");
