@@ -23,7 +23,7 @@
  * screen but two clearly separate facts.
  */
 
-import { canonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
+import { canonicalConnectorKey, type ProofProvenance } from "pdpp-reference-implementation/connection-setup-plan";
 import { buildConnectorCatalog, type CatalogManifestLike } from "./connection-catalog.ts";
 import { type AddAccountSupport, addAccountSupport, sourceSetupAction } from "./source-setup-presentation.ts";
 
@@ -86,9 +86,16 @@ function addAnotherAccountAction(entry: ReturnType<typeof buildConnectorCatalog>
  * directly. Connectors with no manifest entry simply have no map entry, and the
  * Sources page falls back to showing no add-account affordance for them rather
  * than inventing one.
+ *
+ * `proofProvenance` says where `manifests` came from. It defaults to null, so a
+ * manifest that only describes itself never makes a source self-service; pass
+ * "registered_catalog" only for manifests the server read from its registry.
  */
-export function buildSourceAddSupport(manifests: readonly CatalogManifestLike[]): Map<string, SourceAddSupport> {
-  const catalog = buildConnectorCatalog(manifests);
+export function buildSourceAddSupport(
+  manifests: readonly CatalogManifestLike[],
+  proofProvenance: ProofProvenance | null = null
+): Map<string, SourceAddSupport> {
+  const catalog = buildConnectorCatalog(manifests, [], undefined, proofProvenance);
   const map = new Map<string, SourceAddSupport>();
   for (const entry of catalog) {
     const support = addAccountSupport(entry);

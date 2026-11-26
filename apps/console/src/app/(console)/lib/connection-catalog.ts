@@ -26,6 +26,7 @@ import {
   classifyConnectorIntentModality,
   connectorKeyFromManifest,
   manualUploadSetupFromManifest,
+  type ProofProvenance,
   type StaticSecretSetupFieldLike,
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
@@ -411,14 +412,23 @@ function acquisitionPathsFromManifest(manifest: CatalogManifestLike): ConnectorA
 }
 
 /**
- * Build the pure manifest/planner projection used by tests and demo data. The
- * live Add Source page uses `buildOwnerConnectorCatalog` so local manifests
- * cannot supply registration, listing, proof, readiness, or action authority.
+ * Build the manifest/planner projection. `proofProvenance` is the caller's
+ * explicit statement of where `manifests` came from, and it defaults to null:
+ * a manifest read from presentation data (local JSON, the signed install
+ * catalog) cannot attest its own `capabilities.proven.*` claims, so with no
+ * provenance the planner ignores them and the entry describes no proven setup
+ * path. Pass "registered_catalog" only for manifests the server read from its
+ * registered catalog (tests over shipped snapshots do this).
+ *
+ * The live Add Source page goes through `buildOwnerConnectorCatalog`, which
+ * takes setup authority from the server-projected template `setup_plan` and
+ * uses this function only for presentation-only fallbacks, with no provenance.
  */
 export function buildConnectorCatalog(
   manifests: readonly CatalogManifestLike[],
   configuredProviderAuthConnectorKeys: readonly string[] = [],
-  deploymentEnv?: Readonly<Record<string, string | undefined>>
+  deploymentEnv?: Readonly<Record<string, string | undefined>>,
+  proofProvenance: ProofProvenance | null = null
 ): ConnectorCatalogEntry[] {
   const entries: ConnectorCatalogEntry[] = [];
   for (const manifest of manifests) {
@@ -436,10 +446,7 @@ export function buildConnectorCatalog(
       connectorKey,
       configuredProviderAuthConnectorKeys,
       manifest,
-      // The caller of this pure projection hands in manifests it already took
-      // from the server's registered catalog or the shipped snapshot (tests and
-      // demo data). The live Add Source page does not come through here.
-      proofProvenance: "registered_catalog",
+      proofProvenance,
       ...(deploymentEnv ? { deploymentEnv } : {}),
     });
     const setupCopy = setupCopyFromManifest(manifest);
@@ -730,10 +737,12 @@ export function isOwnerActionableEntry(entry: ConnectorCatalogEntry): boolean {
   if (entry.ownerActionable !== undefined) {
     return entry.ownerActionable;
   }
-  // `buildConnectorCatalog` remains a pure manifest/planner projection for
-  // tests and demo data. Its static-secret and provider branches still fail
-  // closed on the planner's proof fields; live pages must use the owner
-  // projection above, which also supplies registration and listing authority.
+  // Entries without an owner-session verdict come from `buildConnectorCatalog`
+  // (tests, demo data, and the owner catalog's presentation-only fallbacks).
+  // Their static-secret and provider branches fail closed on the planner's
+  // proof fields, and those fields stay set unless the caller passed proof
+  // provenance. Live registration and listing authority only comes from the
+  // owner projection above.
   if (entry.setupModality === "static_secret" || entry.disposition === "provider_auth_connect") {
     return entry.supportState === "supported" && entry.proofGate === null;
   }

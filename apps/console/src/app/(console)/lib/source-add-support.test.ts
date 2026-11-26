@@ -16,7 +16,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CatalogManifestLike } from "./connection-catalog.ts";
-import { buildSourceAddSupport, resolveSourceAddSupport } from "./source-add-support.ts";
+import { buildSourceAddSupport as buildSourceAddSupportFrom, resolveSourceAddSupport } from "./source-add-support.ts";
+
+/** These fixtures stand for manifests the server read from its registered catalog. */
+function buildSourceAddSupport(manifests: readonly CatalogManifestLike[]) {
+  return buildSourceAddSupportFrom(manifests, "registered_catalog");
+}
 
 const SUPPORTED_LISTING = { public_listing: { tier: "supported" as const } };
 
@@ -213,5 +218,17 @@ test("every support state carries an owner-safe label with no developer jargon",
   ]);
   for (const support of map.values()) {
     assert.doesNotMatch(support.supportLabel, DEV_JARGON_RE);
+  }
+});
+
+test("a manifest that only describes itself never makes a source self-service", () => {
+  // Same proof claims as the registered fixtures above, but no provenance: the
+  // planner must ignore `capabilities.proven.*`, so no add-another action.
+  for (const manifest of [staticSecretManifest("gmail"), localCollectorManifest("claude-code")]) {
+    const map = buildSourceAddSupportFrom([manifest]);
+    const support = resolveSourceAddSupport(map, manifest.connector_id ?? "");
+    assert.ok(support, `${manifest.connector_id}: still listed`);
+    assert.notEqual(support.support, "self_service", `${manifest.connector_id}: presentation data cannot attest proof`);
+    assert.equal(support.action, null, `${manifest.connector_id}: no add-another action`);
   }
 });
