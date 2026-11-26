@@ -75,6 +75,10 @@ try {
   );
   assert.ok(login.status() < 400, `owner sign-in returned ${login.status()}`);
   await page.waitForURL(`${origin}/`, { timeout: 45_000 });
+  const documentId = await page.evaluate(() => {
+    window.__coreSmokeDocumentId = crypto.randomUUID();
+    return window.__coreSmokeDocumentId;
+  });
 
   await page.getByRole("link", { name: "Data sources", exact: true }).click();
   await page.waitForURL("**/sources");
@@ -86,10 +90,6 @@ try {
     const text = await page.locator("main").innerText().catch(() => "main text unavailable");
     throw new Error(`Add-source list did not become visible; page=${text.slice(0, 900)}`, { cause: error });
   }
-  const documentId = await page.evaluate(() => {
-    window.__coreSmokeDocumentId = crypto.randomUUID();
-    return window.__coreSmokeDocumentId;
-  });
 
   const sourceRowIds = await page
     .locator('[data-testid^="add-source-row-"]')
@@ -104,6 +104,8 @@ try {
     // Opening the service installs it automatically, then shows its command.
     // Observe the ready form and verify the durable install, not an Install
     // button that no longer exists in the owner flow.
+    const beforeOpening = await inspectActiveConnector(createConnectorInstallStore(), connector);
+    assert.notEqual(beforeOpening.status, "active", `${connector} must not already be active before opening its service`);
     await sourceRow.getByRole("link").click();
     await page.waitForURL(`**/sources/add/${connector}`);
     await page.getByTestId("program-command").waitFor({ state: "visible", timeout: 60_000 });
