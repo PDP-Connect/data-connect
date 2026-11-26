@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { withFixturePublisher } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -653,7 +654,7 @@ test("device ingest preflight rejects before reservation while an accepted repla
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
-    await registerConnector(driftedManifest);
+    await registerConnector(withFixturePublisher(driftedManifest));
     assert.equal(
       selectRow<{ semantic_time: string }>(
         "SELECT semantic_time FROM records WHERE connector_instance_id = ? AND record_key = ?",
@@ -768,7 +769,7 @@ test("semantic-capability-identity-only drift (no manifest change) is captured a
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
-    await registerConnector(manifest);
+    await registerConnector(withFixturePublisher(manifest));
 
     const metaAfterBackfill = selectRow<{ model_id: string }>(
       "SELECT model_id FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = 'messages'",
@@ -1474,7 +1475,7 @@ test("device batch's derived (embedding) section does not block a same-instance 
         "messages stream must exist"
       );
       messages.query.search.semantic_fields = ["content"];
-      await registerConnector(manifest);
+      await registerConnector(withFixturePublisher(manifest));
 
       const records = [
         {

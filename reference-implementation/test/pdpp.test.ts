@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3625,7 +3626,7 @@ test("PDPP reference implementation integration", async (t) => {
         declaration_version: "time-range-test.v1",
         display: { name: "Time Range Test" },
         protocol_version: "0.1.0",
-        publisher: { id: "https://pdpp.dev/reference-implementation" },
+        publisher: { id: FIXTURE_PUBLISHER },
         source: { id: "https://registry.pdpp.dev/connectors/time_range_test", kind: "connector" },
         streams: [
           {
@@ -3942,7 +3943,7 @@ test("PDPP reference implementation integration", async (t) => {
           declaration_version: "time-range-test.v1",
           display: { name: "Time Range Test" },
           protocol_version: "0.1.0",
-          publisher: { id: "https://pdpp.dev/reference-implementation" },
+          publisher: { id: FIXTURE_PUBLISHER },
           source: { id: "https://registry.pdpp.dev/connectors/time_range_test", kind: "connector" },
           streams: [
             {
@@ -9231,7 +9232,7 @@ test("PDPP reference implementation integration", async (t) => {
             declaration_version: "cursor-expiry-fixture.v1",
             display: { name: "Cursor expiry fixture" },
             protocol_version: "0.1.0",
-            publisher: { id: "https://pdpp.dev/reference-implementation" },
+            publisher: { id: FIXTURE_PUBLISHER },
             source: { id: "https://registry.pdpp.dev/connectors/cursor-expiry-fixture", kind: "connector" },
             streams: [
               {
