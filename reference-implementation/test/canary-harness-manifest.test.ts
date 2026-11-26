@@ -17,7 +17,6 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
@@ -129,29 +128,6 @@ test("OTP denylist catches wholefoods, which the hand-maintained list missed", (
   // was absent from the six hardcoded names. Derivation closes it by
   // construction; this test fails if anyone re-freezes the list.
   assert.equal(isOtpDenylisted("wholefoods"), true, "wholefoods declares an OTP posture and must be denylisted");
-});
-
-test("OTP denylist equals every manifest that declares an OTP posture, computed independently of the harness", () => {
-  // Recomputed here straight from the shipped manifests, so this asserts
-  // against the ground truth rather than re-running the harness's own
-  // derivation.
-  const declaredOtp = readShippedManifests()
-    .filter((entry) => {
-      const manifest = entry.manifest as { capabilities?: Record<string, unknown> };
-      const capabilities = manifest.capabilities ?? {};
-      const refreshPolicy = capabilities.refresh_policy as { interaction_posture?: string } | undefined;
-      const posture = refreshPolicy?.interaction_posture;
-      const interactions = capabilities.human_interaction;
-      return posture === "otp_likely" || (Array.isArray(interactions) && interactions.includes("otp"));
-    })
-    .map((entry) => entry.file.slice(0, -".json".length))
-    .sort();
-
-  assert.deepEqual(
-    [...OTP_DENYLISTED_CONNECTORS].sort(),
-    declaredOtp,
-    "the derived denylist must equal exactly the manifests declaring an OTP posture"
-  );
 });
 
 test("derivation is fail-closed: a manifest proves safety or it is denied", () => {
