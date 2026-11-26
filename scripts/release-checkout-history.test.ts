@@ -44,7 +44,7 @@ function checkout(steps: WorkflowStep[]): WorkflowStep {
 }
 
 describe("jobs that verify mcp-server check out full history", () => {
-	it("the receipt still binds a merge-base with a fixed commit", () => {
+	it("mcp-server still pins a fixed baseline commit for its receipt", () => {
 		expect(BASELINE_SHA).toMatch(/^[0-9a-f]{40}$/);
 	});
 
