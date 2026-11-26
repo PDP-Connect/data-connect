@@ -129,6 +129,7 @@ interface AuthAppLike {
 }
 
 interface LoginPageOptions {
+  credentialSource: OwnerCredentialSource;
   csrfToken: string;
   error: string | null;
   providerName: string;
@@ -279,7 +280,7 @@ function wantsHtml(req: AuthRequest): boolean {
   return accept.includes("text/html");
 }
 
-function renderLoginPage({ error, returnTo, csrfToken, themeChoice }: LoginPageOptions): string {
+function renderLoginPage({ error, returnTo, csrfToken, themeChoice, credentialSource }: LoginPageOptions): string {
   const safeReturnTo = typeof returnTo === "string" ? returnTo : "";
   const errorBlock = error
     ? `<div class="hosted-ui-error" role="alert">${hostedEscape(loginErrorCopy(error))}</div>`
@@ -291,6 +292,9 @@ function renderLoginPage({ error, returnTo, csrfToken, themeChoice }: LoginPageO
     <label for="hosted-ui-password">Password</label>
     <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
     ${errorBlock}
+    <p class="hosted-ui-muted">${credentialSource === "desktop"
+      ? "Forgot it? Open DataConnect on the computer that runs it. Settings can show or change the password."
+      : "Forgot it? Ask whoever installed DataConnect to set a new one."}</p>
   </div>
   <div class="hosted-ui-actions">
     <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
@@ -762,7 +766,7 @@ function replyLoginRateLimited(
   res: AuthResponse,
   providerName: string,
   retryAfterSeconds: number,
-  loginForm?: { csrfToken: string; returnTo: string; themeChoice?: string }
+  loginForm?: { csrfToken: string; returnTo: string; themeChoice?: string; credentialSource: OwnerCredentialSource }
 ): void {
   res.setHeader("Retry-After", String(retryAfterSeconds));
   if (wantsHtml(req)) {
@@ -774,7 +778,8 @@ function replyLoginRateLimited(
         loginForm.returnTo,
         429,
         `Too many attempts. Try again in about ${retryAfterSeconds} seconds.`,
-        loginForm.themeChoice
+        loginForm.themeChoice,
+        loginForm.credentialSource
       );
       return;
     }
@@ -865,11 +870,13 @@ function sendOwnerLoginPage(
   returnTo: string,
   status: number,
   error: string | null,
-  themeChoice?: string
+  themeChoice?: string,
+  credentialSource: OwnerCredentialSource = "env"
 ): void {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.status(status).send(
     renderLoginPage({
+      credentialSource,
       csrfToken,
       error,
       providerName,
@@ -899,6 +906,7 @@ async function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context:
     const csrfToken = context.ensureCsrfToken(req, res);
     res.status(200).send(
       renderLoginPage({
+        credentialSource: context.credentialSource(),
         csrfToken,
         error: null,
         providerName: context.providerName,
@@ -954,7 +962,8 @@ async function handleOwnerLoginPost(
       returnTo,
       403,
       "Session expired or form replay detected. Please try again.",
-      readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
+      readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
+      context.credentialSource()
     );
     return;
   }
@@ -970,6 +979,7 @@ async function handleOwnerLoginPost(
     const loginForm = wantsHtml(req)
       ? {
           csrfToken: context.ensureCsrfToken(req, res),
+          credentialSource: context.credentialSource(),
           returnTo,
           themeChoice: readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
         }
@@ -989,7 +999,8 @@ async function handleOwnerLoginPost(
       returnTo,
       401,
       "Incorrect password.",
-      readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
+      readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
+      context.credentialSource()
     );
     return;
   }
@@ -1003,7 +1014,8 @@ async function handleOwnerLoginPost(
       returnTo,
       401,
       "The password changed during sign-in. Try again with the current password.",
-      readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
+      readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
+      context.credentialSource()
     );
     return;
   }
