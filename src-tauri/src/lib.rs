@@ -101,14 +101,15 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // First, before any thread exists: a test-profile build moves HOME and
-    // the XDG base directories here, and nothing may have read them yet.
-    #[cfg(desktop)]
-    profile::enter();
-
     // GTK sends the program name as the Wayland app_id; it must equal productName so it matches DataConnect.desktop.
     #[cfg(target_os = "linux")]
     gtk::glib::set_prgname(Some("DataConnect"));
+
+    // Next, before any thread exists: a test-profile build moves HOME and
+    // the XDG base directories here, and nothing may have read them yet. (The
+    // call above only stores a string.)
+    #[cfg(desktop)]
+    profile::enter();
 
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
