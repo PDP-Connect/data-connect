@@ -1594,18 +1594,19 @@ function connectDeps(
   enrolled: string[],
   revoked: string[],
   token: string,
-  hooks: { onRevoke?: () => void } = {}
+  hooks: { onRevoke?: () => void; holdEnroll?: Promise<void> } = {}
 ): NonNullable<Parameters<typeof runConnect>[1]> {
   return {
-    enroll: () => {
+    enroll: async () => {
       enrolled.push(token);
-      return Promise.resolve({
+      await hooks.holdEnroll;
+      return {
         connector_id: "any",
         device_id: `device-${token}`,
         device_token: token,
         local_binding_name: "test-binding",
         source_instance_id: `dsrc_${token}`,
-      });
+      };
     },
     revokeExistingProfile: (input) => {
       revoked.push(input.deviceToken);
@@ -1773,6 +1774,32 @@ test("connect --force stops before it writes when the profile changed during its
     assert.deepEqual(revoked, ["token-old"]);
     assert.deepEqual(enrolled, [], "the one-time code is not consumed");
     assert.equal(readFileSync(canonicalPath, "utf8"), swappedBody);
+  });
+});
+
+test("connect --force stops before it writes when the profile changed during enrollment", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-old", "dsrc_old");
+  await withProfileDir(profileDir, async () => {
+    const enrolled: string[] = [];
+    const revoked: string[] = [];
+    let release!: () => void;
+    const holdEnroll = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const connecting = runConnect(
+      connectOptions("claude-code", { force: true }),
+      connectDeps(enrolled, revoked, "token-fresh", { holdEnroll })
+    );
+    while (enrolled.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    writeProfile(profileDir, "claude-code", "token-swapped", "dsrc_swapped");
+    const swappedBody = readFileSync(canonicalPath, "utf8");
+    release();
+    await assert.rejects(connecting, profileChangedError);
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.deepEqual(enrolled, ["token-fresh"], "enrollment ran while the profile was replaced");
+    assert.equal(readFileSync(canonicalPath, "utf8"), swappedBody, "the replacement survives byte-identical");
+    assert.equal(existsSync(join(profileDir, "claude_code.env")), false, "no other profile file is written");
   });
 });
 
