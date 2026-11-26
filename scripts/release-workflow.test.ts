@@ -315,6 +315,34 @@ function substituteActionsExpressions(script: string) {
   })
 }
 
+describe("polyfill type shim packaging errors", () => {
+  for (const archivePresent of [false, true]) {
+    it(archivePresent ? "identifies an absent checked-in declaration shim" : "identifies an absent vendor archive", () => {
+      const root = mkdtempSync(join(tmpdir(), "type-shim-fixture-"))
+      try {
+        const script = "scripts/check-polyfill-connector-type-shims.sh"
+        mkdirSync(join(root, "scripts"))
+        writeFileSync(join(root, script), readFileSync(resolve(script), "utf8"))
+        const archive = join(root, "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz")
+        if (archivePresent) {
+          mkdirSync(dirname(archive), { recursive: true })
+          const fixture = "package/src/manual-upload-validation.d.ts"
+          mkdirSync(dirname(join(root, fixture)), { recursive: true })
+          writeFileSync(join(root, fixture), "export type Fixture = string;\n")
+          execFileSync("tar", ["-czf", archive, "-C", root, fixture])
+        }
+        const run = spawnSync("bash", [join(root, script)], { encoding: "utf8", timeout: 5_000 })
+        expect(run.status).toBe(1)
+        expect(run.stderr).toMatch(archivePresent
+          ? /missing checked-in type shim: src\/manual-upload-validation\.d\.ts/
+          : /missing declaration source archive: .*pdpp-polyfill-connectors-0\.0\.1\.tgz/)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+})
+
 describe("release workflow", () => {
   it("keeps every clean-install Bash script portable across runner shells", () => {
     const scripts = readCleanInstallBashScripts(readReleaseWorkflow())
