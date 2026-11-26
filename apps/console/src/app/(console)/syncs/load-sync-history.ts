@@ -25,7 +25,7 @@ export async function loadSyncHistory(params: Record<string,string | undefined>)
   }
   const [history,sources,live] = await Promise.all([
     listSyncHistory({ ...historyRange(offset), days: 7, ...(params.before ? {before:params.before} : {}), ...(params.date ? {last:params.date} : {}), ...(params.connection_id ? { connection_id: params.connection_id } : {}) }),
-    loadHistorySources(true), listRuns({ status: "in_progress", limit: 100 }),
+    loadHistorySources(true,offset), listRuns({ status: "in_progress", limit: 100 }),
   ]);
   if(history.mode === "days") { history.data=withCurrentSourceState(history.data,sources).filter(row=>params.only_problems!=="true" || syncDayProblem(row)); }
   const current = live.data.filter(isLiveRun).filter(row => !params.connection_id || (row.connector_instance_id ?? row.connection_id ?? row.source?.connection_id) === params.connection_id).map(row => ({ id: row.run_id,

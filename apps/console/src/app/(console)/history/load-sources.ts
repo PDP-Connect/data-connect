@@ -7,7 +7,7 @@ import { listConnectorManifests } from "../lib/rs-client.ts";
 import { listConnectorSummaries } from "../lib/ref-client.ts";
 import type { HistorySource } from "./source-names.ts";
 export { sourceName, type HistorySource } from "./source-names.ts";
-export async function loadHistorySources(current = false): Promise<HistorySource[]> {
+export async function loadHistorySources(current = false, offset?:number): Promise<HistorySource[]> {
   const sources: HistorySource[] = [];
   const manifests = await listConnectorManifests().catch(()=>[]);
   let cursor: string | undefined;
@@ -17,7 +17,7 @@ export async function loadHistorySources(current = false): Promise<HistorySource
       : await listConnectorSummaries({ profile: "identity_inventory", limit:100, ...(cursor ? {cursor} : {}) });
     sources.push(...page.data.map(row => ({ id: row.connector_instance_id || row.connection_id, connector: row.connector_id,
       name: connectionDisplayName(row.display_name, row.connector_display_name, row.connector_id), serviceName:row.connector_display_name ?? findManifestForConnectorId(manifests,row.connector_id)?.display_name, kinds: findManifestForConnectorId(manifests,row.connector_id)?.streams })));
-    if (current) {applyCurrentSourceWords(page.data,sources);}
+    if (current) {applyCurrentSourceWords(page.data,sources,offset);}
     cursor = page.has_more ? page.next_cursor ?? undefined : undefined;
   } while (cursor);
   return sources;

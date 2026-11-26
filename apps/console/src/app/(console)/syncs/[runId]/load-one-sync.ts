@@ -27,7 +27,7 @@ export async function loadOneSync(id: string, params: Record<string,string | und
   const [status,timeline,history,sources] = await Promise.all([
     getRunStatus(id), getRunTimeline(id),
     listSyncHistory({ ...historyRange(offset), run_id: id, ...(params.connection_id ? { connection_id: params.connection_id } : {}) }),
-    loadHistorySources(),
+    loadHistorySources(true,offset),
   ]);
   const persisted = history.mode === "syncs" ? history.data[0] : null;
   if (!((status || timeline ) || persisted)) { return { model: null, offset }; }
@@ -41,7 +41,7 @@ export async function loadOneSync(id: string, params: Record<string,string | und
   const kinds = getCollectedKinds(terminal);
   const gaps = classifyKnownGaps(extractKnownGapsFromEventData({ known_gaps: status?.known_gaps ?? terminal?.data.known_gaps }).gaps).coverageGaps;
   const setup = connection && outcome === "failed" ? await getConnectionSetupStatus(connection).catch(() => null) : null;
-  return { offset, model: { id, name: sourceName(sources,connection,connector), connector, connection,
+  return { offset, model: { currentSource:sources.find(source=>source.id===connection), id, name: sourceName(sources,connection,connector), connector, connection,
     at: status?.started_at ?? persisted?.started_at ?? events[0]?.occurred_at ?? null,
     started: status?.started_at ?? persisted?.started_at ?? null, completed: status?.completed_at ?? persisted?.completed_at ?? null,
     outcome, cause: status?.failure?.reason ?? status?.terminal_reason ?? persisted?.cause ?? null,

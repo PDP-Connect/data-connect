@@ -18,17 +18,18 @@ export function syncCause(cause: string | null, name: string): string | null {
 }
 export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames: string[] = []): string {
   const current = row.currentState ? ` · ${row.currentState}` : "";
-  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : current;
-  if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}`; }
+  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : "";
+  if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}${current}`; }
   if (row.last_outcome === "failed") {
     const cause = resolveSyncCause(row.evidence ?? {reason:row.cause},name).sentence;
-    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}`;
+    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
   }
   const checked = row.ran === 1 ? row.manual === 1 ? "You started it" : "Checked once" : `Checked ${row.ran.toLocaleString("en-US")} times`;
   const incomplete = row.failed+row.stopped+row.interrupted;
-  return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete.toLocaleString("en-US")} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}`;
+  return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete.toLocaleString("en-US")} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
 }
 export function syncDayProblem(row: CurrentSyncDay): boolean {
+  if (row.currentProblem !== undefined) return row.currentProblem;
   return Boolean(row.currentProblem) || row.failed + row.stopped + row.interrupted > 0 || Boolean(row.missing?.length) || row.could_not_start > 0;
 }
 export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:SyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
@@ -42,10 +43,10 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
       {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
       <ul className="divide-y divide-border">{shown.map(row=><li key={row.connection_id} className="py-4">
         <Link className="flex items-center justify-between gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"history-day",fixture:demo}:{})})}>
-          <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
+          <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,sources.find(source=>source.id===row.connection_id)?.serviceName ?? name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
           <span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(row.last_at,offset)}</span>
         </Link>
-        {row.last_outcome==="failed" && resolveSyncCause(row.evidence ?? {reason:row.cause},name(row)).action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{resolveSyncCause(row.evidence ?? {reason:row.cause},name(row)).action}</Link></div> : null}
+        {sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action?.label}</Link></div> : null}
       </li>)}</ul>
     </Section>;
   })}</>;
