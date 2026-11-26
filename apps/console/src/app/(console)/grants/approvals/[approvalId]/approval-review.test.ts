@@ -63,7 +63,7 @@ function artifact(overrides: Partial<SingleConsentApprovalArtifact> = {}): Singl
     source_declaration: {
       accepted_revision_reference: "accepted-rev-1",
       digest: "sha256:sourceDigest",
-      publisher_attribution: { id: "https://pdpp.dev/reference-implementation", status: "unverified" },
+      publisher_attribution: { id: "https://publishers.pdpp.test/fixtures", status: "unverified" },
       resource_authority: { authority_binding: "https://spotify.example/pdpp", status: "verified" },
       version: "reference.source-declaration.v1",
     },
@@ -100,7 +100,7 @@ test("single consent review renders PR114 artifact authority and no approval sub
     "spotify",
     "reference.source-declaration.v1 / sha256:sourceDigest",
     "accepted revision accepted-rev-1",
-    "publisher https://pdpp.dev/reference-implementation (unverified)",
+    "publisher https://publishers.pdpp.test/fixtures (unverified)",
     "resource authority verified: https://spotify.example/pdpp",
     "Use only for concert recommendations",
     "music-profile",

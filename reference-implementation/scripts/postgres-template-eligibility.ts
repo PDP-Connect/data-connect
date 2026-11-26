@@ -54,6 +54,9 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-attention-store.test.ts",
   // Exercises install, lock and post-install repair behavior over seeded data, not schema bootstrap.
   "test/connector-install-postgres.test.ts",
+  // Install-to-registry journey over a fresh database: Postgres is a fixture for registration and reuse, not schema bootstrap.
+  "test/connector-install-registry-integration.test.ts",
+  "test/connector-install-sql-persistence.test.ts",
   "test/connector-instance-credential-revoke-postgres.test.ts",
   "test/connector-instance-delete-upsert-two-process-race.test.ts",
   "test/connector-instance-delete-vs-queued-write-fence.test.ts",
@@ -64,6 +67,10 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-manifest-revision-fence.test.ts",
   // Uses Postgres as a fixture for the diagnostic run store's writes, retention and locking, not schema bootstrap.
   "test/connector-observation-store.test.ts",
+  // Registration identity boundary: Postgres is a fixture for the connectors row and its persist guard.
+  "test/connector-source-identity-boundary.test.ts",
+  // Source identity move: Postgres is a fixture for the connectors, grants and handles rows it rewrites.
+  "test/connector-source-identity-move.test.ts",
   "test/connector-summary-dirty-hooks.test.ts",
   "test/connector-summary-evidence-canonical-count-cancel-isolation.test.ts",
   "test/connector-summary-evidence-direct-write-source-revision-detection.test.ts",

@@ -278,6 +278,7 @@ test("installs a catalog connector whose key no build ever saw", async () => {
     ...installedGmail,
     connector_id: `https://registry.pdpp.dev/connectors/${key}`,
     connector_key: key,
+    legacy_source_ids: [`https://registry.pdpp.dev/connectors/${key}`],
     manifest_uri: `https://registry.pdpp.dev/connectors/${key}`,
   };
   await withSandbox(async ({ dataDir, dbPath }) => {

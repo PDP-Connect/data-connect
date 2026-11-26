@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,12 +44,12 @@ import { join } from "node:path";
 // carrying a durable DETAIL_GAP.
 import test from "node:test";
 import { type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
-
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Hoisted: the coverage-shortfall explanation the runtime authors, and the
 // connection-scoped denominator the sibling-isolation oracle asserts on.
@@ -187,49 +188,56 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
 
 // Connector-agnostic shape of the live failure: one parent state_stream
 // ("holdings") whose key fans out to two child detail streams.
-const MANIFEST = {
-  connector_id: "coverage-shortfall-regression",
-  display_name: "Coverage Shortfall Regression",
-  manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "holdings",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      name: "activity",
-      primary_key: ["id"],
-      relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
-      schema: {
-        properties: { holding_id: { type: "string" }, id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "coverage-shortfall-regression",
+    display_name: "Coverage Shortfall Regression",
+    manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "holdings",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      coverage_strategy: "parent_detail_accounting",
-      name: "valuations",
-      parent_streams: ["holdings", "activity"],
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        name: "activity",
+        primary_key: ["id"],
+        relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
+        schema: {
+          properties: { holding_id: { type: "string" }, id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+      {
+        coverage_strategy: "parent_detail_accounting",
+        name: "valuations",
+        parent_streams: ["holdings", "activity"],
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression" }
+);
 
 /**
- * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
- * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
- * the crediting it had before the capability existed. The capability is new in
- * Collection Profile 0.2.0, so the manifest declares that version (Section 3.1).
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. The manifest
+ * declaration alone makes a hydrated key need an accepted detail record for it:
+ * the runtime derives that requirement from the manifest, not from START. The
+ * canned connectors below never see the extension in START, so they follow the
+ * base hydrated_keys fallback. MANIFEST, which does not declare the extension,
+ * credits a hydrated key by assertion. The runtime's manifest validation
+ * requires protocol_version 0.2.0 for a manifest that declares the extension.
+ * That is a package rule, not canonical Collection Profile text.
  */
 const KEY_SETS_MANIFEST = {
   ...MANIFEST,
@@ -1324,8 +1332,8 @@ test("START advertises the protocol capabilities this runtime implements, to eve
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  for (const manifest of [MANIFEST, KEY_SETS_MANIFEST]) {
-    // biome-ignore lint/performance/noAwaitInLoops: each manifest is one isolated run.
+  await [MANIFEST, KEY_SETS_MANIFEST].reduce(async (previous, manifest) => {
+    await previous;
     const { start, thrown } = await runCapturingStart(
       server,
       ownerToken,
@@ -1333,8 +1341,8 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"]);
-  }
+    assert.deepEqual(start?.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
+  }, Promise.resolve());
 });
 
 test("reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence", async (t) => {

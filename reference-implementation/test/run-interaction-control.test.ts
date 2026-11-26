@@ -28,6 +28,19 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
+// Test scaffolding only. The shipped seed declares `credentials` alone, while these
+// tests drive connectors that also emit otp and manual_action. Declaring them here
+// keeps the shipped seed unchanged and the undeclared-kind refusal intact elsewhere.
+function withTestHumanInteraction<T extends Record<string, unknown>>(manifest: T): T {
+  return {
+    ...manifest,
+    capabilities: {
+      ...((manifest.capabilities as Record<string, unknown> | undefined) ?? {}),
+      human_interaction: ["credentials", "otp", "manual_action"],
+    },
+  } as T;
+}
+
 const REGEXP_1 = /text\/html/;
 const REGEXP_2 = /Pending interaction/;
 const REGEXP_3 = /Send success/;
@@ -264,8 +277,8 @@ async function withHarness(
     rsPort: 0,
   })) as ClosableServer;
   const asUrl = `http://localhost:${server.asPort}`;
-  const spotifyManifest: SpotifyManifest = JSON.parse(
-    readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
+  const spotifyManifest: SpotifyManifest = withTestHumanInteraction(
+    JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8"))
   );
   try {
     await registerConnector(asUrl, spotifyManifest);
@@ -286,8 +299,8 @@ async function withCustomHarness(connectorPath: string, fn: (ctx: HarnessContext
     rsPort: 0,
   })) as ClosableServer;
   const asUrl = `http://localhost:${server.asPort}`;
-  const spotifyManifest: SpotifyManifest = JSON.parse(
-    readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
+  const spotifyManifest: SpotifyManifest = withTestHumanInteraction(
+    JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8"))
   );
   try {
     await registerConnector(asUrl, spotifyManifest);

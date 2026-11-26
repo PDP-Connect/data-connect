@@ -48,6 +48,20 @@ import { normalizeReferenceWireViewportPayload } from "../server/streaming/proto
 import { createStreamingSessionStore } from "../server/streaming/sessions.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
+// Test scaffolding only. The shipped seed declares `credentials` alone, while these
+// tests drive connectors that also emit otp and manual_action. Declaring them here
+// keeps the shipped seed unchanged and the undeclared-kind refusal intact elsewhere.
+function withTestHumanInteraction<T extends Record<string, unknown>>(manifest: T): T {
+  return {
+    ...manifest,
+    capabilities: {
+      ...((manifest.capabilities as Record<string, unknown> | undefined) ?? {}),
+      human_interaction: ["credentials", "otp", "manual_action"],
+    },
+  } as T;
+}
+
+
 const REGEXP_1 = /retry/i;
 const REGEXP_2 = /retry/i;
 const REGEXP_3 = /text\/event-stream/;
@@ -895,9 +909,7 @@ async function withHarness(options: HarnessOptions | null, fn: (ctx: HarnessCont
   });
   const asUrl = `http://localhost:${server.asPort}`;
   const manifestName = harnessOptions.manifestName || "spotify";
-  const spotifyManifest: SpotifyManifest = JSON.parse(
-    readFileSync(join(REFERENCE_IMPL_DIR, `fixtures/seed-manifests/${manifestName}.json`), "utf8")
-  );
+  const spotifyManifest: SpotifyManifest = withTestHumanInteraction(JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, `fixtures/seed-manifests/${manifestName}.json`), "utf8")));
   try {
     await registerConnector(asUrl, spotifyManifest);
     await fn({ asUrl, companions, server, spotifyManifest });
@@ -3536,9 +3548,7 @@ test("SSE delivers multiple frames and acks each, even when ack rejects", async 
     });
     try {
       const asUrl = `http://localhost:${server.asPort}`;
-      const spotifyManifest: SpotifyManifest = JSON.parse(
-        readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
-      );
+      const spotifyManifest: SpotifyManifest = withTestHumanInteraction(JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")));
       await registerConnector(asUrl, spotifyManifest);
       const started = await startRun(asUrl, spotifyManifest.connector_id);
       const pending = await waitForPendingInteraction(asUrl, started.run_id);
@@ -3644,7 +3654,7 @@ test("mint fails closed with 503 streaming_companion_unavailable when no compani
     });
     try {
       const asUrl = `http://localhost:${server.asPort}`;
-      const spotifyManifest = JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8"));
+      const spotifyManifest = withTestHumanInteraction(JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")));
       await registerConnector(asUrl, spotifyManifest);
       const started = await startRun(asUrl, spotifyManifest.connector_id);
       const pending = await waitForPendingInteraction(asUrl, started.run_id);

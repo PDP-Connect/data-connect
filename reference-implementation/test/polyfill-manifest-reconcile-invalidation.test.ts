@@ -1138,3 +1138,33 @@ test(
     assert.ok(lines.some((line) => line.includes("skipping unverified install gmail")));
   })
 );
+
+test(
+  "reconciliation skips a shipped manifest that repeats an object key instead of registering its last value",
+  withTmpDb(async ({ dir }) => {
+    const manifestsDir = join(dir, "polyfill");
+    mkdirSync(manifestsDir, { recursive: true });
+    // Two `version` members: JSON.parse would keep the second and hide the first.
+    const text = JSON.stringify(shippedPolyfillManifest(), null, 2).replace(
+      '"version"',
+      '"version": "9.9.9",\n  "version"'
+    );
+    assert.match(text, /"version": "9\.9\.9"/);
+    writeFileSync(join(manifestsDir, "seed-flip.json"), text);
+
+    const lines: string[] = [];
+    const summary = await reconcilePolyfillManifests({
+      enabled: true,
+      log: (line) => lines.push(line),
+      manifestsDir,
+      referenceFixturesDir: join(dir, "absent"),
+    });
+
+    assert.equal(await getConnectorManifest(CONNECTOR_ID), null, "the ambiguous manifest was not registered");
+    assert.equal(summary.updated, 0);
+    assert.ok(
+      lines.some((line) => line.includes("skipping malformed manifest") && line.includes("duplicate_json_key")),
+      `the skip names the duplicate key: ${lines.join(" | ")}`
+    );
+  })
+);

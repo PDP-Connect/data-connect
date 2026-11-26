@@ -3,15 +3,14 @@
 
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../../server/source-declaration-legacy-collection.ts";
 
-const FIXTURE_PUBLISHER = "https://publishers.pdpp.test/fixtures";
+export const FIXTURE_PUBLISHER = "https://publishers.pdpp.test/fixtures";
 
 /**
  * Test-only. Gives a fixture manifest an explicit, validated source declaration computed from its own
- * final content, so registration uses the fixture's authored source identity instead of inferring one from
- * the manifest's `connector_id` or `manifest_uri`. The default identity is the fixture's own
- * (`https://fixtures.pdpp.test/sources/<slug>`), not a production identity; pass `sourceId` to pin another.
- * Always recomputed from the content it is given, so a manifest derived by spreading another fixture never
- * keeps a declaration for content it no longer has.
+ * final content, so a first registration of a fixture key with no reviewed legacy mapping goes through the
+ * Core route. The default source identity is `https://fixtures.pdpp.test/sources/<slug>`; options.sourceId
+ * can retain the identity of an edited fixture. Always recomputed from final content, so a manifest
+ * derived by spreading another fixture never keeps a declaration for content it no longer has.
  */
 export function withFixtureSourceDeclaration<T extends object>(manifest: T, options: { sourceId?: string } = {}): T {
   const content = Object.fromEntries(
@@ -26,6 +25,18 @@ export function withFixtureSourceDeclaration<T extends object>(manifest: T, opti
       sourceId: options.sourceId ?? `https://fixtures.pdpp.test/sources/${slug}`,
     }),
   } as T;
+}
+
+/**
+ * Re-author a deliberately edited fixture under the fixture issuer. Discards its old declaration and
+ * regenerates from final manifest content, keeping only the old source id. Do not use for unchanged
+ * stored-row round trips: those must submit the original declaration to exercise idempotent registration.
+ */
+export function withReauthoredFixtureDeclaration<T extends object>(manifest: T): T {
+  const declaration = (manifest as Record<string, unknown>).source_declaration as { source?: { id?: unknown } } | undefined;
+  const sourceId = declaration?.source?.id;
+  if (typeof sourceId !== "string") throw new Error("Stored fixture manifest must retain its source identity");
+  return withFixtureSourceDeclaration(manifest, { sourceId });
 }
 
 const NON_SLUG_CHARACTER = /[^a-z0-9._-]/;

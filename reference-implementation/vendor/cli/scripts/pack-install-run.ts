@@ -163,7 +163,7 @@ async function loginAsFixtureOwner(asUrl: string): Promise<string> {
 // ingested. Returns the created connection_id.
 async function seedFixtureConnection(asUrl: string, ownerSessionCookie: string): Promise<string> {
   const registerResp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(FIXTURE_MANIFEST),
+    body: JSON.stringify({ ...FIXTURE_MANIFEST, legacy_source_ids: [FIXTURE_MANIFEST.connector_id] }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });

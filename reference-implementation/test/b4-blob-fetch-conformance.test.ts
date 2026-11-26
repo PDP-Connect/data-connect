@@ -188,11 +188,8 @@ interface ClientGrantParams {
   connector_id: string;
   purpose_code: string;
   purpose_description: string;
+  source_id: string;
   streams: { name: string; fields: string[] }[];
-}
-
-function sourceIdForConnectorId(connectorId: string): string {
-  return connectorId.includes("://") ? connectorId : `https://registry.pdpp.dev/connectors/${connectorId}`;
 }
 
 async function seedDefaultGrantInstance(connectorId: string, ownerSubjectId: string): Promise<void> {
@@ -234,7 +231,7 @@ async function issueClientGrant(asUrl: string, subjectId: string, params: Client
           access_mode: params.access_mode,
           purpose_code: params.purpose_code,
           purpose_description: params.purpose_description,
-          source: { id: sourceIdForConnectorId(params.connector_id), kind: "connector" },
+          source: { id: params.source_id, kind: "connector" },
           streams: params.streams,
           type: "https://pdpp.dev/data-access",
         },
@@ -287,7 +284,9 @@ function readGmailManifest(): ConnectorManifest {
   return entry.manifest as ConnectorManifest;
 }
 
-async function withGmailHarness(fn: (ctx: { asUrl: string; rsUrl: string; connectorId: string }) => Promise<void>) {
+async function withGmailHarness(
+  fn: (ctx: { asUrl: string; rsUrl: string; connectorId: string; sourceId: string }) => Promise<void>
+) {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
@@ -308,7 +307,12 @@ async function withGmailHarness(fn: (ctx: { asUrl: string; rsUrl: string; connec
   assert.equal(regResp.status, 201, "register gmail connector");
 
   try {
-    await fn({ asUrl, connectorId: manifest.connector_id, rsUrl });
+    await fn({
+      asUrl,
+      connectorId: manifest.connector_id,
+      rsUrl,
+      sourceId: (manifest.source as { id: string }).id,
+    });
   } finally {
     await closeServer(server);
   }
@@ -317,7 +321,7 @@ async function withGmailHarness(fn: (ctx: { asUrl: string; rsUrl: string; connec
 // ─── B4.1 — full blob lifecycle: upload → record → grant → fetch ─────────────
 
 test("blob lifecycle: upload → seed record → grant with blob_ref → fetch bytes (B4)", async () => {
-  await withGmailHarness(async ({ asUrl, rsUrl, connectorId }) => {
+  await withGmailHarness(async ({ asUrl, rsUrl, connectorId, sourceId }) => {
     const ownerToken = await issueOwnerToken(asUrl, "b4_lifecycle_owner");
     const bytes = Buffer.from("attachment content: invoice data for B4 test");
     const sha256Expected = createHash("sha256").update(bytes).digest("hex");
@@ -389,6 +393,7 @@ test("blob lifecycle: upload → seed record → grant with blob_ref → fetch b
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/assist_export",
       purpose_description: "Export Gmail attachment for B4 blob test.",
+      source_id: sourceId,
       streams: [
         {
           fields: ["id", "thread_id", "subject", "received_at", "has_attachments"],
@@ -449,7 +454,7 @@ test("blob lifecycle: upload → seed record → grant with blob_ref → fetch b
 // ─── B4.2 — grant enforcement: blob_not_found without matching grant ─────────
 
 test("blob grant enforcement: blob_not_found when token lacks visibility to the record (B4)", async () => {
-  await withGmailHarness(async ({ asUrl, rsUrl, connectorId }) => {
+  await withGmailHarness(async ({ asUrl, rsUrl, connectorId, sourceId }) => {
     const ownerToken = await issueOwnerToken(asUrl, "b4_enforce_owner");
     const bytes = Buffer.from("secret content: must not be accessible without grant");
 
@@ -513,6 +518,7 @@ test("blob grant enforcement: blob_not_found when token lacks visibility to the 
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/assist_summarize",
       purpose_description: "B4 enforcement: no blob_ref in projection.",
+      source_id: sourceId,
       streams: [
         {
           fields: ["id", "subject", "received_at"],
@@ -592,7 +598,7 @@ test("blob fetch forces active content to download instead of rendering inline (
 // ─── B4.3 — fetch_url shape: relative path prepend RS base URL ───────────────
 
 test("fetch_url is relative /v1/blobs/:blob_id — must prepend RS base URL (B4)", async () => {
-  await withGmailHarness(async ({ asUrl, rsUrl, connectorId }) => {
+  await withGmailHarness(async ({ asUrl, rsUrl, connectorId, sourceId }) => {
     const ownerToken = await issueOwnerToken(asUrl, "b4_fetchurl_owner");
     const bytes = Buffer.from("shape test bytes");
 
@@ -655,6 +661,7 @@ test("fetch_url is relative /v1/blobs/:blob_id — must prepend RS base URL (B4)
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/assist_export",
       purpose_description: "B4 fetch_url shape test.",
+      source_id: sourceId,
       streams: [
         { fields: ["id", "subject"], name: "messages" },
         { fields: ["id", "filename", "blob_ref"], name: "attachments" },

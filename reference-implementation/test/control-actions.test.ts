@@ -392,7 +392,7 @@ async function emitSyntheticRun({
     actor_id: connectorId,
     actor_type: "runtime",
     data: {
-      bindings: { filesystem: {}, interactive: {}, network: {} },
+      bindings: { browser: {}, filesystem: {}, network: {} },
       boot_epoch: _epoch.boot_epoch,
       collection_mode: "incremental",
       connector_instance_id: connectorInstanceId,
@@ -478,7 +478,7 @@ async function emitSyntheticStartedRun({
     actor_id: connectorId,
     actor_type: "runtime",
     data: {
-      bindings: { filesystem: {}, interactive: {}, network: {} },
+      bindings: { browser: {}, filesystem: {}, network: {} },
       boot_epoch: _epoch.boot_epoch,
       collection_mode: "incremental",
       connection_id: connectorInstanceId,
@@ -1051,7 +1051,7 @@ test("controller startup reconciles abandoned controller-managed runs after rest
         actor_id: connectorId,
         actor_type: "runtime",
         data: {
-          bindings: { filesystem: {}, interactive: {}, network: {} },
+          bindings: { browser: {}, filesystem: {}, network: {} },
           // Synthetic "prior incarnation" stamp — this test seeds the
           // pre-crash state of an interrupted run.
           //

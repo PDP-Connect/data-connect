@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { runConnector as RunConnectorType } from "../../runtime/index.ts";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 
 type RunConnectorFn = typeof RunConnectorType;
 
@@ -91,39 +92,42 @@ export function fakeAdmitRunConnection<Store>(
 }
 
 export function multiParentManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "holdings",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "activity",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "parent_detail_accounting",
-        name: "valuations",
-        parent_streams: ["holdings", "activity"],
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "holdings",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "activity",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "parent_detail_accounting",
+          name: "valuations",
+          parent_streams: ["holdings", "activity"],
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 function writeConnectorStub(tmpDir: string, script: string): string {
@@ -175,7 +179,7 @@ export async function runMultiParentScenario<Store>({
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'holdings', key: 'H', data: { id: 'H' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'activity', key: 'A', data: { id: 'A' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'holdings', required_keys: ['H'], hydrated_keys: [] }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: [], empty_keys: ['A'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: ['A'] }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'holdings', cursor: { page: 'holdings-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'activity', cursor: { page: 'activity-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
@@ -229,13 +233,19 @@ export async function runMultiParentScenario<Store>({
 }
 
 /**
- * Hydrated-key crediting depends on the connector's own manifest declaration.
- * The connector lists `H` as hydrated for the holdings boundary but emits no
- * valuations record for it, and reports `A` as verified empty for activity.
- * With DETAIL_COVERAGE_KEY_SETS declared, the bare `H` listing is not evidence
- * and holdings stays put. Without it, the connector keeps the crediting it had
- * before the capability existed and both cursors commit. Shared by the SQLite
- * and Postgres conformance files so both backends run one scenario.
+ * DETAIL_COVERAGE_KEY_SETS credit depends on the manifest declaration, and the
+ * runtime omits the capability from START, so every connector here falls back
+ * to base-profile `hydrated_keys` on the wire. The two modes differ only in the
+ * manifest declaration:
+ * - Declaring connector: a hydrated key credits only with an accepted detail
+ *   record for it. Activity `A` has one (`valuations` id `A`, the primary key
+ *   of its own parent boundary), so activity commits. Holdings `H` has no
+ *   record, so its hydration credits nothing and holdings stays put.
+ * - Nondeclaring connector: hydration credits by assertion, so `H` credits and
+ *   both parents commit.
+ * Raw `empty_keys` and `unchanged_keys` are never emitted, so neither mode
+ * credits a key through them. Both backend suites run the same wire exchange
+ * and assert the same committed state.
  */
 export async function runHydratedKeyCreditingScenario<Store>({
   asUrl,
@@ -254,24 +264,30 @@ export async function runHydratedKeyCreditingScenario<Store>({
   connectorId: string;
   declaresKeySets: boolean;
 }): Promise<void> {
-  // DETAIL_COVERAGE_KEY_SETS is new in Collection Profile 0.2.0, so a manifest
-  // that declares it declares that version (profile Section 3.1).
-  const manifest = {
-    ...multiParentManifest(connectorId),
-    protocol_capabilities: declaresKeySets ? ["DETAIL_COVERAGE_KEY_SETS"] : [],
-    protocol_version: declaresKeySets ? "0.2.0" : "0.1.0",
-  };
+  // DETAIL_COVERAGE_KEY_SETS is an extension of the connector-protocol package,
+  // not a canonical profile capability. The runtime's manifest validation
+  // requires protocol_version 0.2.0 for a manifest that declares it, so a
+  // declaring manifest uses that version.
+  const manifest = withFixtureSourceDeclaration(
+    {
+      ...multiParentManifest(connectorId),
+      protocol_capabilities: declaresKeySets ? ["DETAIL_COVERAGE_KEY_SETS"] : [],
+      protocol_version: declaresKeySets ? "0.2.0" : "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-checkpoint-profile-hydrated-credit-"));
   const connectorPath = writeConnectorStub(
     tmpDir,
     `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'holdings', key: 'H', data: { id: 'H' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'activity', key: 'A', data: { id: 'A' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'valuations', key: 'A', data: { id: 'A' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'holdings', required_keys: ['H'], hydrated_keys: ['H'] }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: [], empty_keys: ['A'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: ['A'] }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'holdings', cursor: { page: 'holdings-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'activity', cursor: { page: 'activity-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 3 }) + '\\n');
   rl.close();
   process.exit(0);
 `
@@ -301,7 +317,17 @@ export async function runHydratedKeyCreditingScenario<Store>({
 
     assert.equal(result.status, "succeeded");
     assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
-    assert.equal(result.checkpoint_summary?.state_streams_committed, declaresKeySets ? 1 : 2);
+    // The runtime omits DETAIL_COVERAGE_KEY_SETS from START, so both modes send
+    // the same base-fallback hydration. Only the manifest declaration differs.
+    // A declaring connector keeps its accepted-record requirement: activity is
+    // proven by its valuations record, holdings' bare hydration is not.
+    assert.equal(
+      result.checkpoint_summary?.state_streams_committed,
+      declaresKeySets ? 1 : 2,
+      declaresKeySets
+        ? "a declaring connector commits only the parent whose hydrated key has an accepted record"
+        : "a nondeclaring connector's hydrated declarations credit by assertion, so both parents commit"
+    );
 
     const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
       headers: { Authorization: `Bearer ${ownerToken}` },
@@ -328,39 +354,42 @@ export async function runHydratedKeyCreditingScenario<Store>({
 // -----------------------------------------------------------------------
 
 export function staticParentManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "unrelated_channel",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "checkpoint_window",
-        name: "reactions",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-        state_stream: "messages",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "unrelated_channel",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "reactions",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+          state_stream: "messages",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 /**
@@ -459,39 +488,42 @@ export async function runStaticParentEmitsCoverageScenario<Store>({
 }
 
 export function undeclaredParentManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "unrelated_parent",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "parent_detail_accounting",
-        name: "attachments",
-        parent_streams: ["messages"],
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "unrelated_parent",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "parent_detail_accounting",
+          name: "attachments",
+          parent_streams: ["messages"],
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 /**
@@ -572,39 +604,42 @@ export async function runUndeclaredParentScenario<Store>({
 }
 
 export function subsetParentManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "a",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "b",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "parent_detail_accounting",
-        name: "detail",
-        parent_streams: ["a", "b"],
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "a",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "b",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "parent_detail_accounting",
+          name: "detail",
+          parent_streams: ["a", "b"],
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 /**
@@ -637,7 +672,7 @@ export async function runSubsetParentCoverageScenario<Store>({
     `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'a', key: 'a-1', data: { id: 'a-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'b', key: 'b-1', data: { id: 'b-1' }, emitted_at: new Date().toISOString() }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'detail', state_stream: 'a', required_keys: ['a-1'], hydrated_keys: [], empty_keys: ['a-1'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'detail', state_stream: 'a', required_keys: ['a-1'], hydrated_keys: ['a-1'] }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'a', cursor: { page: 'a-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'b', cursor: { page: 'b-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');

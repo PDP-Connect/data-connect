@@ -68,21 +68,25 @@ export function createBrowserArtifactFixtures(): {
       rmSync(root, { force: true, recursive: true });
     },
     async publish(manifest) {
-      if (classifyConnectorIntentModality(manifest) !== "browser_bound") {
-        return manifest;
+      const declared = manifest.source_declaration !== undefined || (manifest.source && typeof manifest.source === "object" && "id" in manifest.source);
+      const fixture = !declared && typeof manifest.connector_id === "string" && URL.canParse(manifest.connector_id)
+        ? { ...manifest, source: { id: manifest.connector_id } }
+        : manifest;
+      if (classifyConnectorIntentModality(fixture) !== "browser_bound") {
+        return fixture;
       }
-      const rawKey = manifest.connector_key ?? manifest.connector_id;
+      const rawKey = fixture.connector_key ?? fixture.connector_id;
       if (typeof rawKey !== "string") {
         throw new Error("Browser fixture needs a connector key");
       }
       const key = canonicalConnectorKey(rawKey);
       const provenance = `https://fixtures.pdpp.test/connectors/${encodeURIComponent(key)}`;
       const registered = {
-        ...manifest,
+        ...fixture,
         connector_key: key,
         manifest_uri:
-          manifest.manifest_uri ?? (URL.canParse(String(manifest.connector_id)) ? manifest.connector_id : provenance),
-        version: manifest.version ?? "1.0.0",
+          fixture.manifest_uri ?? (URL.canParse(String(fixture.connector_id)) ? fixture.connector_id : provenance),
+        version: fixture.version ?? "1.0.0",
       };
       const path = mkdtempSync(join(root, "payload-"));
       mkdirSync(join(path, "profile"));

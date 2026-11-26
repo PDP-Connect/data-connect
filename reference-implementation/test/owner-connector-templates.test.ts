@@ -20,6 +20,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
@@ -476,7 +477,7 @@ test("owner-template setup plan offers a catalog-installed browser connector by 
     acmeManifest.display_name = "Acme Shop";
     acmeManifest.setup = undefined;
     acmeManifest.capabilities = { ...asRecord(acmeManifest.capabilities), public_listing: { tier: "preview" } };
-    await registerConnector(asUrl, acmeManifest);
+    await registerConnector(asUrl, withFixtureSourceDeclaration(acmeManifest));
 
     const ownerToken = await issueOwnerToken(asUrl);
     const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -582,7 +583,7 @@ test("client grant bearer cannot list owner connector templates", async () => {
     });
     const clientToken = await approveClientGrant(
       asUrl,
-      String(manifest.connector_id),
+      String(asRecord(manifest.source).id),
       "saved_tracks",
       "cin_spotify_template_auth"
     );

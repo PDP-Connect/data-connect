@@ -1,10 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { normalizeConnectorManifestForStorage, registerConnector } from "../auth.ts";
+import { registerConnector } from "../auth.ts";
+import { canonicalConnectorKeyFromManifest } from "../connector-key.ts";
 import { pinnedLocalCollectorManifest } from "../local-collector-profiles.ts";
 import { runRecordDerivedRepairRound } from "../record-derived-repair.ts";
 import { reconcileConnectorSearchIndexScopes } from "../search-index-reconcile.ts";
+import type { InstalledManifestProvenance } from "./index.ts";
 
 /**
  * Manifest registration for the OCI installer, split at the lock boundary.
@@ -30,10 +32,19 @@ function effectiveManifest(manifest: Record<string, unknown>): Record<string, un
 }
 
 export const installedConnectorManifestRegistration = {
-  registerManifest: (manifest: Record<string, unknown>): Promise<string> =>
-    registerConnector(effectiveManifest(manifest), { queueDerivedRepair: true, replaceAcceptedDigest: true, skipDerivedRepair: true }),
+  registerManifest: (manifest: Record<string, unknown>, provenance?: InstalledManifestProvenance): Promise<string> => {
+    const effective = effectiveManifest(manifest);
+    return registerConnector(effective, {
+      queueDerivedRepair: true,
+      replaceAcceptedDigest: true,
+      skipDerivedRepair: true,
+      verifiedSourceDeclaration: effective === manifest && provenance?.sourceDeclarationVerified === true,
+    });
+  },
   repairManifestDerivedState: async (manifest: Record<string, unknown>): Promise<string> => {
-    const { connectorId } = normalizeConnectorManifestForStorage(effectiveManifest(manifest));
+    const effective = effectiveManifest(manifest);
+    const connectorId = canonicalConnectorKeyFromManifest(effective) ?? effective.connector_id;
+    if (typeof connectorId !== "string") throw new Error("Connector manifest has no key for derived repair");
     const columns = await runRecordDerivedRepairRound({ connectorId });
     await reconcileConnectorSearchIndexScopes(connectorId);
     if (columns.failed > 0) {

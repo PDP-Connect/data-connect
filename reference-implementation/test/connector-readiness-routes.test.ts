@@ -81,6 +81,7 @@ function browserManifest(connectorId: string): Record<string, unknown> {
     connector_id: connectorId,
     connector_key: connectorId,
     display_name: connectorId,
+    source: { id: `https://fixtures.pdpp.test/sources/${connectorId}` },
     setup: undefined,
   };
 }

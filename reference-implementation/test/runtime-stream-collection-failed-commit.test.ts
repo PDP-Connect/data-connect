@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { closePostgresStorage, getStorageBackendKind } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
@@ -146,29 +148,32 @@ function fakeAdmitRunConnection(
 // shape that discriminates it: one sibling that fully succeeds, one stream
 // that reports its own certified failure.
 function testManifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "sibling_a",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "sibling_b",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "sibling_a",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "sibling_b",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"]> & {
@@ -178,18 +183,21 @@ type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"
 type RuntimeManifestStream = NonNullable<RuntimeManifest["streams"]>[number];
 
 function completeManifest(connectorId: string, streams: RuntimeManifestStream[]): RuntimeManifest {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: streams.map((stream) => ({
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-      ...stream,
-    })),
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: streams.map((stream) => ({
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+        ...stream,
+      })),
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function writeConnectorStub(tmpDir: string, script: string): string {
@@ -876,10 +884,8 @@ rl.on('line', (line) => {
       type: string;
     };
     assert.equal(replayStart.type, "START");
-    assert.ok(
-      replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
-      "START must advertise support before connectors emit empty_keys/unchanged_keys",
-    );
+    // START uses the same support declaration as the owner document.
+    assert.deepEqual(replayStart.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
     const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),

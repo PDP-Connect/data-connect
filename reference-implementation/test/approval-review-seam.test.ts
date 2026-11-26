@@ -79,8 +79,10 @@ async function setup(backend: Backend = "sqlite", databaseUrl = POSTGRES_URL) {
   } else {
     initDb(":memory:");
   }
+  // Register the fixture's own source from the start. Otherwise the first registration retains the reviewed
+  // legacy source for `spotify`, and every later registration that names SOURCE_ID is a source rebinding.
   const manifest = loadSpotifyManifest();
-  await registerConnector(manifest);
+  await registerConnector({ ...manifest, source_declaration: nativeManifest().source_declaration });
   await seedPreRegisteredClients([
     {
       client_id: CLIENT_ID,
@@ -603,7 +605,7 @@ test("HTTP batch final review resumes the exact result without duplicate issuanc
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     const register = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify({ ...manifest, source_declaration: nativeManifest().source_declaration }),
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       method: "POST",
     });
@@ -817,7 +819,7 @@ test("HTTP single consent must be reviewed before approve", async () => {
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     const register = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify({ ...manifest, source_declaration: nativeManifest().source_declaration }),
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       method: "POST",
     });
@@ -914,7 +916,7 @@ test("HTTP single final approval derives custom subject from persisted review", 
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     const register = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify({ ...manifest, source_declaration: nativeManifest().source_declaration }),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

@@ -27,6 +27,7 @@ export const GMAIL_INSTALL_VERSION = "9.0.0";
 export const shippedGmail = JSON.parse(
   readFileSync(new URL("../fixtures/collection-profiles/gmail.json", import.meta.url), "utf8")
 ) as Record<string, unknown>;
+shippedGmail.legacy_source_ids = [shippedGmail.manifest_uri];
 
 /** The manifest the install publishes. */
 export const installedGmail = { ...shippedGmail, version: GMAIL_INSTALL_VERSION };

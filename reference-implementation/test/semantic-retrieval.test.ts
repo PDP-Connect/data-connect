@@ -40,6 +40,7 @@
  *   14.35 — restart + drift: backend identity change → stale, rebuild restores
  */
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -156,7 +157,7 @@ const MANIFEST_A = {
     declaration_version: "semantic-a-test-declaration-v1",
     display: { name: "Semantic A" },
     protocol_version: "0.1.0",
-    publisher: { id: "https://pdpp.dev/reference-implementation" },
+    publisher: { id: FIXTURE_PUBLISHER },
     source: { id: SEMANTIC_A_SOURCE_ID, kind: "connector" as const },
     streams: [] as unknown[],
   },
@@ -249,7 +250,7 @@ const MANIFEST_B = {
     declaration_version: "semantic-b-test-declaration-v1",
     display: { name: "Semantic B" },
     protocol_version: "0.1.0",
-    publisher: { id: "https://pdpp.dev/reference-implementation" },
+    publisher: { id: FIXTURE_PUBLISHER },
     source: { id: SEMANTIC_B_SOURCE_ID, kind: "connector" as const },
     streams: [] as unknown[],
   },

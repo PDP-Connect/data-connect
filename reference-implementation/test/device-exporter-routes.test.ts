@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -653,7 +654,7 @@ test("device ingest preflight rejects before reservation while an accepted repla
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
-    await registerConnector(driftedManifest);
+    await registerConnector(withReauthoredFixtureDeclaration(driftedManifest));
     assert.equal(
       selectRow<{ semantic_time: string }>(
         "SELECT semantic_time FROM records WHERE connector_instance_id = ? AND record_key = ?",
@@ -768,7 +769,17 @@ test("semantic-capability-identity-only drift (no manifest change) is captured a
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
+    const storedBeforeBackfill = selectRow<{ manifest: string }>(
+      "SELECT manifest FROM connectors WHERE connector_id = ?",
+      "codex"
+    ).manifest;
+    assert.deepEqual(JSON.parse(storedBeforeBackfill), manifest, "the second registration submits the exact stored manifest");
     await registerConnector(manifest);
+    assert.equal(
+      selectRow<{ manifest: string }>("SELECT manifest FROM connectors WHERE connector_id = ?", "codex").manifest,
+      storedBeforeBackfill,
+      "semantic identity repair leaves the complete persisted manifest and declaration byte-identical"
+    );
 
     const metaAfterBackfill = selectRow<{ model_id: string }>(
       "SELECT model_id FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = 'messages'",
@@ -1474,7 +1485,17 @@ test("device batch's derived (embedding) section does not block a same-instance 
         "messages stream must exist"
       );
       messages.query.search.semantic_fields = ["content"];
+      const storedBeforeRegistration = selectRow<{ manifest: string }>(
+        "SELECT manifest FROM connectors WHERE connector_id = ?",
+        "codex"
+      ).manifest;
+      assert.deepEqual(JSON.parse(storedBeforeRegistration), manifest, "the semantic field assignment is unchanged");
       await registerConnector(manifest);
+      assert.equal(
+        selectRow<{ manifest: string }>("SELECT manifest FROM connectors WHERE connector_id = ?", "codex").manifest,
+        storedBeforeRegistration,
+        "coordination setup preserves the stored manifest and declaration byte-identically"
+      );
 
       const records = [
         {

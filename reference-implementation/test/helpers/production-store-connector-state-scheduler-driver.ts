@@ -83,8 +83,9 @@ interface ActiveRunRecord {
 const HARNESS_MANIFESTS = [
   {
     connector_id: CONNECTOR_A,
+    connector_key: CONNECTOR_A,
     display_name: "Conformance Connector A",
-    manifest_uri: `https://sources.example/${CONNECTOR_A}`,
+    manifest_uri: "https://sources.example/https://test.pdpp.dev/connectors/conformance-a",
     protocol_version: "0.1.0",
     runtime_requirements: { bindings: { network: { required: true } } },
     streams: [
@@ -107,8 +108,9 @@ const HARNESS_MANIFESTS = [
   },
   {
     connector_id: CONNECTOR_B,
+    connector_key: CONNECTOR_B,
     display_name: "Conformance Connector B",
-    manifest_uri: `https://sources.example/${CONNECTOR_B}`,
+    manifest_uri: "https://sources.example/https://test.pdpp.dev/connectors/conformance-b",
     protocol_version: "0.1.0",
     runtime_requirements: { bindings: { network: { required: true } } },
     streams: [
@@ -274,7 +276,14 @@ export function createProductionStoreConnectorStateSchedulerDriver() {
       initDb();
       for (const manifest of HARNESS_MANIFESTS) {
         // biome-ignore lint/performance/noAwaitInLoops: ordered test setup is intentionally sequential
-        await registerConnector(withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri }));
+        await registerConnector(
+          withFixtureSourceDeclaration(manifest, {
+            sourceId:
+              manifest.connector_id === CONNECTOR_A
+                ? "https://sources.example/https://test.pdpp.dev/connectors/conformance-a"
+                : "https://sources.example/https://test.pdpp.dev/connectors/conformance-b",
+          })
+        );
       }
       stateStore = createSqliteConnectorStateStore();
       schedulerStore = createSqliteSchedulerStore();

@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1439,7 +1440,8 @@ async function configureMessagesManifest(
   messages.query.search.lexical_fields = ["content"];
   messages.query.search.semantic_fields = ["content"];
   mutation?.(messages, manifest);
-  await driver.registerManifest(manifest);
+  const reauthored = withReauthoredFixtureDeclaration(manifest);
+  await driver.registerManifest(reauthored);
   const persisted = (await driver.manifest()) as ConnectorManifestMutable;
   const persistedMessages = mustExist(
     persisted.streams.find((stream) => stream.name === "messages"),
@@ -1447,7 +1449,7 @@ async function configureMessagesManifest(
   );
   assert.deepEqual(persistedMessages.query.search.lexical_fields, messages.query.search.lexical_fields);
   assert.deepEqual(persistedMessages.query.search.semantic_fields, messages.query.search.semantic_fields);
-  return manifest;
+  return reauthored;
 }
 
 async function enrollConfiguredDevice(
@@ -2429,7 +2431,7 @@ async function generationManifests(
   stream.consent_time_field = "updated_at";
   stream.query.search.lexical_fields = ["role"];
   stream.query.search.semantic_fields = ["role"];
-  return { m1, m2 };
+  return { m1, m2: withReauthoredFixtureDeclaration(m2) };
 }
 
 function generationRecord(

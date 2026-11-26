@@ -389,7 +389,7 @@ function pkceChallenge(verifier: string): string {
 async function completeScopedMcpFlow(
   asUrl: string,
   session: OwnerSession,
-  connectorId: string
+  sourceId: string
 ): Promise<{ accessToken: string; grantId: string }> {
   const clientId = await registerAuthCodeClient(asUrl, session);
   const verifier = randomBytes(32).toString("base64url");
@@ -398,7 +398,7 @@ async function completeScopedMcpFlow(
       access_mode: "continuous",
       purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
       purpose_description: "Read the fixture mailbox through hosted MCP.",
-      source: { id: `https://registry.pdpp.dev/connectors/${connectorId}`, kind: "connector" },
+      source: { id: sourceId, kind: "connector" },
       streams: [{ fields: ["id", "subject"], name: "messages" }],
       type: "https://pdpp.dev/data-access",
     },
@@ -603,7 +603,7 @@ test("owner-source-to-mcp-closure", async () => {
 
       // 6–7. The app receives only the Gmail/messages connection and stream;
       // read the accepted fixture through the live scoped MCP route.
-      const oauth = await completeScopedMcpFlow(asUrl, session, gmail.connector_id);
+      const oauth = await completeScopedMcpFlow(asUrl, session, (gmail.source as { id: string }).id);
       const initialized = await postMcp(rsUrl, oauth.accessToken, 1, "initialize", {
         capabilities: {},
         clientInfo: { name: "owner-closure-fixture-client", version: "0.0.0" },

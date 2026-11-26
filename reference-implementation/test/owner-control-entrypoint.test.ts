@@ -487,7 +487,12 @@ test("owner-agent control entrypoint rejects a client grant token with 403", asy
       sourceBindingKey: "the owner@example.com",
     });
     const streamName = asRecord(asArray(manifest.streams)[0]).name;
-    const clientToken = await approveClientGrant(asUrl, manifest.connector_id, streamName, "cin_amazon_entrypoint");
+    const clientToken = await approveClientGrant(
+      asUrl,
+      String((manifest.source as { id: string }).id),
+      streamName,
+      "cin_amazon_entrypoint"
+    );
     const { status, body } = await fetchJson(`${rsUrl}/v1/owner/control`, {
       headers: { Authorization: `Bearer ${clientToken}` },
     });

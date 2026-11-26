@@ -8,10 +8,8 @@
 // bindings + external tools and its refresh policy; a loosened check silently
 // admits a malformed manifest at registration.
 //
-// NOTE (pinned quirk): validateRuntimeRequirements returns EARLY when
-// `runtime_requirements.bindings` is absent, so `external_tools` is only validated
-// when `bindings` is also declared. These tests include `bindings` for the
-// external-tools cases and pin the early-return behavior explicitly.
+// Binding and external-tool declarations are validated independently, including
+// external tools in a runtime_requirements object without a bindings member.
 //
 // Mutation surface:
 //   validateRuntimeRequirements -- object-shape guards, RUNTIME_REQUIREMENT_BINDINGS
@@ -54,7 +52,7 @@ test("validateRuntimeRequirements: absent runtime_requirements / bindings is a p
   assert.doesNotThrow(() => validateRuntimeRequirements({}, CODE));
   assert.doesNotThrow(
     () => validateRuntimeRequirements({ runtime_requirements: {} }, CODE),
-    "no bindings -> early return pass"
+    "an absent bindings member does not add a binding requirement"
   );
 });
 
@@ -67,14 +65,14 @@ test("validateRuntimeRequirements: a recognized binding with a boolean required 
 test("validateRuntimeRequirements: an unsupported binding key is rejected", () => {
   expectReject(
     () => validateRuntimeRequirements({ runtime_requirements: { bindings: { teleport: {} } } }, CODE),
-    "unsupported keys: teleport"
+    "teleport must have required property 'required'"
   );
 });
 
 test("validateRuntimeRequirements: a non-boolean `required` is rejected", () => {
   expectReject(
     () => validateRuntimeRequirements({ runtime_requirements: { bindings: { network: { required: "yes" } } } }, CODE),
-    "required must be a boolean"
+    "network.required must be boolean"
   );
 });
 
@@ -82,27 +80,36 @@ test("validateRuntimeRequirements: non-object runtime_requirements or bindings i
   expectReject(() => validateRuntimeRequirements({ runtime_requirements: [] }, CODE), "must be an object");
   expectReject(
     () => validateRuntimeRequirements({ runtime_requirements: { bindings: [] } }, CODE),
-    "bindings must be an object"
+    "bindings must be object"
   );
 });
 
 // ---------------------------------------------------------------------------
-// validateRuntimeRequirements — external_tools (requires bindings present)
+// validateRuntimeRequirements — external_tools (independent of bindings)
 // ---------------------------------------------------------------------------
 
 const withBindings = { bindings: { network: { required: true } } };
 
-test("validateRuntimeRequirements: external_tools is only validated when bindings is declared (pinned quirk)", () => {
-  // WITHOUT bindings, a clearly-invalid external_tools entry is NOT validated
-  // (early return) — this pins the current behavior so a refactor that reorders
-  // the checks is caught.
-  assert.doesNotThrow(
+test("validateRuntimeRequirements: external_tools is validated even when bindings is absent", () => {
+  // Formerly an early return skipped external_tools when bindings was absent.
+  // The coupling is removed: the invalid entry is rejected either way.
+  expectReject(
     () => validateRuntimeRequirements({ runtime_requirements: { external_tools: [{ bogus: 1 }] } }, CODE),
-    "no bindings -> external_tools not reached"
+    "has unsupported keys: bogus"
   );
-  // WITH bindings, the same invalid entry IS rejected.
   expectReject(() =>
     validateRuntimeRequirements({ runtime_requirements: { ...withBindings, external_tools: [{ bogus: 1 }] } }, CODE)
+  );
+  // Control: a valid external_tools entry without bindings still passes.
+  assert.doesNotThrow(() =>
+    validateRuntimeRequirements(
+      {
+        runtime_requirements: {
+          external_tools: [{ license: "MIT", name: "git", purpose: "vcs" }],
+        },
+      },
+      CODE
+    )
   );
 });
 

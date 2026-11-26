@@ -56,6 +56,7 @@ import {
   runSubsetParentCoverageScenario,
   runUndeclaredParentScenario,
 } from "./helpers/checkpoint-dependency-multi-parent-scenario.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const FAILING_STREAM_NAME_PATTERN = /sibling_b/;
 
@@ -152,30 +153,33 @@ function fakeAdmitRunConnection(
 // stream-scoped-failure exception (see runtime-stream-collection-failed-commit.test.ts
 // for the un-cancelled counterpart of this exact shape).
 function twoSiblingManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "sibling_a",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "sibling_b",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "sibling_a",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "sibling_b",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 function writeConnectorStub(tmpDir: string, script: string): string {
@@ -424,7 +428,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
   try {
     // state_stream requires coverage_strategy: "checkpoint_window" on the
     // SAME stream (spec Validation rule 7). Here it is entirely absent.
-    const missingStrategyManifest = {
+    const missingStrategyManifest = withFixtureSourceDeclaration({
       capabilities: { human_interaction: [] },
       connector_id: "checkpoint-profile-coverage-strategy-missing-test",
       display_name: "checkpoint-profile-coverage-strategy-missing-test",
@@ -439,6 +443,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
           semantics: "mutable_state",
         },
         {
+          coverage_strategy: "checkpoint_window",
           name: "child",
           primary_key: ["id"],
           schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
@@ -448,7 +453,12 @@ test("a stream declaring state_stream/parent_streams without the matching covera
         },
       ],
       version: "0.1.0",
-    };
+    });
+    const missingStrategyStream = missingStrategyManifest.streams.find((stream) => stream.name === "child");
+    if (!missingStrategyStream) {
+      throw new Error("missing child fixture stream");
+    }
+    Reflect.deleteProperty(missingStrategyStream, "coverage_strategy");
     const missingStrategyResp = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(missingStrategyManifest),
       headers: { "Content-Type": "application/json" },
@@ -464,7 +474,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
     // on the SAME stream. Here it is set to an unrelated valid value
     // ("full_inventory") instead of being absent, proving the mismatch
     // check — not merely an absence check.
-    const mismatchedStrategyManifest = {
+    const mismatchedStrategyManifest = withFixtureSourceDeclaration({
       capabilities: { human_interaction: [] },
       connector_id: "checkpoint-profile-coverage-strategy-mismatch-test",
       display_name: "checkpoint-profile-coverage-strategy-mismatch-test",
@@ -486,7 +496,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
           semantics: "mutable_state",
         },
         {
-          coverage_strategy: "full_inventory",
+          coverage_strategy: "parent_detail_accounting",
           name: "detail",
           parent_streams: ["parent_a", "parent_b"],
           primary_key: ["id"],
@@ -496,7 +506,12 @@ test("a stream declaring state_stream/parent_streams without the matching covera
         },
       ],
       version: "0.1.0",
-    };
+    });
+    const mismatchedStrategyStream = mismatchedStrategyManifest.streams.find((stream) => stream.name === "detail");
+    if (!mismatchedStrategyStream) {
+      throw new Error("missing detail fixture stream");
+    }
+    mismatchedStrategyStream.coverage_strategy = "full_inventory";
     const mismatchedStrategyResp = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(mismatchedStrategyManifest),
       headers: { "Content-Type": "application/json" },
@@ -509,7 +524,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
     );
 
     // Positive control: the correct coverage_strategy on each shape registers successfully.
-    const validManifest = {
+    const validManifest = withFixtureSourceDeclaration({
       capabilities: { human_interaction: [] },
       connector_id: "checkpoint-profile-coverage-strategy-valid-test",
       display_name: "checkpoint-profile-coverage-strategy-valid-test",
@@ -534,7 +549,7 @@ test("a stream declaring state_stream/parent_streams without the matching covera
         },
       ],
       version: "0.1.0",
-    };
+    });
     const validResp = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(validManifest),
       headers: { "Content-Type": "application/json" },
@@ -568,7 +583,7 @@ test("SQLite/Postgres parity scenario (SQLite side): one detail stream independe
   }
 });
 
-test("SQLite/Postgres parity scenario (SQLite side): only a DETAIL_COVERAGE_KEY_SETS connector needs a record behind a hydrated key", async () => {
+test("SQLite/Postgres parity scenario (SQLite side): a DETAIL_COVERAGE_KEY_SETS-declaring connector still needs an accepted record behind a hydrated key when START omits the extension; a nondeclaring connector's hydration credits by assertion", async () => {
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
