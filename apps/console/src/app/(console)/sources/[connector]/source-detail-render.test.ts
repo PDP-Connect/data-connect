@@ -163,6 +163,14 @@ function visibleOutsideDetails(dom: JSDOM): string {
   return (document.body.textContent ?? "").replace(/\s+/gu, " ").trim();
 }
 
+test("unresolved device commands do not offer an empty steps panel", async () => {
+  const dom = await renderDemo("trouble-unknown");
+  assert.doesNotMatch(visibleOutsideDetails(dom), /Command unavailable/);
+  assert.ok(![...dom.window.document.querySelectorAll("button")].some((node) => node.textContent === "See what to do on that computer"));
+});
+
+
+
 test("all 24 status rows keep the shared state choice and their actions", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   for (let row = 1; row <= 24; row++) {
@@ -295,7 +303,7 @@ test("a device without server steps says what to look for and offers no empty pa
   const document = (await renderDemo("status-8-owner-device")).window.document;
   const control = [...document.querySelectorAll("a, button")].find((node) => node.textContent?.trim() === "See what to do on that computer");
   assert.equal(control, undefined);
-  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /Check DataConnect on/);
+  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /Open DataConnect on/);
 });
 
 test("an overdue real schedule never prints a next check", async () => {

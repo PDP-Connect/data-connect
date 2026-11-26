@@ -238,6 +238,14 @@ export function ConnectionDeviceRecoverySteps({ connectionHealth, localDevicePro
   />;
 }
 
+export function hasDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">): boolean {
+  const remediation = primaryOwnerActionRemediation(renderedVerdict);
+  if (!remediation) return Boolean(summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress));
+  return remediation.commands.some((command) => substituteCommandTemplate(command.command_template, {
+    connectionId, connectorId, providerUrl: providerOrigin, sourceInstanceId: recoverySourceInstanceId(sourceInstances, connectionId),
+  }) !== null);
+}
+
 function recoveryTimeLabel(value: string | null): string | null {
   if (!value) return null;
   const date = new Date(value);
@@ -1231,7 +1239,7 @@ function OutboxStallRemediationPanel({
         </p>
       ) : null}
       <ol className="flex min-w-0 max-w-full flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
-        {steps.map((step, index) => (
+        {steps.filter((step) => !plain || step.command !== null).map((step, index) => (
           <li className="flex min-w-0 max-w-full flex-col gap-0.5" key={step.label}>
             <span className="pdpp-caption font-medium text-foreground">{plain ? `Step ${index + 1}` : step.label}</span>
             {step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}

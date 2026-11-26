@@ -9,6 +9,12 @@ import { isUpToDateRow, sourceStateSentence, sourceStatusWords, type SourceStatu
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 const SUCCESS = "2026-11-24T10:00:00.000Z";
 
+test("a device with zero waiting records has no send-failure state", () => {
+  const value = source({ source_kind: "local_device", local_device_progress: { records_pending: 0 } as RefConnectorSummary["local_device_progress"], owner_state: { resolver: "needs_owner" } as RefConnectorSummary["owner_state"], rendered_verdict: verdict("Some records stuck", [requiredAction({ surface: { kind: "local_device" } })]) });
+  assert.doesNotMatch(sourceStateSentence(value, { now: NOW, name: "Northwind", unsentRecords: 0 }).text, /could not send|stuck/);
+  assert.equal(sourceStatusWords(value, { now: NOW }).action, null);
+});
+
 function health(overrides: Partial<RefConnectionHealthSnapshot> = {}): RefConnectionHealthSnapshot {
   return {
     axes: { attention: "none", coverage: "complete", freshness: "fresh", outbox: "idle" },
@@ -374,7 +380,7 @@ test("source page sentences use the same row and named slots for page-owned fact
   assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again.", slot: null });
   assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do.", slot: null });
   assert.deepEqual(sentence(fixture(14)), { text: "Some optional data is missing. Last synced 2 hours ago.", slot: null });
-  assert.deepEqual(sentence(fixture(22)), { text: "Nothing imported yet.", slot: null });
+  assert.deepEqual(sentence(fixture(22)), { text: "Nothing imported yet. Add an export to copy your records.", slot: null });
 });
 
 test("started time comes only from an active last run", () => {

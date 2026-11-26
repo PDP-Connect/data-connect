@@ -191,6 +191,9 @@ function lifecycleRow(
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
     const surface = requiredAction?.surface?.kind;
+    if (surface === "local_device" && source.local_device_progress?.records_pending === 0) {
+      return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null };
+    }
     const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
     const words = unknownStep ? "Something stopped this data source from syncing" : surface === "browser_session"
       ? "Needs you to sign in again"
@@ -439,7 +442,7 @@ function matchStateSentence(
       return { text: `Synced${when ? ` ${when}` : ""}.${late}${unchecked}` };
     }
     case 21: return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked for missing records.` };
-    case 22: return { text: `${status.words}.` };
+    case 22: return { text: source.source_kind === "manual" ? "Nothing imported yet. Add an export to copy your records." : `${status.words}.` };
     case 23: {
       const label = source.rendered_verdict?.pill.label;
       if (label === "Import complete") {
