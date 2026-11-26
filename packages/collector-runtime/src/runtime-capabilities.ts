@@ -124,11 +124,12 @@ export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * placed, because the matcher would otherwise ignore what the connector asked for.
  */
 const SUPPORTED_BINDING_INTERFACE_VERSION = 1;
+const BINDING_INTERFACE_PATTERN = /^([a-z_]+)@([1-9][0-9]*)$/;
 
 interface BindingRequirement {
+  readonly features?: readonly string[];
   /** `<kind>@<positive integer>`, as in the connector manifest. Absent means unspecified. */
   readonly interface?: string;
-  readonly features?: readonly string[];
   readonly required: boolean;
 }
 
@@ -141,13 +142,14 @@ function bindingInterfaceVersion(name: string, declared: unknown): number | null
   if (typeof declared !== "string") {
     return null;
   }
-  const match = /^([a-z_]+)@([1-9][0-9]*)$/.exec(declared);
+  const match = BINDING_INTERFACE_PATTERN.exec(declared);
   return match && match[1] === name ? Number(match[2]) : null;
 }
 
 function interfaceSupported(decl: { interface?: string }, name: string): boolean {
   return (
-    decl.interface === undefined || bindingInterfaceVersion(name, decl.interface) === SUPPORTED_BINDING_INTERFACE_VERSION
+    decl.interface === undefined ||
+    bindingInterfaceVersion(name, decl.interface) === SUPPORTED_BINDING_INTERFACE_VERSION
   );
 }
 
