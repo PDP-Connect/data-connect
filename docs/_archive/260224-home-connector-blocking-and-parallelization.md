@@ -2,7 +2,7 @@
 
 ### Context
 
-Art demoed a long-running ChatGPT connector (~1h45m for 2.1k conversations). We need to avoid freezing the rest of the product while one import runs.
+A demo showed a long-running ChatGPT connector (~1h45m for 2.1k conversations). We need to avoid freezing the rest of the product while one import runs.
 
 ### Decision
 

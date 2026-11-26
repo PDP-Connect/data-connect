@@ -87,7 +87,7 @@ The watchdog repair was verified again immediately before commit with the
 corrected Node 22 PostgreSQL oracle, then committed separately as
 `0647c2e61bb67c1b3067002821324b1628f7577d`
 (`fix(test): fail reconcile race fixture protocol errors promptly`). The commit
-is GPG-valid, authored by `tnunamak@gmail.com`, DCO-signed, and ends with the
+is GPG-valid, authored by the maintainer, DCO-signed, and ends with the
 `Assisted-by: AI` trailer. Only
 `reference-implementation/test/polyfill-manifest-reconcile-invalidation-postgres.test.ts`
 is in that commit.
