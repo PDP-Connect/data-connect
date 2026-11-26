@@ -343,7 +343,8 @@ export default async function TraceDetailPage({
   return (
     <RecordroomShellWithPalette>
       <header className="mb-5">
-        <h1 className="pdpp-heading text-foreground">{title}</h1>
+        <h1 className="pdpp-heading text-foreground">Technical details for this activity</h1>
+        <p>{title}</p>
       </header>
       <Sheet className="mb-6">
         <SheetBody>
