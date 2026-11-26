@@ -12,6 +12,7 @@
  * the gate logic can be read and tested without owning the full scheduler closure.
  */
 
+import { getRunConfigRepairAttention } from "../../server/connector-run-config.ts";
 import { type AutomationRefreshPolicy, projectRunAutomationPolicy } from "../run-automation-policy.ts";
 import type {
   ConnectorSchedule,
@@ -306,7 +307,9 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
   }
 
   async function gateAttention(connectorId: string, connectorInstanceId: string, key: string): Promise<GateOutcome> {
-    const attentionEvidence = await probeUnresolvedAttention(connectorId, connectorInstanceId);
+    const attentionEvidence =
+      (await probeUnresolvedAttention(connectorId, connectorInstanceId)) ??
+      (await getRunConfigRepairAttention(connectorInstanceId));
     if (attentionEvidence?.key) {
       if (runtime.notifiedAttentionSkips.get(key) === attentionEvidence.key) {
         return null;

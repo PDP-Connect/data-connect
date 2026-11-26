@@ -29,6 +29,7 @@ import {
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
 import { createTraceContext, emitSpineEvent, type SpineTraceContext } from "../../lib/spine.ts";
+import { describeRunConfigFailure, RunConfigBlockedError } from "../../server/connector-run-config.ts";
 import type { SchedulerRunHistoryRecord } from "../../server/stores/scheduler-store.ts";
 import type { ConnectorEnvironmentBinding } from "../connector-child-environment.ts";
 import { runConnector } from "../index.ts";
@@ -196,6 +197,9 @@ function isAdmissionDeniedMessage(message: string): boolean {
 }
 
 function coerceRunError(err: unknown): RunConnectorError {
+  if (err instanceof RunConfigBlockedError) {
+    return { connector_error: describeRunConfigFailure(err.reason), failure_reason: err.reason, message: err.message };
+  }
   if (err && typeof err === "object") {
     const candidate = err as RunConnectorError;
     const message = candidate.message ?? (err instanceof Error ? err.message : "unknown");
@@ -1270,6 +1274,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       lastError,
     });
     await persistRunHistory(failRecord, connectorId, connectorInstanceId);
+    if (lastError?.failure_reason === "store_unreadable") {
+      persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+    }
     handleGrantFailureDisable(failRecord.terminalReason ?? failRecord.failureReason, connectorInstanceId);
     onRunComplete(failRecord);
     return failRecord;

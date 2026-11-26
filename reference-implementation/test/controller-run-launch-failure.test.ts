@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -32,8 +32,16 @@ import {
   type PendingInteractionProjection,
 } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
+import { createScheduler } from "../runtime/scheduler.ts";
+import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
+import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import type { ActiveRunRecord, SchedulerStore } from "../server/stores/scheduler-store.ts";
+import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
+import {
+  type ConfigRevision,
+  getDefaultConnectorInstanceConfigStore,
+} from "../server/stores/connector-instance-config-store.ts";
+import { type ActiveRunRecord, createSqliteSchedulerStore, type SchedulerStore } from "../server/stores/scheduler-store.ts";
 
 const REGEXP_1 = /run_id=run_launch_crash/;
 const REGEXP_2 = /executable missing/;
@@ -94,14 +102,145 @@ function fakeAdmitRunConnection(): (input: {
 }
 
 function freshDb(t: TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-launch-failure-"));
   closeDb();
-  initDb(join(mkdtempSync(join(tmpdir(), "pdpp-launch-failure-")), "pdpp.sqlite"));
+  initDb(join(directory, "pdpp.sqlite"));
   __resetControllerInteractionStateForTests();
   t.after(() => {
     __resetControllerInteractionStateForTests();
     closeDb();
+    rmSync(directory, { force: true, recursive: true });
   });
 }
+
+function scheduleConfigLaunches(t: TestContext) {
+  freshDb(t);
+  const connectorInstanceId = "cin_config_launch";
+  const schedulerStore = createSqliteSchedulerStore();
+  const records: RunRecord[] = [];
+  const launches: { at: number; runId: string }[] = [];
+  const manifest = {
+    ...MANIFEST,
+    capabilities: { refresh_policy: { background_safe: true, recommended_mode: "automatic" as const } },
+  };
+  const controller = createController({
+    admitRunConnection: fakeAdmitRunConnection(),
+    connectorPathResolver: () => "fixture-connector.js",
+    logger: { error: () => undefined, warn: () => undefined },
+    runConnectorImpl: async (opts) => {
+      assert.ok(opts.runId);
+      launches.push({ at: Date.now(), runId: opts.runId });
+      await resolveRunConnectorOptions({ connectorInstanceId: opts.connectorInstanceId });
+      await emitSpineEvent({
+        actor_id: CONNECTOR_ID,
+        actor_type: "runtime",
+        data: { connector_instance_id: connectorInstanceId, records_emitted: 0 },
+        event_type: "run.completed",
+        object_id: opts.runId,
+        object_type: "run",
+        run_id: opts.runId,
+        status: "completed",
+      });
+      return { records_emitted: 0, status: "succeeded" };
+    },
+    schedulerStore,
+  });
+  const scheduler = createScheduler({
+    connectors: [
+      {
+        connectorId: CONNECTOR_ID,
+        connectorInstanceId,
+        connectorPath: "fixture-connector.js",
+        intervalMs: 25,
+        manifest,
+        maxRetries: 1,
+        ownerSubjectId: "owner_local",
+        ownerToken: "owner-token",
+      },
+    ],
+    onInteraction: () => undefined,
+    onRunComplete: (record) => records.push(record),
+    readinessChecker: () => ({ ready: true }),
+    runManagedConnectorViaController: createRunManagedConnectorViaController({
+      ...controller,
+      browserSurfaceLeaseManager: { isManagedConnector: () => true },
+      runNow: async (id, opts) => {
+        const handle = await controller.runNow(id, { ...opts, manifest });
+        assert.ok(handle.status);
+        return { ...handle, status: handle.status };
+      },
+    }) ?? null,
+    schedulerStore,
+  });
+  t.after(() => scheduler.stop());
+  return { connectorInstanceId, launches, records, scheduler, schedulerStore };
+}
+
+async function waitForScheduledConfig(check: () => boolean) {
+  const deadline = Date.now() + 3000;
+  while (!check()) {
+    assert.ok(Date.now() < deadline, "scheduled config outcome did not arrive");
+    // biome-ignore lint/performance/noAwaitInLoops: Poll until the scheduler observes the fixture change.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("an unreadable config store records a typed terminal and retries with scheduler backoff", async (t) => {
+  const { connectorInstanceId, launches, records, scheduler, schedulerStore } = scheduleConfigLaunches(t);
+  t.mock.method(getDefaultConnectorInstanceConfigStore(), "getActiveRevision", () =>
+    Promise.reject(new Error("fixture storage unavailable"))
+  );
+  scheduler.start();
+  await waitForScheduledConfig(() => records.length > 0);
+  scheduler.stop();
+
+  assert.equal(launches.length, 2);
+  const [initial, retry] = launches;
+  assert.ok(initial && retry);
+  assert.ok(retry.at - initial.at >= 950, "the retry uses the normal one-second backoff");
+  const terminal = await getRunTerminalEvent(initial.runId);
+  assert.equal(terminal?.event_type, "run.failed");
+  assert.equal(terminal?.data?.reason, "store_unreadable");
+  assert.equal(records[0]?.attempt, 2);
+  const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
+  assert.equal(stored?.failureReason, "store_unreadable");
+});
+
+test("automatic runs skip an invalid revision once and resume when the active revision changes", async (t) => {
+  const { launches, records, scheduler } = scheduleConfigLaunches(t);
+  let active = { config: [], revision: 1 } as unknown as ConfigRevision;
+  let reads = 0;
+  t.mock.method(getDefaultConnectorInstanceConfigStore(), "getActiveRevision", () => {
+    reads += 1;
+    // The first due tick sees a usable configuration at preflight. The
+    // launch sees the invalid revision, which must stop the in-tick retries.
+    return Promise.resolve(reads === 1 ? null : active);
+  });
+  scheduler.start();
+  await waitForScheduledConfig(() => records.length >= 2);
+  const [refusal, pending] = records;
+  assert.equal(refusal?.status, "failed");
+  assert.equal(refusal?.failureReason, "invalid_active_config");
+  assert.equal(refusal?.attempt, 1, "the invalid revision does not retry in the same tick");
+  assert.equal(pending?.status, "skipped");
+  assert.ok(pending?.error?.includes("invalid_active_config:1"));
+  await waitForScheduledConfig(() => reads >= 5);
+  assert.equal(launches.length, 1);
+  assert.equal(records.length, 2, "repeat ticks do not record the same repair again");
+
+  const [initial] = launches;
+  assert.ok(initial);
+  const terminal = await getRunTerminalEvent(initial.runId);
+  assert.equal(terminal?.event_type, "run.failed");
+  assert.equal(terminal?.data?.reason, "invalid_active_config");
+  assert.ok(String(terminal?.data?.failure_message).includes("Confirm a replacement"));
+
+  active = { ...active, config: {}, revision: 2 };
+  await waitForScheduledConfig(() => records.length >= 3);
+  scheduler.stop();
+  assert.equal(records[2]?.status, "succeeded");
+  assert.equal(launches.length, 2);
+});
 
 function countTerminalEvents(runId: string) {
   const page = listSpineEventsPage("run", runId, { limit: 100 });

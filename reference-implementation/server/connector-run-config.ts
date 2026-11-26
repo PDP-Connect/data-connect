@@ -41,7 +41,10 @@
  */
 
 import type { ConfigRevision, ConnectorInstanceConfigStore } from "./stores/connector-instance-config-store.ts";
-import { getDefaultConnectorInstanceConfigStore } from "./stores/connector-instance-config-store.ts";
+import {
+  getDefaultConnectorInstanceConfigStore,
+  InvalidActiveConfigJsonError,
+} from "./stores/connector-instance-config-store.ts";
 
 export interface ResolveRunConnectorOptionsInput {
   readonly connectorInstanceId: string | null | undefined;
@@ -67,16 +70,40 @@ export interface RunConfigDecision {
 }
 
 export type RunConfigBlockedReason = "missing_instance_identity" | "store_unreadable" | "invalid_active_config";
+const RUN_CONFIG_BLOCKED_CODE = "connector_run_config_blocked";
+
+export function describeRunConfigFailure(reason: unknown) {
+  switch (reason) {
+    case "invalid_active_config":
+      return {
+        code: RUN_CONFIG_BLOCKED_CODE,
+        message: "Confirm a replacement connector configuration before retrying.",
+        origin: "runtime",
+        retryable: false,
+      };
+    case "store_unreadable":
+      return {
+        code: RUN_CONFIG_BLOCKED_CODE,
+        message: "The connector configuration store could not be read.",
+        origin: "runtime",
+        retryable: true,
+      };
+    default:
+      return null;
+  }
+}
 
 export class RunConfigBlockedError extends Error {
-  readonly code = "connector_run_config_blocked";
+  readonly code = RUN_CONFIG_BLOCKED_CODE;
 
   readonly reason: RunConfigBlockedReason;
+  readonly revision: number | undefined;
 
-  constructor(reason: RunConfigBlockedReason) {
-    super("Connector run configuration could not be confirmed.");
+  constructor(reason: RunConfigBlockedReason, revision?: number) {
+    super(describeRunConfigFailure(reason)?.message ?? "Connector run configuration could not be confirmed.");
     this.name = "RunConfigBlockedError";
     this.reason = reason;
+    this.revision = revision;
   }
 }
 
@@ -120,8 +147,14 @@ export async function resolveRunConnectorOptions(
   try {
     const store = input.store ?? getDefaultConnectorInstanceConfigStore();
     active = await store.getActiveRevision(connectorInstanceId);
-  } catch {
+  } catch (err) {
+    if (err instanceof InvalidActiveConfigJsonError) {
+      report(onDecision, { connectorInstanceId, reason: "invalid_active_config" });
+      // biome-ignore lint/style/useErrorCause: The refusal exposes only its safe reason and revision.
+      throw new RunConfigBlockedError("invalid_active_config", err.revision);
+    }
     report(onDecision, { connectorInstanceId, reason: "store_unreadable" });
+    // biome-ignore lint/style/useErrorCause: Store errors can expose connection details.
     throw new RunConfigBlockedError("store_unreadable");
   }
   if (active === null) {
@@ -134,7 +167,7 @@ export async function resolveRunConnectorOptions(
     // A revision whose persisted config is not an object cannot be handed to
     // readOptions. Refuse it rather than coercing it into something shaped.
     report(onDecision, { connectorInstanceId, reason: "invalid_active_config" });
-    throw new RunConfigBlockedError("invalid_active_config");
+    throw new RunConfigBlockedError("invalid_active_config", active.revision);
   }
   report(onDecision, {
     connectorInstanceId,
@@ -143,4 +176,18 @@ export async function resolveRunConnectorOptions(
     revision: active.revision,
   });
   return active.config;
+}
+
+/** Derive the scheduler's repair gate from the active revision on every due tick. */
+export async function getRunConfigRepairAttention(connectorInstanceId: string) {
+  try {
+    await resolveRunConnectorOptions({ connectorInstanceId });
+    return null;
+  } catch (err) {
+    if (err instanceof RunConfigBlockedError && err.reason === "invalid_active_config") {
+      return { key: `invalid_active_config:${err.revision}`, reason: err.message };
+    }
+    // The launch remains fail-closed and owns retrying a store outage.
+    return null;
+  }
 }

@@ -96,6 +96,21 @@ test("reasonClassOf returns null for non-failed records", () => {
 
 // ─── computeNextRunWithBackoff: threshold behavior ────────────────────────
 
+test("config store outages retain capped backoff without blocking future runs", () => {
+  const history = Array.from({ length: 10 }, () => failedRun({ failureReason: "store_unreadable" }));
+  const decision = computeNextRunWithBackoff(history, BASE_INTERVAL_MS, T0);
+  assert.equal(decision.consecutiveFailures, 10);
+  assert.equal(decision.recommendedHealthState, "cooling_off");
+  assert.ok(decision.effectiveIntervalMs > BASE_INTERVAL_MS);
+});
+
+test("an invalid config revision does not back off its replacement", () => {
+  const history = Array.from({ length: 10 }, () => failedRun({ failureReason: "invalid_active_config" }));
+  const decision = computeNextRunWithBackoff(history, BASE_INTERVAL_MS, T0);
+  assert.equal(decision.consecutiveFailures, 0);
+  assert.equal(decision.effectiveIntervalMs, BASE_INTERVAL_MS);
+});
+
 test("no history yields no back-off and a nextRunAt of lastRun + base interval", () => {
   const decision = computeNextRunWithBackoff([], BASE_INTERVAL_MS, T0);
   assert.equal(decision.backoffApplied, false);

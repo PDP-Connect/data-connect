@@ -261,6 +261,28 @@ test("a malformed active config BLOCKS the run rather than substituting manifest
   );
 });
 
+test("malformed JSON in an active SQLite revision reports the revision that needs repair", withDb(async () => {
+  const connectorInstanceId = "cin_slack_1";
+  seedConnectorInstance(connectorInstanceId);
+  const store = createSqliteConnectorInstanceConfigStore();
+  const active = await store.propose({
+    baseEpoch: 1,
+    baseRevision: 0,
+    config: { RECLAIM_UPLOADS: true },
+    connectorInstanceId,
+    provenance: AGENT_PROVENANCE,
+  });
+  assert.equal(active.status, "active");
+  getDb().prepare("UPDATE connector_instance_config_revisions SET config_json = ? WHERE connector_instance_id = ? AND revision = ?")
+    .run("{", connectorInstanceId, active.revision);
+
+  await assert.rejects(resolveRunConnectorOptions({ connectorInstanceId, store }), {
+    code: "connector_run_config_blocked",
+    reason: "invalid_active_config",
+    revision: active.revision,
+  });
+}));
+
 test("a throwing diagnostic cannot mask the typed refusal or the resolution", async () => {
   const throwing = () => {
     throw new Error("diagnostic sink failed");
