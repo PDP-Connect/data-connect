@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export type SyncOutcome = "finished" | "failed" | "stopped" | "interrupted" | "could_not_start" | "syncing";
 export interface SyncHistoryInput extends HistoryInput { only_problems?: boolean }
 export interface SyncDay {
@@ -18,7 +18,7 @@ export type SyncHistory = HistoryList<SyncDay, "days"> | HistoryList<SyncEntry, 
 const time = "coalesce(completed_at, started_at)";
 const ran = "status IN ('succeeded','failed','cancelled','abandoned')";
 const outcome = `CASE status WHEN 'succeeded' THEN 'finished' WHEN 'cancelled' THEN 'stopped' WHEN 'abandoned' THEN 'interrupted' WHEN 'skipped' THEN 'could_not_start' WHEN 'surface_failed' THEN 'could_not_start' WHEN 'running' THEN 'syncing' ELSE 'failed' END`;
-export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryBackend = historyBackend()): Promise<SyncHistory> {
+export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<SyncHistory> {
   const [first, end] = historyBounds(input);
   const values: unknown[] = [first, end];
   let where = `${time} >= ? AND ${time} < ?`;
@@ -36,7 +36,7 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
       connector_instance_id AS connection_id, connector_id, ${time} AS at, started_at, completed_at,
       ${outcome} AS outcome, records_emitted AS records, trigger_kind AS trigger,
       coalesce(failure_reason, terminal_reason, error) AS cause FROM run_history
-      WHERE ${where} ORDER BY ${time} DESC, id DESC LIMIT ?`, [...values, limit + 1], backend);
+      WHERE ${where} ORDER BY ${time} DESC, id DESC LIMIT ?`, [...values, limit + 1], backend, query);
     return historyPage(rows, limit, "syncs", (row) => Buffer.from(JSON.stringify([row.at, row.history_id])).toString("base64url"));
   }
   const day = historyDaySql(time, backend, input.offset);
@@ -56,7 +56,7 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
     MAX(CASE WHEN latest=1 THEN ${outcome} END) AS last_outcome,
     SUM(CASE WHEN ${ran} AND trigger_kind='manual' THEN 1 ELSE 0 END) AS manual,
     MAX(CASE WHEN latest=1 AND status='failed' THEN coalesce(failure_reason,terminal_reason,error) END) AS cause
-    FROM bucketed GROUP BY day, connector_instance_id ORDER BY day DESC, last_at DESC, connection_id`, values, backend);
+    FROM bucketed GROUP BY day, connector_instance_id ORDER BY day DESC, last_at DESC, connection_id`, values, backend, query);
   const data = rows.map((row) => {
     for (const key of ["ran","finished","failed","stopped","interrupted","could_not_start","records","manual"]) row[key] = Number(row[key]);
     return row as unknown as SyncDay;

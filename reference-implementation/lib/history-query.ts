@@ -34,10 +34,11 @@ export function historyDaySql(column: string, backend: HistoryBackend, offset: n
     ? `to_char((${column})::timestamptz AT TIME ZONE 'UTC' + interval '${offset} minutes', 'YYYY-MM-DD')`
     : `date(${column}, '${offset} minutes')`;
 }
-export async function historyRows<T>(sql: string, values: unknown[], backend: HistoryBackend): Promise<T[]> {
+export type HistoryQuery = (sql: string, values: unknown[]) => Promise<{ rows: unknown[] }>;
+export async function historyRows<T>(sql: string, values: unknown[], backend: HistoryBackend, query: HistoryQuery = postgresQuery): Promise<T[]> {
   if (backend === "sqlite") return getDb().prepare(sql).all(...values) as T[];
   let index = 0;
-  return (await postgresQuery(sql.replaceAll("?", () => `$${++index}`), values)).rows as T[];
+  return (await query(sql.replaceAll("?", () => `$${++index}`), values)).rows as T[];
 }
 export interface HistoryList<T, M extends string> {
   mode: M;

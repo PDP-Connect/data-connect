@@ -272,3 +272,15 @@ export const liveDashboardDataSource: DashboardDataSource = {
   searchRecordsSemantic,
   supportsExploreTimelineDirection: async () => process.env.PDPP_EXPLORE_TIMELINE_DIRECTION === "1",
 };
+
+export interface HistoryDataSource {
+  listSyncHistory: typeof import("./ref-client.ts").listSyncHistory;
+  listAppHistory: typeof import("./ref-client.ts").listAppHistory;
+}
+export const liveHistoryDataSource: HistoryDataSource = {
+  listSyncHistory: (input) => import("./ref-client.ts").then(client => client.listSyncHistory(input)),
+  listAppHistory: (input) => import("./ref-client.ts").then(client => client.listAppHistory(input)),
+};
+export function createHistoryPracticeDataSource(syncs: import("./ref-client.ts").SyncHistory, reads: import("./ref-client.ts").AppHistory): HistoryDataSource {
+  return { listSyncHistory: async () => structuredClone(syncs), listAppHistory: async () => structuredClone(reads) };
+}

@@ -548,6 +548,7 @@ import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
 import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
+import { mountRefAppHistory } from "./routes/ref-app-history.ts";
 import { mountRefSyncHistory } from "./routes/ref-sync-history.ts";
 import { mountRefAppAccess } from "./routes/ref-app-access.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
@@ -5203,6 +5204,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
   mountRefTraces(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefTraces>[1]);
   mountRefGrants(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefGrants>[1]);
   mountRefRuns(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefRuns>[1]);
+
+  mountRefAppHistory(app, { requireOwnerSession: ownerAuth.requireOwnerSession, ownerSubjectId: (req: ReqLike) => getOwnerTokenSubjectId(req), pdppError, handleError } as unknown as Parameters<typeof mountRefAppHistory>[1]);
 
   mountRefSyncHistory(app, { requireOwnerSession: ownerAuth.requireOwnerSession, pdppError, handleError } as unknown as Parameters<typeof mountRefSyncHistory>[1]);
 

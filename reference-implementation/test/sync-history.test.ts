@@ -44,7 +44,7 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(detail.has_more, true);
   if (detail.mode !== "syncs") throw new Error("wrong response");
   assert.deepEqual(detail.data.map((row) => row.outcome), ["could_not_start", "could_not_start"]);
-  const next = await readSyncHistory({ ...input, day: input.first, connection_id: "mail_account", limit: 2, cursor: detail.next_cursor ?? undefined }, backend);
+  const next = await readSyncHistory({ ...input, day: input.first, connection_id: "mail_account", limit: 2, ...(detail.next_cursor ? { cursor: detail.next_cursor } : {}) }, backend);
   assert.equal(next.mode, "syncs");
   if (next.mode !== "syncs") throw new Error("wrong response");
   assert.deepEqual(next.data.map((row) => row.id), ["two", "one"]);

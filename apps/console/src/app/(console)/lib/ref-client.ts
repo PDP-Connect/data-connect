@@ -3711,3 +3711,19 @@ export async function abandonBrowserEnrollmentShell(
     method: "POST",
   })) as { object: "enrollment_abandoned"; connection_id: string; connector_id: string; status: string };
 }
+
+export type { SyncHistory, SyncHistoryInput, SyncDay, SyncEntry, SyncOutcome } from "pdpp-reference-implementation/sync-history";
+export type { AppHistory, AppHistoryInput, AppReadDay, AppReadEntry, AccessChange } from "pdpp-reference-implementation/app-history";
+export async function listSyncHistory(input: import("pdpp-reference-implementation/sync-history").SyncHistoryInput): Promise<import("pdpp-reference-implementation/sync-history").SyncHistory> {
+  return await refFetch(`/_ref/sync-history?${historyQuery(input)}`) as import("pdpp-reference-implementation/sync-history").SyncHistory;
+}
+export async function listAppHistory(input: import("pdpp-reference-implementation/app-history").AppHistoryInput): Promise<import("pdpp-reference-implementation/app-history").AppHistory> {
+  return await refFetch(`/_ref/app-history?${historyQuery(input)}`) as import("pdpp-reference-implementation/app-history").AppHistory;
+}
+function historyQuery(input: object): string {
+  const params = new URLSearchParams();
+  for (const [key,value] of Object.entries(input)) {
+    if (value !== undefined) params.set(key, Array.isArray(value) ? value.join(",") : String(value));
+  }
+  return params.toString();
+}
