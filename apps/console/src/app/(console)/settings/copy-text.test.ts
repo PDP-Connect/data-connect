@@ -55,6 +55,15 @@ test("copyText returns unavailable with no clipboard, or no navigator at all", a
   assert.equal(await withNavigator(undefined, () => copyText("abc")), "unavailable");
 });
 
+test("copyText returns unavailable, and does not throw, when reading the clipboard throws", async () => {
+  const locked = {
+    get clipboard(): never {
+      throw new Error("blocked");
+    },
+  };
+  assert.equal(await withNavigator(locked, () => copyText("abc")), "unavailable");
+});
+
 test("only a copy that did not happen has a failure line, and the two failures differ", () => {
   assert.equal(copyFailureLine("copied"), null);
   const unavailable = copyFailureLine("unavailable");

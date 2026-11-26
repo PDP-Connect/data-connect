@@ -8,7 +8,13 @@ export type CopyOutcome = "copied" | "unavailable" | "failed";
 
 /** Writes `text` to the clipboard. Never throws. */
 export async function copyText(text: string): Promise<CopyOutcome> {
-  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+  // Reading the property can throw too (a locked-down or detached `navigator`); that is "unavailable".
+  let clipboard: Clipboard | undefined;
+  try {
+    clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+  } catch {
+    return "unavailable";
+  }
   if (!clipboard) return "unavailable";
   try {
     await clipboard.writeText(text);
