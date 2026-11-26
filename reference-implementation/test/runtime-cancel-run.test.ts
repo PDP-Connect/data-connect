@@ -43,7 +43,7 @@ import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connecto
 const STREAM = "items";
 
 const MANIFEST = {
-  connector_id: "https://registry.pdpp.dev/connectors/runtime-cancel-stub",
+  connector_id: "runtime-cancel-stub",
   runtime_requirements: {},
   streams: [
     {
@@ -352,3 +352,81 @@ test("runtime owner-cancel: a raced successful DONE still returns the cancelled 
   assert.ok(events.includes("run.cancelled"));
   assert.ok(!events.includes("run.completed"));
 });
+
+// A connector blocked on an INTERACTION stays blocked until the runtime sends
+// INTERACTION_RESPONSE. Cancellation and the scheduler timeout must settle that
+// wait instead of holding the run for the interaction's own timeout.
+for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
+  { abortReason: undefined, expectedStatus: "cancelled", expectedTerminalEvent: "run.cancelled" },
+  { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
+]) {
+  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 5000 }, async (t) => {
+    freshDb(t);
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
+    t.after(() => rmSync(tmpDir, { force: true, recursive: true }));
+    const stubPath = join(tmpDir, "stub.mjs");
+    writeFileSync(
+      stubPath,
+      `import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.once('line', () => {
+  process.stdout.write(JSON.stringify({
+    type: 'INTERACTION', request_id: 'int_otp', kind: 'otp', message: 'Enter the code', timeout_seconds: 600,
+  }) + '\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      "utf8"
+    );
+    const runId = `run_cancel_blocked_interaction_${abortReason ?? "owner"}`;
+    const controller = new AbortController();
+    let releaseHandler: () => void = () => undefined;
+    const outcome = runConnector({
+      admitRunConnection: async ({ connectorId }) => {
+        await Promise.resolve();
+        const exactId = makeDefaultAccountConnectorInstanceId(OWNER_AUTH_DEFAULT_SUBJECT_ID, connectorId);
+        return { connectorId, connectorInstanceId: exactId, ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID };
+      },
+      cancelSignal: controller.signal,
+      collectionMode: "full_refresh",
+      connectorId: MANIFEST.connector_id,
+      connectorPath: stubPath,
+      manifest: MANIFEST,
+      // An owner who never answers: the handler settles only when the test
+      // releases it after the assertions.
+      onInteraction: (interaction) => {
+        setImmediate(() => controller.abort(abortReason));
+        return new Promise((resolve) => {
+          releaseHandler = () =>
+            resolve({ request_id: interaction.request_id, status: "cancelled", type: "INTERACTION_RESPONSE" });
+        });
+      },
+      onProgress: () => undefined,
+      ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
+      ownerToken: "test-owner-token",
+      rsUrl: "http://127.0.0.1:9",
+      runId,
+      state: null,
+    }).then(
+      (value) => value,
+      (err: unknown) => err
+    );
+    // The test timeout is the deadline: a run held for the 600 s interaction timeout fails it.
+    const settled = await outcome;
+    releaseHandler();
+
+    assert.equal((settled as { status?: unknown }).status, expectedStatus);
+    const events = spineEventsForRun(runId);
+    const types = events.map((event) => event.event_type);
+    assert.deepEqual(
+      types.filter((type) => type === "run.cancelled" || type === "run.failed" || type === "run.completed"),
+      [expectedTerminalEvent],
+      "exactly one terminal event"
+    );
+    assert.deepEqual(
+      events.filter((event) => event.event_type === "run.interaction_completed").map((event) => event.status),
+      ["cancelled"],
+      "the pending interaction settles once, as cancelled"
+    );
+  });
+}

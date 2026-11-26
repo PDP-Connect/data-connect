@@ -2,27 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS and
- * STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS (connection-setup-plan.ts) are now
- * generated from the shipped manifests' `capabilities.proven.
- * provider_auth_lifecycle` / `capabilities.proven.static_secret_live.proven`
- * declarations (server/generated/connector-registry.generated.ts, produced by
- * scripts/generate-connector-registry.ts). The two parity tests this file
- * used to run — re-scanning the manifests here and diffing against those
- * constants — compared two manifest-derived readings against each other, a
- * near-tautology now that test/connector-registry-manifest-derivation.test.ts's
- * drift oracle already byte-compares the tracked generated file against a
- * live run of the real generator (a strictly stronger check: it exercises
- * the actual generator code, not a second hand-written re-derivation).
- * Those two tests were dropped here for that reason; the
- * PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS test's synthetic
- * "test_provider" check moved to
- * test/connector-registry-manifest-derivation.test.ts's own coverage of
- * connection-setup-plan.ts's non-generated literal addition.
+ * The setup planner (connection-setup-plan.ts) reads
+ * `capabilities.proven.provider_auth_lifecycle` and
+ * `capabilities.proven.static_secret_live.proven` straight from the
+ * connector's manifest; there is no connector-key list.
  *
- * This file keeps the check that is NOT redundant with the drift oracle: a
- * live, independent proof — against every manifest actually shipped today,
- * not synthetic fixtures — that a manifest can never claim
+ * This file proves, independently of the planner and against every manifest actually shipped today,
+ * not synthetic fixtures, that a manifest can never claim
  * `capabilities.proven.static_secret_live.proven` or
  * `capabilities.proven.provider_auth_lifecycle` without also declaring the
  * `setup.modality` that proof requires. These are PROOF GATES, not

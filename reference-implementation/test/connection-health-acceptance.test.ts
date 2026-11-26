@@ -1694,6 +1694,40 @@ test("acceptance: a never-run connection's unknown coverage axis is promoted to 
   );
 });
 
+test("acceptance: a caller that cannot date the proof keeps the unknown axis though the report is complete", () => {
+  // A local-device connection with no as-of passes promoteToComplete:false:
+  // "complete" there is a fact about one proof run, so it must not be lifted by the streams alone.
+  const healthInput: Parameters<typeof projectConnectorSummaryConnectionHealth>[0] = {
+    freshness: FRESH,
+    lastRun: null,
+    lastSuccessfulRun: null,
+    manifestStreams: [{ coverage_strategy: "checkpoint_window", name: "messages" }],
+    nowIso: NOW,
+    schedule: null,
+  };
+  const initial = projectConnectorSummaryConnectionHealth(healthInput);
+  const report = [
+    collectionReportEntry({
+      coverage_condition: "complete",
+      required: true,
+      stream: "messages",
+    }),
+  ];
+  assert.equal(refineConnectionHealthWithCollectionReport(healthInput, initial, report).axes.coverage, "complete");
+  assert.equal(
+    refineConnectionHealthWithCollectionReport(healthInput, initial, report, {
+      promoteToComplete: true,
+    }).axes.coverage,
+    "complete"
+  );
+  assert.equal(
+    refineConnectionHealthWithCollectionReport(healthInput, initial, report, {
+      promoteToComplete: false,
+    }).axes.coverage,
+    "unknown"
+  );
+});
+
 test("a bounded continuation proven complete by the stream report does not degrade connection health", () => {
   const continuation = {
     boundary: "uidvalidity:1",

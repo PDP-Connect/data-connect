@@ -568,7 +568,7 @@ test("Upcoming dedupe: space-containing keys that COLLIDE under a join are kept 
 test("Upcoming first load: page 1 requests a LARGE upcoming head (not the 32-row feed cap)", async () => {
   // The bounded future set should be revealed on first expand, so page 1 must ask
   // for a large upcoming head via upcomingLimit — NOT the 32-row feed page size that
-  // forced repeated load-more (the 32→64 tedium Tim hit).
+  // forced repeated load-more (the 32→64 tedium an owner hit).
   const page1 = timelinePageWithUpcoming(pageRecords("p1", 0, 5), upcomingRecords("u1", 50), 188, "ucursor-2");
   const captured: Array<number | undefined> = [];
   const ds = {

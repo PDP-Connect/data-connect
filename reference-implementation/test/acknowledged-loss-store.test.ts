@@ -23,7 +23,7 @@ const NOW = "2026-08-23T20:00:00.000Z";
 
 const HEB_PURGE = {
   acknowledgedAt: "2026-08-21T00:00:00.000Z",
-  acknowledgedBy: "Tim Nunamaker",
+  acknowledgedBy: "Jane Doe",
   cause: "provider_deleted_upstream",
   note: "H-E-B purged the order history; heb.com no longer shows those orders.",
   scope: "total",
@@ -71,7 +71,7 @@ test("acknowledged-loss store: a stamped acknowledgement survives a process rest
 
     const reread = readAcknowledgedLoss((await store.get(id))?.sourceBinding);
     assert.ok(reread, "the acknowledgement must survive a restart");
-    assert.equal(reread.acknowledgedBy, "Tim Nunamaker");
+    assert.equal(reread.acknowledgedBy, "Jane Doe");
     assert.equal(reread.acknowledgedAt, "2026-08-21T00:00:00.000Z");
     assert.equal(reread.cause, "provider_deleted_upstream");
     assert.equal(

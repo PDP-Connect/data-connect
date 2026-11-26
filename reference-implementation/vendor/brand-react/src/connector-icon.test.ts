@@ -20,6 +20,10 @@ const HUE_VAR_RE = /--pdpp-monogram-hue:\s*(-?\d+)/;
 const ICON_CLASS = /class="pdpp-connector-icon"/;
 const SVG_VIEWBOX = /viewBox="0 0 24 24"/;
 const SVG_COLOR_STYLE = /color:#1ED760/;
+const SCRIPT_TAG = /<script/iu;
+const HANDLER_OR_PAYLOAD = /onload|onclick|alert/iu;
+const STYLE_ATTR = /style=/u;
+const EXTERNAL_HOST = /x\.test/u;
 
 test("ConnectorIcon with no icon renders the deterministic monogram fallback", () => {
   const html = renderToStaticMarkup(createElement(ConnectorIcon, { name: "Spotify" }));
@@ -64,4 +68,40 @@ test("ConnectorIcon falls back to the monogram when icon.svg is empty", () => {
     createElement(ConnectorIcon, { icon: { kind: "inline_svg", svg: "" }, name: "Slack" })
   );
   assert.match(html, MONOGRAM_CLASS);
+});
+
+// Amazon's pinned manifest pairs its white glyph with this background.
+test("ConnectorIcon preserves a declared background behind a white glyph", () => {
+  const icon = {
+    backgroundColor: "#FF9900",
+    kind: "inline_svg",
+    svg: '<svg viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 0z"/></svg>',
+  };
+  const html = renderToStaticMarkup(createElement(ConnectorIcon, { icon, name: "Amazon" }));
+  assert.ok(html.includes("background-color:#FF9900"), "the white mark needs its declared background");
+  assert.ok(html.includes('fill="#FFFFFF"'), "the upstream glyph must retain its declared color");
+});
+
+// Second check: callers validate, but the component is the last line before
+// dangerouslySetInnerHTML, so it must not trust them.
+test("ConnectorIcon refuses script and event-handler markup handed straight to it", () => {
+  const svg =
+    '<svg viewBox="0 0 24 24" onload="alert(1)"><script>alert(1)</script><path d="M12 0z" onclick="alert(2)"/></svg>';
+  const html = renderToStaticMarkup(createElement(ConnectorIcon, { icon: { kind: "inline_svg", svg }, name: "Slack" }));
+  assert.doesNotMatch(html, SCRIPT_TAG);
+  assert.doesNotMatch(html, HANDLER_OR_PAYLOAD);
+  assert.match(html, MONOGRAM_CLASS);
+});
+
+test("ConnectorIcon drops a non-hex color rather than writing it into the style attribute", () => {
+  const svg = '<svg viewBox="0 0 24 24"><path d="M12 0z"/></svg>';
+  const html = renderToStaticMarkup(
+    createElement(ConnectorIcon, {
+      icon: { backgroundColor: "red;background-image:url(//x.test/a)", color: "#12", kind: "inline_svg", svg },
+      name: "Slack",
+    })
+  );
+  assert.doesNotMatch(html, STYLE_ATTR);
+  assert.doesNotMatch(html, EXTERNAL_HOST);
+  assert.match(html, ICON_CLASS);
 });

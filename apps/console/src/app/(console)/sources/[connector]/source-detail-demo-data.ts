@@ -32,7 +32,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
   const connectionId = "cin_demo_claude_code_workstation";
   const run: RunSummary = {
     connection_id: connectionId,
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: connectionId,
     event_count: 14,
     failure_reason: "local collector outbox has dead-lettered rows",
@@ -183,7 +183,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
   const sourceInstances: DeviceSourceInstance[] = [
     {
       accepted_record_count: 464,
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       connector_instance_id: connectionId,
       created_at: "2026-06-24T12:00:00.000Z",
       device_id: "device_demo_workstation",
@@ -207,7 +207,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectionId,
     connectionStatus: "active",
     connector: {
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       display_name: "Claude Code",
       name: "Claude Code",
       streams: [{ name: "messages" }, { name: "sessions" }],
@@ -262,18 +262,19 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectionLabelSeed: "Claude Code workstation",
     connectionPrimaryAction: renderedVerdict.required_actions[0] ?? null,
     connectionRenderedVerdict: renderedVerdict,
-    connectorId: "claude_code",
-    connectorInstallKey: "claude_code",
+    connectorId: "claude-code",
+    connectorInstallKey: "claude-code",
     connectorInstanceId: connectionId,
     // A local-device source: the reference reports no install state for it.
     connectorNotInstalled: false,
+    coverageAsOf: null,
     coverageHorizons: [],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",
     headerCount: "464 records, 2 streams",
     latestKnownGaps: [],
     manifest: {
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       display_name: "Claude Code",
       name: "Claude Code",
       streams: [{ name: "messages" }, { name: "sessions" }],

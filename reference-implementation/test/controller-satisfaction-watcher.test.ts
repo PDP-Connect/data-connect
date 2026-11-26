@@ -23,7 +23,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import type { ActiveRunRecord, ScheduleRecord, SchedulerStore } from "../server/stores/scheduler-store.ts";
 
-const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/self-heal-test";
+const CONNECTOR_ID = "self-heal-test";
 const INSTANCE_ID = "cin_self_heal";
 const OWNER_A = "owner_self_heal_a";
 const OWNER_B = "owner_self_heal_b";
@@ -269,6 +269,17 @@ function failRunConnector(calls: RuntimeRunConnectorOptions[]) {
   };
 }
 
+type BlobCredentialRegistration = { connectorInstanceId: string; ownerSubjectId: string; runId: string; token: string };
+
+function recordingBlobCredentialHooks(registrations: BlobCredentialRegistration[]) {
+  return {
+    register: ({ connectorInstanceId, ownerSubjectId, runId, token }: BlobCredentialRegistration) => {
+      registrations.push({ connectorInstanceId, ownerSubjectId, runId, token });
+    },
+    revoke: () => undefined,
+  };
+}
+
 function writeOwnerSnapshotConnector(tmpDir: string, snapshotPath: string): string {
   const connectorPath = join(tmpDir, "owner-snapshot.mjs");
   writeFileSync(
@@ -283,6 +294,7 @@ rl.on('line', (line) => {
   if (msg.type !== 'START') return;
   const snapshotPath = process.env.SELF_HEAL_SNAPSHOT_PATH ?? ${JSON.stringify(snapshotPath)};
   writeFileSync(snapshotPath, JSON.stringify({
+    blobUploadToken: process.env.PDPP_BLOB_UPLOAD_TOKEN ?? null,
     ownerToken: process.env.PDPP_OWNER_TOKEN ?? null,
     secret: process.env.SELF_HEAL_SECRET ?? null,
   }), 'utf8');
@@ -404,9 +416,11 @@ test("credential auto-resume uses the repair owner's connection, credential, tok
   const connectorPath = writeOwnerSnapshotConnector(tmpDir, snapshotPath);
   const admittedOwners: string[] = [];
   const resolverOwners: string[] = [];
+  const registrations: BlobCredentialRegistration[] = [];
 
   try {
     const controller = createController({
+      blobUploadCredentialHooks: recordingBlobCredentialHooks(registrations),
       admitRunConnection: ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
         admittedOwners.push(ownerSubjectId);
         return Promise.resolve({
@@ -442,8 +456,14 @@ test("credential auto-resume uses the repair owner's connection, credential, tok
     assert.equal(resumed.terminal_status, "succeeded");
     assert.deepEqual(admittedOwners, [OWNER_B], "controller closure owner A must not admit the repair run");
     assert.deepEqual(resolverOwners, [OWNER_B], "credential recovery must use the repair owner");
+    // The repair owner's run credential, not the owner bearer, reaches the
+    // child under both names (older connectors read PDPP_OWNER_TOKEN).
+    assert.equal(registrations.length, 1);
+    assert.equal(registrations[0]?.ownerSubjectId, OWNER_B, "run credential is bound to the repair owner");
+    assert.equal(registrations[0]?.connectorInstanceId, "cin_self_heal_owner_b");
     assert.deepEqual(JSON.parse(readFileSync(snapshotPath, "utf8")), {
-      ownerToken: `token-${OWNER_B}`,
+      blobUploadToken: registrations[0]?.token,
+      ownerToken: registrations[0]?.token,
       secret: `${OWNER_B}-secret`,
     });
     assert.equal(admittedOwners.includes(OWNER_A), false);
@@ -461,9 +481,11 @@ test("managed controller recovery preserves two per-run owners across a stale cl
   const connectorPath = writeOwnerSnapshotConnector(tmpDir, snapshotA);
   const admittedOwners: string[] = [];
   const resolverOwners: string[] = [];
+  const registrations: BlobCredentialRegistration[] = [];
 
   try {
     const controller = createController({
+      blobUploadCredentialHooks: recordingBlobCredentialHooks(registrations),
       admitRunConnection: ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
         admittedOwners.push(ownerSubjectId);
         return Promise.resolve({
@@ -523,12 +545,24 @@ test("managed controller recovery preserves two per-run owners across a stale cl
     assert.equal(runB?.status, "succeeded");
     assert.deepEqual(admittedOwners, [OWNER_A, OWNER_B], "managed admission must use each run owner");
     assert.deepEqual(resolverOwners, [OWNER_A, OWNER_B], "managed credential recovery must use each run owner");
+    // Each run holds its own run-scoped credential, bound to its own owner and
+    // instance; neither child sees an owner bearer.
+    const credentialA = registrations.find((entry) => entry.ownerSubjectId === OWNER_A);
+    const credentialB = registrations.find((entry) => entry.ownerSubjectId === OWNER_B);
+    assert.equal(registrations.length, 2);
+    assert.ok(credentialA && credentialB);
+    assert.equal(credentialA.connectorInstanceId, "cin_managed_owner_a");
+    assert.equal(credentialB.connectorInstanceId, "cin_managed_owner_b");
+    assert.notEqual(credentialA.token, credentialB.token, "each owner's run gets a distinct credential");
+    assert.notEqual(credentialA.runId, credentialB.runId);
     assert.deepEqual(JSON.parse(readFileSync(snapshotA, "utf8")), {
-      ownerToken: `token-${OWNER_A}`,
+      blobUploadToken: credentialA.token,
+      ownerToken: credentialA.token,
       secret: `${OWNER_A}-secret`,
     });
     assert.deepEqual(JSON.parse(readFileSync(snapshotB, "utf8")), {
-      ownerToken: `token-${OWNER_B}`,
+      blobUploadToken: credentialB.token,
+      ownerToken: credentialB.token,
       secret: `${OWNER_B}-secret`,
     });
   } finally {

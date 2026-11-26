@@ -148,6 +148,15 @@ async function factsFor(instanceId = INSTANCE_ID): Promise<StreamFactsByStream |
   return (evidence?.stream_latest_facts as StreamFactsByStream | null | undefined) ?? null;
 }
 
+/** The fact map exactly as stored, before any read masks it: a version-behind row reads as no facts. */
+async function storedFactsFor(instanceId = INSTANCE_ID): Promise<StreamFactsByStream | null> {
+  const { rows } = await postgresQuery<{ facts: StreamFactsByStream | null }>(
+    "SELECT stream_latest_facts_json AS facts FROM connector_summary_evidence WHERE connector_instance_id = $1",
+    [instanceId]
+  );
+  return rows[0]?.facts ?? null;
+}
+
 test("real PostgreSQL: a later cancelled/not_committed attempt does not regress an already-durably-proven stream", {
   skip: !POSTGRES_URL,
 }, async () => {
@@ -391,7 +400,7 @@ test("real PostgreSQL: existing-row self-heal — a row pre-seeded in the exact 
     assert.equal(preFixRow.stream_facts_fold_version, null, "premise: row predates fold-version stamping");
     assert.equal(Number(preFixRow.dirty), 0, "premise: row reads clean, exactly like the live corrupted row");
     assert.equal(preFixRow.state, "fresh");
-    const preFixFacts = await factsFor();
+    const preFixFacts = await storedFactsFor();
     assert.ok(preFixFacts, "evidence row must exist before healing");
     assert.ok(preFixFacts.messages, "messages stream fact must exist");
     assert.equal(

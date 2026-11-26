@@ -353,7 +353,7 @@ test("connector fragments reject platform and run controls in every casing", () 
   });
   assert.equal(allowed.CONNECTION_SECRET, "allowed");
 
-  for (const name of ["PATH", "PDPP_OWNER_TOKEN", "PDPP_RS_URL", "PDPP_CONNECTOR_ID"]) {
+  for (const name of ["PATH", "PDPP_OWNER_TOKEN", "PDPP_BLOB_UPLOAD_TOKEN", "PDPP_RS_URL", "PDPP_CONNECTOR_ID"]) {
     for (const variant of [name, name.toLowerCase(), `${name.slice(0, 1)}${name.slice(1).toLowerCase()}`]) {
       assert.throws(
         () =>
@@ -524,13 +524,13 @@ const STORE_FIXTURES: Record<string, StoreFixture> = {
   reddit: {
     expectedEnv: {
       REDDIT_PASSWORD: "stored-reddit-password",
-      REDDIT_USERNAME: "dondochaka",
+      REDDIT_USERNAME: "janedoe",
     },
     recovered: {
       credentialKind: "username_password",
       secret: JSON.stringify({
         password: "stored-reddit-password",
-        username: "dondochaka",
+        username: "janedoe",
       }),
     },
     sourceBinding: null,
@@ -912,6 +912,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
               return Promise.resolve(null);
             },
           },
+          installedConnectorKeys: [],
           manifest: BACKGROUND_SAFE_MANIFEST,
           ownerToken: "owner-token",
           rsUrl: "http://localhost.invalid",
@@ -942,6 +943,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       ownerToken: "owner-token",
       rsUrl: "http://localhost.invalid",
@@ -990,6 +992,7 @@ test("connector stderr progress and retained diagnostics redact secret and proxy
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       onProgress: (message) => progress.push(message),
       ownerToken: "owner-token",
@@ -1108,6 +1111,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
     PDPP_CAPTURE_ON_FAILURE: "1",
     PDPP_CAPTURE_ROOT_DIR: "/captures",
     PDPP_FORCE_CONTAINER: "1",
+    PDPP_BLOB_UPLOAD_TOKEN: "stale-parent-blob-token",
     PDPP_OWNER_TOKEN: "stale-parent-owner-token",
     PDPP_RUN_ID: "stale-parent-run-id",
     PDPP_TRACE: "1",
@@ -1121,6 +1125,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
     "PDPP_CONNECTOR_ID",
     "PDPP_CONNECTOR_INSTANCE_ID",
     "PDPP_OWNER_TOKEN",
+    "PDPP_BLOB_UPLOAD_TOKEN",
     "PDPP_RS_URL",
     "PDPP_REFERENCE_BASE_URL",
     "PDPP_RUN_ID",
@@ -1156,6 +1161,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
           connectorId: "env-isolation-test",
           connectorInstanceId: "cin_env_isolation",
           connectorPath,
+          installedConnectorKeys: [],
           manifest: {
             ...BACKGROUND_SAFE_MANIFEST,
             setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
@@ -1192,10 +1198,12 @@ test("connector children receive run-scoped capabilities without unrelated paren
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: {
         ...BACKGROUND_SAFE_MANIFEST,
         setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
       },
+      blobUploadToken: "run-scoped-blob-token",
       ownerToken: "run-scoped-owner-token",
       rsUrl: "http://127.0.0.1:7663",
       staticSecretEnv: {
@@ -1221,7 +1229,11 @@ test("connector children receive run-scoped capabilities without unrelated paren
       PDPP_CAPTURE_ON_FAILURE: "1",
       PDPP_CAPTURE_ROOT_DIR: "/captures",
       PDPP_FORCE_CONTAINER: "1",
-      PDPP_OWNER_TOKEN: "run-scoped-owner-token",
+      // The child holds the run-scoped blob credential and never the owner
+      // bearer, neither the runtime's nor a stale one from the parent env.
+      // Older connectors read the same credential under the old name.
+      PDPP_BLOB_UPLOAD_TOKEN: "run-scoped-blob-token",
+      PDPP_OWNER_TOKEN: "run-scoped-blob-token",
       PDPP_REFERENCE_BASE_URL: null,
       PDPP_RS_URL: "http://127.0.0.1:7663",
       PDPP_RUN_ID: null,

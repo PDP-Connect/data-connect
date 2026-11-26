@@ -55,6 +55,10 @@ test("configured reference rewrites resolve correctly", async () => {
     rewrites.map(({ source, destination }) => ({ destination, source })),
     [
       {
+        destination: "/api/reachability/service-proof",
+        source: "/.well-known/gozar/service",
+      },
+      {
         destination: "/well-known/oauth-authorization-server",
         source: "/.well-known/oauth-authorization-server",
       },

@@ -42,7 +42,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useState, useSyncExternalStore } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -52,7 +52,9 @@ import {
   IcDialogPortal,
   IcDialogTrigger,
 } from "./dialog.tsx";
+import { DEFAULT_JUMP_SHORTCUT_LABEL, jumpShortcutLabel } from "./jump-shortcut.ts";
 import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
+import { ShellThemeButton } from "./shell-theme.tsx";
 import "./shell.css";
 
 // SYNCS_NOTE: the owner-facing "Syncs" group item has no dedicated real route;
@@ -221,66 +223,42 @@ function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: 
 // ─── Footer host block ────────────────────────────────────────────
 
 function FootBlock({ host, build }: { build: string; host: string }) {
-  // Theme toggle lives here in the sidebar footer — a quiet utility, not a
-  // front-and-center header action. The hook flips <html> so any toggle
-  // instance stays in sync via the DOM.
-  const [theme, toggleTheme] = useThemeToggle();
-  const themeLabel = theme === "dark" ? "Dark" : "Light";
-  const themeTitle = theme === "dark" ? "Switch to light" : "Switch to dark";
+  // Use the same theme control in the sidebar and the portaled drawer.
   return (
     <div className="rr-side__foot">
       <span className="rr-side__host">
         {host} · {build}
       </span>
       <span className="rr-side__motto">your data, at home</span>
-      <button className="rr-side__theme rr-chrome-btn" onClick={toggleTheme} title={themeTitle} type="button">
-        {themeLabel}
-      </button>
+      <ShellThemeButton />
     </div>
   );
 }
 
-// ─── Theme toggle (flips <html> data-theme + dark class) ──────────
 
-type Theme = "dark" | "light";
+// ─── Jump button (platform-aware shortcut label) ──────────────────
 
-function readInitialTheme(): Theme {
-  if (typeof document === "undefined") {
-    return "dark";
+function detectPlatform(): string | undefined {
+  if (typeof navigator === "undefined") {
+    return;
   }
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light") {
-    return "light";
-  }
-  if (attr === "dark") {
-    return "dark";
-  }
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
+  const withUaData = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return withUaData.userAgentData?.platform || navigator.platform;
 }
 
-function applyTheme(theme: Theme) {
-  const root = document.documentElement;
-  root.setAttribute("data-theme", theme);
-  root.classList.toggle("dark", theme === "dark");
-}
+const subscribeNever = () => () => undefined;
+const clientJumpLabel = () => jumpShortcutLabel(detectPlatform());
+const serverJumpLabel = () => DEFAULT_JUMP_SHORTCUT_LABEL;
 
-function useThemeToggle(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>("dark");
-
-  // Sync from the SSR-rendered <html> on mount (avoids a hydration flip).
-  useEffect(() => {
-    setTheme(readInitialTheme());
-  }, []);
-
-  const toggle = useCallback(() => {
-    setTheme((cur) => {
-      const next: Theme = cur === "dark" ? "light" : "dark";
-      applyTheme(next);
-      return next;
-    });
-  }, []);
-
-  return [theme, toggle];
+function JumpButton({ onJump }: { onJump: () => void }) {
+  // The server snapshot is the neutral label, so hydration matches the server
+  // markup; the client snapshot switches to the Command glyph on Apple platforms.
+  const label = useSyncExternalStore(subscribeNever, clientJumpLabel, serverJumpLabel);
+  return (
+    <button className="rr-chrome-btn" onClick={onJump} type="button">
+      Jump <span className="rr-kbd">{label}</span>
+    </button>
+  );
 }
 
 // ─── RecordroomShell ──────────────────────────────────────────────
@@ -303,7 +281,7 @@ export function RecordroomShell({
 }: RecordroomShellProps) {
   const identity = DATACONNECT_PRODUCT_IDENTITY;
   const resolvedBuild = build ?? `${identity.name} ${identity.version}`;
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
@@ -341,9 +319,7 @@ export function RecordroomShell({
                 provider, not this shell. Pages that mount a command palette
                 pass onJump so the button and the shortcut open the same one. */}
               {onJump ? (
-                <button className="rr-chrome-btn" onClick={onJump} type="button">
-                  Jump <span className="rr-kbd">⌘K</span>
-                </button>
+                <JumpButton onJump={onJump} />
               ) : null}
               <IcDialogTrigger className="rr-chrome-btn rr-menu-btn" type="button">
                 Menu

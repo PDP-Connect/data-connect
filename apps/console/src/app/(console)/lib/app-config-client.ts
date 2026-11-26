@@ -5,7 +5,7 @@
  * Server-only client for the owner app-config route family
  * (`/v1/owner/app-config`, reference-implementation/server/routes/
  * owner-app-config.ts). Same owner-bearer pattern as
- * `remote-access-client.ts`/`connector-install-client.ts`: mint the owner
+ * `connector-install-client.ts`: mint the owner
  * token from the dashboard's session cookie, then call the resource server
  * directly.
  */

@@ -89,7 +89,7 @@
       "kind": "http_health",
       "id": "health-probe",
       "description": "The reference server must answer. Verified live 2026-08-21: /owner/login returns 200 unauthenticated and is server-rendered, so a 200 proves the app is serving, not just that a port is open. (/_ref/health and /health both 404; /_ref/fleet-health returns 401 unauthenticated, so neither is usable as an unauthenticated probe.)",
-      "url": "https://pdpp.vivid.fish/owner/login",
+      "url": "/owner/login",
       "expectStatus": 200,
       "blocking": true
     },

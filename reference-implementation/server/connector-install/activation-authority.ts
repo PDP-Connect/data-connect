@@ -4,9 +4,13 @@
 /** The database pointer is the only authority for an OCI connector's runnable bytes. */
 import { createHash, randomUUID } from "node:crypto";
 import {
-  assertRetainedSourceIdentity,
   type ConnectorManifestStorageContext,
+  assertLegacyOwnershipPostgres,
+  assertLegacyOwnershipSqlite,
+  moveSourceIdentityPostgres,
+  moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
+  retainedSourceIdentityChange,
   retainedStorageContext,
 } from "../auth.ts";
 import { getDb } from "../db.ts";
@@ -124,11 +128,14 @@ function parseRow(row: ActivationRow | undefined): ConnectorActivation | null {
 export async function publishConnectorActivation(record: ConnectorInstallRecord): Promise<ConnectorActivation> {
   const attemptId = randomUUID();
   const id = record.connectorId;
+  // Only a record that carries the digest of the sidecar its installer core verified supplies a verified declaration.
+  const identityOptions = { verifiedSourceDeclaration: record.sourceDeclarationSha256 !== undefined };
   // The retained declaration is read under the same lock that persists the new manifest, so the
   // identity choice cannot race a concurrent registration.
   let values: ActivationValues;
   if (isPostgresStorageBackend()) {
     values = await withPostgresTransaction(async (client) => {
+      await assertLegacyOwnershipPostgres(client, id, record.manifest);
       await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_activation'), hashtext($1))", [id]);
       const registry = await client.query<{ manifest: unknown }>(
         "SELECT manifest FROM connectors WHERE connector_id=$1 FOR UPDATE",
@@ -136,7 +143,10 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
       );
       const previous = registry.rows[0]?.manifest;
       const derived = activationValues(record, retainedStorageContext(previous));
-      assertRetainedSourceIdentity(id, previous, derived.canonicalManifestJson);
+      const identityMove = retainedSourceIdentityChange(id, previous, derived.canonicalManifestJson, identityOptions);
+      if (identityMove) {
+        await moveSourceIdentityPostgres(client, identityMove);
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)
          ON CONFLICT(connector_id) DO UPDATE SET manifest = EXCLUDED.manifest
@@ -179,9 +189,18 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
     values = getDb()
       .transaction(() => {
         const db = getDb();
+        assertLegacyOwnershipSqlite(id, record.manifest);
         const old = db.prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get<{ manifest: string }>(id);
         const derived = activationValues(record, retainedStorageContext(old?.manifest));
-        assertRetainedSourceIdentity(id, old?.manifest, derived.canonicalManifestJson);
+        const identityMove = retainedSourceIdentityChange(
+          id,
+          old?.manifest,
+          derived.canonicalManifestJson,
+          identityOptions
+        );
+        if (identityMove) {
+          moveSourceIdentitySqlite(identityMove);
+        }
         if (!old || canonicalJson(JSON.parse(old.manifest)) !== derived.canonicalManifestJson) {
           db.prepare(
             "INSERT INTO connectors(connector_id,manifest) VALUES(?,?) ON CONFLICT(connector_id) DO UPDATE SET manifest=excluded.manifest"

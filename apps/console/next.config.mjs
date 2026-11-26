@@ -42,6 +42,7 @@ const nextConfig = {
   // dev`, which is where this app's screenshots and manual review happen.
   devIndicators: false,
   output: "standalone",
+  serverExternalPackages: ["@tnunamak/gozar"],
   // sharp ships prebuilt binaries for both glibc and musl per platform, and Next's
   // file tracer can't tell at build time which one the deploy target needs, so it
   // conservatively includes both. The console never runs on musl, but linuxdeploy
@@ -56,6 +57,9 @@ const nextConfig = {
     "/llms-full.txt": ["../../docs/agent-skills/**/*.md"],
     "/llms.txt": ["../../docs/agent-skills/**/*.md"],
     "/well-known/skills/**": ["../../docs/agent-skills/**/*.md"],
+    // The icon resolver reads this offline corpus by path at runtime rather
+    // than importing each SVG, so Next's standalone tracer cannot infer it.
+    "/*": ["../../node_modules/simple-icons/data/simple-icons.json", "../../node_modules/simple-icons/icons/*.svg"],
   },
   outputFileTracingRoot: path.join(__dirname, "../.."),
   reactStrictMode: true,
@@ -75,6 +79,10 @@ const nextConfig = {
   // biome-ignore lint/suspicious/useAwait: Preserves an established runtime, ordering, async, accessibility, or source-shape contract; covered by package verification.
   async rewrites() {
     return [
+      {
+        destination: "/api/reachability/service-proof",
+        source: "/.well-known/gozar/service",
+      },
       {
         destination: "/well-known/oauth-authorization-server",
         source: "/.well-known/oauth-authorization-server",

@@ -2,25 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * SUPPORTED_LOCAL_COLLECTOR_CONNECTORS (connection-setup-plan.ts) is now
- * generated from the shipped manifests' `capabilities.proven.local_collector`
- * declaration (server/generated/connector-registry.generated.ts, produced by
- * scripts/generate-connector-registry.ts). A parity test comparing that
- * generated value against a second manifest scan written in this file would
- * be comparing two manifest-derived readings against each other — a
- * near-tautology now that
- * test/connector-registry-manifest-derivation.test.ts's drift oracle already
- * byte-compares the tracked generated file against a live run of the real
- * generator (a strictly stronger check: it exercises the actual generator
- * code, not a second hand-written re-derivation). That parity test was
- * dropped here for that reason.
- *
- * This file keeps only the check that is NOT redundant with the drift
- * oracle: a live, independent proof that the invariant the generator and
- * connector-manifest-validation.ts's validateProvenModalityConsistency both
- * assume — a connector cannot claim `capabilities.proven.local_collector`
- * without also declaring `runtime_requirements.bindings.filesystem` — holds
- * for every manifest actually shipped today, not just synthetic fixtures.
+ * The planner reads `capabilities.proven.local_collector` from each manifest;
+ * no connector key list stands behind it. This file checks that the invariant
+ * connector-manifest-validation.ts's validateProvenModalityConsistency
+ * assumes — a connector cannot claim
+ * `capabilities.proven.local_collector` without also declaring
+ * `runtime_requirements.bindings.filesystem` — holds for every manifest
+ * actually shipped today, not just synthetic fixtures.
  * (`capabilities.proven.local_collector` is a proof gate, not a
  * classification: `runtime_requirements.bindings.filesystem` alone marks 13
  * shipped manifests as filesystem-backed, but only a subset has a proven,

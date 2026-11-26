@@ -42,9 +42,9 @@ function read(rel: string) {
 
 
 test("schema summaries share the bounded grouped stream reader", () => {
-  const src = read("reference-implementation/server/index.ts");
-  const start = src.indexOf("async function listSubjectVisibleStreamSummaries(");
-  const end = src.indexOf("async function buildConnectorSchemaItem(", start);
+  const src = read("reference-implementation/server/connector-schema-builder.ts");
+  const start = src.indexOf("export async function listSubjectVisibleStreamSummaries(");
+  const end = src.indexOf("export async function buildConnectorSchemaItem(", start);
   assert.ok(start >= 0 && end > start);
   const summaryReader = src.slice(start, end);
   assert.ok(summaryReader.includes("await listStreamsByResolvedBindings("));

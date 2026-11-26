@@ -3,9 +3,15 @@
 //! A small, policy-driven supervisor for local sidecar processes.
 //!
 //! The `process_group` option is implemented with POSIX process groups on Unix.
-//! Windows has no POSIX process-group equivalent in `std::process`; until a
-//! Job Object implementation is added, graceful group signalling is not
-//! available there and the option stops only the leader after escalation.
+//! Windows has no POSIX process-group equivalent in `std::process`; graceful
+//! group signalling is not available there and the option stops only the
+//! leader after escalation. (Each Windows sidecar is in a kill-on-close Job
+//! Object, but only to clean up after the app dies, not for graceful stops.)
+//!
+//! A sidecar must not outlive the app. Every sidecar gets a stdin pipe the
+//! supervisor never writes to (`PARENT_LIFELINE_ENV`): the kernel closes it
+//! when the app dies, on every OS, and the sidecar exits on EOF. Linux
+//! (`PR_SET_PDEATHSIG`) and Windows (Job Object) add a kernel-level kill.
 
 use serde::Serialize;
 #[cfg(unix)]
@@ -16,7 +22,7 @@ use std::fmt;
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::OnceLock;
@@ -24,6 +30,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+#[cfg(windows)]
+mod windows_job;
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 pub(crate) const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -83,6 +92,13 @@ fn set_case_insensitive_environment_value(
     }
     environment.insert(key, value);
 }
+
+/// The group grace used by both Desktop Quit and Unix shutdown.
+pub(crate) const DESKTOP_PROCESS_GROUP_GRACE: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const PARENT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(8);
+#[cfg(unix)]
+static PARENT_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
 type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
@@ -310,13 +326,40 @@ fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
         thread::Builder::new()
             .name("sidecar-signal-handler".to_string())
             .spawn(move || {
-                if let Some(signal) = signals.forever().next() {
-                    if let Ok(process_groups) = signal_registry.lock() {
-                        for process_group in process_groups.iter().copied() {
-                            signal_process_group_direct(process_group as u32, libc::SIGKILL);
-                        }
-                    }
+                let first_signal = signals.forever().next();
+                if let Some(signal) = first_signal {
+                    // We are on the iterator's thread, not in a signal callback.
+                    PARENT_SHUTTING_DOWN.store(true, Ordering::Release);
+                    let started = Instant::now();
+                    let mut term_sent = false;
+                    drive_parent_shutdown(
+                        signal == libc::SIGHUP,
+                        || started.elapsed(),
+                        || signals.pending().next().is_some(),
+                        thread::sleep,
+                        |force| {
+                            // A group ID must remain registered while signalled.
+                            let groups = match signal_registry.try_lock() {
+                                Ok(groups) => groups,
+                                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                                Err(std::sync::TryLockError::WouldBlock) => return false,
+                            };
+                            if groups.is_empty() {
+                                return true;
+                            }
+                            if force || !term_sent {
+                                let child_signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+                                for group in groups.iter().copied() {
+                                    signal_process_group_direct(group as u32, child_signal);
+                                }
+                                term_sent = true;
+                            }
+                            force
+                        },
+                    );
                     let _ = signal_hook::low_level::emulate_default_handler(signal);
+                    // A competing handler must not keep the parent alive.
+                    unsafe { libc::_exit(128 + signal) }
                 }
             })
             .map_err(|error| format!("failed to start shutdown signal handler: {error}"))?;
@@ -329,6 +372,89 @@ fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
 }
 
 #[cfg(unix)]
+fn drive_parent_shutdown(
+    mut force: bool,
+    mut elapsed: impl FnMut() -> Duration,
+    mut repeated_signal: impl FnMut() -> bool,
+    mut sleep: impl FnMut(Duration),
+    mut step: impl FnMut(bool) -> bool,
+) {
+    const POLL: Duration = Duration::from_millis(20);
+    loop {
+        let now = elapsed();
+        force |= repeated_signal() || now >= DESKTOP_PROCESS_GROUP_GRACE;
+        if step(force) || now >= PARENT_SHUTDOWN_BUDGET {
+            break;
+        }
+        let deadline = if force {
+            PARENT_SHUTDOWN_BUDGET
+        } else {
+            DESKTOP_PROCESS_GROUP_GRACE
+        };
+        sleep(POLL.min(deadline.saturating_sub(now)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod parent_shutdown_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn simulate(
+        drain_at: Option<Duration>,
+        repeat_at: Option<Duration>,
+        locked: bool,
+    ) -> (Duration, Vec<(Duration, bool)>) {
+        let now = Cell::new(Duration::ZERO);
+        let mut actions = Vec::new();
+        drive_parent_shutdown(
+            false,
+            || now.get(),
+            || repeat_at.is_some_and(|at| now.get() >= at),
+            |delta| now.set(now.get() + delta),
+            |force| {
+                if locked {
+                    return false;
+                }
+                if drain_at.is_some_and(|at| now.get() >= at) {
+                    return true;
+                }
+                if actions.is_empty() || force {
+                    actions.push((now.get(), force));
+                }
+                force
+            },
+        );
+        (now.get(), actions)
+    }
+
+    #[test]
+    fn parent_signal_gives_a_draining_group_term_only() {
+        let drained = Duration::from_millis(40);
+        assert_eq!(
+            simulate(Some(drained), None, false),
+            (drained, vec![(Duration::ZERO, false)])
+        );
+    }
+
+    #[test]
+    fn parent_signal_escalates_after_grace_or_a_second_signal() {
+        let repeat = Duration::from_millis(40);
+        for (second, expected) in [(None, DESKTOP_PROCESS_GROUP_GRACE), (Some(repeat), repeat)] {
+            assert_eq!(
+                simulate(None, second, false),
+                (expected, vec![(Duration::ZERO, false), (expected, true)])
+            );
+        }
+    }
+
+    #[test]
+    fn parent_signal_stops_waiting_if_the_registry_stays_busy() {
+        assert_eq!(simulate(None, None, true), (PARENT_SHUTDOWN_BUDGET, vec![]));
+    }
+}
+
+#[cfg(unix)]
 fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
     let registry = PROCESS_GROUP_REGISTRY
         .get()
@@ -336,10 +462,13 @@ fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
         .ok_or_else(|| {
             SupervisorError::Message("parent signal handlers are not installed".to_string())
         })?;
-    registry
+    let mut groups = registry
         .lock()
-        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?
-        .insert(process_group as libc::pid_t);
+        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?;
+    if PARENT_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return Err(SupervisorError::Message("parent is shutting down".to_string()));
+    }
+    groups.insert(process_group as libc::pid_t);
     Ok(())
 }
 
@@ -855,7 +984,21 @@ struct SpawnedProcess {
     output: CapturedOutput,
     #[cfg(unix)]
     process_group_id: Option<libc::pid_t>,
+    /// Write end of the child's stdin pipe. Never written to; held open for as
+    /// long as this value lives, so the child sees EOF only when the app
+    /// closes it or dies. See `PARENT_LIFELINE_ENV`.
+    #[allow(dead_code)] // held for its Drop, not read
+    lifeline: Option<ChildStdin>,
+    /// Windows: the kernel kills the child's process tree when this closes.
+    #[cfg(windows)]
+    #[allow(dead_code)] // held for its Drop, not read
+    job: Option<windows_job::KillOnCloseJob>,
 }
+
+/// Set on every sidecar to arm its parent lifeline: the sidecar exits when its
+/// stdin reaches EOF. `scripts/parent-lifeline.mjs` reads it.
+const PARENT_LIFELINE_ENV: &str = "PDPP_PARENT_LIFELINE";
+const PARENT_LIFELINE_STDIN: &str = "stdin";
 
 const OUTPUT_TAIL_LINES: usize = 40;
 const OUTPUT_LINE_MAX_BYTES: usize = 8 * 1024;
@@ -1219,7 +1362,10 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .stdin(Stdio::null())
+        // A pipe the supervisor never writes to: the lifeline. The kernel
+        // closes our end when the app dies however it dies, which is the one
+        // parent-death signal that exists on every OS.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = &spec.cwd {
@@ -1242,6 +1388,9 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     for (key, value) in &environment {
         command.env(key, render_port(value, port));
     }
+    // After the loop, so it is set whether or not the environment is cleared
+    // and cannot be overridden by the spec.
+    command.env(PARENT_LIFELINE_ENV, PARENT_LIFELINE_STDIN);
 
     #[cfg(unix)]
     if spec.process_group {
@@ -1277,7 +1426,15 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     // uses. macOS/Windows still get the userspace SIGTERM/SIGINT/SIGHUP
     // handler (install_parent_signal_handlers) and the process-group
     // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
-    // specific kernel-level SIGKILL/OOM/segfault backstop.
+    // specific kernel-level SIGKILL/OOM/segfault backstop. They rely on the
+    // stdin lifeline above instead (PARENT_LIFELINE_ENV), which the sidecar
+    // acts on while it is running.
+    //
+    // PDEATHSIG covers only this direct child: the kernel clears it across
+    // fork(), so a grandchild is not covered. A program that forks the real
+    // server (a launcher script) must exec it instead, as the staged
+    // `launch.mjs` files do on Linux (`process.execve`); otherwise the
+    // grandchild outlives a SIGKILLed app and keeps its port.
     #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1311,11 +1468,28 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     }
 
     let mut child = command.spawn()?;
+    let lifeline = child.stdin.take();
+    // Kernel backstop on Windows: the sidecar and everything it starts die
+    // when the app's last handle to the job closes. A failure here leaves the
+    // stdin lifeline as the only cover, so log it and keep going.
+    #[cfg(windows)]
+    let job = match windows_job::KillOnCloseJob::adopt(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            log::warn!(
+                "[{}] could not place the sidecar in a kill-on-close job: {error}",
+                spec.label
+            );
+            None
+        }
+    };
     #[cfg(unix)]
     let process_group_id = if spec.process_group {
         match register_process_group(child.id()) {
             Ok(()) => Some(child.id() as libc::pid_t),
             Err(error) => {
+                // This unregistered group still has its original unreaped leader.
+                signal_process_group_direct(child.id(), libc::SIGKILL);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error);
@@ -1413,6 +1587,9 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         output,
         #[cfg(unix)]
         process_group_id,
+        lifeline,
+        #[cfg(windows)]
+        job,
     })
 }
 
@@ -1894,17 +2071,70 @@ fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
             Err(error) if proc_stat_error_skips_entry(&error) => continue,
             Err(error) => return Err(error),
         };
-        // comm may contain spaces, parentheses, or non-UTF8 bytes.
-        let end = stat.iter().rposition(|byte| *byte == b')')
-            .ok_or_else(|| io::Error::other("malformed proc stat"))?;
-        let pgrp = stat[end + 1..].split(|byte| byte.is_ascii_whitespace())
-            .filter(|field| !field.is_empty()).nth(2)
-            .and_then(|field| std::str::from_utf8(field).ok())
-            .and_then(|field| field.parse::<u32>().ok())
-            .ok_or_else(|| io::Error::other("missing proc stat pgrp"))?;
-        if pgrp == process_group { return Ok(true); }
+        if proc_stat_pgrp_is_member(parse_proc_stat_pgrp(&stat)?, process_group) {
+            return Ok(true);
+        }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat_pgrp(stat: &[u8]) -> io::Result<i32> {
+    // comm may contain spaces, parentheses, or non-UTF8 bytes.
+    let end = stat.iter().rposition(|byte| *byte == b')')
+        .ok_or_else(|| io::Error::other("malformed proc stat"))?;
+    stat[end + 1..].split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty()).nth(2)
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .and_then(|field| field.parse::<i32>().ok())
+        .ok_or_else(|| io::Error::other("missing proc stat pgrp"))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_pgrp_is_member(pgrp: i32, process_group: u32) -> bool {
+    // The kernel can emit -1 when the task is exiting.
+    pgrp > 0 && pgrp as u32 == process_group
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod proc_stat_pgrp_tests {
+    use super::{parse_proc_stat_pgrp, proc_stat_pgrp_is_member};
+
+    #[test]
+    fn parses_signed_pgrps_and_matches_only_positive_owned_groups() {
+        let cases: &[(&[u8], i32, bool)] = &[
+            (b"4242 (node) X 0 -1\n", -1, false),
+            (b"4242 (node) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 78\n", 78, false),
+            (b"4242 (node) Z 1 77\n", 77, true),
+            (b"4242 (a)b)) S 1 77\n", 77, true),
+            (b"4242 (\xff) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 0\n", 0, false),
+        ];
+        for &(stat, expected_pgrp, expected_member) in cases {
+            let pgrp = parse_proc_stat_pgrp(stat).unwrap();
+            assert_eq!(pgrp, expected_pgrp);
+            assert_eq!(proc_stat_pgrp_is_member(pgrp, 77), expected_member);
+        }
+        let mut full = b"4242 (node) X 0 -1".to_vec();
+        full.extend_from_slice(&b" 0".repeat(47));
+        full.push(b'\n');
+        let pgrp = parse_proc_stat_pgrp(&full).unwrap();
+        assert_eq!(pgrp, -1);
+        assert!(!proc_stat_pgrp_is_member(pgrp, 77));
+    }
+
+    #[test]
+    fn malformed_records_remain_errors() {
+        let cases: &[&[u8]] = &[
+            b"4242 (node) S 1\n",
+            b"4242 (node) S 1 invalid\n",
+            b"4242 (node S 1 77\n",
+        ];
+        for &stat in cases {
+            assert!(parse_proc_stat_pgrp(stat).is_err());
+        }
+    }
 }
 
 // A vanished process is not a member. An entry we may not read (hidepid,
@@ -2179,6 +2409,101 @@ mod tests {
         assert!(message.contains("exit_code=Some(23)"), "{message}");
         assert!(message.contains("fast stdout tail"), "{message}");
         assert!(message.contains("fast stderr tail"), "{message}");
+    }
+
+    /// Waits for `child` to exit, killing it after `timeout` so a failing test
+    /// does not leak a process.
+    fn exited_within(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The parent lifeline: the child gets a stdin pipe the supervisor holds
+    /// open, plus the flag that arms the child. Dropping the pipe is what the
+    /// kernel does to it when the app dies.
+    #[test]
+    fn closing_the_lifeline_ends_a_child_that_watches_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('lifeline=' + process.env.PDPP_PARENT_LIFELINE + '\n');
+process.stdin.on('end', () => process.exit(0));
+process.stdin.resume();"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "lifeline=".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        // The spec cannot turn the lifeline off.
+        spec.env.vars.insert(
+            OsString::from(PARENT_LIFELINE_ENV),
+            OsString::from("disabled"),
+        );
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+
+        let first_line = spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert_eq!(first_line, "lifeline=stdin");
+
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the lifeline"
+        );
+
+        drop(spawned.lifeline.take());
+        let status = exited_within(&mut spawned.child, Duration::from_secs(10))
+            .expect("child must exit once the lifeline closes");
+        assert!(status.success(), "{status:?}");
+    }
+
+    /// Windows kernel backstop: the job kills a child that ignores stdin.
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_job_kills_a_child_that_ignores_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('up\n'); setInterval(() => {}, 1000);"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "up".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+        spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert!(spawned.job.is_some(), "child was not placed in a job");
+
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the job"
+        );
+
+        drop(spawned.job.take());
+        assert!(
+            exited_within(&mut spawned.child, Duration::from_secs(10)).is_some(),
+            "child must be killed when the job handle closes"
+        );
     }
 
     #[test]
@@ -3232,7 +3557,7 @@ setInterval(() => {}, 1000);
         let object = environment.as_object().unwrap();
         for key in object.keys() {
             assert!(
-                ["ALLOWED", "PORT", "REPORT_PATH"].contains(&key.as_str())
+                ["ALLOWED", "PORT", "REPORT_PATH", PARENT_LIFELINE_ENV].contains(&key.as_str())
                     || is_windows_runtime_environment_key(OsStr::new(key)),
                 "unexpected child environment variable: {key}"
             );

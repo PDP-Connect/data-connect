@@ -161,6 +161,36 @@ test("falsifiability: the scanner detects a synthetic hardcoded-identity violati
   }
 });
 
+test("falsifiability: the rename-migration exemption covers one file and one rule", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const file = join(dir, "synthetic-migration.ts");
+    const source = [
+      'export const OLD_IDS = { gmail: "slack" };',
+      'export const URL_FOR_OLD_IDS_IDS = "https://oauth2.example-provider.com/token";',
+      "",
+    ].join("\n");
+    writeFileSync(file, source);
+    const keys = new Set(["gmail", "slack"]);
+    const elsewhere = scanFile(file, "reference-implementation/server/not-the-rename-migration.ts", keys, repoRoot);
+    assert.ok(
+      elsewhere.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "an identity literal in any other file must still be flagged"
+    );
+    const exempt = scanFile(file, "reference-implementation/server/connector-id-rename-migration.ts", keys, repoRoot);
+    assert.ok(
+      !exempt.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "the rename migration is exempt from the identity-literal rule"
+    );
+    assert.ok(
+      exempt.some((v) => v.rule === "hardcoded-provider-endpoint-url"),
+      "the exemption must not silence any other rule in that file"
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("falsifiability: the scanner detects a synthetic provider-endpoint violation", () => {
   const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
   try {
@@ -737,6 +767,53 @@ test("falsifiability (P1 fix): parameter-indirection through a same-file helper 
   );
 });
 
+test("a Buffer read decoded before JSON.parse is a data load", () => {
+  withSyntheticProductionFile(
+    "synthetic-decoded-buffer-read.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      "function readProfile(entry: { path: string }) {",
+      "  const bytes = readFileSync(entry.path);",
+      '  return JSON.parse(bytes.toString("utf8"));',
+      "}",
+      "export { readProfile };",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        "decoding the bytes before parsing must not hide the load from the scan"
+      );
+    }
+  );
+});
+
+test("a descriptor read outside the reviewed sites is a data load", () => {
+  withSyntheticProductionFile(
+    "synthetic-descriptor-read.ts",
+    [
+      'import { closeSync, openSync, readSync } from "node:fs";',
+      "function readProfile(entry: { path: string }) {",
+      "  const buffer = Buffer.alloc(4096);",
+      '  const fd = openSync(entry.path, "r");',
+      "  const length = readSync(fd, buffer, 0, buffer.length, null);",
+      "  closeSync(fd);",
+      '  return JSON.parse(buffer.subarray(0, length).toString("utf8"));',
+      "}",
+      "export { readProfile };",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        "reading through a descriptor must not hide the load from the scan"
+      );
+    }
+  );
+});
+
 test("falsifiability: parameter-indirection does NOT cross-resolve two unrelated same-named parameters in different functions", () => {
   withSyntheticProductionFile(
     "synthetic-helper-indirection-ambiguity-load.ts",
@@ -946,8 +1023,8 @@ test("falsifiability (rule 5 counterweight): a helper missing the reject-on-esca
 // --- Rule (5) widened fix: import.meta.resolve("@pdpp/polyfill-connectors/manifests")
 // as a recognized manifest-root anchor --------------------------------------
 //
-// runtime/controller.ts:1374 and scripts/generate-connector-registry.ts:104
-// both resolve the installed @pdpp/polyfill-connectors package's manifests
+// runtime/controller.ts:1374
+// resolves the installed @pdpp/polyfill-connectors package's manifests
 // directory via `dirname(fileURLToPath(import.meta.resolve(
 // "@pdpp/polyfill-connectors/manifests")))` -- that package is a pinned
 // tarball dependency (node_modules/@pdpp/polyfill-connectors), not a

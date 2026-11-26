@@ -98,7 +98,6 @@ writeFileSync(file, `${JSON.stringify(lock, null, 2)}\n`);
 NODE
 npm install --package-lock-only --ignore-scripts
 npm ci --allow-git=all
-npm --prefix reference-implementation run generate:connector-registry
 
 node --input-type=module - "$pin_sha" <<'NODE'
 import { appendFileSync } from "node:fs";

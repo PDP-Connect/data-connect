@@ -33,7 +33,6 @@ import {
   fileSha256,
   gitSha,
   readNpmVersion,
-  readPnpmVersion,
   SELF_PACKAGE_NAME,
   SIBLING_CANDIDATE_SCHEMA,
   type SiblingCandidateEvidence,
@@ -47,11 +46,9 @@ const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf
 // SELF_PACKAGE_NAME constant; this receipt is written under the manifest's
 // own name, so a mismatch here would silently fail that lookup.
 assert.equal(manifest.name, SELF_PACKAGE_NAME, "package.json name must match artifact-receipt.ts's SELF_PACKAGE_NAME");
-const pnpmExecutable = join(dirname(process.execPath), "pnpm");
 const EMITTED_MCP_RESOLUTION = /node_modules\/@pdpp\/mcp-server\/dist\//;
 const MCP_BIN_HELP = /pdpp-mcp-server/;
 const PACKAGE_RELATIVE_PATH = /^\.\//;
-const LOWER_BOUNDED_VERSION_RANGE = /^>=([0-9]+\.[0-9]+\.[0-9]+)/;
 const siblingSources: Record<string, string> = {
   "@pdpp/cli": resolve(packageRoot, "..", "cli"),
   "@pdpp/read-core": resolve(packageRoot, "..", "read-core"),
@@ -176,12 +173,11 @@ function assertCandidateTarball(tarball: string, expectedName: string): void {
   assert.equal(tarballManifest(tarball).name, expectedName, `candidate tarball must be ${expectedName}`);
 }
 
-function candidateVersion(packageName: string): string {
-  const range = manifest.dependencies?.[packageName];
-  const match = LOWER_BOUNDED_VERSION_RANGE.exec(range ?? "");
-  assert.ok(match, `MCP dependency ${packageName} must declare a lower-bounded release version`);
-  return (match as RegExpExecArray)[1] as string;
-}
+// The release publishes the three packages at one lockstep version and pins
+// the MCP server's @pdpp/* dependencies to it exactly. The candidates mirror
+// that: every candidate carries this version, and the staged MCP manifest
+// depends on exactly this version of each sibling.
+const CANDIDATE_VERSION = manifest.version;
 
 function packPackage(root: string, outputRoot: string): string {
   const [packed] = parseNpmPackOutput(
@@ -213,7 +209,7 @@ function buildCurrentSiblingCandidate({
   mkdirSync(releasePackRoot, { recursive: true });
 
   assertCleanWorkingTree(sourceRoot);
-  run(pnpmExecutable, ["build"], { cwd: sourceRoot });
+  run("npm", ["run", "build"], { cwd: sourceRoot });
   const sourceIdentity = currentSourceIdentity(sourceRoot);
   const sourceTarball = packPackage(sourceRoot, sourcePackRoot);
   assertCandidateTarball(sourceTarball, packageName);
@@ -222,7 +218,7 @@ function buildCurrentSiblingCandidate({
   const stagedPackageRoot = join(stagedRoot, "package");
   const stagedManifestPath = join(stagedPackageRoot, "package.json");
   const stagedManifest = JSON.parse(readFileSync(stagedManifestPath, "utf8")) as { version: string };
-  stagedManifest.version = candidateVersion(packageName);
+  stagedManifest.version = CANDIDATE_VERSION;
   writeFileSync(stagedManifestPath, `${JSON.stringify(stagedManifest, null, 2)}\n`);
   const tarball = packPackage(stagedPackageRoot, releasePackRoot);
   assertCandidateTarball(tarball, packageName);
@@ -253,6 +249,31 @@ function assertCurrentSiblingCandidate(candidate: SiblingCandidate, packageName:
     sourceTarballSha256: fileSha256(candidate.sourceTarball),
     tarballPath: candidate.tarball,
   });
+}
+
+/**
+ * Repack the MCP tarball with its in-repository `@pdpp/*` dependency ranges
+ * replaced by exactly CANDIDATE_VERSION, as the release pins them.
+ */
+function stagePinnedMcpTarball(sourceTarball: string, stageRoot: string): string {
+  const extractRoot = join(stageRoot, "extract");
+  const packOutputRoot = join(stageRoot, "pack");
+  mkdirSync(extractRoot, { recursive: true });
+  mkdirSync(packOutputRoot, { recursive: true });
+  run("tar", ["-xzf", sourceTarball, "-C", extractRoot]);
+  const stagedPackageRoot = join(extractRoot, "package");
+  const stagedManifestPath = join(stagedPackageRoot, "package.json");
+  const stagedManifest = JSON.parse(readFileSync(stagedManifestPath, "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  for (const sibling of Object.keys(siblingSources)) {
+    assert.ok(stagedManifest.dependencies?.[sibling], `MCP manifest must depend on ${sibling}`);
+    stagedManifest.dependencies[sibling] = CANDIDATE_VERSION;
+  }
+  writeFileSync(stagedManifestPath, `${JSON.stringify(stagedManifest, null, 2)}\n`);
+  const tarball = packPackage(stagedPackageRoot, packOutputRoot);
+  assertCandidateTarball(tarball, manifest.name);
+  return tarball;
 }
 
 function importAllExports(consumerRoot: string): string[] {
@@ -299,17 +320,13 @@ export async function main(): Promise<void> {
       run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", packRoot], { cwd: packageRoot })
     );
     assert.ok(pack, "npm pack produced no entries for the MCP package");
-    const mcpTarball = join(packRoot, pack.filename);
+    const mcpTarball = stagePinnedMcpTarball(join(packRoot, pack.filename), join(tempRoot, "mcp-staged"));
     const cliTarball = cliCandidate.tarball;
     const readCoreTarball = readCoreCandidate.tarball;
 
     run("npm", ["init", "--yes"], { cwd: consumerRoot });
     const consumerName = (JSON.parse(readFileSync(join(consumerRoot, "package.json"), "utf8")) as { name: string })
       .name;
-    writeFileSync(
-      join(consumerRoot, "pnpm-workspace.yaml"),
-      `packages:\n  - .\noverrides:\n  "@pdpp/cli": "file:${cliTarball}"\n  "@pdpp/read-core": "file:${readCoreTarball}"\n`
-    );
     assertCleanWorkingTree(packageRoot);
     assertCurrentSiblingCandidate(cliCandidate, "@pdpp/cli");
     assertCurrentSiblingCandidate(readCoreCandidate, "@pdpp/read-core");
@@ -330,23 +347,22 @@ export async function main(): Promise<void> {
     // tarball, but its manifest declares ordinary external dependencies
     // (`@modelcontextprotocol/sdk`, `zod`) that this isolated consumer has
     // never fetched before, so that second step is intentionally online.
-    // `overrides` in pnpm-workspace.yaml keeps forcing the two `@pdpp/*`
-    // packages to the exact candidate tarballs during the online step too;
+    // The staged MCP manifest depends on exactly CANDIDATE_VERSION of each
+    // sibling, and the first step already installed exactly that version, so
+    // npm keeps those nodes instead of fetching from the registry.
     // assertInstalledPackageMatchesTarball below re-verifies by content hash
-    // after both steps, independent of which step or network mode installed
-    // them, so an override that silently failed to apply would still fail
-    // the hash check.
-    run(pnpmExecutable, ["add", "--ignore-scripts", "--offline", cliTarball, readCoreTarball], {
+    // after both steps, so a registry substitution would still fail.
+    run("npm", ["install", "--ignore-scripts", "--offline", cliTarball, readCoreTarball], {
       cwd: consumerRoot,
       env: installEnv,
     });
-    run(pnpmExecutable, ["add", "--ignore-scripts", mcpTarball], {
+    run("npm", ["install", "--ignore-scripts", mcpTarball], {
       cwd: consumerRoot,
       env: installEnv,
     });
-    const [dependencyTree] = JSON.parse(
-      run(pnpmExecutable, ["list", "--json", "--depth", "-1"], { cwd: consumerRoot, env: installEnv })
-    ) as Array<{ name?: string }>;
+    const dependencyTree = JSON.parse(
+      run("npm", ["ls", "--json", "--depth=0"], { cwd: consumerRoot, env: installEnv })
+    ) as { name?: string };
     assert.equal(dependencyTree?.name, consumerName, "consumer dependency tree is missing");
 
     const installedRoots: Record<string, string> = {
@@ -393,7 +409,7 @@ export async function main(): Promise<void> {
       ...currentReceiptIdentity(packageRoot, mcpTarball),
       workingTreeClean: true,
       node: { version: process.version, execPath: process.execPath },
-      packageManager: { npmVersion: readNpmVersion(), pnpmVersion: readPnpmVersion(pnpmExecutable) },
+      packageManager: { npmVersion: readNpmVersion() },
       tarballFiles: pack.files.map((file) => file.path).sort((a, b) => a.localeCompare(b)),
       exports: Object.entries(resolved).map(([specifier, path]) => ({ specifier, path })),
       bins: [{ name: "pdpp-mcp-server", command: "npx --no-install pdpp-mcp-server --help", output: help.trim() }],
@@ -410,14 +426,14 @@ export async function main(): Promise<void> {
       },
       dependencyTree,
       commands: [
-        "pnpm build",
-        "pnpm build @pdpp/cli and @pdpp/read-core from the clean reviewed tree",
-        "npm pack --json --ignore-scripts each sibling, then stamp an isolated release-candidate version",
+        "npm run build",
+        "npm run build @pdpp/cli and @pdpp/read-core from the clean reviewed tree",
+        "npm pack --json --ignore-scripts each sibling, then stamp the lockstep candidate version",
         "repack and bind each sibling candidate to current base, head, source closure, source tarball, and candidate tarball",
-        "pnpm add --ignore-scripts --offline <fresh exact @pdpp/cli and @pdpp/read-core candidate tarballs>",
-        "pnpm add --ignore-scripts <mcp-server candidate tarball> (online: resolves ordinary external registry dependencies)",
-        "pnpm overrides pin @pdpp/cli and @pdpp/read-core to the verified candidate tarballs",
-        "pnpm list --json --depth -1",
+        "npm pack the MCP server, then pin its @pdpp/cli and @pdpp/read-core dependencies to the candidate version",
+        "npm install --ignore-scripts --offline <fresh exact @pdpp/cli and @pdpp/read-core candidate tarballs>",
+        "npm install --ignore-scripts <mcp-server candidate tarball> (online: resolves ordinary external registry dependencies)",
+        "npm ls --json --depth=0",
         "import every declared export",
         "npx --no-install pdpp-mcp-server --help",
         "MCP initialize + tools/call schema",

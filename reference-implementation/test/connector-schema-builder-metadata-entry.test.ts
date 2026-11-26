@@ -67,7 +67,7 @@ test("buildStreamMetadataEntry: passes through declared views/relationships/quer
     relationships: [{ cardinality: "one_to_many", name: "thread", stream: "threads" }],
     views: [{ name: "recent" }],
   };
-  const freshness = { as_of: "2026-03-01T00:00:00Z", state: "fresh" };
+  const freshness = { captured_at: "2026-03-01T00:00:00Z", status: "current" as const };
   const entry = buildStreamMetadataEntry({ freshness, manifestStream: stream });
 
   assert.deepEqual(entry.views, [{ name: "recent" }]);

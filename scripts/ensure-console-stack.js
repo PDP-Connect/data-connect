@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto"
 import {
   chmodSync,
+  copyFileSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -31,6 +32,7 @@ import {
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = dirname(ROOT)
+const PARENT_LIFELINE_SOURCE = join(ROOT, "parent-lifeline.mjs")
 const DEFAULT_PROFILE = "release"
 const STAGE_DIRECTORY = ["src-tauri", "target", "reference-stack", "console"]
 // Last segment of STAGE_DIRECTORY, reused to name this build's immutable
@@ -57,13 +59,11 @@ const SIMPLE_ICONS_PACKAGE = join("node_modules", "simple-icons")
 
 // The console bundles reference-implementation/server/polyfill-connectors-
 // runtime.ts, which requires optional @pdpp/polyfill-connectors subpaths at
-// run time. The bundle reads members of only these three: the conformance
-// roster (which connectors can add an account, which are scaffolds), static-
-// secret capture normalization, and the credential validation mode. All three
-// are leaf ESM files. The other subpaths stay unstaged and resolve to null,
-// which the runtime module treats as "package absent".
+// run time. The bundle reads members of only these two: static-secret capture
+// normalization and the credential probe. Both are leaf ESM files. The other
+// subpaths stay unstaged and resolve to null, which the runtime module treats
+// as "package absent".
 const CONSOLE_CONNECTOR_PACKAGE_MODULES = [
-  "src/connector-conformance-roster.js",
   "src/static-secret-credential-capture.js",
   "src/credential-probe.js",
 ]
@@ -260,7 +260,7 @@ function hashFile(filePath) {
   return `sha256:${createHash("sha256").update(readFileSync(filePath)).digest("hex")}`
 }
 
-function writeLauncher(stageDirectory, serverRelativePath) {
+export function writeLauncher(stageDirectory, serverRelativePath) {
   const launcher = `#!/usr/bin/env node
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -271,9 +271,30 @@ import { fileURLToPath } from "node:url"
 
 const stageDirectory = dirname(fileURLToPath(import.meta.url))
 const serverPath = resolve(stageDirectory, ${JSON.stringify(serverRelativePath)})
-const child = spawn(process.execPath, [serverPath], {
+const serverArgs = [
+  "--import",
+  new URL("./parent-lifeline.mjs", import.meta.url).href,
+  serverPath,
+]
+const serverEnv = { ...process.env, NODE_ENV: "production", PDPP_LAUNCHER_PID: String(process.pid) }
+
+// On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
+// the kernel does not carry that signal to a forked grandchild. Replace this
+// process with the server instead of forking it: the pid, the process group
+// and the armed signal all stay with the server. Without execve (older Node,
+// macOS, Windows) fall back to the forwarding parent below.
+if (process.platform === "linux" && typeof process.execve === "function") {
+  try {
+    process.chdir(dirname(serverPath))
+    process.execve(process.execPath, [process.execPath, ...serverArgs], serverEnv)
+  } catch (error) {
+    console.error("[console] execve failed, forking instead:", error)
+  }
+}
+
+const child = spawn(process.execPath, serverArgs, {
   cwd: dirname(serverPath),
-  env: { ...process.env, NODE_ENV: "production" },
+  env: serverEnv,
   stdio: "inherit",
 })
 
@@ -292,6 +313,7 @@ child.once("exit", (code, signal) => {
   const launcherPath = join(stageDirectory, "launch.mjs")
   writeFileSync(launcherPath, launcher, { mode: 0o755 })
   chmodSync(launcherPath, 0o755)
+  copyFileSync(PARENT_LIFELINE_SOURCE, join(stageDirectory, "parent-lifeline.mjs"))
 }
 
 function writeManifest(stageDirectory, profile, serverRelativePath) {
@@ -478,8 +500,8 @@ export function stageConsoleStack({
       `staged connector manifests directory is empty: ${stagedManifestsDirectory}`
     )
   }
-  // The same class of failure for the connector package's code: without the
-  // conformance roster the console refuses every new browser account.
+  // The same class of failure for the connector package's code: a module the
+  // bundle cannot resolve inside the stage silently turns credential checks off.
   try {
     assertStagedConsoleConnectors({
       stageRoot: targetDirectory,

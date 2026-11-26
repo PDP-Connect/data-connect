@@ -42,6 +42,7 @@ const TOP_LEVEL_REGEX_29 = /credential_capture field 'password' is a secret fiel
 // The unknown-version message is a fixed rule. It never echoes the manifest's own value.
 const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0$/;
 const PROFILE_VERSION_MESSAGE = "protocol_version must be one of 0.1.0, 0.2.0";
+const COVERAGE_STORES_CAPABILITY_PATTERN = /coverage_stores requires protocol_capabilities RUN_COVERAGE_V1/;
 const PROFILE_0_2_0_CAPABILITY_PATTERN = /protocol_capabilities DETAIL_COVERAGE_KEY_SETS require protocol_version 0\.2\.0/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
 
@@ -66,6 +67,7 @@ const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of kn
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 
 import {
   invalidConnectorManifest,
@@ -219,11 +221,11 @@ test("validateBlobRefSchemaDeclaration rejects non-object, missing props, wrong 
   assert.throws(() => validateBlobRefSchemaDeclaration(stream, noRequired, "invalid_request"), TOP_LEVEL_REGEX_5);
 });
 
-// Collection Profile Sections 3.1 and 3.4 at registration: 0.1.0 or 0.2.0,
-// known capability names, and a 0.2.0 capability only at 0.2.0. A manifest
-// without protocol_version is checked as 0.1.0. The stored-manifest read path
-// skips this check so a manifest already stored stays readable.
-test("validateConnectorManifest enforces the Collection Profile declaration at registration only", () => {
+// The runtime refuses 0.3.0 until it implements the whole profile. RUN_COVERAGE_V1
+// remains an elective extension over supported 0.1.0/0.2.0 bases, and any
+// coverage_stores declaration requires that capability. The stored-manifest
+// read path skips this registration check so existing rows stay readable.
+test("validateConnectorManifest refuses 0.3.0 until the whole profile is implemented", () => {
   const keySets = { protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
   assert.doesNotThrow(() =>
     validateConnectorManifest({ ...manifestWithStream(), ...keySets, protocol_version: "0.2.0" })
@@ -235,20 +237,43 @@ test("validateConnectorManifest enforces the Collection Profile declaration at r
     "an unknown version is rejected with the fixed rule, not an echo of the manifest value"
   );
   const rejected: [Record<string, unknown>, RegExp][] = [
-    [{ protocol_version: "0.3.0" }, PROFILE_VERSION_PATTERN],
+    [{ protocol_version: "0.4.0" }, PROFILE_VERSION_PATTERN],
+    [{ protocol_version: "0.3.0" }, /protocol_version must be one of 0\.1\.0, 0\.2\.0/],
     [{ ...keySets, protocol_version: "0.1.0" }, PROFILE_0_2_0_CAPABILITY_PATTERN],
     [keySets, PROFILE_0_2_0_CAPABILITY_PATTERN],
     [{ protocol_capabilities: ["FORGED"], protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
     [{ protocol_capabilities: null, protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
   ];
   for (const [fields, pattern] of rejected) {
-    const manifest = { ...manifestWithStream(), ...fields };
+    const manifest = {
+      ...manifestWithStream(),
+      ...fields,
+    };
     assert.throws(() => validateConnectorManifest(manifest), pattern, JSON.stringify(fields));
     assert.doesNotThrow(
       () => validateConnectorManifest(manifest, "connector_invalid", { skipCollectionProfileCheck: true }),
       JSON.stringify(fields)
     );
   }
+});
+
+test("validateConnectorManifest refuses coverage_stores without RUN_COVERAGE_V1 at registration", () => {
+  const manifest = {
+    ...manifestWithStream({ coverage_stores: ["messages"] }),
+    protocol_capabilities: [],
+    protocol_version: "0.2.0",
+  };
+  assert.throws(() => validateConnectorManifest(manifest), COVERAGE_STORES_CAPABILITY_PATTERN);
+});
+
+test("validateConnectorManifest accepts coverage_stores with RUN_COVERAGE_V1 on base profile 0.2.0", () => {
+  assert.doesNotThrow(() =>
+    validateConnectorManifest({
+      ...manifestWithStream({ coverage_stores: ["messages"] }),
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.2.0",
+    })
+  );
 });
 
 test("validateConnectorManifest accepts valid stream evidence declarations", () => {
@@ -827,4 +852,93 @@ test("validateConnectorManifest accepts a well-formed secret credential_capture 
 
 test("validateConnectorManifest accepts a manifest with no credential_capture at all", () => {
   assert.doesNotThrow(() => validateConnectorManifest(manifestWithStream({})));
+});
+
+// ─── connector_id / connector_key identity ────────────────────────────────
+//
+// The check holds no connector list: a registry-URL connector_id is valid when
+// its slug equals connector_key, whether or not this repository ships it.
+
+const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
+
+function manifestWithIdentity(identity: { connector_id?: string; connector_key?: string }) {
+  const { connector_key: _key, ...rest } = manifestWithStream();
+  return { ...rest, ...identity };
+}
+
+test("a registry-URL connector_id whose slug equals connector_key validates, shipped or not", () => {
+  for (const slug of ["gmail", "whatsapp-web", "acme-widgets"]) {
+    assert.doesNotThrow(() =>
+      validateConnectorManifest(
+        manifestWithIdentity({ connector_id: `${REGISTRY_URL_PREFIX}${slug}`, connector_key: slug })
+      )
+    );
+  }
+});
+
+test("a registry-URL connector_id whose slug differs from connector_key is refused, shipped or not", () => {
+  for (const slug of ["gmail", "acme-widgets"]) {
+    assert.throws(
+      () =>
+        validateConnectorManifest(
+          manifestWithIdentity({ connector_id: `${REGISTRY_URL_PREFIX}${slug}`, connector_key: "other-key" })
+        ),
+      /connector_key must match the canonical key for connector_id/
+    );
+  }
+});
+
+test("a bare connector_id that differs from connector_key is refused with the provenance hint", () => {
+  assert.throws(
+    () => validateConnectorManifest(manifestWithIdentity({ connector_id: "acme-widgets", connector_key: "other-key" })),
+    /connector_id must match connector_key; use manifest_uri/
+  );
+  assert.doesNotThrow(() =>
+    validateConnectorManifest(manifestWithIdentity({ connector_id: "acme-widgets", connector_key: "acme-widgets" }))
+  );
+});
+
+test("a connector_id on another host that differs from connector_key is refused with the provenance hint", () => {
+  assert.throws(
+    () =>
+      validateConnectorManifest(
+        manifestWithIdentity({ connector_id: "https://example.test/connectors/acme", connector_key: "acme" })
+      ),
+    /connector_id must match connector_key; use manifest_uri/
+  );
+});
+
+test("registry and bare id forms derive one key", () => {
+  for (const connectorId of ["gmail", `${REGISTRY_URL_PREFIX}gmail`, `${REGISTRY_URL_PREFIX}gmail/`]) {
+    for (const identity of [{ connector_id: connectorId }, { connector_id: connectorId, connector_key: "gmail" }]) {
+      const manifest = manifestWithIdentity(identity);
+      assert.doesNotThrow(() => validateConnectorManifest(manifest), connectorId);
+      assert.equal(canonicalConnectorKeyFromManifest(manifest), "gmail", connectorId);
+    }
+  }
+});
+
+test("a non-registry URL connector_id without connector_key still validates and keeps its spelling", () => {
+  const url = "https://test.pdpp.dev/connectors/acme";
+  const manifest = manifestWithIdentity({ connector_id: url });
+  assert.doesNotThrow(() => validateConnectorManifest(manifest));
+  assert.equal(canonicalConnectorKeyFromManifest(manifest), url);
+});
+
+test("id-only malformed identities are refused even without a connector_key comparison", () => {
+  for (const connectorId of ["bad key", ".", "..", "-gmail", "Gmail",
+    `${REGISTRY_URL_PREFIX}gmail/extra`, `${REGISTRY_URL_PREFIX}gmail?x=1`,
+    `${REGISTRY_URL_PREFIX}gmail#fragment`, `${REGISTRY_URL_PREFIX}gmail%2Fextra`]) {
+    assert.throws(
+      () => validateConnectorManifest(manifestWithIdentity({ connector_id: connectorId })),
+      /connector_id must resolve to a valid connector key/,
+      connectorId
+    );
+  }
+  for (const connectorId of ["", "   ", null, 42]) {
+    assert.throws(
+      () => validateConnectorManifest({ ...manifestWithStream(), connector_id: connectorId }),
+      /connector_id must resolve to a valid connector key/
+    );
+  }
 });

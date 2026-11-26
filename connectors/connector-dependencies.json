@@ -15,9 +15,9 @@
     "wholefoods-playwright": "1.0.0",
     "youtube-playwright": "1.0.0",
     "claude-export-playwright": "2.0.1",
-    "apple-health-pdpp": "0.1.0",
-    "chatgpt-pdpp": "0.1.0",
+    "apple-health-pdpp": "0.1.17",
+    "chatgpt-pdpp": "0.2.5",
     "github-pdpp": "0.5.0",
-    "ynab-pdpp": "0.3.0"
+    "ynab-pdpp": "0.3.26"
   }
 }

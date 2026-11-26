@@ -11,7 +11,13 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { formatSourceOutboxState } from "../lib/connection-evidence.ts";
-import { isBrowserBoundConnector, isSupportedLocalCollectorConnector } from "../lib/connection-modality.ts";
+import { loadBrowserBoundVerdict } from "../lib/load-browser-connect-support.ts";
+import { loadLocalCollectorTemplates } from "../lib/load-local-collector-support.ts";
+import {
+  type LocalCollectorTemplate,
+  localCollectorEnrollmentKeys,
+  resolveLocalCollectorEnrollmentKey,
+} from "../lib/local-collector-support.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import {
   type DeviceExporter,
@@ -50,21 +56,17 @@ export default async function DeviceExportersPage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   // The Sources "Add source" catalog deep-links here only for packaged local
-  // collectors (`?connector=claude_code` / `codex`). Browser-bound
+  // collectors (`?connector=claude-code` / `codex`). Browser-bound
   // connectors are deliberately not prefilled here: their old monorepo proof
   // command is not an owner-usable setup path.
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
   const connectorParam = resolvedSearchParams?.connector;
   const requestedConnector = Array.isArray(connectorParam) ? connectorParam[0] : connectorParam;
-  const defaultConnectorId = isSupportedLocalCollectorConnector(requestedConnector) ? requestedConnector : undefined;
-  // A deep-link to an unsupported *browser-bound* connector is an intentful
-  // request this page cannot generate commands for yet. Detect that case via the
-  // shared modality classifier (no scattered key checks) and surface an honest
-  // notice that names the connector and points at the owner-run runbook — never a
-  // faked enroll flow.
-  const browserBoundRequest =
-    !defaultConnectorId && isBrowserBoundConnector(requestedConnector) ? (requestedConnector as string) : undefined;
-
+  // The server's connector templates say which connectors can enroll a local
+  // collector; the console holds no key list of its own.
+  const collectorTemplates = (await loadLocalCollectorTemplates()) ?? [];
+  const collectorConnectorIds = localCollectorEnrollmentKeys(collectorTemplates);
+  const defaultConnectorId = resolveLocalCollectorEnrollmentKey(collectorTemplates, requestedConnector) ?? undefined;
   // When the owner arrives here from the "Add source" picker (a validated
   // `?connector=` deep-link), frame the page as finishing the connector they
   // chose — a "Sources / Add <Connector>" breadcrumb — instead of the bare
@@ -76,12 +78,19 @@ export default async function DeviceExportersPage({
     : undefined;
 
   try {
-    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests] = await Promise.all([
-      listDeviceExporterDiagnostics(),
-      listDeviceExporterSourceInstances(),
-      getReferencePublicOrigin(),
-      listConnectorManifests().catch(() => []),
-    ]);
+    // A deep-link to an unsupported *browser-bound* connector is an intentful
+    // request this page cannot generate commands for yet. Only the server's
+    // verdict that the connector is browser-bound shows the notice; without a
+    // verdict the page shows no notice and keeps its diagnostics.
+    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests, requestIsBrowserBound] =
+      await Promise.all([
+        listDeviceExporterDiagnostics(),
+        listDeviceExporterSourceInstances(),
+        getReferencePublicOrigin(),
+        listConnectorManifests().catch(() => []),
+        !defaultConnectorId && requestedConnector ? loadBrowserBoundVerdict(requestedConnector) : null,
+      ]);
+    const browserBoundRequest = requestIsBrowserBound === true ? requestedConnector : undefined;
     const connectorIcons = Object.fromEntries(
       connectorManifests.flatMap((manifest) => [
         [manifest.connector_id, manifest.icon] as const,
@@ -110,7 +119,11 @@ export default async function DeviceExportersPage({
         ) : null}
 
         <Section>
-          <EnrollmentForm defaultConnectorId={defaultConnectorId} referenceBaseUrl={referenceBaseUrl} />
+          <EnrollmentForm
+            collectorConnectorIds={collectorConnectorIds}
+            defaultConnectorId={defaultConnectorId}
+            referenceBaseUrl={referenceBaseUrl}
+          />
         </Section>
 
         <Section
@@ -125,7 +138,13 @@ export default async function DeviceExportersPage({
           ) : (
             <DataList ariaLabel="Local device exporters">
               {devices.map((device) => (
-                <DeviceRow connectorIcons={connectorIcons} device={device} key={device.device_id} referenceBaseUrl={referenceBaseUrl} />
+                <DeviceRow
+                  collectorTemplates={collectorTemplates}
+                  connectorIcons={connectorIcons}
+                  device={device}
+                  key={device.device_id}
+                  referenceBaseUrl={referenceBaseUrl}
+                />
               ))}
             </DataList>
           )}
@@ -156,7 +175,7 @@ function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connecto
       surface="human"
       title={
         <span className="inline-flex items-center gap-2">
-          <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
+          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
           Browser setup not available yet
         </span>
       }
@@ -173,10 +192,12 @@ function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connecto
 }
 
 function DeviceRow({
+  collectorTemplates,
   connectorIcons,
   device,
   referenceBaseUrl,
 }: {
+  collectorTemplates: readonly LocalCollectorTemplate[];
   connectorIcons: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   device: DeviceExporter;
   referenceBaseUrl: string;
@@ -192,7 +213,7 @@ function DeviceRow({
   // a different binding name.
   const reenrollSource =
     device.status === "revoked" || heartbeat === "stale" || heartbeat === "never"
-      ? device.source_instances.find((s) => isSupportedLocalCollectorConnector(s.connector_id))
+      ? device.source_instances.find((s) => resolveLocalCollectorEnrollmentKey(collectorTemplates, s.connector_id) !== null)
       : null;
 
   return (
@@ -308,7 +329,7 @@ function SourceInstanceCard({
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="pdpp-body truncate font-medium text-foreground">
-            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcon} name={sourceLabel(source)} />
+            <ConnectorMark spacing="after" connectorId={source.connector_id} icon={connectorIcon} name={sourceLabel(source)} />
             {sourceLabel(source)}
           </h3>
           <p className="pdpp-caption truncate text-muted-foreground">

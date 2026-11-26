@@ -890,15 +890,17 @@ test("config parser matches canonical connector URLs and short runtime ids", () 
   assert.equal(unrelatedUrl.managedConnectors.has("chatgpt"), false);
   assert.equal(unrelatedUrl.staticProfileKey, "https://registry.pdpp.dev/not-connectors/chatgpt/");
 
-  const unknownFirstPartyUrl = parseNekoBrowserSurfaceLeaseConfig({
+  // A registry URL for a connector this server has never heard of still maps to
+  // its slug: the server keeps no connector list.
+  const unlistedConnectorUrl = parseNekoBrowserSurfaceLeaseConfig({
     PDPP_NEKO_BASE_URL: "http://neko:8080",
     PDPP_NEKO_CDP_HTTP_URL: "http://neko:9222",
     PDPP_NEKO_MANAGED_CONNECTORS: "https://registry.pdpp.dev/connectors/not-real",
     PDPP_NEKO_SURFACE_CAP: "1",
   });
 
-  assert.equal(unknownFirstPartyUrl.managedConnectors.has("not-real"), false);
-  assert.equal(unknownFirstPartyUrl.staticProfileKey, "https://registry.pdpp.dev/connectors/not-real");
+  assert.equal(unlistedConnectorUrl.managedConnectors.has("not-real"), true);
+  assert.equal(unlistedConnectorUrl.staticProfileKey, "not-real");
 });
 
 test("runtime config parser preserves static default and exposes lease config", () => {

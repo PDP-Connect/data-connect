@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH } from "../operations/ref-connectors-list/pagination.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
@@ -46,7 +47,7 @@ interface RetainedCountRouteItem {
 
 interface RouteEnvelope {
   readonly data?: readonly RetainedCountRouteItem[];
-  readonly error?: { code?: string; message?: string };
+  readonly error?: { code?: string; message?: string; param?: string };
   readonly has_more?: boolean;
   readonly next_cursor?: string | null;
   readonly object?: string;
@@ -168,8 +169,12 @@ async function seedInstance(options: {
     );
 }
 
-async function getEnvelope(asUrl: string, query: string): Promise<{ status: number; body: RouteEnvelope }> {
-  const response = await fetch(`${asUrl}/_ref/connectors?${query}`);
+async function getEnvelope(
+  asUrl: string,
+  query: string,
+  headers?: Record<string, string>
+): Promise<{ status: number; body: RouteEnvelope }> {
+  const response = await fetch(`${asUrl}/_ref/connectors?${query}`, headers ? { headers } : {});
   const body = (await response.json()) as RouteEnvelope;
   return { body, status: response.status };
 }
@@ -253,8 +258,134 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
   );
 }
 
+/** Same serializer as the console client (`lib/ref-client.ts`): URLSearchParams, one repeated `connector_id` per id. */
+function clientQuery(ids: readonly string[], limit: number): string {
+  const params = new URLSearchParams();
+  for (const id of ids) {
+    params.append("connector_id", id);
+  }
+  params.set("limit", String(limit));
+  params.set("profile", "retained_count_summary");
+  return params.toString();
+}
+
+/** Legal alternate encoding: every character of every `connector_id` name and value sent as %HH. */
+function allPercentEncoded(text: string): string {
+  return [...text].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`).join("");
+}
+
+function encodedKeyQuery(ids: readonly string[], limit: number): string {
+  const key = allPercentEncoded("connector_id");
+  return `${ids.map((id) => `${key}=${allPercentEncoded(id)}`).join("&")}&limit=${limit}&profile=retained_count_summary`;
+}
+
+/**
+ * A request that issues a cursor must either walk to its last page or be
+ * refused on page 1. It must never hand out a cursor whose continuation
+ * exceeds Node's header limit (HTTP 431) and strands the later rows. The size
+ * is varied three ways that the decoded ids do not show: URLSearchParams
+ * escapes `~!'()` to three bytes each, parameter names can be percent-encoded,
+ * and headers (here a cookie) count against the same limit.
+ */
+async function assertScopedContinuation(asUrl: string): Promise<void> {
+  await seedConnector(CONNECTOR_A);
+  await seedConnector(CONNECTOR_B);
+  const expected = ["cin_walk_a1", "cin_walk_a2", "cin_walk_b1"];
+  await seedInstance({ connectorId: CONNECTOR_A, connectorInstanceId: expected[0] as string, index: 0 });
+  await seedInstance({ connectorId: CONNECTOR_A, connectorInstanceId: expected[1] as string, index: 1 });
+  await seedInstance({ connectorId: CONNECTOR_B, connectorInstanceId: expected[2] as string, index: 2 });
+
+  const scope = (fillers: number, pad: string) => [
+    CONNECTOR_A,
+    CONNECTOR_B,
+    ...Array.from({ length: fillers }, (_, i) => `${pad}${i.toString(36)}`),
+  ];
+
+  async function walk(
+    query: string,
+    headers?: Record<string, string>,
+    cursorParam: (cursor: string) => string = (cursor) => `cursor=${encodeURIComponent(cursor)}`
+  ): Promise<{ failed: { status: number; body: RouteEnvelope } | null; seen: string[] }> {
+    const seen: string[] = [];
+    let page = await getEnvelope(asUrl, query, headers);
+    for (let pages = 0; pages < 10; pages += 1) {
+      if (page.status !== 200) {
+        return { failed: page, seen };
+      }
+      seen.push(...(page.body.data ?? []).map((row) => row.connection_id ?? ""));
+      if (!page.body.has_more) {
+        return { failed: null, seen };
+      }
+      const cursor = page.body.next_cursor as string;
+      assert.ok(cursor.length <= CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH, "cursor must not grow with the scope");
+      // biome-ignore lint/performance/noAwaitInLoops: each page needs the previous page's cursor.
+      page = await getEnvelope(asUrl, `${query}&${cursorParam(cursor)}`, headers);
+    }
+    throw new Error("scope did not terminate");
+  }
+
+  // 410 ordinary ids: the contract allows at most 100, so this is a typed 400 before page 1.
+  const tooMany = await getEnvelope(asUrl, clientQuery(scope(408, "f"), 1));
+  assert.equal(tooMany.status, 400, JSON.stringify(tooMany.body).slice(0, 200));
+  assert.equal(tooMany.body.error?.code, "invalid_request");
+  assert.equal(tooMany.body.error?.param, "connector_id", "a connector_id error names connector_id, not limit");
+
+  const variants: Array<{
+    cursorParam?: (cursor: string) => string;
+    name: string;
+    request: (step: number) => [string, Record<string, string>?];
+    steps: number[];
+  }> = [
+      {
+        name: "URLSearchParams, tilde-padded ids",
+        request: (tildes) => [clientQuery(scope(98, "~".repeat(tildes)), 1)],
+        steps: [0, 10, 30, 35, 36, 37, 38, 39, 40, 45, 50, 60],
+      },
+      {
+        cursorParam: (cursor) => `${allPercentEncoded("cursor")}=${allPercentEncoded(cursor)}`,
+        name: "percent-encoded names, values and cursor",
+        request: (tildes) => [encodedKeyQuery(scope(98, "~".repeat(tildes)), 1)],
+        steps: [0, 10, 20, 25, 26, 27, 28, 29, 30, 35, 40, 44],
+      },
+      {
+        name: "large cookie header",
+        request: (cookieBytes) => [clientQuery(scope(8, "f"), 1), { cookie: `pad=${"x".repeat(cookieBytes)}` }],
+        steps: [0, 2000, 8000, 12000, 12100, 12200, 12300, 12400, 12500, 14000, 15800, 16200, 17000],
+      },
+    ];
+  for (const variant of variants) {
+    let walked = 0;
+    let guardRefused = 0;
+    for (const step of variant.steps) {
+      const [query, headers] = variant.request(step);
+      // biome-ignore lint/performance/noAwaitInLoops: each size is a separate HTTP boundary assertion.
+      const result = await walk(query, headers, variant.cursorParam);
+      const label = `${variant.name} ${step}`;
+      if (result.failed === null) {
+        assert.deepEqual(result.seen.sort(), expected, `${label}: every matching row must be reachable`);
+        walked += 1;
+        continue;
+      }
+      assert.equal(result.seen.length, 0, `${label}: a refusal must come from page 1, before any cursor is issued`);
+      if (result.failed.status === 400) {
+        assert.match(result.failed.body.error?.message ?? "", /too large to page: its target takes \d+ bytes and its headers \d+ bytes/, label);
+        guardRefused += 1;
+      } else {
+        // Past Node's limit the transport itself refuses page 1; nothing is stranded.
+        assert.equal(result.failed.status, 431, label);
+      }
+    }
+    assert.ok(walked >= 2, `${variant.name}: sizes that fit must walk`);
+    assert.ok(guardRefused >= 1, `${variant.name}: a size that could not continue must be refused on page 1`);
+  }
+}
+
 test("SQLite mounted route: repeated connector_id SET scope + retained_count_summary profile", async () => {
   await withMountedRoute(null, assertRouteSetScopeParity);
+});
+
+test("SQLite mounted route: a scoped list that issues a cursor can always send it back", async () => {
+  await withMountedRoute(null, assertScopedContinuation);
 });
 
 if (POSTGRES_URL) {
@@ -267,6 +398,18 @@ if (POSTGRES_URL) {
         databaseName: `pdpp_route_retained_count_${process.pid}_${Date.now()}`,
       },
       async (url) => await withMountedRoute(url, assertRouteSetScopeParity)
+    );
+  });
+
+  test("PostgreSQL mounted route: a scoped list that issues a cursor can always send it back", async () => {
+    assert.ok(POSTGRES_URL, "PDPP_TEST_POSTGRES_URL must target the disposable PostgreSQL proof service");
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: `pdpp_route_scope_continue_${process.pid}_${Date.now()}`,
+      },
+      async (url) => await withMountedRoute(url, assertScopedContinuation)
     );
   });
 }

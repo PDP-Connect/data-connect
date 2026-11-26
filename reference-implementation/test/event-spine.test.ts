@@ -1665,7 +1665,7 @@ test("event spine", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams`, {
           headers: { Authorization: `Bearer ${approval.token}` },
         });
-        assert.equal(rejectedResp.status, 403);
+        assert.equal(rejectedResp.status, 401);
         const requestId = rejectedResp.headers.get("Request-Id");
         const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(requestId?.startsWith("req_"));
@@ -2421,7 +2421,7 @@ rl.on('line', (line) => {
         return;
       }
 
-      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(manifest.connector_id)}`) {
+      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id)}`) {
         let body = "";
         for await (const chunk of req) {
           body += chunk;
@@ -2529,7 +2529,7 @@ rl.on('line', (line) => {
 
       for (const event of [...advancedEvents, failedEvent]) {
         assert.equal(event.data.source?.kind, "connector");
-        assert.equal(event.data.source?.id, manifest.connector_id);
+        assert.equal(event.data.source?.id, canonicalConnectorKey(manifest.connector_id));
         assert.ok(
           !("connector_id" in event.data),
           `${event.event_type} should use source descriptors instead of raw connector_id`
@@ -3126,7 +3126,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.reason, "connector_reported_failed");
         assert.equal(failedEvent.data.connector_error_message, "Remote provider rate limit");
         assert.equal(failedEvent.data.connector_error_retryable, true);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
+        assert.equal(failedEvent.data.records_flushed, 1);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
       } finally {
         rmSync(tmpDir, { force: true, recursive: true });

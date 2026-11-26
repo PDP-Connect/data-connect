@@ -127,7 +127,9 @@ function flattenRow(row: unknown): Record<string, unknown> {
   }
   for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
     if (Array.isArray(value)) {
-      out[key] = value.join(", ");
+      out[key] = value
+        .map((entry) => (entry && typeof entry === "object" ? JSON.stringify(entry) : entry))
+        .join(", ");
     } else if (value && typeof value === "object") {
       out[key] = JSON.stringify(value);
     } else {

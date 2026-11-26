@@ -29,6 +29,10 @@ import {
   postgresQuery,
   withPostgresTransaction,
 } from "../postgres-storage.ts";
+import {
+  advancePostgresCollectionRevisionInTransaction,
+  advanceSqliteCollectionRevisionInTransaction,
+} from "./collection-revision-store.ts";
 
 export interface ConnectorStateScope {
   readonly connectorId: string;
@@ -79,6 +83,17 @@ interface SqliteTransactionHandle {
 
 export interface ConnectorStateDeltaTransactionHooks {
   readonly afterStateWrite?: (stream: string) => Promise<void> | void;
+  /** Collection revision the caller assigned to this transaction; stamped on every row it writes. */
+  readonly collectionRevision?: number | null;
+}
+
+/**
+ * A write that touches a connector stream is a state commit and gets a
+ * collection revision. The server's own `$`-prefixed rows (declared and
+ * measured scope) are not connector state and do not.
+ */
+function isCollectionStateCommit(stateByStream: ConnectorStateMap): boolean {
+  return Object.keys(stateByStream).some((stream) => !stream.startsWith("$"));
 }
 
 /** Write an owner-scoped state delta on an existing SQLite transaction. */
@@ -104,6 +119,7 @@ export function putSqliteConnectorStateDeltaInTransaction(
       JSON.stringify(cursor),
       updatedAt,
       generation,
+      hooks.collectionRevision ?? null,
     ]);
     const hookResult = hooks.afterStateWrite?.(stream);
     if (hookResult instanceof Promise) {
@@ -129,14 +145,23 @@ export async function putPostgresConnectorStateDeltaInTransaction(
   for (const [stream, cursor] of Object.entries(stateByStream)) {
     // biome-ignore lint/performance/noAwaitInLoops: writes and fault hooks must be ordered on one transaction client.
     await client.query(
-      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation)
-       VALUES($1, $2, $3, $4::jsonb, $5, $6)
+      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation, collection_revision)
+       VALUES($1, $2, $3, $4::jsonb, $5, $6, $7)
        ON CONFLICT (connector_instance_id, stream) DO UPDATE
          SET connector_id = EXCLUDED.connector_id,
              state_json = EXCLUDED.state_json,
              updated_at = EXCLUDED.updated_at,
-             manifest_generation = EXCLUDED.manifest_generation`,
-      [scope.connectorId, connectorInstanceId, stream, JSON.stringify(cursor), updatedAt, generation]
+             manifest_generation = EXCLUDED.manifest_generation,
+             collection_revision = EXCLUDED.collection_revision`,
+      [
+        scope.connectorId,
+        connectorInstanceId,
+        stream,
+        JSON.stringify(cursor),
+        updatedAt,
+        generation,
+        hooks.collectionRevision ?? null,
+      ]
     );
     await hooks.afterStateWrite?.(stream);
   }
@@ -208,9 +233,18 @@ export function createSqliteConnectorStateStore(): ConnectorStateStore {
     const grantId = scope.grantId ?? null;
     const now = new Date().toISOString();
     writeTransaction(() => {
-      const current = getDb()
-        .prepare("SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = ?")
-        .get(connectorInstanceId) as { manifest_generation?: number } | undefined;
+      const advanced =
+        !grantId && isCollectionStateCommit(stateByStream)
+          ? advanceSqliteCollectionRevisionInTransaction(getDb(), connectorInstanceId, {
+              at: now,
+              event: "state_commit",
+            })
+          : null;
+      const current = advanced
+        ? { manifest_generation: advanced.manifestGeneration }
+        : (getDb()
+            .prepare("SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = ?")
+            .get(connectorInstanceId) as { manifest_generation?: number } | undefined);
       // Legacy connector-keyed callers materialize state before their
       // compatibility connection exists. They are generation 0; a real
       // connection write always captures its durable current generation.
@@ -230,13 +264,22 @@ export function createSqliteConnectorStateStore(): ConnectorStateStore {
         }
         getDb()
           .prepare(
-            `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation)
-           VALUES(?, ?, ?, ?, ?, ?)
+            `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation, collection_revision)
+           VALUES(?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
              connector_id = excluded.connector_id, state_json = excluded.state_json,
-             updated_at = excluded.updated_at, manifest_generation = excluded.manifest_generation`
+             updated_at = excluded.updated_at, manifest_generation = excluded.manifest_generation,
+             collection_revision = excluded.collection_revision`
           )
-          .run(connectorId, connectorInstanceId, stream, JSON.stringify(cursor), now, generation);
+          .run(
+            connectorId,
+            connectorInstanceId,
+            stream,
+            JSON.stringify(cursor),
+            now,
+            generation,
+            advanced?.revision ?? null
+          );
       }
     });
 
@@ -304,10 +347,21 @@ export function createPostgresConnectorStateStore(): ConnectorStateStore {
       const grantId = scope.grantId ?? null;
       const now = new Date().toISOString();
       await withPostgresTransaction(async (client: PostgresTransactionClient) => {
-        const current = await client.query(
-          "SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = $1 FOR SHARE",
-          [connectorInstanceId]
-        );
+        // The revision UPDATE takes the connection row lock itself, so this
+        // transaction never upgrades a FOR SHARE lock to a write lock.
+        const advanced =
+          !grantId && isCollectionStateCommit(stateByStream)
+            ? await advancePostgresCollectionRevisionInTransaction(client, connectorInstanceId, {
+                at: now,
+                event: "state_commit",
+              })
+            : null;
+        const current = advanced
+          ? { rows: [{ manifest_generation: advanced.manifestGeneration }] }
+          : await client.query(
+              "SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = $1 FOR SHARE",
+              [connectorInstanceId]
+            );
         const generation = Number(current.rows[0]?.manifest_generation ?? 0);
         for (const [stream, cursor] of Object.entries(stateByStream)) {
           if (grantId) {
@@ -324,13 +378,22 @@ export function createPostgresConnectorStateStore(): ConnectorStateStore {
             continue;
           }
           await client.query(
-            `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation)
-           VALUES($1, $2, $3, $4::jsonb, $5, $6)
+            `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation, collection_revision)
+           VALUES($1, $2, $3, $4::jsonb, $5, $6, $7)
            ON CONFLICT (connector_instance_id, stream) DO UPDATE
              SET connector_id = EXCLUDED.connector_id,
                  state_json = EXCLUDED.state_json,
-                 updated_at = EXCLUDED.updated_at, manifest_generation = EXCLUDED.manifest_generation`,
-            [connectorId, connectorInstanceId, stream, JSON.stringify(cursor), now, generation]
+                 updated_at = EXCLUDED.updated_at, manifest_generation = EXCLUDED.manifest_generation,
+                 collection_revision = EXCLUDED.collection_revision`,
+            [
+              connectorId,
+              connectorInstanceId,
+              stream,
+              JSON.stringify(cursor),
+              now,
+              generation,
+              advanced?.revision ?? null,
+            ]
           );
         }
       });

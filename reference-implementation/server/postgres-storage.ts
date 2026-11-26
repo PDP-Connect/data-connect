@@ -16,6 +16,12 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { type Pool as PgPool, Pool, type PoolClient, type QueryResultRow } from "pg";
 import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  type ConnectorIdRenameResult,
+  describeConnectorIdRename,
+  migrateRenamedConnectorIdsPostgres,
+} from "./connector-id-rename-migration.ts";
+import {
   hashKey,
   makeConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey,
@@ -36,6 +42,7 @@ import {
   ensurePostgresMigrationLedger,
   LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID,
   readPostgresMigrationLedgerRow,
+  RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID,
 } from "./postgres-migration-ledger.ts";
 import {
   assertTestDatabase,
@@ -1071,6 +1078,7 @@ async function migratePostgresRecordRejectionBytePayload(client: PoolClient): Pr
 
 // Postgres SQLSTATE raised when a statement is cancelled by `statement_timeout`.
 const POSTGRES_STATEMENT_TIMEOUT_SQLSTATE = "57014";
+const POSTGRES_LOCK_TIMEOUT_SQLSTATE = "55P03";
 
 /**
  * Thrown by `postgresQueryBounded` when Postgres itself cancelled the
@@ -1416,6 +1424,30 @@ export async function withPostgresTransaction<T>(
       await client.query("ROLLBACK");
     } catch {
       // Rollback failure must not hide the original transaction error.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Run `fn` against one REPEATABLE READ, read-only snapshot on a single client.
+ * Every statement inside sees the same committed state, so a multi-statement
+ * read cannot straddle a concurrent writer's commit.
+ */
+export async function withPostgresSnapshotRead<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await fn(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original read error.
     }
     throw err;
   } finally {
@@ -1842,6 +1874,40 @@ async function bootstrapPostgresSchemaOnce({
       -- capabilities.record_identity.generation at reconcile time).
       ALTER TABLE connector_instances
         ADD COLUMN IF NOT EXISTS record_identity_generation BIGINT NOT NULL DEFAULT 0;
+      -- Per-connection collection revision: see ensureCollectionRevisionColumns
+      -- in db.ts and server/stores/collection-revision-store.ts.
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_event TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_run_id TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_at TEXT;
+      -- Run order: see ensureCollectionRevisionColumns in db.ts.
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_sequence_issued BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS storage_epoch BIGINT NOT NULL DEFAULT 1;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_sequence BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_event TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_run_id TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_revision BIGINT;
+      CREATE TABLE IF NOT EXISTS collection_run_sequences (
+        connector_instance_id TEXT NOT NULL
+          REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        run_sequence BIGINT NOT NULL,
+        storage_epoch BIGINT NOT NULL,
+        device_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        PRIMARY KEY (connector_instance_id, run_id)
+      );
 
       -- Existing Postgres deployments may have been bootstrapped before the
       -- static-secret draft lifecycle existed. Widen the status CHECK in place
@@ -2018,7 +2084,7 @@ async function bootstrapPostgresSchemaOnce({
         file_name TEXT NOT NULL,
         staging_path TEXT NOT NULL,
         final_path TEXT,
-        file_size_bytes INTEGER NOT NULL DEFAULT 0,
+        file_size_bytes BIGINT NOT NULL DEFAULT 0,
         artifact_sha256 TEXT,
         status TEXT NOT NULL CHECK (status IN ('uploaded', 'validating', 'staged', 'duplicate', 'failed')),
         acquisition_batch_id TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL,
@@ -2034,6 +2100,22 @@ async function bootstrapPostgresSchemaOnce({
       -- backfill to NULL, which the sweep also treats as orphaned.
       ALTER TABLE manual_upload_artifacts
         ADD COLUMN IF NOT EXISTS owner_epoch TEXT;
+      -- Widen legacy upload sizes without taking an ACCESS EXCLUSIVE lock
+      -- for this type change again on every boot after the upgrade.
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'manual_upload_artifacts'
+             AND column_name = 'file_size_bytes'
+             AND data_type = 'integer'
+        ) THEN
+          ALTER TABLE manual_upload_artifacts
+            ALTER COLUMN file_size_bytes TYPE BIGINT;
+        END IF;
+      END $$;
       CREATE INDEX IF NOT EXISTS idx_pg_manual_upload_artifacts_connection_created
         ON manual_upload_artifacts(connector_instance_id, created_at DESC);
 
@@ -3143,7 +3225,12 @@ async function bootstrapPostgresSchemaOnce({
         -- (server/stores/run-history-writer.ts) sets this false. Scheduler
         -- cadence/backoff readers filter on this column — see
         -- terminal-read-architecture-fable-0730.md R7.5.
-        scheduler_managed BOOLEAN NOT NULL DEFAULT false
+        scheduler_managed BOOLEAN NOT NULL DEFAULT false,
+        -- Run provenance: the actor_type of the run's terminal spine event, or
+        -- 'runtime' for a scheduler append. NULL = not known (still running,
+        -- predates the column and not yet backfilled, or spine events but no
+        -- terminal one). See the SQLite twin in db.ts.
+        actor_type TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_pg_run_history_connector_completed
@@ -3202,6 +3289,7 @@ async function bootstrapPostgresSchemaOnce({
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 
@@ -3296,6 +3384,14 @@ async function bootstrapPostgresSchemaOnce({
         ON spine_events(run_id, event_type, event_seq DESC)
         WHERE run_id IS NOT NULL
           AND event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned');
+      -- Run-history provenance backfill probes all five terminal types by
+      -- run_id and event_seq. The existing index above omits browser-surface
+      -- failures, so this narrower purpose-built index keeps that lookup off
+      -- the general run index too.
+      CREATE INDEX IF NOT EXISTS idx_pg_spine_events_run_actor_terminal
+        ON spine_events(run_id, event_seq DESC)
+        WHERE run_id IS NOT NULL
+          AND event_type IN ('run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned');
       -- Boot-epoch reconciliation idempotency: at most one run.abandoned
       -- per orphan run.started.event_id. The constraint name
       -- spine_run_abandoned_cause_unique is referenced by the runtime
@@ -3725,6 +3821,8 @@ async function bootstrapPostgresSchemaOnce({
         ADD COLUMN IF NOT EXISTS lease_expires_at TEXT;
       ALTER TABLE connector_state
         ADD COLUMN IF NOT EXISTS manifest_generation BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_state
+        ADD COLUMN IF NOT EXISTS collection_revision BIGINT;
       ALTER TABLE grant_connector_state
         ADD COLUMN IF NOT EXISTS manifest_generation BIGINT NOT NULL DEFAULT 0;
       -- Terminal-run events are the fold source for per-stream evidence; the
@@ -3938,6 +4036,7 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresSchedulerInstanceColumns(client);
     await migratePostgresRunHistoryRename(client);
     await migratePostgresRunHistoryCompletedAtNullable(client);
+    await migratePostgresRunHistorySchedulerManagedDefault(client, { log });
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);
     // Legacy blob tables gain connector_instance_id in the migration above.
@@ -3948,7 +4047,25 @@ async function bootstrapPostgresSchemaOnce({
     // A migration that reads a missing ledger table would have to guess its
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
+    await migratePostgresRenamedConnectorIds(client, { log });
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
+    await migratePostgresRunHistoryDeviceRunProvenance(client, { log });
+    // After the rename/rebuild migrations and the scheduler_managed repairs
+    // above (the rename/rebuild can swap run_history for the legacy table). A nullable ADD COLUMN with no default is
+    // catalog-only (no table rewrite), but it still needs a momentary
+    // ACCESS EXCLUSIVE lock, so it gets the same bounded lock wait as the
+    // scheduler_managed repairs, which run first so a contended run_history
+    // fails boot through their own typed, resumable error paths.
+    await client.query("BEGIN");
+    try {
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await client.query("SET LOCAL statement_timeout = '30s'");
+      await client.query("ALTER TABLE run_history ADD COLUMN IF NOT EXISTS actor_type TEXT");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
     await migratePostgresConnectorSummaryEvidenceRepairChunkPageSize(client);
@@ -5621,6 +5738,240 @@ async function migratePostgresRunHistoryCompletedAtNullable(client: PoolClient):
   await client.query("ALTER TABLE run_history ALTER COLUMN completed_at DROP NOT NULL");
 }
 
+// `run_history.scheduler_managed` is false for every row the spine-driven
+// writer inserts (fresh schemas default it to false). A database that
+// predates the column got it through ADD COLUMN ... DEFAULT true, and that
+// default outlived the backfill it was written for: the spine writer, which
+// leaves the column unset, then stamped true on every run it recorded. Set the
+// default to the fresh-schema value. Only the default changes; rows are
+// repaired by migratePostgresRunHistoryDeviceRunProvenance. The ALTER takes
+// an exclusive table lock, so it runs only when the default differs.
+const PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS = 2000;
+const PG_RUN_HISTORY_PROVENANCE_LEASE_MS = 15 * 60 * 1000;
+const PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS = 3;
+const PG_RUN_HISTORY_MIGRATION_RETRY_INITIAL_DELAY_MS = 100;
+const PG_RUN_HISTORY_MIGRATION_RETRY_MAX_DELAY_MS = 500;
+const PG_RUN_HISTORY_DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+const PG_RUN_HISTORY_DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
+const PG_RUN_HISTORY_PROVENANCE_LOCK_TIMEOUT_MS = 1_000;
+const PG_RUN_HISTORY_PROVENANCE_STATEMENT_TIMEOUT_MS = 30_000;
+
+interface PostgresMigrationTimeouts {
+  readonly lockTimeoutMs: number;
+  readonly statementTimeoutMs: number;
+}
+
+const PG_RUN_HISTORY_DEFAULT_TIMEOUTS: PostgresMigrationTimeouts = {
+  lockTimeoutMs: PG_RUN_HISTORY_DEFAULT_LOCK_TIMEOUT_MS,
+  statementTimeoutMs: PG_RUN_HISTORY_DEFAULT_STATEMENT_TIMEOUT_MS,
+};
+
+const PG_RUN_HISTORY_PROVENANCE_TIMEOUTS: PostgresMigrationTimeouts = {
+  lockTimeoutMs: PG_RUN_HISTORY_PROVENANCE_LOCK_TIMEOUT_MS,
+  statementTimeoutMs: PG_RUN_HISTORY_PROVENANCE_STATEMENT_TIMEOUT_MS,
+};
+
+async function withPostgresMigrationTimeouts<T>(
+  client: PoolClient,
+  timeouts: PostgresMigrationTimeouts,
+  operation: () => Promise<T>
+): Promise<T> {
+  await client.query("BEGIN");
+  try {
+    // SET LOCAL reverts on COMMIT and ROLLBACK, so bootstrap never changes the
+    // session settings of the pooled connection it releases afterwards.
+    await client.query(`SET LOCAL lock_timeout = ${timeouts.lockTimeoutMs}`);
+    await client.query(`SET LOCAL statement_timeout = ${timeouts.statementTimeoutMs}`);
+    const result = await operation();
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original migration error.
+    }
+    throw err;
+  }
+}
+
+function postgresMigrationTimeoutKind(err: unknown): "lock_timeout" | "statement_timeout" | null {
+  const code = (err as { code?: string } | null)?.code;
+  if (code === POSTGRES_LOCK_TIMEOUT_SQLSTATE) {
+    return "lock_timeout";
+  }
+  return code === POSTGRES_STATEMENT_TIMEOUT_SQLSTATE ? "statement_timeout" : null;
+}
+
+function postgresRunHistoryMigrationRetryDelayMs(attempt: number): number {
+  return Math.min(
+    PG_RUN_HISTORY_MIGRATION_RETRY_MAX_DELAY_MS,
+    PG_RUN_HISTORY_MIGRATION_RETRY_INITIAL_DELAY_MS * 2 ** (attempt - 1)
+  );
+}
+
+async function retryPostgresRunHistoryMigrationTimeout<T>(
+  operationName: string,
+  timeouts: PostgresMigrationTimeouts,
+  log: StorageLog,
+  operation: () => Promise<T>
+): Promise<T> {
+  for (let attempt = 1; attempt <= PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      const timeoutKind = postgresMigrationTimeoutKind(err);
+      if (!timeoutKind) {
+        throw err;
+      }
+      if (attempt === PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS) {
+        throw new Error(
+          `Postgres boot migration ${operationName} timed out after ${attempt} attempts (${timeoutKind}; lock_timeout=${timeouts.lockTimeoutMs}ms; statement_timeout=${timeouts.statementTimeoutMs}ms). The timed-out transaction rolled back and the last committed migration cursor remains intact. Bootstrap stopped to avoid serving with incomplete run_history ownership data. Resolve transactions blocking run_history or spine_events (inspect pg_stat_activity/pg_locks), then restart.`,
+          { cause: err }
+        );
+      }
+      const delayMs = postgresRunHistoryMigrationRetryDelayMs(attempt);
+      log(
+        `[PDPP] ${operationName}: ${timeoutKind} on attempt ${attempt}/${PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS}; retrying in ${delayMs}ms`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(`Postgres boot migration ${operationName} exhausted its retry loop unexpectedly.`);
+}
+
+async function migratePostgresRunHistorySchedulerManagedDefault(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<void> {
+  await retryPostgresRunHistoryMigrationTimeout(
+    "run_history scheduler_managed default repair",
+    PG_RUN_HISTORY_DEFAULT_TIMEOUTS,
+    log,
+    () =>
+      withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_DEFAULT_TIMEOUTS, async () => {
+        const result = await client.query<{ column_default: string | null }>(
+          `SELECT column_default FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'run_history' AND column_name = 'scheduler_managed'`
+        );
+        const columnDefault = result.rows[0]?.column_default;
+        if (columnDefault === undefined || columnDefault === "false") {
+          return;
+        }
+        await client.query("ALTER TABLE run_history ALTER COLUMN scheduler_managed SET DEFAULT false");
+      })
+  );
+}
+
+/**
+ * Correct `scheduler_managed` on the run_history rows a device wrote.
+ *
+ * A device terminal commit writes a spine event with `actor_type =
+ * 'local_device'`; the run-history writer turns it into the run_history row.
+ * While the column default was true (see the default migration above) every
+ * such row was stamped true, and the coverage projection read it as scheduler
+ * history. A row is set false when a `local_device` spine event names the same
+ * (run_id, connector_instance_id): run_id alone is not unique across
+ * connections.
+ *
+ * Server rows are not touched. A row for a server-side run was stamped true by
+ * the default whether or not the scheduler wrote it, and nothing stored
+ * separates a scheduler run from a manual one, so no correct value can be
+ * rebuilt for it.
+ *
+ * Pages run in id order, and each page is its own short transaction that also
+ * advances the ledger cursor, so a crash resumes at the last committed page.
+ * Each page probes the run_id/event_type terminal-event partial index once per
+ * still-true row; a COMPLETE receipt skips the whole pass on later boots.
+ */
+async function migratePostgresRunHistoryDeviceRunProvenance(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<{ changedRows: number; skippedByReceipt: boolean }> {
+  const claim = await claimPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+    leaseDurationMs: PG_RUN_HISTORY_PROVENANCE_LEASE_MS,
+    leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
+    nowIso: new Date().toISOString(),
+  });
+  if (!claim) {
+    return { changedRows: 0, skippedByReceipt: true };
+  }
+  let cursor = claim.cursor ?? "0";
+  let changedRows = 0;
+  for (;;) {
+    try {
+      // Pages are sequential by contract: each cursor is valid only after the previous page committed.
+      const page = await retryPostgresRunHistoryMigrationTimeout(
+        `run_history device-run provenance page after id ${cursor}`,
+        PG_RUN_HISTORY_PROVENANCE_TIMEOUTS,
+        log,
+        () =>
+          withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_PROVENANCE_TIMEOUTS, async () => {
+            const pageRows = await client.query<{ upper_id: string | null }>(
+              `SELECT MAX(id)::text AS upper_id
+                 FROM (SELECT id FROM run_history WHERE id > $1::bigint ORDER BY id LIMIT $2) page`,
+              [cursor, PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS]
+            );
+            const upperId = pageRows.rows[0]?.upper_id;
+            if (!upperId) {
+              return null;
+            }
+            const updated = await client.query(
+              `UPDATE run_history rh
+                  SET scheduler_managed = false
+                WHERE rh.id > $1::bigint AND rh.id <= $2::bigint
+                  AND rh.scheduler_managed
+                  AND rh.run_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM spine_events s
+                     WHERE s.run_id = rh.run_id
+                       AND s.event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned')
+                       AND s.actor_type = 'local_device'
+                       AND COALESCE(
+                         NULLIF(s.connector_instance_id, ''),
+                         NULLIF(s.data_json->>'connector_instance_id', ''),
+                         NULLIF(s.data_json->>'connection_id', '')
+                       ) = rh.connector_instance_id
+                  )`,
+              [cursor, upperId]
+            );
+            const batchChangedRows = updated.rowCount ?? 0;
+            await advancePostgresMigrationCursor(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+              changedRows: batchChangedRows,
+              cursor: upperId,
+              nowIso: new Date().toISOString(),
+            });
+            return { upperId, batchChangedRows };
+          })
+      );
+      if (!page) {
+        break;
+      }
+      cursor = page.upperId;
+      changedRows += page.batchChangedRows;
+    } catch (err) {
+      try {
+        await withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_PROVENANCE_TIMEOUTS, () =>
+          blockPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+            error: err instanceof Error ? err.message : String(err),
+            nowIso: new Date().toISOString(),
+          })
+        );
+      } catch {
+        // A ledger write failure must not hide the original migration error.
+      }
+      throw err;
+    }
+  }
+  await completePostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+    nowIso: new Date().toISOString(),
+  });
+  if (changedRows > 0) {
+    log(`[PDPP] run_history device-run provenance: ${changedRows} device runs set scheduler_managed = false`);
+  }
+  return { changedRows, skippedByReceipt: false };
+}
+
 // Widens `connector_maintenance_cursor.name`'s CHECK to admit the
 // `run_history_backfill` cursor row alongside the existing
 // `connector_summary_evidence` one. No-op once the constraint already
@@ -5672,6 +6023,7 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
   if (checks.every(Boolean)) {
+    await ensurePostgresChangesFloor(client);
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;
   }
@@ -5807,7 +6159,48 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
     throw err;
   }
+  await ensurePostgresChangesFloor(client);
   await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
+}
+
+// Oldest reconstructible changes_since watermark. A database that predates the
+// column may already have pruned or compacted history, which the floor cannot
+// tell, so seed each stream's floor at its head: every older token expires once
+// and the client re-syncs from `beginning`. The column and its seed commit in one
+// transaction, so an interrupted seed cannot leave a column that makes the next
+// startup skip it. Runs after the instance-namespace migration so both tables
+// carry connector_instance_id.
+async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
+  if (await hasPostgresColumn(client, "version_counter", "changes_floor")) {
+    return;
+  }
+  await client.query("BEGIN");
+  try {
+    // Serialize concurrent starters: the loser re-checks after the winner commits.
+    await client.query("LOCK TABLE version_counter IN ACCESS EXCLUSIVE MODE");
+    if (!(await hasPostgresColumn(client, "version_counter", "changes_floor"))) {
+      await client.query("ALTER TABLE version_counter ADD COLUMN changes_floor BIGINT NOT NULL DEFAULT 0");
+      await client.query(
+        `UPDATE version_counter
+            SET changes_floor = GREATEST(
+              max_version,
+              COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                         WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                           AND rc.stream = version_counter.stream), 0),
+              COALESCE((SELECT MAX(r.version) FROM records r
+                         WHERE r.connector_instance_id = version_counter.connector_instance_id
+                           AND r.stream = version_counter.stream), 0))`
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is what the caller needs.
+    }
+    throw err;
+  }
 }
 
 async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient): Promise<void> {
@@ -7202,6 +7595,44 @@ async function coalesceExactPostgresLocalDeviceBindingDuplicates(client: PoolCli
       }
       throw err;
     }
+  }
+}
+
+/**
+ * One-time rename of connector ids that older collectors spelled with
+ * underscores. The receipt makes later boots skip the scan; a failure leaves
+ * the receipt `blocked`, never `complete`, so the next boot tries again.
+ */
+async function migratePostgresRenamedConnectorIds(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<void> {
+  const claim = await claimPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
+    leaseDurationMs: PG_LOCAL_DEVICE_MIGRATION_LEASE_MS,
+    leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
+    nowIso: new Date().toISOString(),
+  });
+  if (!claim) {
+    return;
+  }
+  let result: ConnectorIdRenameResult;
+  try {
+    result = await migrateRenamedConnectorIdsPostgres(client);
+  } catch (err) {
+    try {
+      await blockPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
+        error: err instanceof Error ? err.message : String(err),
+        nowIso: new Date().toISOString(),
+      });
+    } catch {
+      // A ledger write failure must not hide the original migration error.
+    }
+    throw err;
+  }
+  await completePostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, { nowIso: new Date().toISOString() });
+  const summary = describeConnectorIdRename(result);
+  if (summary) {
+    log(`[PDPP] ${summary}`);
   }
 }
 

@@ -70,7 +70,7 @@ async function seedSilentDevice() {
     updatedAt: createdAt,
   });
   await store.upsertSourceInstance({
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     createdAt,
     deviceId: "dev_1",
     localBindingId: "dsi_1",

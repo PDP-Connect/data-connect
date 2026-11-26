@@ -95,6 +95,12 @@ export type VerdictLabel =
   | "Archived"
   | "Can't collect"
   | "Checking"
+  // A local connector reported every store collected and nothing in the run's
+  // delivery contradicts it, but the runtime holds no evidence about the source
+  // itself. Neutral: it is not "Healthy" (nothing independent verified it) and
+  // it is not trouble (nothing disagrees with it). Derived from the
+  // `coverage_reported_collected` reason, never from a tone.
+  | "Collected, not independently checked"
   | "Healthy"
   | "Import complete"
   | "Missing data"
@@ -404,6 +410,13 @@ export interface StreamRollup {
    * `retry_by_runtime`.
    */
   readonly recovery_action?: string | null;
+  /**
+   * Whether this stream's `unknown` coverage is the connector's own positive
+   * report, cross-checked against delivery accounting but not against the
+   * source. Read only to say whose claim it is; it never raises the stream's
+   * coverage above `unknown`. Optional; absent reads `false`.
+   */
+  readonly reported_collected?: boolean;
   readonly stream_id: string;
   /**
    * Whether this stream's ENTIRE terminal shortfall carries durable per-item
@@ -806,6 +819,9 @@ function labelForPill(
   if (tone === "green" && snapshot.axes.outbox === "active") {
     return "Syncing";
   }
+  if (tone === "grey" && coverageIsReportedOnly(snapshot)) {
+    return "Collected, not independently checked";
+  }
   // A one-time import that reached green did so BECAUSE freshness is
   // not_applicable, not because it proved current. "Healthy" implies an
   // ongoing collection loop this source will never run again; "Import
@@ -894,6 +910,37 @@ export function freshnessNotApplicable(snapshot: ConnectionHealthSnapshot): bool
       condition.type === "Fresh" &&
       condition.status === "not_applicable" &&
       condition.reason === CONNECTION_CONDITION_REASONS.FRESHNESS_NOT_APPLICABLE_COMPLETE
+  );
+}
+
+/**
+ * Whether the connection's coverage is the connector's own report and nothing
+ * more: the connector reported every store collected, nothing in the run's
+ * delivery contradicts it, and the runtime holds no evidence about the source
+ * itself. Read from the `SourceCoverageComplete` condition's reason, the one
+ * place that decision is made.
+ */
+export function coverageIsReportedOnly(snapshot: ConnectionHealthSnapshot): boolean {
+  return snapshot.conditions.some(
+    (condition) =>
+      condition.type === "SourceCoverageComplete" &&
+      condition.reason === CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED
+  );
+}
+
+/**
+ * Whether the headline `unknown` is only the neutral reported-collected state:
+ * the one `unknown` the runtime names and does not treat as missing evidence.
+ * Every consumer that asks "is there unknown evidence here?" must use this
+ * instead of reading `state` or `unknown_reasons` itself, so the fleet verdict,
+ * the console summary and the pill cannot disagree about it.
+ */
+export function unknownIsOnlyReportedCollected(snapshot: ConnectionHealthSnapshot): boolean {
+  return (
+    snapshot.state === "unknown" &&
+    snapshot.unknown_reasons.length > 0 &&
+    snapshot.unknown_reasons.every((reason) => reason === CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED) &&
+    coverageIsReportedOnly(snapshot)
   );
 }
 
@@ -1200,6 +1247,7 @@ function streamDisposition(
     gapRetryable: stream.gap_retryable,
     refresh,
     schedule,
+    reportedCollected: stream.reported_collected === true,
     unfillableAccounted: stream.unfillable_accounted === true,
   });
 }
@@ -1289,7 +1337,7 @@ const TERMINAL_COVERAGE_CTA = "Missing data needs review";
  * `source-actionability.ts` sets the row's `what` from
  * `verdict.forward_statement` and its `actionLabel` from this `cta`. The hard
  * branch used to return the forward statement's own sentence verbatim, so
- * `HEB - gezalsatx@yahoo.com` rendered "Some data from this source can't be
+ * `HEB - jane.doe@example.com` rendered "Some data from this source can't be
  * collected." above "Some data from this source can't be collected" — one
  * fact, printed twice, in the slot reserved for what happens next.
  *
@@ -2346,28 +2394,10 @@ function terminalForwardStatement(
  * same honest distinction `buildForwardStatement`'s `default` branch already
  * draws for the connection-level statement.
  *
- * A local-device connection whose collector build predates the
- * `coverage_diagnostics` evidence the server now requires (`SourceCoverageComplete`
- * condition, reason `coverage_unknown_stale_collector` —
- * `sourceCoverageCondition`, `connection-health.ts`) is a DIFFERENT claim from
- * "not measured yet": the generic copy implies the next scheduled run will
- * resolve it, but a stale collector binary will re-run and land in the exact
- * same unmeasured state forever. `design-notes/source-state-truth-2026-08-18.md`
- * named this exact gap — the specific, owner-actionable message the condition
- * already carries ("Update the local collector") was computed and then
- * discarded behind this generic sentence.
  */
 function unmeasuredCoverageForwardStatement(snapshot: ConnectionHealthSnapshot): string {
   if (freshnessNotApplicable(snapshot)) {
     return "Coverage can't be measured — this one-time import ended before it finished a full pass, and it will not run again.";
-  }
-  const staleCollector = snapshot.conditions.find(
-    (item) =>
-      item.type === "SourceCoverageComplete" &&
-      item.reason === CONNECTION_CONDITION_REASONS.COVERAGE_UNKNOWN_STALE_COLLECTOR
-  );
-  if (staleCollector) {
-    return "This local collector build predates coverage evidence the server now requires. Update the collector.";
   }
   return "Coverage has not been measured yet.";
 }
@@ -2492,6 +2522,11 @@ function noActionOwedForwardStatement(snapshot: ConnectionHealthSnapshot, stream
   // would deny the loss the pill just named.
   if (streams.some((stream) => isOptionalTerminalLoss(stream))) {
     return "Collecting normally, apart from optional data this source can no longer provide.";
+  }
+  // The runtime holds no evidence about the source itself, so it cannot say the
+  // source is covered. It can say what the connector reported.
+  if (coverageIsReportedOnly(snapshot)) {
+    return "The connector reports it collected everything. PDP Connect has not independently checked that.";
   }
   return "Current and collecting normally.";
 }
@@ -2628,7 +2663,10 @@ function buildStreamRows(
       considered: stream.considered,
       coverage: stream.coverage,
       disposition,
-      statement: streamStatement(disposition, snapshot.badges.syncing, freshnessNotApplicable(snapshot)),
+      statement:
+        stream.reported_collected === true && disposition === "complete"
+          ? "The connector reports it collected this."
+          : streamStatement(disposition, snapshot.badges.syncing, freshnessNotApplicable(snapshot)),
       stream_id: stream.stream_id,
     };
   });
@@ -2919,7 +2957,7 @@ function copyClaim(text: string): string {
  * or as inert status text (maintainer). A `cta` that merely repeats the
  * sentence next to it spends that slot saying nothing.
  *
- * THE LIVE DEFECT (2026-08-25). `HEB - gezalsatx@yahoo.com` rendered:
+ * THE LIVE DEFECT (2026-08-25). `HEB - jane.doe@example.com` rendered:
  *
  *     pill:              "Can't collect"
  *     forward_statement: "Some data from this source can't be collected."

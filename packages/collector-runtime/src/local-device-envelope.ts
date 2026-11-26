@@ -59,7 +59,19 @@ export interface CanonicalTerminalFactInput {
   readonly stream: string;
 }
 
-export interface TerminalRunCommitEnvelopeInput {
+export interface CanonicalCoverageFactInput {
+  readonly artifact_digest?: string;
+  readonly manifest_fingerprint?: string;
+  readonly runtime_accounting?: Record<string, unknown>;
+  readonly scoped: boolean;
+  readonly stores: readonly {
+    readonly store: string;
+    readonly status: "collected" | "partial" | "unavailable" | "failed";
+  }[];
+  readonly stream: string;
+}
+
+interface TerminalRunCommitEnvelopeBase {
   readonly collection_boundary: string;
   readonly commit_id: string;
   readonly connector_id: string;
@@ -68,9 +80,13 @@ export interface TerminalRunCommitEnvelopeInput {
   readonly run_id: string;
   readonly source_instance_id: string;
   readonly state_delta: Readonly<Record<string, unknown>>;
-  readonly terminal_facts: readonly CanonicalTerminalFactInput[];
-  readonly version: 1;
 }
+
+export type TerminalRunCommitEnvelopeInput = TerminalRunCommitEnvelopeBase &
+  (
+    | { readonly terminal_facts: readonly CanonicalTerminalFactInput[]; readonly version: 1 }
+    | { readonly terminal_facts: readonly CanonicalCoverageFactInput[]; readonly version: 2 }
+  );
 
 /**
  * The one hash-authority projection shared by collector and reference server
@@ -81,6 +97,30 @@ export interface TerminalRunCommitEnvelopeInput {
  * identity MUST already be canonical before entry.
  */
 export function canonicalTerminalRunCommitEnvelope(input: TerminalRunCommitEnvelopeInput): unknown {
+  validateSourceInstanceId(input.source_instance_id);
+  if (input.version === 2) {
+    return toCanonicalValue({
+      collection_boundary: input.collection_boundary,
+      commit_id: input.commit_id,
+      connector_id: input.connector_id,
+      connector_instance_id: input.connector_instance_id,
+      device_id: input.device_id,
+      run_id: input.run_id,
+      source_instance_id: input.source_instance_id,
+      state_delta: input.state_delta,
+      terminal_facts: input.terminal_facts
+        .map((fact) => ({
+          ...(fact.artifact_digest ? { artifact_digest: fact.artifact_digest } : {}),
+          ...(fact.manifest_fingerprint ? { manifest_fingerprint: fact.manifest_fingerprint } : {}),
+          ...(fact.runtime_accounting ? { runtime_accounting: fact.runtime_accounting } : {}),
+          scoped: fact.scoped,
+          stores: [...fact.stores].sort((left, right) => left.store.localeCompare(right.store)),
+          stream: fact.stream,
+        }))
+        .sort((left, right) => left.stream.localeCompare(right.stream)),
+      version: 2,
+    });
+  }
   return toCanonicalValue({
     collection_boundary: input.collection_boundary,
     commit_id: input.commit_id,
@@ -110,7 +150,14 @@ function canonicalRecordKey(key: string | readonly string[]): string {
   return typeof key === "string" ? key : JSON.stringify(key);
 }
 
+function validateSourceInstanceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("sourceInstanceId must be a non-blank string");
+  }
+}
+
 export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnvelopeInput): LocalDeviceRecordEnvelope {
+  validateSourceInstanceId(input.sourceInstanceId);
   const body = {
     connector_id: input.connectorId,
     data: toNormalizedRecordData(input.record.data),
@@ -138,6 +185,24 @@ export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnve
 export function buildLocalDeviceIngestBatchRequest(
   input: BuildLocalDeviceIngestBatchRequestInput
 ): LocalDeviceIngestBatchRequest {
+  validateSourceInstanceId(input.sourceInstanceId);
+  if (input.records.some((record) => record.source_instance_id !== input.sourceInstanceId)) {
+    throw new Error("batch sourceInstanceId must match every record envelope");
+  }
+  for (const record of input.records) {
+    if (record.batch_id !== input.batchId) {
+      throw new Error("batch batchId must match every record envelope");
+    }
+    if (record.batch_seq !== input.batchSeq) {
+      throw new Error("batch batchSeq must match every record envelope");
+    }
+    if (record.connector_id !== input.connectorId) {
+      throw new Error("batch connectorId must match every record envelope");
+    }
+    if (record.device_id !== input.deviceId) {
+      throw new Error("batch deviceId must match every record envelope");
+    }
+  }
   return {
     batch_id: input.batchId,
     batch_seq: input.batchSeq,

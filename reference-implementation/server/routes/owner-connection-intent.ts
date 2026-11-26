@@ -28,6 +28,11 @@
 //       (#"Owner-agent control SHALL initiate connections as typed
 //         owner-mediated intents")
 
+import {
+  describeReceivedSince,
+  isDeclarableOwnerWindowSince,
+  OWNER_WINDOW_SINCE_REQUIREMENT,
+} from "../../runtime/owner-time-window.ts";
 import { buildConnectionSetupPlan, type ConnectorIntentModality } from "../connection-setup-plan.ts";
 import { auditActorKind, buildAuditTrace } from "./_owner-connection-helpers.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_route-contract.ts";
@@ -213,11 +218,12 @@ function parseIntentScopeSince(value: unknown): { ok: true; since?: string } | {
   if (value === undefined || value === null) {
     return { ok: true };
   }
-  if (typeof value !== "string" || !value.trim()) {
-    return { message: "collection_scope.since must be a non-empty ISO-8601 string", ok: false };
-  }
-  if (Number.isNaN(Date.parse(value.trim()))) {
-    return { message: `collection_scope.since is not a parseable instant: ${value}`, ok: false };
+  // The owner's offset is required: see owner-connection-collection-scope.ts.
+  if (typeof value !== "string" || !isDeclarableOwnerWindowSince(value.trim())) {
+    return {
+      message: `collection_scope.since must be ${OWNER_WINDOW_SINCE_REQUIREMENT}; got: ${describeReceivedSince(value)}`,
+      ok: false,
+    };
   }
   return { ok: true, since: value.trim() };
 }

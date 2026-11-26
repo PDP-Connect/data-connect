@@ -8,10 +8,11 @@
  * the runtime retains for its connector key. Resolution order, on both write
  * paths (`registerConnector` and the installer's `publishConnectorActivation`):
  *
- *   1. a retained declaration keeps its `source.id`; provenance cannot change it;
+ *   1. a retained declaration keeps its `source.id`; provenance cannot change it (the one exception,
+ *      a verified package moving a legacy projection, is in connector-source-identity-move.test.ts);
  *   2. otherwise an explicit declaration is validated and used;
  *   3. otherwise a first-party key takes the reviewed legacy source identity from
- *      the runtime-owned map (connector-legacy-source-map.ts), independent of the
+ *      the manifest declaration, independent of the
  *      incoming provenance (`manifest_uri`) and alias (`connector_id`);
  *   4. otherwise the registration is refused before any write.
  *
@@ -19,7 +20,6 @@
  */
 
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 import { executeAsPolyfillConnectorRegister } from "../operations/as-polyfill-connector-register/index.ts";
 import {
@@ -28,6 +28,7 @@ import {
   getAcceptedDeclarationDigest,
   getConnectorManifest,
   normalizeConnectorManifestForStorage,
+  retainedStorageContext,
   registerConnector,
 } from "../server/auth.ts";
 import {
@@ -35,13 +36,9 @@ import {
   publishConnectorActivation,
 } from "../server/connector-install/activation-authority.ts";
 import type { ConnectorInstallRecord } from "../server/connector-install/index.ts";
-import {
-  LEGACY_FIRST_PARTY_ENTRIES,
-  LEGACY_FIRST_PARTY_KEYS,
-  legacyFirstPartySourceIdFor,
-} from "../server/connector-legacy-source-map.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
-import { closeDb, initDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 import { closePostgresStorage, initPostgresStorage } from "../server/postgres-storage.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
@@ -55,7 +52,7 @@ const OTHER_SOURCE = "https://sources.example/other/identity-boundary";
 
 const INVALID_REQUEST = "invalid_request";
 const ALREADY_BOUND = /already bound to source/;
-const CANONICAL_KEY_MESSAGE = /canonical key/;
+const CANONICAL_KEY_MESSAGE = /connector_id must match connector_key/;
 const INVALID_SOURCE_DECLARATION = /Invalid SourceDeclaration/;
 const KEY_MATCH_MESSAGE = /connector_id must match connector_key/;
 const NO_SOURCE_MESSAGE = /no source declaration/;
@@ -80,6 +77,12 @@ function streamFor(name: string) {
   };
 }
 
+function fixtureLegacyIds(overrides: Record<string, unknown>): string[] | undefined {
+  const key = canonicalConnectorKey(overrides.connector_key ?? overrides.connector_id);
+  const owner = readPolyfillManifests().find(({ manifest }) => manifest.connector_key === key)?.manifest;
+  return typeof owner?.connector_id === "string" ? [owner.connector_id] : undefined;
+}
+
 function legacyManifest(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
     capabilities: { human_interaction: [] },
@@ -87,6 +90,7 @@ function legacyManifest(overrides: Record<string, unknown>): Record<string, unkn
     protocol_version: "0.1.0",
     streams: [streamFor("items")],
     version: "1.0.0",
+    legacy_source_ids: fixtureLegacyIds(overrides),
     ...overrides,
   };
 }
@@ -180,7 +184,7 @@ scenario("an unmapped registry URL connector_id is refused and never becomes a s
   await assertRejectedWithoutWrite(
     url,
     () => registerConnector(legacyManifest({ connector_id: url, manifest_uri: DOC_ONE }), { skipDerivedRepair: true }),
-    URL_KEY_MESSAGE
+    NO_SOURCE_MESSAGE
   );
 });
 
@@ -204,9 +208,9 @@ scenario("a URL-only connector_id with an explicit valid declaration is refused 
   assert.equal(await storedFor(key), null, "the declared slug must not be registered either");
 });
 
-// Known first-party key: the reviewed source identity wins over any incoming provenance.
+// Known first-party key: the declared source identity wins over any incoming provenance.
 for (const [label, provenance] of PROVENANCE_VARIANTS) {
-  scenario(`a first-party key takes its reviewed source identity regardless of provenance (${label})`, async () => {
+  scenario(`a first-party key takes its declared source identity regardless of provenance (${label})`, async () => {
     const key = "amazon";
     await registerConnector(
       legacyManifest({
@@ -222,36 +226,36 @@ for (const [label, provenance] of PROVENANCE_VARIANTS) {
   });
 }
 
-// Known registry-URL alias with no connector_key resolves to its key and the same reviewed source.
-scenario("a known registry URL alias resolves to its key and the reviewed source", async () => {
-  await registerConnector(
-    legacyManifest({
-      connector_id: firstPartySource("gmail"),
-      manifest_uri: DOC_ONE,
-    }),
-    { skipDerivedRepair: true }
-  );
-  const stored = await storedFor("gmail");
-  assert.equal(stored?.connector_key, "gmail");
-  assert.equal(retainedSourceId(stored), firstPartySource("gmail"));
+scenario("a fresh first-party key without a declared identity is refused", async () => {
+  await assertRejectedWithoutWrite("amazon", () => registerConnector(legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined }), { skipDerivedRepair: true }), NO_SOURCE_MESSAGE);
 });
 
-// Known legacy local alias with its canonical key and no declaration resolves to the reviewed source.
-scenario("a known legacy local alias with its canonical key takes the reviewed source", async () => {
-  await registerConnector(
-    legacyManifest({
-      connector_id: "claude_code",
-      connector_key: "claude-code",
-    }),
-    {
-      skipDerivedRepair: true,
-    }
-  );
-  assert.equal(retainedSourceId(await storedFor("claude-code")), firstPartySource("claude-code"));
+scenario("pre-projection registration keeps no identity until a matching manifest declares one", () => {
+  const previous = { connector_id: "amazon", connector_key: "amazon" };
+  const context = retainedStorageContext(previous);
+  const without = legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined });
+  assert.equal(normalizeConnectorManifestForStorage(without, context).storedManifest.source_declaration, undefined);
+  assert.equal(retainedSourceId(normalizeConnectorManifestForStorage(legacyManifest({ connector_key: "amazon" }), context).storedManifest), firstPartySource("amazon"));
+  assert.throws(() => normalizeConnectorManifestForStorage(legacyManifest({ connector_key: "gmail" }), context), /does not match/);
+});
+
+scenario("a declared legacy identity cannot belong to another connector", async () => {
+  await registerConnector(legacyManifest({ connector_key: "amazon" }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("gmail", () => registerConnector(legacyManifest({ connector_key: "gmail", legacy_source_ids: [firstPartySource("amazon")] }), { skipDerivedRepair: true }), /already owned/);
+});
+
+scenario("a declared legacy identity cannot equal another connector's current identity", async () => {
+  await registerConnector(legacyManifest({ connector_key: "srcid-primary", source_declaration: explicitDeclaration("srcid-primary", EXPLICIT_SOURCE) }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("srcid-legacy", () => registerConnector(legacyManifest({ connector_key: "srcid-legacy", legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }), /already owned/);
+});
+
+scenario("concurrent legacy identity claims by different keys commit exactly one", async () => {
+  const results = await Promise.allSettled(["srcid-owner-a", "srcid-owner-b"].map((key) => registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true })));
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
 });
 
 // Control: an explicit validated declaration is the supported route for a first-party key too.
-scenario("an explicit declaration wins over the reviewed mapping on a first registration", async () => {
+scenario("an explicit declaration wins over the manifest declaration on a first registration", async () => {
   const key = "amazon";
   await registerConnector(
     legacyManifest({
@@ -479,7 +483,7 @@ scenario("an explicit key with an unmapped unequal custom URI is rejected", asyn
 scenario("a known alias with its canonical explicit key is accepted", async () => {
   await registerConnector(
     legacyManifest({
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       connector_key: "claude-code",
       source_declaration: explicitDeclaration("claude-code", EXPLICIT_SOURCE),
     }),
@@ -692,12 +696,12 @@ scenario(
   }
 );
 
-// A seeded retained identity that differs from the reviewed map must survive a schema/provenance update through the writer.
+// A seeded retained identity that differs from the manifest declaration must survive a schema/provenance update through the writer.
 scenario("a retained custom source for a mapped key survives a schema update without a declaration", async () => {
   const key = "amazon";
   await explicitRegistration(key, EXPLICIT_SOURCE);
   const before = (await storedFor(key))?.source_declaration as { declaration_version: string } | undefined;
-  assert.notEqual(EXPLICIT_SOURCE, firstPartySource("amazon"), "the seed must differ from the reviewed map");
+  assert.notEqual(EXPLICIT_SOURCE, firstPartySource("amazon"), "the seed must differ from the manifest declaration");
   await registerConnector(
     legacyManifest({
       connector_id: key,
@@ -727,9 +731,9 @@ scenario("a retained custom source for a mapped key survives a schema update wit
 });
 
 // Pure lookup: prototype names and unmapped names never resolve, and no key can be repointed through the exports.
-scenario("prototype and unmapped names never resolve to a reviewed source", async () => {
+scenario("prototype and unmapped names never resolve to a declared source", async () => {
   for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "srcid-not-mapped"]) {
-    assert.equal(legacyFirstPartySourceIdFor(name), undefined, `${name} must not resolve`);
+    assert.throws(() => normalizeConnectorManifestForStorage(legacyManifest({ connector_id: name, connector_key: name })), /no source declaration|connector_id is required/);
   }
   await assertRejectedWithoutWrite(
     "constructor",
@@ -739,20 +743,6 @@ scenario("prototype and unmapped names never resolve to a reviewed source", asyn
       }),
     NO_SOURCE_MESSAGE
   );
-});
-
-// Mutation control: the exported map views are frozen; a mutation attempt is refused and the lookup is unchanged.
-scenario("exported key, entry and tuple views cannot be mutated to repoint a lookup", () => {
-  assert.equal(Object.isFrozen(LEGACY_FIRST_PARTY_KEYS), true);
-  assert.equal(Object.isFrozen(LEGACY_FIRST_PARTY_ENTRIES), true);
-  const [firstKey, firstSource] = LEGACY_FIRST_PARTY_ENTRIES[0] ?? [];
-  assert.ok(firstKey && firstSource);
-  const tuple = LEGACY_FIRST_PARTY_ENTRIES[0] as unknown as object;
-  assert.equal(Reflect.set(tuple, 1, OTHER_SOURCE), false, "a frozen entry tuple refuses assignment");
-  assert.equal(Reflect.set(LEGACY_FIRST_PARTY_ENTRIES as unknown as object, 0, [firstKey, OTHER_SOURCE]), false);
-  assert.equal(Reflect.set(LEGACY_FIRST_PARTY_KEYS as unknown as object, 0, "constructor"), false);
-  assert.equal(legacyFirstPartySourceIdFor(firstKey), firstSource, "the lookup is unchanged");
-  assert.equal(legacyFirstPartySourceIdFor("amazon"), firstPartySource("amazon"));
 });
 
 // Null and undefined mean "unspecified" (documented normalizer behavior), never a request for a map fallback.
@@ -792,7 +782,7 @@ scenario(
   }
 );
 
-// Malformed nonnull declarations refuse before any write, and never fall back to the reviewed map or provenance.
+// Malformed nonnull declarations refuse before any write, and never fall back to the manifest declaration or provenance.
 for (const [label, malformed] of [
   ["an empty object", {}],
   ["a string", "declaration"],
@@ -845,7 +835,7 @@ scenario("an identical POST to a retained connector is idempotent and keeps its 
   assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
 });
 
-// POST control: a first-party identical re-POST with no declaration is idempotent under the reviewed source.
+// POST control: a first-party identical re-POST with no declaration is idempotent under the declared source.
 scenario("an identical POST of a first-party connector without a declaration is idempotent", async () => {
   const manifest = legacyManifest({
     connector_id: "amazon",
@@ -1022,24 +1012,16 @@ scenario("an installer publish refuses a fresh custom key without a declaration"
   assert.equal(await getConnectorActivation(key), null, "no activation is written");
 });
 
-// The reviewed map is the proof for fresh first-party registrations: it must equal the pinned package
-// identities exactly. A package change that adds, removes or re-points a shipped key fails here, so the
-// map is reviewed rather than extended silently.
-test("the reviewed legacy source map equals the pinned first-party package identities", () => {
-  const pinned = readPolyfillManifests();
-  const byKey = new Map(pinned.map((entry) => [entry.manifest.connector_key, entry.manifest]));
-  assert.equal(pinned.length, 45, "the pinned package ships 45 first-party manifests");
-  assert.deepEqual([...LEGACY_FIRST_PARTY_KEYS].sort(), [...byKey.keys()].sort());
-  const canonicalPairs = [...LEGACY_FIRST_PARTY_ENTRIES].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  const mappingPin = createHash("sha256").update(JSON.stringify(canonicalPairs), "utf8").digest("hex");
-  assert.equal(mappingPin, "7e8f726725b7a14705571339c84a52d8f05888ffc0996b77cce3d4ae13dae9e6");
-  for (const [key, sourceId] of LEGACY_FIRST_PARTY_ENTRIES) {
-    const manifest = byKey.get(key);
-    assert.ok(manifest, `pinned manifest for ${key}`);
-    assert.equal(manifest.connector_id, sourceId, `${key}: connector_id is the reviewed source`);
-    assert.equal(manifest.manifest_uri, sourceId, `${key}: manifest_uri is the reviewed source`);
-    assert.equal(manifest.source_declaration, undefined, `${key}: the pinned manifest declares no source`);
-  }
+test("SQLite: pre-projection stored registration updates without inventing an identity", async () => {
+  initDb(":memory:");
+  try {
+    const manifest = legacyManifest({ connector_key: "amazon", connector_id: "amazon", legacy_source_ids: undefined });
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)").run("amazon", JSON.stringify(manifest));
+    await registerConnector({ ...manifest, version: "1.1.0" }, { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor("amazon")), undefined);
+    await registerConnector({ ...manifest, version: "1.2.0", legacy_source_ids: [firstPartySource("amazon")] }, { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor("amazon")), firstPartySource("amazon"));
+  } finally { closeDb(); }
 });
 
 for (const entry of SCENARIOS) {

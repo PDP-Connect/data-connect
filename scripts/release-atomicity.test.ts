@@ -16,7 +16,7 @@
 // Nothing here contacts the network, and nothing here publishes.
 
 import { execFileSync } from "node:child_process"
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { load } from "js-yaml"
@@ -28,10 +28,8 @@ import {
   normalizeVersion,
 } from "./release-registry-state.js"
 import { awaitPublished } from "./verify-release-complete.js"
-import {
-  PACKAGE_NAME as BARRIER_PACKAGE_NAME,
-  barrierFailureMessage,
-} from "./verify-connector-protocol-published.js"
+import { lockstepPackages, publishRootsFromConfig } from "./lockstep-packages.js"
+import { barrierFailureMessage, barrierFor } from "./verify-lockstep-dependencies-published.js"
 
 const REPO_ROOT = resolve(__dirname, "..")
 
@@ -194,9 +192,10 @@ exit 1
 async function runBarrier(
   stubDir: string,
   version: string,
-  wait: { delayMs?: number } = {}
+  wait: { delayMs?: number } = {},
+  dependentRoot = "packages/collector-runtime"
 ): Promise<{ status: number; stdout: string; stderr: string; sleeps: number[] }> {
-  const { main } = await import("./verify-connector-protocol-published.js")
+  const { main } = await import("./verify-lockstep-dependencies-published.js")
 
   const previousPath = process.env.PATH
   const previousArgv = process.argv
@@ -219,7 +218,12 @@ async function runBarrier(
   }
 
   process.env.PATH = `${stubDir}:${previousPath ?? ""}`
-  process.argv = [process.argv[0]!, join(REPO_ROOT, "scripts/verify-connector-protocol-published.ts"), version]
+  process.argv = [
+    process.argv[0]!,
+    join(REPO_ROOT, "scripts/verify-lockstep-dependencies-published.ts"),
+    version,
+    dependentRoot,
+  ]
   process.exit = ((code?: number) => {
     throw new ExitSignal(code ?? 0)
   }) as typeof process.exit
@@ -319,25 +323,93 @@ describe("release pipeline wiring", () => {
   }
   const parsedWorkflow = load(workflow) as { jobs: Record<string, WorkflowJob> }
 
-  it("publishes all three packages, in the order the barrier depends on", () => {
-    // Count PLUGIN ENTRIES, not mentions — the surrounding comments name the
-    // path too, and counting those would make this assertion pass for the
-    // wrong reason.
-    const npmEntries = releaserc.match(/^\s+- - "@semantic-release\/npm"$/gm) ?? []
-    expect(npmEntries).toHaveLength(3)
-    // connector-protocol publishes first, the barrier proves it is live, and
-    // only then do the two packages that depend on it publish. Asserting the
-    // ORDER, not just the membership: a reorder is what the barrier exists to
-    // catch, and a set comparison would not see one.
-    const order = [...releaserc.matchAll(/pkgRoot: "(packages\/[^"]+)"/g)].map(m => m[1])
-    expect(order).toEqual([
-      "packages/connector-protocol",
-      "packages/collector-runtime",
-      "packages/local-collector",
+  it("derives the lockstep packages and their dependencies from .releaserc.yaml", () => {
+    expect(lockstepPackages(REPO_ROOT)).toEqual([
+      { dependsOn: [], name: "@pdpp/connector-protocol", root: "packages/connector-protocol" },
+      { dependsOn: ["@pdpp/connector-protocol"], name: "@pdpp/collector-runtime", root: "packages/collector-runtime" },
+      { dependsOn: [], name: "@pdpp/local-collector", root: "packages/local-collector" },
+      { dependsOn: [], name: "@pdpp/read-core", root: "reference-implementation/vendor/read-core" },
+      { dependsOn: [], name: "@pdpp/cli", root: "reference-implementation/vendor/cli" },
+      {
+        dependsOn: ["@pdpp/cli", "@pdpp/read-core"],
+        name: "@pdpp/mcp-server",
+        root: "reference-implementation/vendor/mcp-server",
+      },
     ])
-    const barrier = releaserc.indexOf("scripts/verify-connector-protocol-published.ts")
-    expect(barrier).toBeGreaterThan(releaserc.indexOf('pkgRoot: "packages/connector-protocol"'))
-    expect(barrier).toBeLessThan(releaserc.indexOf('pkgRoot: "packages/collector-runtime"'))
+  })
+
+  it("refuses an npm step that names no pkgRoot, in either plugin form", () => {
+    for (const step of ['"@semantic-release/npm"', '["@semantic-release/npm", {}]']) {
+      expect(() => publishRootsFromConfig(`plugins:\n  - ${step}\n`), step).toThrow(/must name its pkgRoot/)
+    }
+    expect(publishRootsFromConfig('plugins:\n  - ["@semantic-release/npm", { pkgRoot: packages/a }]\n')).toEqual([
+      "packages/a",
+    ])
+  })
+
+  // A dependent published before its dependency is live installs against the
+  // previous release (v2.2.1 failed that way). Asserting the ORDER of the
+  // parsed plugin list, not mentions in the text, so a comment cannot satisfy it.
+  it("publishes every dependency, then its barrier, then the dependent", () => {
+    const plugins = (load(releaserc) as { plugins: unknown[] }).plugins
+    const npmStep = (root: string) =>
+      plugins.findIndex(
+        plugin =>
+          Array.isArray(plugin) &&
+          plugin[0] === "@semantic-release/npm" &&
+          (plugin[1] as { pkgRoot?: string }).pkgRoot === root
+      )
+    const barrierStep = (root: string) =>
+      plugins.findIndex(
+        plugin =>
+          Array.isArray(plugin) &&
+          plugin[0] === "@semantic-release/exec" &&
+          String((plugin[1] as { publishCmd?: string }).publishCmd ?? "") ===
+            `node --import tsx scripts/verify-lockstep-dependencies-published.ts \${nextRelease.version} ${root}`
+      )
+    const packages = lockstepPackages(REPO_ROOT)
+    const dependents = packages.filter(pkg => pkg.dependsOn.length > 0)
+    expect(dependents.map(pkg => pkg.name)).toEqual(["@pdpp/collector-runtime", "@pdpp/mcp-server"])
+    for (const pkg of dependents) {
+      const barrier = barrierStep(pkg.root)
+      expect(barrier, `${pkg.name} has a barrier`).toBeGreaterThan(-1)
+      expect(barrier).toBeLessThan(npmStep(pkg.root))
+      for (const dependency of pkg.dependsOn) {
+        const root = packages.find(candidate => candidate.name === dependency)?.root ?? ""
+        expect(npmStep(root), `${dependency} publishes before ${pkg.name}'s barrier`).toBeLessThan(barrier)
+      }
+    }
+    // No barrier guards a package with nothing to wait for.
+    const barriers = plugins.filter(
+      plugin =>
+        Array.isArray(plugin) &&
+        String((plugin[1] as { publishCmd?: string } | undefined)?.publishCmd ?? "").includes(
+          "verify-lockstep-dependencies-published.ts"
+        )
+    )
+    expect(barriers).toHaveLength(dependents.length)
+  })
+
+  it("names the dependencies a barrier waits for, and refuses a root with none", () => {
+    expect(barrierFor("reference-implementation/vendor/mcp-server", REPO_ROOT)).toEqual({
+      dependencies: ["@pdpp/cli", "@pdpp/read-core"],
+      dependent: "@pdpp/mcp-server",
+    })
+    expect(() => barrierFor("packages/local-collector", REPO_ROOT)).toThrow(/guards nothing/)
+  })
+
+  // The quality job is the only place a package's own tests run before it
+  // publishes; a package added to the stream without a verify step would ship
+  // untested.
+  it("verifies every lockstep package before publishing it", () => {
+    const steps = parsedWorkflow.jobs.quality?.steps ?? []
+    const runs = steps.map(step => String(step.run ?? ""))
+    for (const pkg of lockstepPackages(REPO_ROOT)) {
+      expect(
+        runs.some(run => run.includes(pkg.root) || run.includes(pkg.name)),
+        `${pkg.name} has a quality step`
+      ).toBe(true)
+    }
   })
 
   it("resolves the release mode before any publishing job runs", () => {
@@ -350,7 +422,7 @@ describe("release pipeline wiring", () => {
   // asked once, immediately after a publish, and read propagation lag as
   // "not published".
   it("gives the publish-ordering barrier a propagation budget", async () => {
-    expect(releaserc).toContain("scripts/verify-connector-protocol-published.ts")
+    expect(releaserc).toContain("scripts/verify-lockstep-dependencies-published.ts")
 
     // Exercises the real retry primitive the barrier calls, against a stub
     // registry that answers MISSING once and then PUBLISHED — the exact
@@ -385,12 +457,13 @@ describe("release pipeline wiring", () => {
   })
 
   it("tells an unanswerable registry apart from a genuinely absent package", () => {
-    const spec = `${BARRIER_PACKAGE_NAME}@9.9.9`
+    const spec = "@pdpp/connector-protocol@9.9.9"
 
     // UNKNOWN means the registry did not answer. Reporting it as "not
     // published" would tell the operator the release is missing a package
     // when the truth is that nothing could be determined.
     const unknown = barrierFailureMessage(
+      "@pdpp/collector-runtime",
       spec,
       new RegistryUnknownError(spec, "npm error code E500")
     )
@@ -398,11 +471,10 @@ describe("release pipeline wiring", () => {
     expect(unknown).toContain("E500")
     expect(unknown).not.toContain("isn't live yet")
 
-    const missing = barrierFailureMessage(spec, new Error("npm error code E404"))
+    const missing = barrierFailureMessage("@pdpp/collector-runtime", spec, new Error("npm error code E404"))
     expect(missing).toContain("isn't live yet")
     expect(missing).not.toContain("UNKNOWN")
-
-    expect(BARRIER_PACKAGE_NAME).toBe("@pdpp/connector-protocol")
+    expect(missing).toContain("refusing to publish @pdpp/collector-runtime")
   })
 
   it("fails the publish-ordering barrier when the package never appears", async () => {
@@ -599,13 +671,13 @@ describe("release pipeline wiring", () => {
   // other plugin entry through. If it rewrote or dropped the npm entries, a
   // forced run would publish a different set of packages than an ordinary
   // release — forcing is meant to change which commits count, nothing else.
-  it("keeps all three npm publishes on the forced-release path too", async () => {
+  it("keeps every npm publish on the forced-release path too", async () => {
     const { buildForcedReleaseConfig } = await import("./forced-release-config.js")
     const cfg = buildForcedReleaseConfig("patch", REPO_ROOT)
     const npmPublishes = cfg.plugins.filter(
       (p: unknown) => Array.isArray(p) && p[0] === "@semantic-release/npm"
     )
-    expect(npmPublishes).toHaveLength(3)
+    expect(npmPublishes).toHaveLength(lockstepPackages(REPO_ROOT).length)
   })
 })
 
@@ -622,7 +694,14 @@ describe("resolve-release-version decide()", () => {
   // decide() reads real git tags and the real registry, so it gets a scratch
   // repository and a stubbed npm rather than a mocked module: the thing under
   // test is how it reconciles those two sources.
-  function makeTaggedRepo(tags: string[]): string {
+  // Each tag's commit carries the release config it was cut with, because
+  // decide() judges a tag by the packages that config published.
+  const THREE_PACKAGE_ROOTS = ["packages/connector-protocol", "packages/collector-runtime", "packages/local-collector"]
+  function makeTaggedRepo(
+    tags: string[],
+    roots: readonly string[] = THREE_PACKAGE_ROOTS,
+    laterRoots?: readonly string[]
+  ): string {
     const dir = mkdtempSync(join(tmpdir(), "atomic-git-"))
     const git = (...args: string[]) =>
       execFileSync("git", args, {
@@ -637,10 +716,19 @@ describe("resolve-release-version decide()", () => {
         },
       })
     git("init", "-q", "-b", "main")
-    writeFileSync(join(dir, "f"), "x")
-    git("add", "f")
-    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "c")
+    const commitConfig = (releaseRoots: readonly string[]) => {
+      const plugins = releaseRoots.map(root => `  - - "@semantic-release/npm"\n    - pkgRoot: "${root}"`).join("\n")
+      writeFileSync(join(dir, ".releaserc.yaml"), `plugins:\n${plugins}\n`)
+      for (const root of releaseRoots) {
+        mkdirSync(join(dir, root), { recursive: true })
+        writeFileSync(join(dir, root, "package.json"), JSON.stringify({ name: `@pdpp/${root.split("/").at(-1)}` }))
+      }
+      git("add", ".")
+      git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "c")
+    }
+    commitConfig(roots)
     for (const tag of tags) git("tag", tag)
+    if (laterRoots) commitConfig(laterRoots)
     return dir
   }
 
@@ -691,12 +779,13 @@ describe("resolve-release-version decide()", () => {
       const decision = JSON.parse(result.stdout) as {
         mode: string
         reason: string
-        superseded?: { tag: string; version: string; missing: string[] }
+        superseded?: { tag: string; version: string; published: string[]; missing: string[] }
       }
       expect(decision.mode).toBe("release")
       expect(decision.superseded?.version).toBe(V)
       expect(decision.superseded?.tag).toBe(`npm-v${V}`)
       expect(decision.superseded?.missing).toEqual(["@pdpp/collector-runtime", "@pdpp/local-collector"])
+      expect(decision.superseded?.published).toEqual(["@pdpp/connector-protocol"])
       expect(decision.reason).toMatch(/The next successful release will supersede it\./)
     } finally {
       stub.cleanup()
@@ -716,6 +805,24 @@ describe("resolve-release-version decide()", () => {
       const decision = JSON.parse(result.stdout) as { mode: string; reason: string }
       expect(decision.mode).toBe("release")
       expect(decision.reason).toMatch(/no published packages/)
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  // Today's config publishes six packages, but a tag cut when it published
+  // three is complete with those three. Judging it by today's list would
+  // report every old release as missing the packages that joined later.
+  it("judges a tag by the packages its own config published", async () => {
+    const repo = makeTaggedRepo([`npm-v${V}`], THREE_PACKAGE_ROOTS, [...THREE_PACKAGE_ROOTS, "packages/cli"])
+    const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "published", [LC]: "published" } })
+    try {
+      const result = await runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      const decision = JSON.parse(result.stdout) as { reason: string; superseded?: unknown }
+      expect(decision.superseded).toBeUndefined()
+      expect(decision.reason).toMatch(/fully published \(3\/3 packages/)
     } finally {
       stub.cleanup()
       rmSync(repo, { recursive: true, force: true })
@@ -818,7 +925,12 @@ describe("the superseded-version report", () => {
     const { supersededMessage } = await import("./resolve-release-version.js")
     expect(
       supersededMessage(
-        { tag: `npm-v${V}`, version: V, missing: ["@pdpp/collector-runtime", "@pdpp/local-collector"] },
+        {
+          tag: `npm-v${V}`,
+          version: V,
+          published: ["@pdpp/connector-protocol"],
+          missing: ["@pdpp/collector-runtime", "@pdpp/local-collector"],
+        },
         "2.3.0"
       )
     ).toBe(
@@ -840,6 +952,7 @@ describe("the superseded-version report", () => {
         join(REPO_ROOT, "scripts/report-superseded-release.ts"),
         `npm-v${V}`,
         "@pdpp/collector-runtime,@pdpp/local-collector",
+        "@pdpp/connector-protocol",
         "2.3.0",
       ],
       { encoding: "utf8" }
@@ -863,6 +976,7 @@ describe("the superseded-version report", () => {
           join(REPO_ROOT, "scripts/report-superseded-release.ts"),
           `npm-v${V}`,
           "",
+          "@pdpp/connector-protocol",
           "2.3.0",
         ],
         { encoding: "utf8", stdio: "pipe" }

@@ -69,7 +69,7 @@ function makeHarness(): Harness {
 
 function capture(h: Harness, body: Buffer, recordKey = "tool_result_file:drain") {
   return captureBlobArtifact({
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     content: [body],
     mimeType: "text/plain",
     outbox: h.outbox,
@@ -93,7 +93,7 @@ function drain(h: Harness, blobUpload: DrainBlobUploadFn, spoolReclaimMinAgeMs =
   return drainCollectorOutbox({
     blobUpload,
     client: inertClient,
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     holderId: "holder-1",
     outbox: h.outbox,
     policy,
@@ -265,7 +265,7 @@ describe("blob_upload drain", () => {
     // No `blobUpload`/`spool` wired into the drain at all.
     const result = await drainCollectorOutbox({
       client: inertClient,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,
@@ -428,7 +428,7 @@ describe("blob spool retention", () => {
     await drainCollectorOutbox({
       blobUpload: () => Promise.reject(new Error("no work expected")),
       client: inertClient,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,
@@ -517,7 +517,7 @@ describe("terminal reporting while blob uploads are unresolved", () => {
     h.outbox.enqueue({
       id: "checkpoint-after-blob",
       kind: "checkpoint",
-      payload: { connectorId: "claude_code", sourceInstanceId: "src-1", state: { cursor: "after-blob" } },
+      payload: { connectorId: "claude-code", sourceInstanceId: "src-1", state: { cursor: "after-blob" } },
       sourceInstanceId: "src-1",
     });
 
@@ -532,7 +532,7 @@ describe("terminal reporting while blob uploads are unresolved", () => {
           return Promise.resolve({}) as never;
         },
       },
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,

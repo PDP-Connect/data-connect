@@ -11,8 +11,8 @@
  * cancellations in 10 minutes, all in the REPAIR path (`"repair for
  * <id> cancelled by Postgres statement_timeout"`, not `"discovery
  * cancelled"`), and always the SAME two connections --
- * `cin_2de5ede05c8cc8d45935c414` (peregrine Claude Code, 2.42M records) and
- * `cin_ece4bfe5096b8bf67a1468c2` (peregrine Codex, 1.30M records), together
+ * `cin_0a1b2c3d4e5f60718293a4b5` (workstation Claude Code, 2.42M records) and
+ * `cin_5b4a39281706f5e4d3c2b1a0` (workstation Codex, 1.30M records), together
  * ~3.7M of the fleet's 5.46M total rows in `records`.
  *
  * Root cause: `repairCandidatePostgres`'s per-connection canonical read
@@ -26,7 +26,7 @@
  * investigation WITHOUT measuring it against a real multi-million-row
  * connection. Measured directly against production (READ-ONLY, `EXPLAIN
  * (ANALYZE, BUFFERS)`): 4.07s / ~584k buffers (~4.5 GB) for
- * cin_2de5ede05c8cc8d45935c414, 3.67s for cin_ece4bfe5096b8bf67a1468c2 --
+ * cin_0a1b2c3d4e5f60718293a4b5, 3.67s for cin_5b4a39281706f5e4d3c2b1a0 --
  * `records` has SEVEN existing indexes, none of which cover
  * `(connector_instance_id, deleted)` without a `stream` predicate this
  * GROUP-BY query cannot supply (the closest, `idx_pg_records_stream_cursor`,
