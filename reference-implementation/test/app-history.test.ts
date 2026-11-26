@@ -55,6 +55,7 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(result.data[0]?.across_sources, 1);
   assert.equal(result.data[0]?.sources[0]?.reads, 3);
   assert.equal(result.data[0]?.sources[0]?.records, 25);
+  assert.equal(result.data[0]?.sources[0]?.last_at, "2026-11-24T23:30:00.000Z");
   assert.equal(result.changes.length, 3);
   const dates = await readAppHistory("owner",{...input,first:"1970-01-01",days:7},backend);
   assert.equal(dates.first_day,"2026-11-25");
@@ -78,6 +79,13 @@ async function check(backend: "sqlite" | "postgres") {
   const scoped = await readAppHistory("owner", { ...input, connection_id: "mail_account" }, backend);
   if (scoped.mode !== "days") throw new Error("wrong mode");
   assert.equal(scoped.data[0]?.reads, 3);
+  await write("UPDATE spine_events SET connector_instance_id=NULL, occurred_at='2026-11-24T23:35:00.000Z' WHERE event_id='event_2'",[]);
+  await write("UPDATE spine_events SET occurred_at='2026-11-24T23:40:00.000Z' WHERE event_id='event_3'",[]);
+  const clocks=await readAppHistory("owner",input,backend);
+  if(clocks.mode!=="days")throw Error("mode");
+  assert.equal(clocks.data[0]?.last_at,"2026-11-24T23:40:00.000Z");
+  assert.equal(clocks.data[0]?.sources.find(source=>source.connection_id==="mail_account")?.last_at,"2026-11-24T23:30:00.000Z");
+  assert.equal(clocks.data[0]?.sources.find(source=>source.source_id==="mail" && !source.connection_id)?.last_at,"2026-11-24T23:35:00.000Z");
 }
 test("SQLite app days exclude discovery, retain unknown source reads and separate permission refusals", async () => {
   initDb();

@@ -4,7 +4,7 @@ import { CONSOLE_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import { jsonObject, type AppAccess } from "./app-access.ts";
 import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
-export interface AppReadSource { source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
+export interface AppReadSource { last_at?: string | null; source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
   day: string; client_id: string; reads: number; across_sources: number; sources: AppReadSource[];
   last_at: string | null; last_refusal_at?: string | null; permission_refusals: number;
@@ -108,7 +108,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     if (row.last_refusal_at && String(row.last_refusal_at) > (entry.last_refusal_at ?? "")) entry.last_refusal_at = String(row.last_refusal_at);
     entry.reads += reads; entry.permission_refusals += refused;
     if (row.last_at && (!entry.last_at || String(row.last_at) > entry.last_at)) entry.last_at = String(row.last_at);
-    if (row.source_id && reads) entry.sources.push({ source_id: String(row.source_id), source_kind: row.source_kind as string | null, connection_id: row.connection_id as string | null, reads, records: row.records === null ? null : Number(row.records) });
+    if (row.source_id && reads) entry.sources.push({ last_at: row.last_at ? String(row.last_at) : null, source_id: String(row.source_id), source_kind: row.source_kind as string | null, connection_id: row.connection_id as string | null, reads, records: row.records === null ? null : Number(row.records) });
     else entry.across_sources += reads;
   }
   for (const entry of days.values()) entry.sources.sort((a,b) => b.reads-a.reads || a.source_id.localeCompare(b.source_id));
