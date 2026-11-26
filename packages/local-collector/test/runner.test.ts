@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -1269,7 +1270,21 @@ test("a second collector that finds the profile migration in progress stops with
   // This test process is a live owner of the migration lock.
   writeFileSync(join(profileDir, ".profile-migration.lock"), `${process.pid}\n`);
 
-  assert.throws(() => migrateLegacyProfileFiles(profileDir), /another process is migrating/);
+  assert.throws(() => migrateLegacyProfileFiles(profileDir), /already in progress.*is running/);
+  assert.equal(existsSync(legacyPath), true);
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
+});
+
+test("a profile migration lock whose owner has exited is not taken over; the collector stops and the lock stays as it was", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const lockPath = join(profileDir, ".profile-migration.lock");
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  const staleLock = `${child.pid}\n`;
+  writeFileSync(lockPath, staleLock);
+
+  assert.throws(() => migrateLegacyProfileFiles(profileDir), (error: unknown) => String(error).includes(lockPath));
+  assert.equal(readFileSync(lockPath, "utf8"), staleLock);
   assert.equal(existsSync(legacyPath), true);
   assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
 });

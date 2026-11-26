@@ -59,6 +59,7 @@ import {
   acquireMigrationLock,
   collectorStateDirectory,
   defaultCollectorStateRoot,
+  type MigrationLock,
   releaseMigrationLock,
   resolveCollectorQueuePath,
 } from "../src/durable-state.ts";
@@ -2380,12 +2381,16 @@ function safeProfileFileName(name: string): string {
  * Two collectors can start together and both see a legacy profile and no
  * current one, so the checks alone do not make the rename safe. One process
  * owns the migration through the same lock helper as the queue handoff; a
- * second one stops with a named error. The rename is also safe without the
- * lock, because an older collector does not take it: the current name is
- * installed with a hard link, which fails when the name exists instead of
- * replacing that file, and a legacy file that has already gone is a finished
- * migration only once the current profile is there and names this connector.
- * `hooks` lets tests stop at those points.
+ * second one stops with a named error.
+ *
+ * The lock binds only collectors that run this code. An older collector does
+ * not take it, and this code does not make that collector's own rename safe.
+ * What the steps below do is limit this code's own damage when something
+ * outside the lock changes the state under it: the current name is installed
+ * with a hard link, which fails when the name exists instead of replacing that
+ * file, and a legacy file that has already gone is a finished migration only
+ * once the current profile is there and names this connector. `hooks` lets
+ * tests stop at those points.
  */
 export function migrateLegacyProfileFiles(
   profileDir: string,
@@ -2403,19 +2408,21 @@ export function migrateLegacyProfileFiles(
     return;
   }
   const lockPath = join(profileDir, ".profile-migration.lock");
+  let lock: MigrationLock;
   try {
-    acquireMigrationLock(lockPath);
+    lock = acquireMigrationLock(lockPath);
   } catch (error) {
-    throw new Error(`another process is migrating the legacy profiles in ${profileDir}; run again when it finishes`, {
-      cause: error,
-    });
+    throw new Error(
+      `could not take the lock to migrate the legacy profiles in ${profileDir}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
   try {
     for (const entry of pending) {
       migrateLegacyProfileFile(entry, hooks);
     }
   } finally {
-    releaseMigrationLock(lockPath);
+    releaseMigrationLock(lock);
   }
 }
 

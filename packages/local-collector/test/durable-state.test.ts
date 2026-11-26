@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -469,6 +470,108 @@ test("a second collector that finds the underscore-queue handoff in progress sto
     );
     assert.equal(existsSync(hyphenPath), false);
     assert.equal(sourceSummary(underscorePath, SOURCE_A), 1);
+  });
+});
+
+function underscoreQueueFixture(root: string) {
+  const stateRoot = join(root, "state");
+  const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+  const underscorePath = canonicalCollectorQueuePath({
+    connectorId: "claude_code",
+    sourceInstanceId: SOURCE_A,
+    stateRoot,
+  });
+  return { hyphenPath, lockPath: `${hyphenPath}.handoff.lock`, stateRoot, underscorePath };
+}
+
+/** A process id that has exited, so a lock file naming it has a dead owner. */
+function deadProcessId(): number {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  assert.ok(child.pid > 0);
+  return child.pid;
+}
+
+// Two collectors that both read a dead owner's lock must not both take it: one
+// removing the stale file and acquiring would let the other remove that fresh
+// lock. The lock therefore has no recovery step; every acquirer stops, names
+// the file and leaves it for the owner to delete.
+test("a handoff lock whose owner has exited is not taken over: every collector stops and the lock stays as it was", () => {
+  withTempRoot("pdpp-durable-state-stale-lock-", (root) => {
+    const { hyphenPath, lockPath, stateRoot, underscorePath } = underscoreQueueFixture(root);
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+    const staleLock = `${deadProcessId()}\n`;
+    writeFileSync(lockPath, staleLock);
+
+    for (const competitor of ["first", "second"]) {
+      assert.throws(
+        () => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+        (error: unknown) =>
+          error instanceof CollectorStateResolutionError &&
+          error.code === "legacy_state_migration_failed" &&
+          error.message.includes(lockPath),
+        `${competitor} collector`
+      );
+      assert.equal(readFileSync(lockPath, "utf8"), staleLock, `${competitor} collector leaves the stale lock untouched`);
+    }
+    assert.equal(existsSync(hyphenPath), false, "nobody entered the move");
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 1);
+  });
+});
+
+test("a collector releases only the handoff lock it took", () => {
+  withTempRoot("pdpp-durable-state-lock-owner-", (root) => {
+    const { lockPath, stateRoot, underscorePath } = underscoreQueueFixture(root);
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+    const otherOwner = `${process.pid} other-owner-token\n`;
+
+    resolveCollectorQueuePath({
+      // The lock was deleted by hand and another collector took it while this one was moving the queue.
+      beforeUnderscoreQueueFold: () => writeFileSync(lockPath, otherOwner),
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+
+    assert.equal(readFileSync(lockPath, "utf8"), otherOwner, "the other owner's lock is not removed");
+  });
+});
+
+// A second collector that sees both names of an interrupted or in-progress move
+// must not drop the legacy name itself: the owner is still settling it.
+test("a legacy name that is a link to the canonical queue is dropped only under the handoff lock", () => {
+  withTempRoot("pdpp-durable-state-underscore-link-locked-", (root) => {
+    const { hyphenPath, lockPath, stateRoot, underscorePath } = underscoreQueueFixture(root);
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+    linkSync(underscorePath, hyphenPath);
+    writeFileSync(lockPath, `${process.pid} owner-token\n`);
+
+    assert.throws(
+      () => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      (error: unknown) =>
+        error instanceof CollectorStateResolutionError && error.code === "legacy_state_migration_failed"
+    );
+    assert.equal(existsSync(underscorePath), true, "the legacy name is still there for the owner to settle");
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1);
+  });
+});
+
+test("a legacy name that disappears right after the canonical name was linked finishes the move once the canonical queue checks out", () => {
+  withTempRoot("pdpp-durable-state-underscore-link-gone-", (root) => {
+    const { hyphenPath, stateRoot, underscorePath } = underscoreQueueFixture(root);
+    seedOutbox(underscorePath, SOURCE_A, "legacy-row");
+
+    const resolved = captureStderr(() =>
+      resolveCollectorQueuePath({
+        afterUnderscoreQueueLink: () => rmSync(underscorePath),
+        connectorId: "claude-code",
+        sourceInstanceId: SOURCE_A,
+        stateRoot,
+      })
+    );
+
+    assert.equal(resolved.result, hyphenPath);
+    assert.equal(resolved.stderr, "");
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1);
   });
 });
 
