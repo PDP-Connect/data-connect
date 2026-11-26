@@ -7,9 +7,11 @@ import {
   type ConnectorManifestStorageContext,
   assertLegacyOwnershipPostgres,
   assertLegacyOwnershipSqlite,
+  assertRetainedSourceIdentities,
   moveSourceIdentityPostgres,
   moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
+  retainMovedFromIdentity,
   retainedSourceIdentityChange,
   retainedStorageContext,
 } from "../auth.ts";
@@ -73,12 +75,23 @@ interface ActivationValues {
  */
 function activationValues(
   record: ConnectorInstallRecord,
-  context: ConnectorManifestStorageContext = {}
+  context: ConnectorManifestStorageContext = {},
+  previousManifest?: unknown,
+  movedFrom?: string
 ): ActivationValues {
-  const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(record.manifest, context);
+  const { connectorId, storedManifest: normalizedManifest } = normalizeConnectorManifestForStorage(
+    record.manifest,
+    context
+  );
   if (connectorId !== record.connectorId) {
     throw new Error("Connector activation manifest identity mismatch");
   }
+  const storedManifestJson = retainMovedFromIdentity(
+    JSON.stringify(normalizedManifest),
+    previousManifest,
+    movedFrom
+  );
+  const storedManifest = JSON.parse(storedManifestJson) as Record<string, unknown>;
   const canonicalManifestJson = canonicalJson(storedManifest);
   const manifestRevision = sha256(canonicalManifestJson);
   const recordJson = JSON.stringify(record);
@@ -104,7 +117,7 @@ function parseRow(row: ActivationRow | undefined): ConnectorActivation | null {
   const record = JSON.parse(row.record_json) as ConnectorInstallRecord;
   const canonicalManifest = JSON.parse(row.canonical_manifest_json) as Record<string, unknown>;
   // The row's own canonical declaration is the identity it was published under.
-  const expected = activationValues(record, retainedStorageContext(canonicalManifest));
+  const expected = activationValues(record, retainedStorageContext(canonicalManifest), canonicalManifest);
   if (
     expected.activationId !== row.activation_id ||
     expected.manifestRevision !== row.manifest_revision ||
@@ -135,18 +148,21 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
   let values: ActivationValues;
   if (isPostgresStorageBackend()) {
     values = await withPostgresTransaction(async (client) => {
-      await assertLegacyOwnershipPostgres(client, id, record.manifest);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_activation'), hashtext($1))", [id]);
       const registry = await client.query<{ manifest: unknown }>(
         "SELECT manifest FROM connectors WHERE connector_id=$1 FOR UPDATE",
         [id]
       );
       const previous = registry.rows[0]?.manifest;
-      const derived = activationValues(record, retainedStorageContext(previous));
-      const identityMove = retainedSourceIdentityChange(id, previous, derived.canonicalManifestJson, identityOptions);
+      const initial = activationValues(record, retainedStorageContext(previous));
+      const identityMove = retainedSourceIdentityChange(id, previous, initial.canonicalManifestJson, identityOptions);
+      const derived = activationValues(record, retainedStorageContext(previous), previous, identityMove?.from);
+      assertRetainedSourceIdentities(previous, JSON.parse(derived.canonicalManifestJson) as Record<string, unknown>);
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
       }
+      await assertLegacyOwnershipPostgres(client, id, JSON.parse(derived.canonicalManifestJson));
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)
          ON CONFLICT(connector_id) DO UPDATE SET manifest = EXCLUDED.manifest
@@ -189,18 +205,20 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
     values = getDb()
       .transaction(() => {
         const db = getDb();
-        assertLegacyOwnershipSqlite(id, record.manifest);
         const old = db.prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get<{ manifest: string }>(id);
-        const derived = activationValues(record, retainedStorageContext(old?.manifest));
+        const initial = activationValues(record, retainedStorageContext(old?.manifest));
         const identityMove = retainedSourceIdentityChange(
           id,
           old?.manifest,
-          derived.canonicalManifestJson,
+          initial.canonicalManifestJson,
           identityOptions
         );
+        const derived = activationValues(record, retainedStorageContext(old?.manifest), old?.manifest, identityMove?.from);
+        assertRetainedSourceIdentities(old?.manifest, JSON.parse(derived.canonicalManifestJson) as Record<string, unknown>);
         if (identityMove) {
           moveSourceIdentitySqlite(identityMove);
         }
+        assertLegacyOwnershipSqlite(id, JSON.parse(derived.canonicalManifestJson));
         if (!old || canonicalJson(JSON.parse(old.manifest)) !== derived.canonicalManifestJson) {
           db.prepare(
             "INSERT INTO connectors(connector_id,manifest) VALUES(?,?) ON CONFLICT(connector_id) DO UPDATE SET manifest=excluded.manifest"
@@ -369,7 +387,11 @@ async function migrateLegacyActivation(connectorId: string): Promise<void> {
         "SELECT manifest FROM connectors WHERE connector_id=$1",
         [connectorId]
       );
-      const values = activationValues(record, retainedStorageContext(registry.rows[0]?.manifest));
+      const values = activationValues(
+        record,
+        retainedStorageContext(registry.rows[0]?.manifest),
+        registry.rows[0]?.manifest
+      );
       const coherent = registry.rows[0] && canonicalJson(registry.rows[0].manifest) === values.canonicalManifestJson;
       await client.query(
         `INSERT INTO connector_activations(connector_id,state,record_json,canonical_manifest_json,manifest_revision,activation_id,attempt_id,repair_reason,updated_at)
@@ -403,7 +425,11 @@ async function migrateLegacyActivation(connectorId: string): Promise<void> {
         const registry = db
           .prepare("SELECT manifest FROM connectors WHERE connector_id=?")
           .get<{ manifest: string }>(connectorId);
-        const values = activationValues(record, retainedStorageContext(registry?.manifest));
+        const values = activationValues(
+          record,
+          retainedStorageContext(registry?.manifest),
+          registry?.manifest
+        );
         const coherent = registry && canonicalJson(JSON.parse(registry.manifest)) === values.canonicalManifestJson;
         db.prepare(`INSERT INTO connector_activations(connector_id,state,record_json,canonical_manifest_json,manifest_revision,activation_id,attempt_id,repair_reason,updated_at)
         VALUES(?,?,?,?,?,?,?,?,datetime('now'))`).run(
