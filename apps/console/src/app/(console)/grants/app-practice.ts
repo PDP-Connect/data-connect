@@ -1,5 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { appPractice } from "../history/practice.ts";
+import { applyAppReading } from "./app-reading.ts";
+import type { AppHistory, AppReadDay } from "../lib/ref-client.ts";
+import { APP_PRACTICE_SOURCES } from "../lib/app-practice-sources.ts";
 import { mergeAppAccessSources } from "pdpp-reference-implementation/app-access";
 import type { AppAccess, PendingApproval } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp } from "./app-access.ts";
@@ -131,6 +135,10 @@ export function buildAppPractice(demo: string) {
       }),
     };
   });
+  if (["app", "mixed"].includes(demo)) for (const app of data) {
+    const template=app.sources[0]!;
+    app.sources=APP_PRACTICE_SOURCES.map(source=>({...structuredClone(template),source:{kind:"connector",id:source.connector,connector_id:source.connector,connection_id:source.id}}));
+  }
   if (demo === "app-fifty-six") {
     const template = data[0]!.sources[0]!;
     const rows = Array.from({ length: 56 }, (_, index) => {
@@ -212,10 +220,15 @@ export function buildAppPractice(demo: string) {
       }
     }
   }
+  const readingHistory: AppHistory = {mode:"days", data:apps.flatMap(app=>{
+    const history=appPractice(!app.lastRead || demo === "app-never-read" || app.state !== "reading" ? "unread" : "app",-new Date().getTimezoneOffset(),app.lastRead ? Date.parse(app.lastRead) : now,app.sourceAccess);
+    return history.mode === "days" ? history.data.map(row=>({...row,client_id:app.clientIds[0] ?? row.client_id})) : [];
+  }),changes:[],identities:[],has_more:false,next_cursor:null};
   // A pending registration has no past permission to show as stopped.
   return {
     registrations: data,
-    apps: apps.filter((app) => app.state === "waiting" || app.grantIds.length > 0),
+    apps: apps.filter((app) => app.state === "waiting" || app.grantIds.length > 0).map(app=>applyAppReading(app,readingHistory.data as AppReadDay[])),
+    readingHistory,
     approvals,
   };
 }

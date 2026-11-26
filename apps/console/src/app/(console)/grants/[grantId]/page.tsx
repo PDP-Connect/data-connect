@@ -11,9 +11,10 @@ export default async function AppDetailPage({ params, searchParams }: { params: 
   const { grantId } = await params;
   const query = await searchParams;
   const demo = process.env.NODE_ENV !== "production" ? query.demo : undefined;
-  const { apps } = await loadApps(demo);
+  const loaded = await loadApps(demo);
+  const { apps } = loaded;
   const app = apps.find((item) => item.grantIds.includes(decodeURIComponent(grantId)) || item.hrefId === decodeURIComponent(grantId));
   if (!app) notFound();
-  const recent = await loadRecentReading(app,demo);
+  const recent = await loadRecentReading(app,demo,"readingHistory" in loaded ? loaded.readingHistory : undefined);
   return <RecordroomShellWithPalette><DayCut /><AppPage app={app} demo={demo} recent={recent} /></RecordroomShellWithPalette>;
 }

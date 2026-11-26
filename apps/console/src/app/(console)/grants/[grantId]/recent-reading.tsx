@@ -19,7 +19,7 @@ export function RecentReading({
   demo?: string;
 }) {
   if (!rows.length) {
-    return null;
+    return <Section title="What it has read lately"><p>It has not read anything yet.</p></Section>;
   }
   return (
     <Section title="What it has read lately">

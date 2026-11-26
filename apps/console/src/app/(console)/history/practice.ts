@@ -1,8 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import {CONSOLE_OWNER_CLIENT_ID} from "pdpp-reference-implementation/reference-local-defaults";
-import type { AppHistory, AppReadEntry, AppReadDay, AccessChange, SyncDay, SyncEntry, SyncHistory } from "../lib/ref-client.ts";
+import type { AppAccessSource, AppHistory, AppReadEntry, AppReadDay, AccessChange, SyncDay, SyncEntry, SyncHistory } from "../lib/ref-client.ts";
 import type { HistorySource } from "./load-sources.ts";
+import { APP_PRACTICE_SOURCES } from "../lib/app-practice-sources.ts";
 import { personDay } from "./day-cut.ts";
 export const SYNC_STATES = ["mixed","problems","source","empty","no-match","forty","recopied","expired-sign-in","missing-kind","hundred-ten"];
 export const SYNC_DAY_STATES = ["three","sixty"];
@@ -15,7 +16,7 @@ function practiceTime(now: number,index: number,offset: number): string {
 }
 export const practiceEnabled = (demo?: string) => process.env.NODE_ENV !== "production" && Boolean(demo);
 export function historyPracticeSources(count = 6): HistorySource[] {
-  const names = ["Amazon","Reddit","Gmail","Spotify","Northwind","GitHub"];
+  const names = [...APP_PRACTICE_SOURCES.map(source => source.name),"Northwind","GitHub"];
   return Array.from({ length: count }, (_,index) => ({ id: `practice-source-${index}`, connector: names[index % names.length]!.toLowerCase(), name: count > 6 ? `${names[index % names.length]} (${Math.floor(index/6)+1})` : names[index]! }));
 }
 export function syncPractice(state: string, offset: number, now = Date.now()): { history: SyncHistory; sources: HistorySource[]; now: { id: string; name: string; needs: boolean; at: string }[] } {
@@ -52,13 +53,17 @@ export function syncDayPractice(state: string, offset: number, now = Date.now(),
 export function practiceNow(day: string | undefined,offset:number,now=Date.now()): number {
   return day ? now + Date.parse(day)-Date.parse(personDay(now,offset)) : now;
 }
-export function appPractice(state: string, offset: number, now = Date.now()): AppHistory {
+export function appPractice(state: string, offset: number, now = Date.now(), allowed?: readonly AppAccessSource[]): AppHistory {
   const data: AppReadDay[] = [];
   for (let day = 0; day < 3; day++) for (let app = 0; app < (state === "thirty" ? 30 : state === "fifty-nine" ? 59 : 2); app++) {
     const at = practiceTime(now-day*86400000,app,offset);
     data.push({ day: personDay(at,offset), client_id: `practice-app-${app}`, reads: 120, across_sources: 80,
       last_at: at, permission_refusals: day === 0 && app === 1 ? 3 : 0,
-      sources: Array.from({ length: 4 }, (_,index) => ({ source_id: historyPracticeSources()[index]!.connector, source_kind: "connector", connection_id: `practice-source-${index}`, reads: 10, records: index === 0 ? null : 230 })) });
+      sources: APP_PRACTICE_SOURCES.map((source,index) => ({ last_at:at, source_id: source.connector, source_kind: "connector", connection_id: source.id, reads: 10, records: index === 0 ? null : 230 })) });
+  }
+  if (allowed) for (const row of data) {
+    row.sources = allowed.map(source => ({ source_id: source.source.connector_id ?? source.source.id, source_kind: source.source.kind, connection_id: source.source.connection_id, reads: 10, records: 20, last_at: row.last_at }));
+    row.reads = row.across_sources + row.sources.reduce((count,source) => count + source.reads,0);
   }
   const changes: AccessChange[] = ["allowed","not_allowed","removed"].map((change,index) => ({ id: `practice-change-${index}`, trace_id: `practice-trace-${index}`, at: practiceTime(now,index,offset), day: personDay(now,offset), client_id: `practice-app-${index===1?2:0}`, change: change as AccessChange["change"], source_id: index === 1 ? null : "gmail", source_kind: "connector", connection_id: index === 1 ? null : "practice-source-2" }));
   if(state==="seven-fifty") for(const row of data) {row.reads=225;row.across_sources=0;row.sources=[{source_id:"gmail",source_kind:"connector",connection_id:"practice-source-2",reads:225,records:4500}];}

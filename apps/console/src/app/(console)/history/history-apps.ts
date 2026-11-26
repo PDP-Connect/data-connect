@@ -4,13 +4,13 @@ import {CONSOLE_OWNER_CLIENT_ID} from "pdpp-reference-implementation/reference-l
 import type { AppReadDay } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp, type AppAccess } from "../grants/app-access.ts";
 import { buildAppPractice } from "../grants/app-practice.ts";
-import {historyPracticeSources} from "./practice.ts";
+import { APP_PRACTICE_SOURCES } from "../lib/app-practice-sources.ts";
 import { appPractice } from "./practice.ts";
 export function practiceHistoryApps(state: string): AppAccess[] {
   if (state === "empty") return [];
   const base = buildAppPractice("mixed").registrations[0];
   if (!base) return [];
-  return groupGrantAccessByApp(Array.from({ length: state === "thirty" ? 30 : state === "fifty-nine" ? 59 : 3 }, (_,index) => ({ ...structuredClone(base), client_id: `practice-app-${index}`, client_name: index === 0 ? "ChatGPT" : index === 1 ? "Claude" : `Northwind Notes ${index}`, return_host: index === 0 ? "chatgpt.com" : index === 1 ? "claude.ai" : "notes.northwind.example", sources: (index===2 && !["thirty","fifty-nine"].includes(state)?[]:historyPracticeSources().slice(0,4)).map((item) => ({ ...structuredClone(base.sources[0]!), source:{kind:"connector",id:item.connector,connector_id:item.connector,connection_id:item.id}, grant_ids: [`practice-access-${index}`], active_grant_ids: [`practice-access-${index}`] })) })));
+  return groupGrantAccessByApp(Array.from({ length: state === "thirty" ? 30 : state === "fifty-nine" ? 59 : 3 }, (_,index) => ({ ...structuredClone(base), client_id: `practice-app-${index}`, client_name: index === 0 ? "ChatGPT" : index === 1 ? "Claude" : `Northwind Notes ${index}`, return_host: index === 0 ? "chatgpt.com" : index === 1 ? "claude.ai" : "notes.northwind.example", sources: (index===2 && !["thirty","fifty-nine"].includes(state)?[]:APP_PRACTICE_SOURCES).map((item) => ({ ...structuredClone(base.sources[0]!), source:{kind:"connector",id:item.connector,connector_id:item.connector,connection_id:item.id}, grant_ids: [`practice-access-${index}`], active_grant_ids: [`practice-access-${index}`] })) })));
 }
 export interface NamedAppDay extends AppReadDay { app: AppAccess }
 export function groupAppHistory(rows: AppReadDay[], apps: AppAccess[]): NamedAppDay[] {
@@ -28,7 +28,7 @@ export function groupAppHistory(rows: AppReadDay[], apps: AppAccess[]): NamedApp
     for (const source of row.sources) {
       const existing = day.sources.find(item => item.source_id === source.source_id && item.connection_id === source.connection_id && item.source_kind === source.source_kind);
       if (!existing) day.sources.push({...source});
-      else { existing.reads += source.reads; existing.records = existing.records === null && source.records === null ? null : (existing.records ?? 0)+(source.records ?? 0); }
+      else { if ((source.last_at ?? "") > (existing.last_at ?? "")) existing.last_at = source.last_at; existing.reads += source.reads; existing.records = existing.records === null && source.records === null ? null : (existing.records ?? 0)+(source.records ?? 0); }
     }
   }
   for (const row of groups.values()) row.sources.sort((a,b) => b.reads-a.reads);

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import type { AppReadEntry } from "../../lib/ref-client.ts";
@@ -28,7 +29,7 @@ export function ReadDayRows({rows,sources,offset=0}:{rows:AppReadEntry[];sources
   </li>)}</ul>;
 }
 export function ReadDayView({app,day,offset,rows,sources,discovery=[],nextCursor,loadMore,pageKey}:{app:AppAccess;day:string;offset:number;rows:AppReadEntry[];sources:HistorySource[];pageKey?:string;discovery?:AppReadEntry[];moreHref?:string;nextCursor?:string|null;loadMore?:(cursor:string)=>Promise<HistoryPageChunk>}) {
-  return <><PageHeader breadcrumbs={[{href:"/audit",label:"Activity"}]} title={`${app.name}, ${sentenceDayLabel(day,offset)}`} />
+  return <><PageHeader breadcrumbs={[{href:"/audit",label:"Activity"}]} title={<span className="inline-flex items-center gap-3"><ConnectorMark connectorId={app.name} name={app.name} /><span>{app.name}, {sentenceDayLabel(day,offset)}</span></span>} />
     <AppendHistory key={pageKey ?? `${day}:${app.hrefId}`} initial={{content:<ReadDayRows rows={rows} sources={sources} offset={offset} />,next:nextCursor ?? null}} load={loadMore} label="Show more" />
     {discovery.length ? <ReadDayRows rows={discovery} sources={sources} offset={offset} /> : null}
     <p className="my-6"><Link className="text-primary underline-offset-4 hover:underline" href={`/grants/${encodeURIComponent(app.hrefId)}`}>See {app.name}</Link></p>
