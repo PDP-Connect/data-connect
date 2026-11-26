@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto"
 import {
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   lstatSync,
@@ -119,7 +120,7 @@ function confinedFile(
   return checkConfinedFile(root, relativePath, label).path
 }
 
-function checkConfinedFile(
+export function checkConfinedFile(
   root: string,
   relativePath: string,
   label: string
@@ -145,11 +146,16 @@ function checkConfinedFile(
 /**
  * Reads at most `limit + 1` bytes from one descriptor, which must be the
  * regular file that passed confinement. A file or parent directory replaced
- * after the check opens another inode and is refused, and a file that grows
- * mid-read cannot allocate past the limit.
+ * after the check opens another inode and is refused. Content beyond the
+ * limit is refused without reading past `limit + 1` bytes.
  */
-export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
-  const fd = openSync(file.path, "r")
+export function readConfinedFile(
+  file: ConfinedFile,
+  limit: number,
+  refusal = `${file.label} exceeds the ${limit} byte limit.`
+): Buffer {
+  // A substituted FIFO must reach the regular-file check without blocking.
+  const fd = openSync(file.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const opened = fstatSync(fd)
     if (
@@ -159,6 +165,7 @@ export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
     ) {
       throw new Error(`${file.label} changed while it was being read.`)
     }
+    if (opened.size > limit) throw new Error(refusal)
     const buffer = Buffer.alloc(limit + 1)
     let length = 0
     while (length < buffer.length) {
@@ -166,6 +173,7 @@ export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
       if (n === 0) break
       length += n
     }
+    if (length > limit) throw new Error(refusal)
     return buffer.subarray(0, length)
   } finally {
     closeSync(fd)
@@ -214,11 +222,9 @@ function readManifest(root: string): {
   // of the parsed bytes.
   const bytes = readConfinedFile(
     checkConfinedFile(root, MANIFEST_PATH, "Collection Profile manifest"),
-    MAX_PROFILE_BYTES
+    MAX_PROFILE_BYTES,
+    "Collection Profile manifest exceeds the 1 MiB limit."
   )
-  if (bytes.byteLength > MAX_PROFILE_BYTES) {
-    throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
-  }
   const decoded = decodeLocalManifestJson(bytes.toString("utf8"))
   if (decoded.kind === "invalid_json") {
     throw new Error("Collection Profile manifest is invalid JSON.")

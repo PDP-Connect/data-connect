@@ -10,17 +10,12 @@
  */
 import { createHash } from "node:crypto";
 import {
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readdirSync,
   readFileSync,
-  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -47,10 +42,12 @@ import {
 } from "../connector-uninstall-journal.ts";
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
+  checkConfinedFile,
   createFileLocalConnectorSourceStore,
   inspectActiveLocalConnectorSource,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
+  readConfinedFile,
 } from "./local-source.ts";
 
 const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
@@ -442,31 +439,12 @@ function assertStoredRecordMetadata(active: ConnectorInstallRecord): void {
   }
 }
 
-function readBoundedFile(file: string, limit: number, refusal: string): Buffer {
-  // Nonblocking open lets the handle check reject a substituted FIFO without waiting for a writer.
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > limit) throw new Error(refusal);
-    const bytes = Buffer.alloc(limit + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const received = readSync(fd, bytes, length, bytes.length - length, null);
-      if (received === 0) break;
-      length += received;
-    }
-    if (length > limit) throw new Error(refusal);
-    return bytes.subarray(0, length);
-  } finally {
-    closeSync(fd);
-  }
-}
-
 function readVerifiedStoredFile(root: string, path: string, expected: string, maxBytes?: number): Buffer {
   const file = confinedFile(root, path);
   const refusal = "Active connector bytes failed integrity verification.";
   if (!(file && DIGEST.test(expected))) throw new Error(refusal);
-  const bytes = maxBytes === undefined ? readFileSync(file) : readBoundedFile(file, maxBytes, refusal);
+  const bytes = maxBytes === undefined ? readFileSync(file)
+    : readConfinedFile(checkConfinedFile(root, path, "Active connector metadata"), maxBytes, refusal);
   if (sha256(bytes) !== expected) {
     throw new Error(refusal);
   }
@@ -718,8 +696,9 @@ function withVerifiedSourceDeclaration(
   if (!file) {
     throw new Error("Active source declaration bytes failed integrity verification.");
   }
-  const bytes = readBoundedFile(
-    file, MAX_CONFIG_BYTES, "Active source declaration bytes failed integrity verification."
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, SOURCE_DECLARATION_PATH, "Active source declaration"),
+    MAX_CONFIG_BYTES, "Active source declaration bytes failed integrity verification."
   );
   if (sha256(bytes) !== active.sourceDeclarationSha256) {
     throw new Error("Active source declaration bytes failed integrity verification.");
@@ -751,7 +730,10 @@ function sourceDeclarationDigestOf(root: string): string | undefined {
   if (!file) {
     throw new Error("Verified source declaration is invalid.");
   }
-  const bytes = readBoundedFile(file, MAX_CONFIG_BYTES, "Verified source declaration is invalid.");
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, SOURCE_DECLARATION_PATH, "Verified source declaration"),
+    MAX_CONFIG_BYTES, "Verified source declaration is invalid."
+  );
   return sha256(bytes);
 }
 
@@ -814,8 +796,9 @@ function readVerifiedRecord(
   if (!(manifestFile && entrypointFile && provenanceFile)) {
     throw new Error("Verified connector layout is incomplete.");
   }
-  const manifestBytes = readBoundedFile(
-    manifestFile, MAX_CONFIG_BYTES, "Connector profile exceeds the 1 MiB RI limit."
+  const manifestBytes = readConfinedFile(
+    checkConfinedFile(root, manifestPath, "Connector profile"),
+    MAX_CONFIG_BYTES, "Connector profile exceeds the 1 MiB RI limit."
   );
   const manifest: unknown = parseProfileText(manifestBytes.toString("utf8"));
   if (!manifest || typeof manifest !== "object") {
@@ -1729,8 +1712,9 @@ export function normalizeCoreInstallLayout(
   if (!sourceDeclarationPath) {
     throw new Error("Pinned installer core produced an incomplete collection-profile layout.");
   }
-  const sidecar = readBoundedFile(
-    sourceDeclarationPath, MAX_CONFIG_BYTES, "Staged source declaration exceeds the 1 MiB RI limit."
+  const sidecar = readConfinedFile(
+    checkConfinedFile(coreRoot, SOURCE_DECLARATION_PATH, "Staged source declaration"),
+    MAX_CONFIG_BYTES, "Staged source declaration exceeds the 1 MiB RI limit."
   );
   if (!sidecar.equals(Buffer.from(verifiedSourceDeclaration))) {
     throw new Error("Staged source declaration does not match installer-core verification.");
