@@ -1709,7 +1709,7 @@ test("manual browser verification (manual_action) classifies as external, not se
     runId: "run_verify",
   });
   assert.equal(payload.interaction_sensitivity, "external");
-  assert.equal(payload.body, "A connector needs you to take an action.");
+  assert.equal(payload.body, "Open DataConnect to finish signing in.");
   const serialized = JSON.stringify(payload);
   for (const forbidden of ["provider.example", "verify"]) {
     // "verify" appears in the run id segment; check the body only.
@@ -1734,7 +1734,7 @@ test("re-consent kind defaults to secret and produces no connector copy", () => 
     runId: "run_reconsent",
   });
   assert.equal(payload.interaction_sensitivity, "secret");
-  assert.equal(payload.body, "A connector needs owner input.");
+  assert.equal(payload.body, "Open DataConnect to finish signing in.");
   assert.equal(JSON.stringify(payload).includes("ABCDE"), false);
 });
 

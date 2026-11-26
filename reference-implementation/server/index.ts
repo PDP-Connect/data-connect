@@ -1,3 +1,5 @@
+import { formatConnectionDisplayName } from "@pdpp/display";
+import { resolvePersistentWebPushConfig } from "./web-push-key-config.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8646,7 +8648,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
 
-  const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
+  const webPushConfig = opts.webPushConfig || await resolvePersistentWebPushConfig({ store: createRequestProviderAppConfigStore() });
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
   // Reference-internal run-target registry, lifted out of buildAsApp so the
   // controller can hand the same instance the per-run nonce hooks it needs
@@ -8793,7 +8795,7 @@ export async function startServer(opts: ServerOpts = {}) {
         config: webPushConfig,
         connectorDisplayName: async (connectorId) => {
           const summary = await getConnectorSummaryForRoute(connectorId, controller);
-          return summary?.display_name || summary?.connector_display_name || connectorId;
+          return formatConnectionDisplayName(summary?.display_name, summary?.connector_display_name, connectorId);
         },
         log: logger as never,
         ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
@@ -10347,7 +10349,7 @@ function createReferenceSchedulerManager({
         try {
           const summary = await getConnectorSummaryForRoute(routeId, controller);
           if (summary) {
-            connectorDisplayName = summary.display_name || summary.connector_display_name || connectorId;
+            connectorDisplayName = formatConnectionDisplayName(summary.display_name, summary.connector_display_name, connectorId);
             connectionUrl = `/sources/${encodeURIComponent(summary.connection_id || routeId)}`;
             renderedVerdict = summary.rendered_verdict;
           }
@@ -10381,7 +10383,7 @@ function createReferenceSchedulerManager({
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       onInteraction: async (...args: unknown[]) => {
         const interaction = args[0] as Record<string, unknown>;
-        const connectorDisplayName =
+        let connectorDisplayName =
           // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
           typeof interaction?.connector_display_name === "string" &&
           (interaction.connector_display_name as string).trim()
@@ -10395,6 +10397,9 @@ function createReferenceSchedulerManager({
         const runId = typeof interaction?.run_id === "string" ? (interaction.run_id as string) : null;
         if (runId) {
           try {
+            const routeId = typeof interaction.connector_instance_id === "string" ? interaction.connector_instance_id : typeof interaction.connector_id === "string" ? interaction.connector_id : null;
+            const source = routeId ? await getConnectorSummaryForRoute(routeId, controller).catch(() => null) : null;
+            connectorDisplayName = formatConnectionDisplayName(source?.display_name, source?.connector_display_name || connectorDisplayName, typeof interaction.connector_id === "string" ? interaction.connector_id : null);
             await fanoutPendingInteractionWebPush({
               config: webPushConfig,
               connectorDisplayName,

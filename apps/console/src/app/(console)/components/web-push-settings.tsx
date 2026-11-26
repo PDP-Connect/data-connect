@@ -3,7 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
+import { IcButton, buttonVariants } from "@pdpp/brand-react";
 import { useEffect, useReducer, useState } from "react";
 import type { WebPushConfig, WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
@@ -174,7 +174,7 @@ function hasNavigatorFeature(feature: string) {
 }
 
 async function webPushResponseError(response: Response, fallbackAction: string) {
-  let detail: string | null = null;
+  let detail: string | null;
   try {
     const body = (await response.json()) as { error?: { code?: string; message?: string }; message?: string };
     detail = body.error?.message || body.message || body.error?.code || null;
@@ -612,7 +612,11 @@ function DiagnosticsDisclosure({
 export function WebPushSettings({
   config,
   subscriptions,
+  plain = false,
+  practice,
 }: {
+  plain?: boolean;
+  practice?: string;
   config: WebPushConfig;
   subscriptions: WebPushSubscriptionSummary[];
 }) {
@@ -662,6 +666,7 @@ export function WebPushSettings({
   }
 
   useEffect(() => {
+    if (practice) return;
     const reason = detectSupport(config);
     dispatch({
       permission: "Notification" in window ? Notification.permission : "unknown",
@@ -677,7 +682,7 @@ export function WebPushSettings({
     return () => {
       cancelled = true;
     };
-  }, [config]);
+  }, [config, practice]);
 
   async function enable() {
     if (!config.public_key) {
@@ -824,6 +829,34 @@ export function WebPushSettings({
   const receivingDevices = currentSubscriptions.filter(
     (subscription) => !subscription.revoked_at && !removedEndpoints.includes(subscription.endpoint)
   );
+
+  if (plain || practice) {
+    const blocked = practice ? practice === "blocked" : permission === "denied";
+    const insecure = practice ? practice === "insecure" : typeof window !== "undefined" && !window.isSecureContext;
+    const unsupported = practice ? ["unsupported", "insecure"].includes(practice) : Boolean(unavailable) && !blocked;
+    const on = practice ? ["on", "devices"].includes(practice) : enabled;
+    const otherDevices = practice === "devices" ? [{ endpoint: "practice-phone", device_label: "Phone" }, { endpoint: "practice-tablet", device_label: "Tablet" }] : receivingDevices.filter((row) => row.endpoint !== endpoint);
+    return <section aria-label="Notification settings" className="grid gap-4">
+      {!config.enabled ? <p>Notifications are not available on this install yet.</p> : blocked ? <>
+        <p>This browser is blocking notifications from DataConnect.</p>
+        <p className="text-sm text-muted-foreground">{notificationSettingsSteps(typeof navigator === "undefined" ? "" : navigator.userAgent)[0]}<br />{notificationSettingsSteps(typeof navigator === "undefined" ? "" : navigator.userAgent)[1]}</p>
+        <IcButton variant="ghost" disabled={Boolean(practice)} onClick={() => window.location.reload()}>Check again</IcButton>
+      </> : unsupported ? <>
+        <p>This browser can’t receive notifications.</p>
+        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings">Turn on remote access</a> to get one.</p> : null}
+      </> : !practice && checking ? <p role="status">Checking this device…</p> : on ? <>
+        <p>On for this browser.</p>
+        <div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={sendTest} variant="ghost">Send a test</IcButton><IcButton disabled={busy || Boolean(practice)} onClick={() => endpoint && setConfirmingEndpoint(endpoint)} variant="ghost">Turn off</IcButton></div>
+      </> : <>
+        <p>Only when a data source needs you to sign in or approve something. The message never contains your data.</p>
+        <IcButton className="w-fit" disabled={busy || Boolean(practice)} onClick={enable}>Turn on notifications</IcButton>
+      </>}
+      {otherDevices.length ? <div className="grid gap-2"><h2>Other devices that get notifications</h2><ul className="divide-y divide-border">{otherDevices.map((row) => <li className="flex items-center justify-between gap-3 py-3" key={row.endpoint}><span>{row.device_label || "Another device"}</span><IcButton variant="ghost" disabled={busy || Boolean(practice)} onClick={() => setConfirmingEndpoint(row.endpoint)}>Turn off</IcButton></li>)}</ul></div> : null}
+      {confirmingEndpoint ? <div role="alertdialog" aria-label="Turn off notifications" className="grid gap-2"><p>Turn off notifications for this device? It will stop receiving them.</p><div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={() => disable(confirmingEndpoint)}>Turn off</IcButton><IcButton variant="ghost" onClick={() => setConfirmingEndpoint(null)}>Cancel</IcButton></div></div> : null}
+      {testStatus ? <p role="status">{testStatus.startsWith("Test notification sent") ? "Test sent. Check your notifications." : "The test could not be sent. Try again."}</p> : null}
+      {status.startsWith("Permission:") || status === "Checking this browser…" || status.includes("enabled") || status.includes("disabled") || status === "Unavailable in this browser" ? null : <div role="status"><p>This could not be completed. Try again.</p><IcButton variant="ghost" onClick={() => navigator.clipboard.writeText(status)}>Copy details for support</IcButton></div>}
+    </section>;
+  }
 
   return (
     <section aria-label="Notification settings" className="grid gap-4">
@@ -1025,4 +1058,11 @@ function WebPushSetupDetails({
       <DiagnosticsDisclosure diagnostics={diagnostics} expanded={showDetails} onToggle={onToggleDetails} />
     </div>
   );
+}
+
+export function notificationSettingsSteps(userAgent: string): [string, string] {
+  if (/Firefox/i.test(userAgent)) return ["Open Firefox Settings, then Privacy & Security.", "Under Permissions, allow notifications for DataConnect, then come back here."];
+  if (/Safari/i.test(userAgent) && !/Chrome|Chromium|Edg/i.test(userAgent)) return ["Open Safari Settings, then Websites and Notifications.", "Allow notifications for DataConnect, then come back here."];
+  if (/Chrome|Chromium|Edg/i.test(userAgent)) return ["Open this browser’s site settings for DataConnect.", "Set Notifications to Allow, then come back here."];
+  return ["Open this browser’s settings for this site.", "Allow notifications, then come back here."];
 }

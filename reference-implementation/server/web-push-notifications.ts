@@ -683,9 +683,9 @@ export function getDefaultWebPushSubscriptionStore(): WebPushSubscriptionStore {
 
 export function buildTestPushPayload({ now = nowIso() }: { now?: string } = {}) {
   return {
-    body: "Your dashboard browser can receive Web Push alerts.",
+    body: "This is a test. Notifications work on this device.",
     timestamp: now,
-    title: "PDPP test notification",
+    title: "DataConnect",
     type: "pdpp.test_notification",
     url: "/",
   };
@@ -780,11 +780,11 @@ export function resolveWebPushUrgency(payload: unknown): WebPushUrgency {
 function interactionPushBody(sensitivity: InteractionSensitivity): string {
   switch (sensitivity) {
     case "external":
-      return "A connector needs you to take an action.";
+      return "Open DataConnect to finish signing in.";
     case "informational":
-      return "A connector run is waiting for owner action.";
+      return "Open DataConnect to finish signing in.";
     default:
-      return "A connector needs owner input.";
+      return "Open DataConnect to finish signing in.";
   }
 }
 
@@ -836,7 +836,7 @@ export function buildPendingInteractionPushPayload({
     interaction_sensitivity: sensitivity,
     run_id: runId,
     timestamp: nowIso(),
-    title: `PDPP ${connectorDisplayName}: action needed`,
+    title: `${connectorDisplayName} needs you`,
     type: "pdpp.pending_interaction",
     url,
   });
@@ -892,14 +892,14 @@ export function buildAssistancePushPayload({
   // the assistance object in and pipe `.message`/`.data` through.
   return Object.freeze({
     assistance_request_id: assistanceRequestId,
-    body: "A connector needs you to act in another app.",
+    body: "Open DataConnect to continue this sync.",
     connector_display_name: connectorDisplayName,
     notification_tier: NOTIFICATION_TIERS.ACTION_REQUIRED,
     owner_action: typeof assistance?.owner_action === "string" ? assistance.owner_action : null,
     response_contract: "none",
     run_id: runId,
     timestamp: nowIso(),
-    title: `PDPP ${connectorDisplayName}: action needed`,
+    title: `${connectorDisplayName} needs you`,
     type: "pdpp.assistance_requested",
     url: `/syncs/${encodeURIComponent(runId)}`,
   });
@@ -1375,8 +1375,8 @@ export function buildEscalationPushPayload({
   // dead-but-429ing provider), the only actionable message is "check the
   // dashboard". Connector-specific copy must NOT appear in the body because
   // push bodies are visible on lock screens before the owner authenticates.
-  const body = "Your attention is required to continue syncing.";
-  const title = `PDPP ${connectorDisplayName}: action needed`;
+  const body = "Open DataConnect to continue this sync.";
+  const title = `${connectorDisplayName} needs you`;
   return Object.freeze({
     body,
     connector_display_name: connectorDisplayName,

@@ -197,7 +197,7 @@ test("dashboard test notification button posts to /_ref/web-push/test and gates 
   assert.match(src, DIAGNOSTICS_TEST_PUSH_PATTERN);
   assert.match(src, DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN);
   assert.match(src, DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN);
-  assert.equal(src.match(/>\s*Turn on notifications\s*</g)?.length, 1);
+  assert.equal(src.match(/>\s*Turn on notifications\s*</g)?.length, 2);
   assert.doesNotMatch(src, /Enable this device/);
   assert.match(src, DIAGNOSTICS_TURN_OFF_BUTTON_PATTERN);
   assert.match(src, TURN_OFF_CONFIRMATION_PATTERN);
