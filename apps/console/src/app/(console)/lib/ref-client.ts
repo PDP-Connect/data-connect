@@ -15,6 +15,10 @@ import { redirectToOwnerLogin } from "./login-redirect.ts";
 import { getAsInternalUrl, ReferenceServerUnreachableError, withOwnerSessionCookie } from "./owner-token.ts";
 import { isCredentialRefusal, refErrorCode } from "./static-secret-refusal.ts";
 import { verifyDashboardSession } from "./verify-session.ts";
+import type { AppAccess, RemoveAppAccessInput, RemoveAppAccessResult } from "pdpp-reference-implementation/app-access";
+export type {
+  AppAccess, AppAccessSource, AppAccessSourceIdentity, RemoveAppAccessInput, RemoveAppAccessResult,
+} from "pdpp-reference-implementation/app-access";
 
 export interface SourceObject {
   connection_id?: string | null;
@@ -1711,6 +1715,18 @@ export async function listGrants(opts: ListQuery = {}): Promise<ListResponse<Gra
     "/_ref/grants",
     opts as Record<string, string | number | undefined>
   )) as ListResponse<GrantSummary>;
+}
+
+export async function listAppAccess(): Promise<ListResponse<AppAccess>> {
+  return (await refFetch("/_ref/app-access")) as ListResponse<AppAccess>;
+}
+
+export async function removeAppAccess(input: RemoveAppAccessInput): Promise<RemoveAppAccessResult> {
+  return (await refFetch("/_ref/app-access/remove", undefined, {
+    body: JSON.stringify(input),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })) as RemoveAppAccessResult;
 }
 
 export async function listRuns(opts: ListQuery = {}): Promise<ListResponse<RunSummary>> {

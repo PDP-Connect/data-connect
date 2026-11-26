@@ -23,6 +23,7 @@
  */
 
 import {
+  type AppAccess,
   type DatasetSummary,
   type DeploymentDiagnostics,
   type ExploreTimelinePage,
@@ -36,6 +37,7 @@ import {
   type ListResponse,
   listConnectorSummaries,
   listExploreTimeline,
+  listAppAccess,
   listGrants,
   listPendingApprovals,
   listRuns,
@@ -43,6 +45,9 @@ import {
   type PendingApproval,
   type RefConnectorIdentitySummariesResponse,
   type RefConnectorSummariesResponse,
+  removeAppAccess,
+  type RemoveAppAccessInput,
+  type RemoveAppAccessResult,
   type RunSummary,
   refSearch,
   type TimelineEnvelope,
@@ -73,6 +78,13 @@ import {
   type TimeBucketAggregate,
   type TimeBucketGranularity,
 } from "./rs-client.ts";
+
+export interface AppAccessDataSource {
+  listAppAccess: () => Promise<ListResponse<AppAccess>>;
+  removeAppAccess: (input: RemoveAppAccessInput) => Promise<RemoveAppAccessResult>;
+}
+
+export const liveAppAccessDataSource: AppAccessDataSource = { listAppAccess, removeAppAccess };
 
 export interface DashboardDataSource {
   /**

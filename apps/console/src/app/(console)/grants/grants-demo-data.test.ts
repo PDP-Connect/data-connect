@@ -3,7 +3,29 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEmptyGrantsDemoData, buildGrantsDemoData } from "./grants-demo-data.ts";
+import {
+  buildAppAccessDemoData,
+  buildEmptyGrantsDemoData,
+  buildGrantsDemoData,
+  createAppAccessDemoDataSource,
+} from "./grants-demo-data.ts";
+
+test("practice removal updates only the local complete app list and is repeatable", async () => {
+  const source = createAppAccessDemoDataSource();
+  const first = (await source.listAppAccess()).data[0];
+  assert.ok(first);
+  assert.equal((await source.removeAppAccess({ client_ids: [first.client_id] })).ended_count, 1);
+  assert.equal((await source.listAppAccess()).data[0]?.sources[0]?.in_force, false);
+  assert.equal((await source.removeAppAccess({ client_ids: [first.client_id] })).ended_count, 0);
+});
+
+test("practice apps supply complete access facts without a live request", () => {
+  const list = buildAppAccessDemoData();
+  assert.equal(list.has_more, false);
+  assert.equal(list.data.length, 2);
+  assert.equal(list.data[0]?.sources[0]?.in_force, true);
+  assert.equal(list.data[1]?.sources[0]?.stopped_reason, "removed");
+});
 
 test("empty Apps demo has no rows or waiting requests while atlas keeps both", () => {
   const empty = buildEmptyGrantsDemoData();
