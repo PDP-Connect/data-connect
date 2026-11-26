@@ -42,12 +42,12 @@ import test from "node:test";
 
 import {
   compactionPoliciesFromManifests,
+  findPolicy,
   recordFingerprint as scriptRecordFingerprint,
 } from "../scripts/compact-record-history.ts";
 
 import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 const COMPACTION_POLICIES = compactionPoliciesFromManifests(readShippedManifests().map(({ manifest }) => manifest as ManifestLike)).policies;
-const findPolicy = (key: string, stream: string) => COMPACTION_POLICIES.find((policy) => policy.connectorIds.includes(key) && policy.stream === stream) ?? null;
 
 /**
  * Whether a TypeScript loader (tsx) is active in this process. When the suite
@@ -125,7 +125,7 @@ function expectParity(payload: Record<string, unknown>, excludeKeys?: readonly s
 
 if (canonicalRecordFingerprint) {
   test("parity: gmail threads representative payload", () => {
-    const policy = findPolicy("gmail", "threads");
+    const policy = findPolicy("gmail", "threads", COMPACTION_POLICIES);
     assert.ok(policy, "gmail/threads policy must exist");
     expectParity(
       {
@@ -142,7 +142,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: slack workspace excludes fetched_at", () => {
-    const policy = findPolicy("slack", "workspace");
+    const policy = findPolicy("slack", "workspace", COMPACTION_POLICIES);
     assert.ok(policy, "slack/workspace policy must exist");
     const base = {
       domain: "my-ws",
@@ -160,7 +160,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: slack channel_memberships excludes fetched_at; real membership move is a boundary", () => {
-    const policy = findPolicy("slack", "channel_memberships");
+    const policy = findPolicy("slack", "channel_memberships", COMPACTION_POLICIES);
     assert.ok(policy, "slack/channel_memberships policy must exist");
     assert.deepEqual(policy.excludeKeys, ["fetched_at"]);
     const base = { channel_id: "C1", id: "C1:U1", user_id: "U1" };
@@ -187,7 +187,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: slack users representative payload", () => {
-    const policy = findPolicy("slack", "users");
+    const policy = findPolicy("slack", "users", COMPACTION_POLICIES);
     assert.ok(policy, "slack/users policy must exist");
     expectParity(
       {
@@ -207,7 +207,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: slack files representative payload", () => {
-    const policy = findPolicy("slack", "files");
+    const policy = findPolicy("slack", "files", COMPACTION_POLICIES);
     assert.ok(policy, "slack/files policy must exist");
     expectParity(
       {
@@ -224,7 +224,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: ynab payee_locations representative payload", () => {
-    const policy = findPolicy("ynab", "payee_locations");
+    const policy = findPolicy("ynab", "payee_locations", COMPACTION_POLICIES);
     assert.ok(policy, "ynab/payee_locations policy must exist");
     expectParity(
       {
@@ -239,7 +239,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: ynab budgets representative payload excludes last_month/last_modified_on", () => {
-    const policy = findPolicy("ynab", "budgets");
+    const policy = findPolicy("ynab", "budgets", COMPACTION_POLICIES);
     assert.ok(policy, "ynab/budgets policy must exist");
     const base = {
       currency_decimal_digits: 2,
@@ -278,7 +278,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: gmail labels representative payload (stored body, no id)", () => {
-    const policy = findPolicy("gmail", "labels");
+    const policy = findPolicy("gmail", "labels", COMPACTION_POLICIES);
     assert.ok(policy, "gmail/labels policy must exist");
     // The stored record_json has no `id` (the stream is keyed by `name`).
     // The connector hashes `{id:name, ...body}` with excludeFromFingerprint
@@ -300,7 +300,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: usaa statements excludes fetched_at", () => {
-    const policy = findPolicy("usaa", "statements");
+    const policy = findPolicy("usaa", "statements", COMPACTION_POLICIES);
     assert.ok(policy, "usaa/statements policy must exist");
     const base = {
       account_id: "ACCT-CHK-0001",
@@ -320,7 +320,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chase accounts excludes fetched_at", () => {
-    const policy = findPolicy("chase", "accounts");
+    const policy = findPolicy("chase", "accounts", COMPACTION_POLICIES);
     assert.ok(policy, "chase/accounts policy must exist");
     const base = {
       available_balance_cents: null,
@@ -343,7 +343,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chase statements excludes fetched_at", () => {
-    const policy = findPolicy("chase", "statements");
+    const policy = findPolicy("chase", "statements", COMPACTION_POLICIES);
     assert.ok(policy, "chase/statements policy must exist");
     const base = {
       account_id: "INTACC123",
@@ -369,7 +369,7 @@ if (canonicalRecordFingerprint) {
     // (2) its excludeKeys are exactly the connector's
     // TRANSACTION_FINGERPRINT_EXCLUDE_KEYS (["fetched_at","source"]) so the
     // canonical survivor boundary equals the connector's no-op boundary.
-    const policy = findPolicy("chase", "transactions");
+    const policy = findPolicy("chase", "transactions", COMPACTION_POLICIES);
     assert.ok(policy);
     assert.equal(policy.changeModel, "immutable_semantic");
     assert.equal(policy.representativePolicy, "current");
@@ -377,7 +377,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chase transactions excludes fetched_at/source but a REAL field move is a boundary", () => {
-    const policy = findPolicy("chase", "transactions");
+    const policy = findPolicy("chase", "transactions", COMPACTION_POLICIES);
     assert.ok(policy, "chase/transactions policy must exist");
     // A posted transaction's identity (id = account_id|fitid) and fields
     // are immutable; run-clock `fetched_at` and acquisition-mode `source`
@@ -428,7 +428,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: usaa accounts excludes fetched_at but a REAL balance move is a boundary", () => {
-    const policy = findPolicy("usaa", "accounts");
+    const policy = findPolicy("usaa", "accounts", COMPACTION_POLICIES);
     assert.ok(policy, "usaa/accounts policy must exist");
     // Unlike chase/accounts (all balances null), USAA's account body carries
     // a REAL point-in-time balance_cents. Excluding ONLY fetched_at is
@@ -455,7 +455,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: usaa credit_card_billing excludes fetched_at but REAL balance/rewards moves are boundaries", () => {
-    const policy = findPolicy("usaa", "credit_card_billing");
+    const policy = findPolicy("usaa", "credit_card_billing", COMPACTION_POLICIES);
     assert.ok(policy, "usaa/credit_card_billing policy must exist");
     const base = {
       account_id: "CC-0001",
@@ -494,7 +494,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: usaa transactions excludes fetched_at but a REAL field move is a boundary", () => {
-    const policy = findPolicy("usaa", "transactions");
+    const policy = findPolicy("usaa", "transactions", COMPACTION_POLICIES);
     assert.ok(policy, "usaa/transactions policy must exist");
     // A posted transaction's identity (id = hashId(accountId|date|amount|
     // original|#ord)) and fields are immutable; only `fetched_at` moves when
@@ -532,7 +532,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: usaa inbox_messages excludes fetched_at but a read/unread flip is a boundary", () => {
-    const policy = findPolicy("usaa", "inbox_messages");
+    const policy = findPolicy("usaa", "inbox_messages", COMPACTION_POLICIES);
     assert.ok(policy, "usaa/inbox_messages policy must exist");
     const base = {
       date_received: "2026-05-14",
@@ -555,7 +555,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chase current_activity excludes fetched_at but a pending→posted transition is a boundary", () => {
-    const policy = findPolicy("chase", "current_activity");
+    const policy = findPolicy("chase", "current_activity", COMPACTION_POLICIES);
     assert.ok(policy, "chase/current_activity policy must exist");
     const base = {
       account_id: "INTACC123",
@@ -592,7 +592,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: amazon orders excludes fetched_at but a delivery_status move is a boundary", () => {
-    const policy = findPolicy("amazon", "orders");
+    const policy = findPolicy("amazon", "orders", COMPACTION_POLICIES);
     assert.ok(policy, "amazon/orders policy must exist");
     const base = {
       delivery_status: "Shipping",
@@ -622,7 +622,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chatgpt custom_instructions whole-body fingerprint (no exclude); an edit is a boundary", () => {
-    const policy = findPolicy("chatgpt", "custom_instructions");
+    const policy = findPolicy("chatgpt", "custom_instructions", COMPACTION_POLICIES);
     assert.ok(policy, "chatgpt/custom_instructions policy must exist");
     assert.deepEqual(policy.excludeKeys, [], "custom_instructions hashes the whole body (no run-clock field)");
     // The stored record_json is the full builder body including the stable
@@ -647,7 +647,7 @@ if (canonicalRecordFingerprint) {
   });
 
   test("parity: chatgpt shared_conversations whole-body fingerprint (no exclude); new id / title move is a boundary", () => {
-    const policy = findPolicy("chatgpt", "shared_conversations");
+    const policy = findPolicy("chatgpt", "shared_conversations", COMPACTION_POLICIES);
     assert.ok(policy, "chatgpt/shared_conversations policy must exist");
     assert.deepEqual(policy.excludeKeys, [], "shared_conversations hashes the whole body (no run-clock field)");
     const base = {
@@ -924,7 +924,7 @@ if (canonicalRecordFingerprint) {
       ["codex", "history"],
     ];
     for (const [connector, stream] of connectorStreamPairs) {
-      const policy = findPolicy(connector, stream);
+      const policy = findPolicy(connector, stream, COMPACTION_POLICIES);
       assert.ok(policy, `${connector}/${stream} policy must exist`);
       assert.deepEqual(policy.excludeKeys, ["mtime_epoch", "size_bytes"], `${connector}/${stream} exclude keys`);
 
@@ -1064,7 +1064,7 @@ if (canonicalRecordFingerprint) {
 
   test("parity: representative payloads for additional shipped manifest policies", () => {
     for (const [connector, stream, payload] of ADDITIONAL_SHIPPED_POLICY_FIXTURES) {
-      const policy = findPolicy(connector, stream);
+      const policy = findPolicy(connector, stream, COMPACTION_POLICIES);
       assert.ok(policy, `${connector}/${stream} policy must exist`);
       for (const excludedKey of policy.excludeKeys) {
         assert.ok(

@@ -473,9 +473,10 @@ test("manifest-declared recurring point-in-time snapshot streams DO have a regis
   // manifest-declared class with precedence, NOT by policy absence.
   const manifestRecurringSnapshot = manifestStreamPairsByCompactionClass("recurring_snapshot");
   assert.ok(manifestRecurringSnapshot.length > 0, "expected at least one manifest to declare recurring_snapshot");
+  const policies = compactionPoliciesFromManifests(allShippedManifestsForTest()).policies;
   for (const { connector, stream } of manifestRecurringSnapshot) {
     assert.ok(
-      compactionPoliciesFromManifests(allShippedManifestsForTest()).policies.find((policy) => policy.connectorIds.includes(connector) && policy.stream === stream),
+      findPolicy(connector, stream, policies),
       `${connector}/${stream} is a recurring snapshot; it MUST keep a compaction policy as the no-op regression safety net`
     );
   }
