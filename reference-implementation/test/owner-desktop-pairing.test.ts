@@ -39,7 +39,7 @@ const CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}-[ABCDEFGHJKMNPQRSTVWXYZ2-9
 const CSRF_HIDDEN_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/u;
 const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
 
-async function closeServer(server: TestServer): Promise<void> {
+async function stopServer(server: TestServer): Promise<void> {
   await closeTestServer(server);
   closeDb();
 }
@@ -59,7 +59,7 @@ async function withServer(
   try {
     await fn({ asUrl: `http://localhost:${server.asPort}` });
   } finally {
-    await closeServer(server);
+    await stopServer(server);
   }
 }
 
