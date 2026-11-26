@@ -5654,7 +5654,7 @@ export async function registerConnector(
     verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
-  manifest = await assertIncomingSourceDeclarationPublisher(manifest);
+  manifest = await normalizeIncomingConnectorManifest(manifest);
   validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
   // The retained identity is read here and re-checked under the publication lock in
   // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
@@ -5989,7 +5989,7 @@ function assertSourceIdentityMovable(
 }
 
 /** A returned server projection is writeable only when omitting it regenerates the same declaration. */
-export async function assertIncomingSourceDeclarationPublisher(
+export async function normalizeIncomingConnectorManifest(
   manifest: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   const declaration = sourceDeclarationOf(manifest);

@@ -46,7 +46,7 @@ import {
   initPostgresStorage,
   isPostgresStorageBackend,
 } from "../server/postgres-storage.ts";
-import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
+import { COLLECTION_PROFILE_URI, snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const PUBLISHER = "https://publishers.example/accepted";
@@ -232,6 +232,14 @@ for (const path of ["registration", "activation"] as const) {
         (detail.envelope.source_declaration as { publisher: { id: string } }).publisher.id,
         "https://pdpp.dev/reference-implementation"
       );
+      if (moved) {
+        const declaration = detail.envelope.source_declaration as { extensions: Record<string, { legacy_source_ids?: string[] }> };
+        assert.deepEqual(
+          declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids,
+          [history],
+          "registry GET contains the moved-from identity before the round trip"
+        );
+      }
       // Object member order is not declaration content.
       const returned = {
         ...detail.envelope,
