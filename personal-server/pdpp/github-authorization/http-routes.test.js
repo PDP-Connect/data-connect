@@ -122,3 +122,35 @@ test("credential redemption rejects HTTP downgrade proofs for owned tunnel host"
 
   assert.equal(response.status, 403)
 })
+
+test("local timeline routes are registered by default", () => {
+  const routes = []
+  registerGithubAuthorizationRoutes({
+    app: { post: path => routes.push(path) },
+    devToken: "test-only",
+    adapter: {},
+  })
+
+  assert.deepEqual(routes.filter(path => path.includes("/local-timeline/")), [
+    "/v1/pdpp/local-timeline/consent-requests",
+    "/v1/pdpp/local-timeline/consent-requests/:requestId/approve",
+    "/v1/pdpp/local-timeline/revoke",
+  ])
+})
+
+test("disabling local timeline preserves the non-timeline routes", () => {
+  const routes = []
+  registerGithubAuthorizationRoutes({
+    app: { post: path => routes.push(path) },
+    devToken: "test-only",
+    adapter: {},
+    enableLocalTimeline: false,
+  })
+
+  assert.deepEqual(routes, [
+    "/v1/pdpp/credentials/:sessionId/redeem",
+    "/v1/pdpp/consent-requests",
+    "/v1/pdpp/consent-requests/:requestId/approve",
+    "/v1/pdpp/introspect",
+  ])
+})
