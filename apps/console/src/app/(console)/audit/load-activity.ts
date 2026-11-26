@@ -21,11 +21,16 @@ export async function loadActivity(params: Record<string,string | undefined>) {
     }
     return { history, apps, sources: historyPracticeSources(), offset };
   }
-  const [registrations,sources] = await Promise.all([listAppAccess(),loadHistorySources()]);
-  const apps = groupGrantAccessByApp(registrations.data);
-  const app = apps.find(app=>app.hrefId===params.app);
-  const history = await listAppHistory({ ...historyRange(offset), ...(app ? { client_ids: app.clientIds } : params.app ? {client_ids: [""]} : {}), ...(params.connection_id ? { connection_id: params.connection_id } : {}) });
+  const [registrations,sources,history] = await Promise.all([
+    listAppAccess(),loadHistorySources(),
+    listAppHistory({ ...historyRange(offset), ...(params.connection_id ? { connection_id: params.connection_id } : {}) }),
+  ]);
   const known = new Set(registrations.data.map(row=>row.client_id));
-  const completeApps = history.mode === "days" ? groupGrantAccessByApp([...registrations.data,...history.identities.filter(row=>!known.has(row.client_id))]) : apps;
-  return { history, apps: completeApps, sources, offset };
+  const apps = groupGrantAccessByApp(history.mode === "days" ? [...registrations.data,...history.identities.filter(row=>!known.has(row.client_id))] : registrations.data);
+  if (history.mode === "days" && params.app) {
+    const selected=apps.find(app=>app.hrefId===params.app);
+    history.data=history.data.filter(row=>selected?.clientIds.includes(row.client_id));
+    history.changes=history.changes.filter(row=>selected?.clientIds.includes(row.client_id));
+  }
+  return { history, apps, sources, offset };
 }

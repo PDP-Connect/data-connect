@@ -11,7 +11,9 @@ import { DailySyncsView } from "./daily-syncs-view.tsx";
 import { loadSyncHistory } from "./load-sync-history.ts";
 export const dynamic = "force-dynamic";
 export default async function RunsPage({ searchParams }: { searchParams: Promise<Record<string,string | undefined>> }) {
-  const params = await searchParams;
+  const params = { ...await searchParams };
+  if (params.demo === "problems") params.only_problems ??= "true";
+  if (params.demo === "source") params.connection_id ??= "practice-source-0";
   if (params.peek) redirect(`/syncs/${encodeURIComponent(params.peek)}`);
   let model: Awaited<ReturnType<typeof loadSyncHistory>>;
   try { model = await loadSyncHistory(params); }

@@ -33,7 +33,7 @@ const THROTTLING_RE = /throttling/i;
 const UNVERIFIED_ZERO_COPY_RE = /without proving the account was empty/;
 const SERVER_WORK_PROJECTION_RE = /serverWorkGroupHealth|source_work/;
 const RAW_VERDICT_TONE_RE = /rendered_verdict\.pill\.tone|verdict\.pill\.tone/;
-const SYNCS_PAGE_SOURCE = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+const SYNCS_PAGE_SOURCE = readFileSync(new URL("./load-sync-history.ts", import.meta.url), "utf8");
 const DEFERRED_RUN_NOT_LIVE_RE =
   /return !\["cancelled", "completed", "deferred", "failed", "rejected", "succeeded"\]\.includes\(run\.status\);/;
 

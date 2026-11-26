@@ -21,7 +21,6 @@ export function historyBounds(input: HistoryInput): [string, string] {
   const validDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day) && new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
   if (!validDay(input.first) || !validDay(input.last) || (input.day && !validDay(input.day)) ||
       !Number.isInteger(input.offset) || Math.abs(input.offset) > 840 || input.first > input.last ||
-      Date.parse(input.last) - Date.parse(input.first) > 366 * 86_400_000 ||
       (input.day && (input.day < input.first || input.day > input.last))) {
     throw new RangeError("Invalid history day range or UTC distance");
   }

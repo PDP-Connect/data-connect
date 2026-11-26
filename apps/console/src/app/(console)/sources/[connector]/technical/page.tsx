@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import Link from "next/link";
 import { RecordroomShellWithPalette } from "../../../components/recordroom-shell-with-palette.tsx";
 import {
 	loadConnectorPageModel,
@@ -31,6 +32,9 @@ export default async function TechnicalPage({
 			<PageHeader breadcrumbs={[{ href: "/sources", label: "Data sources" }, { href: `/sources/${encodeURIComponent(model.connectionId)}`, label: model.displayName }, { href: `/sources/${encodeURIComponent(model.connectionId)}/technical`, label: "Technical details" }]} title={`Technical details for ${model.displayName}`} />
 			<p className="mb-4 text-muted-foreground">
 				Ids, logs and measurements for whoever is helping you with a problem.
+			</p>
+			<p className="mb-6 text-sm text-muted-foreground">
+				<Link href="/sources/technical/history">Data sources technical overview</Link>
 			</p>
 			<SourceTechnicalDetails
 				model={model}

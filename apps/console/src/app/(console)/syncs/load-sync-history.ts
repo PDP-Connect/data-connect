@@ -1,18 +1,26 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { listRuns, listSyncHistory } from "../lib/ref-client.ts";
+import { listRuns, listSyncHistory, type RunSummary } from "../lib/ref-client.ts";
 import { historyRange } from "../history/day-cut.ts";
 import { loadHistorySources } from "../history/load-sources.ts";
 import { readPersonOffset } from "../history/server-day.ts";
 import { practiceEnabled, syncPractice } from "../history/practice.ts";
+function isLiveRun(run: RunSummary): boolean {
+  return !["cancelled", "completed", "deferred", "failed", "rejected", "succeeded"].includes(run.status);
+}
 export async function loadSyncHistory(params: Record<string,string | undefined>) {
   const offset = await readPersonOffset();
-  if (practiceEnabled(params.demo)) return { ...syncPractice(params.demo as string,offset), offset };
+  if (practiceEnabled(params.demo)) {
+    const model = syncPractice(params.demo as string,offset);
+    if (model.history.mode === "days") model.history.data = model.history.data.filter(row => (!params.connection_id || row.connection_id === params.connection_id) && (params.only_problems !== "true" || row.failed+row.stopped+row.interrupted > 0));
+    if (params.connection_id) model.now = [];
+    return { ...model, offset };
+  }
   const [history,sources,live] = await Promise.all([
     listSyncHistory({ ...historyRange(offset), ...(params.connection_id ? { connection_id: params.connection_id } : {}), only_problems: params.only_problems === "true" }),
     loadHistorySources(), listRuns({ status: "in_progress", limit: 100 }),
   ]);
-  const current = live.data.filter(row => !params.connection_id || (row.connector_instance_id ?? row.connection_id ?? row.source?.connection_id) === params.connection_id).map(row => ({ id: row.run_id,
+  const current = live.data.filter(isLiveRun).filter(row => !params.connection_id || (row.connector_instance_id ?? row.connection_id ?? row.source?.connection_id) === params.connection_id).map(row => ({ id: row.run_id,
     name: sources.find(source => source.id === (row.connector_instance_id ?? row.connection_id ?? row.source?.connection_id))?.name ?? "Data source",
     needs: row.needs_input, at: row.first_at,
   }));

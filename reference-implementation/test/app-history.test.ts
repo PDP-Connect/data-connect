@@ -31,6 +31,8 @@ async function fixture(write: Write) {
       [`event_${seq}`, seq, type, "2026-11-24T23:30:00.000Z", "2026-11-24T23:30:00.000Z", `trace_${seq}`, source,
       JSON.stringify({ query_shape: shape, ...(count !== null ? { record_count: count } : {}), ...(error ? { error: { code: error } } : {}) })]);
   }
+  await write("UPDATE spine_events SET connector_instance_id='mail_account' WHERE event_id IN ('event_1','event_2')",[]);
+  await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,actor_type,actor_id,subject_type,subject_id,object_type,object_id,status,request_id,grant_id,run_id,source_kind,source_id,client_id,stream_id,token_id,interaction_id,data_json,version,connector_instance_id) SELECT 'event_12',12,event_type,occurred_at,recorded_at,scenario_id,'trace_12',actor_type,actor_id,subject_type,subject_id,object_type,object_id,status,request_id,grant_id,run_id,source_kind,NULL,client_id,stream_id,token_id,interaction_id,?,version,connector_instance_id FROM spine_events WHERE event_id='event_1'`,[JSON.stringify({query_shape:"field_window",record_count:5})]);
   await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,
     actor_type,actor_id,subject_id,object_type,object_id,status,client_id,data_json,version)
     VALUES ('foreign', 11, 'disclosure.served', '2026-11-24T23:30:00.000Z','2026-11-24T23:30:00.000Z','test','foreign','client','other','foreign','query','q','succeeded','foreign','{}','1')`, []);
@@ -43,11 +45,11 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(result.data.length, 1);
   assert.equal(result.identities[0]?.client_name,"Test app");
   assert.equal(result.identities[0]?.return_host,"app.example");
-  assert.equal(result.data[0]?.reads, 3);
+  assert.equal(result.data[0]?.reads, 4);
   assert.equal(result.data[0]?.permission_refusals, 1);
   assert.equal(result.data[0]?.across_sources, 1);
-  assert.equal(result.data[0]?.sources[0]?.reads, 2);
-  assert.equal(result.data[0]?.sources[0]?.records, 20);
+  assert.equal(result.data[0]?.sources[0]?.reads, 3);
+  assert.equal(result.data[0]?.sources[0]?.records, 25);
   assert.equal(result.changes.length, 3);
   const west = await readAppHistory("owner", { ...input, first: "2026-11-24", last: "2026-11-24", offset: -360 }, backend);
   assert.equal(west.data.length, 1);
@@ -58,12 +60,12 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(page.data.length, 3);
   assert.equal(page.data.filter(row => row.refused).length, 2);
   const next = await readAppHistory("owner", { ...input, day: input.first, client_ids: ["app"], limit: 5, ...(page.next_cursor ? { cursor: page.next_cursor } : {}) }, backend);
-  assert.equal(next.data.length, 4);
+  assert.equal(next.data.length, 5);
   assert.equal(next.has_more, false);
   assert.equal((await readAppHistory("owner", { ...input, client_ids: ["foreign"] }, backend)).data.length, 0);
-  const scoped = await readAppHistory("owner", { ...input, connection_id: "mail" }, backend);
+  const scoped = await readAppHistory("owner", { ...input, connection_id: "mail_account" }, backend);
   if (scoped.mode !== "days") throw new Error("wrong mode");
-  assert.equal(scoped.data[0]?.reads, 2);
+  assert.equal(scoped.data[0]?.reads, 3);
 }
 test("SQLite app days exclude discovery, retain unknown source reads and separate permission refusals", async () => {
   initDb();

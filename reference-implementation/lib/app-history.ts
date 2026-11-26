@@ -31,8 +31,9 @@ function field(key: string, backend: HistoryBackend): string {
 export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, subjectId: string) {
   const [first, end] = historyBounds(input);
   const client = "coalesce(e.client_id, g.client_id)";
-  const source = `coalesce(e.source_id, ${field("requested_connection_id", backend)})`;
+  const source = `coalesce(e.connector_instance_id, ${field("requested_connection_id", backend)}, e.source_id)`;
   const connection = `coalesce(e.connector_instance_id, ${field("requested_connection_id", backend)})`;
+  const sourceKind = `CASE WHEN ${connection} IS NOT NULL THEN 'connector' ELSE e.source_kind END`;
   const shape = field("query_shape", backend);
   const reason = backend === "postgres" ? "e.data_json->'error'->>'code'" : "json_extract(e.data_json, '$.error.code')";
   const rawCount = `CAST(${field("record_count", backend)} AS TEXT)`;
@@ -46,10 +47,10 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
   }
   if (input.connection_id) { where += ` AND (${source} = ? OR ${connection} = ?)`; values.push(input.connection_id, input.connection_id); }
   const from = "FROM spine_events e LEFT JOIN grants g ON g.grant_id=e.grant_id";
-  return { client, source, connection, shape, reason, records, values, where, from };
+  return { client, source, sourceKind, connection, shape, reason, records, values, where, from };
 }
 export async function readAppHistory(subjectId: string, input: AppHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<AppHistory> {
-  const { client, source, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
+  const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
   if (input.day) {
     if (!input.client_ids?.length) throw new RangeError("A single day requires an app");
     const limit = historyLimit(input);
@@ -61,7 +62,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
       values.push(cursor[0], cursor[0], cursor[1]);
     }
     const rows = await historyRows<AppReadEntry & { event_type: string }>(`SELECT e.event_id AS id, e.trace_id, e.occurred_at AS at,
-      ${client} AS client_id, ${shape} AS shape, ${source} AS source_id, e.source_kind,
+      ${client} AS client_id, ${shape} AS shape, ${source} AS source_id, ${sourceKind} AS source_kind,
       ${connection} AS connection_id, coalesce(e.stream_id, ${field("requested_stream", backend)}) AS record_kind,
       ${records} AS records, ${field("metric", backend)} AS metric, e.event_type, ${reason} AS reason
       ${from} WHERE ${pageWhere} AND e.event_type IN ('disclosure.served','query.rejected')
@@ -73,14 +74,14 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
   const disclosure = `e.event_type='disclosure.served' AND coalesce(${shape},'') NOT IN (${DISCOVERY_SHAPES.map(value => `'${value}'`).join(",")})`;
   const refusal = `e.event_type='query.rejected' AND ${reason} IN (${PERMISSION_REFUSALS.map(value => `'${value}'`).join(",")})`;
   const grouped = await historyRows<Record<string, unknown>>(`SELECT ${day} AS day, ${client} AS client_id,
-    ${source} AS source_id, e.source_kind, ${connection} AS connection_id,
+    ${source} AS source_id, ${sourceKind} AS source_kind, ${connection} AS connection_id,
     SUM(CASE WHEN ${disclosure} THEN 1 ELSE 0 END) AS reads,
     SUM(CASE WHEN ${disclosure} THEN ${records} END) AS records,
     MAX(CASE WHEN ${disclosure} THEN e.occurred_at END) AS last_at,
     MAX(CASE WHEN ${refusal} THEN e.occurred_at END) AS last_refusal_at,
     SUM(CASE WHEN ${refusal} THEN 1 ELSE 0 END) AS permission_refusals
     ${from} WHERE ${where} AND e.event_type IN ('disclosure.served','query.rejected')
-    GROUP BY ${day}, ${client}, ${source}, e.source_kind, ${connection}`, values, backend, query);
+    GROUP BY ${day}, ${client}, ${source}, ${sourceKind}, ${connection}`, values, backend, query);
   const days = new Map<string, AppReadDay>();
   for (const row of grouped) {
     const reads = Number(row.reads); const refused = Number(row.permission_refusals);
@@ -98,7 +99,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
   const changes = await historyRows<AccessChange>(`SELECT e.event_id AS id, e.trace_id, ${day} AS day,
     e.occurred_at AS at, ${client} AS client_id,
     CASE WHEN e.event_type='consent.denied' THEN 'not_allowed' WHEN e.event_type IN ('grant.revoked','grant_package.revoked','client.deleted') THEN 'removed' ELSE 'allowed' END AS change,
-    ${source} AS source_id, e.source_kind, ${connection} AS connection_id
+    ${source} AS source_id, ${sourceKind} AS source_kind, ${connection} AS connection_id
     ${from} WHERE ${where} AND e.event_type IN (${accessTypes})
     ORDER BY e.occurred_at DESC, e.event_id DESC`, values, backend, query);
   const byDecision = new Map<string,AccessChange>();

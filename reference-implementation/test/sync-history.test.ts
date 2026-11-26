@@ -10,6 +10,8 @@ import { readSyncHistory } from "../lib/sync-history.ts";
 
 type Write = (sql: string, values: unknown[]) => Promise<unknown>;
 async function fixture(write: Write) {
+  await write(`INSERT INTO run_history(run_id,connector_instance_id,connector_id,source_json,status,started_at)
+    VALUES ('now','other_account','mail','{}','running','2026-11-25T03:00:00.000Z')`,[]);
   for (const [id, status, time, trigger, records] of [
     ["one", "succeeded", "2026-11-24T23:30:00.000Z", "manual", 14],
     ["two", "failed", "2026-11-25T01:00:00.000Z", null, 2],

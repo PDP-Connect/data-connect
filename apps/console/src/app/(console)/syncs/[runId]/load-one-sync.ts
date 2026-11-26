@@ -27,7 +27,7 @@ export async function loadOneSync(id: string, params: Record<string,string | und
   const connector = status?.connector_id ?? persisted?.connector_id ?? events.find(event => event.source?.connector_id)?.source?.connector_id ?? "";
   const active = status ? isRunHandleActive(status.status) : persisted ? persisted.outcome === "syncing" : !timeline?.terminal_status;
   const assistance = active ? getCurrentRunAssistance(events) : null;
-  const outcome = assistance ? "needs_you" : active ? "syncing" : persisted?.outcome ?? (status?.status === "completed" || timeline?.terminal_status === "completed" ? "finished" : status?.status === "cancelled" ? "stopped" : status?.status === "abandoned" ? "interrupted" : ["deferred","surface_failed"].includes(status?.status ?? "") ? "could_not_start" : "failed");
+  const outcome = assistance && assistance.ownerAction !== "none" ? "needs_you" : active ? "syncing" : persisted?.outcome ?? (status?.status === "completed" || timeline?.terminal_status === "completed" ? "finished" : status?.status === "cancelled" ? "stopped" : status?.status === "abandoned" ? "interrupted" : ["deferred","surface_failed"].includes(status?.status ?? "") ? "could_not_start" : "failed");
   const terminal = getCollectionTerminalEvent(events);
   const kinds = getCollectedKinds(terminal);
   const gaps = classifyKnownGaps(extractKnownGapsFromEventData({ known_gaps: status?.known_gaps ?? terminal?.data.known_gaps }).gaps).coverageGaps;

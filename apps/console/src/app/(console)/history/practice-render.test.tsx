@@ -5,6 +5,8 @@ import { mock, test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
+import { SyncsView } from "../syncs/syncs-view.tsx";
+import { DEMO_SYNCS_MODEL } from "../syncs/syncs-demo.ts";
 import { DailySyncsView } from "../syncs/daily-syncs-view.tsx";
 import { SyncDayView } from "../syncs/day/sync-day-view.tsx";
 import { ACTIVITY_STATES, READ_STATES, readPractice, historyPracticeSources, SYNC_DETAIL_STATES, SYNC_STATES, SYNC_DAY_STATES, syncPractice, syncDayPractice } from "./practice.ts";
@@ -55,7 +57,21 @@ test("an app's recent reading uses the same day rows and stops at five", async (
   const { RecentReading } = await import("../grants/[grantId]/recent-reading.tsx");
   const {history,apps} = practiceAppHistory("mixed",120); if (history.mode !== "days") throw Error("wrong mode");
   const rows = groupAppHistory(history.data,apps).filter(row=>row.app.clientIds.includes("practice-app-0"));
-  const document = assertPlain(<RecentReading rows={rows} sources={historyPracticeSources()} offset={120} />);
+  const eight = Array.from({length:8},(_,index)=>({...rows[0]!,day:personDay(Date.now()-index*86400000,120)}));
+  const document = assertPlain(<RecentReading rows={eight} sources={historyPracticeSources()} offset={120} />);
   assert.match(document.body.textContent ?? "",/What it has read lately/);
-  assert.equal(document.querySelectorAll('a[href^="/audit/day"]').length,3);
+  assert.equal(document.querySelectorAll('a[href^="/audit/day"]').length,5);
+});
+test("practice sync rows stay inside their stated day just after midnight",()=>{
+  const offset=120;const now=Date.parse("2026-11-25T22:02:00.000Z");
+  const model=syncPractice("forty",offset,now);
+  if(model.history.mode!=="days")throw Error("wrong mode");
+  for(const row of model.history.data)assert.equal(personDay(row.last_at!,offset),row.day);
+});
+
+test("the former exact counters and source facts remain on the technical overview",()=>{
+  const document=new JSDOM(renderToStaticMarkup(<SyncsView title="Data sources technical overview" model={DEMO_SYNCS_MODEL} seeded />)).window.document;
+  assert.match(document.body.textContent ?? "",/Data sources technical overview/);
+  assert.match(document.body.textContent ?? "",/streams on schedule/);
+  assert.match(document.body.textContent ?? "",/Streams by source/);
 });

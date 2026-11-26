@@ -438,3 +438,12 @@ test("sync page never says nothing was collected unless every count is known and
     assert.doesNotMatch(visible, WHAT_COLLECTED_RE, name);
   }
 });
+
+test("the technical practice address renders the real technical page without a live read", async () => {
+  const { default: Page } = await import("./technical-page.tsx");
+  const element = await Page({params:Promise.resolve({runId:"practice-sync"}),searchParams:Promise.resolve({demo:"technical"})});
+  const document = new JSDOM(renderToStaticMarkup(element)).window.document;
+  assert.match(document.body.textContent ?? "",/Technical details for this sync/);
+  assert.match(document.body.textContent ?? "",/Northwind/);
+  assert.match(document.body.textContent ?? "",/14/);
+});

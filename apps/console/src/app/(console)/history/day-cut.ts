@@ -25,17 +25,30 @@ export function historyTime(at: string | null, offset: number, now = Date.now())
   return clockLabel(at, offset);
 }
 export function historyRange(offset: number, now = Date.now()) {
-  return { first: personDay(now - 365 * 86_400_000, offset), last: personDay(now,offset), offset };
+  return { first: "1970-01-01", last: personDay(now,offset), offset };
 }
 export function visibleDays(rows: { day: string }[], count: number): string[] {
   return [...new Set(rows.map(row => row.day))].sort().reverse().slice(0,count);
 }
 export function historyDayCount(value?: string): number {
   const count = Number(value);
-  return Number.isInteger(count) && count >= 7 && count <= 366 ? count : 7;
+  return Number.isInteger(count) && count >= 7 && count <= 10000 ? count : 7;
 }
 export function historyHref(path: string, params: Record<string,string | undefined>, patch: Record<string,string | undefined>): string {
   const query = new URLSearchParams();
   for (const [key,value] of Object.entries({ ...params, ...patch })) if (value) query.set(key,value);
   return `${path}${query.size ? `?${query}` : ""}`;
+}
+
+export function sentenceDayLabel(day: string, offset: number): string {
+  const label = dayLabel(day,offset);
+  return label === "Today" || label === "Yesterday" ? label.toLowerCase() : label;
+}
+export function startedAgo(at: string, now = Date.now()): string {
+  const minutes = Math.max(0,Math.floor((now-Date.parse(at))/60_000));
+  if (minutes < 1) return "a few seconds ago";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes/60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours/24); return `${days} day${days === 1 ? "" : "s"} ago`;
 }

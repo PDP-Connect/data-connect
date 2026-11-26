@@ -67,6 +67,8 @@ import {
 
 import { flowPreview, flowPreviewState, previewBrowserMessage } from "../../connect/flow-preview.ts";
 
+import { practiceEnabled } from "../../history/practice.ts";
+import { technicalPractice } from "./technical-practice.ts";
 export const dynamic = "force-dynamic";
 
 interface LatestProgress {
@@ -77,7 +79,7 @@ interface LatestProgress {
   total: number | null;
 }
 
-type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string; return_to?: string }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string; return_to?: string; demo?: string }>;
 
 function getCursor(value: string | string[] | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -110,11 +112,12 @@ export default async function RunDetailPage({
   if (preview) return <SignInDetailsSurface connector={flowPreview.connector} fields={flowPreview.fields.map(field => ({ ...field, autocomplete: null }))} interactionId="sample-step" message={previewBrowserMessage("needs-details")} preview previewError={preview === "rejected" ? flowPreview.detailsRejected : undefined} runId={runId} />;
   const cursor = getCursor(query.cursor);
   const receiptsCursor = getCursor(query.receipts_cursor);
+  const sample = practiceEnabled(query.demo) && query.demo === "technical";
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
   try {
-    [envelope, runStatus] = await Promise.all([getRunTimeline(runId, { cursor }), getRunStatus(runId)]);
+    [envelope, runStatus] = sample ? technicalPractice(runId) : await Promise.all([getRunTimeline(runId, { cursor }), getRunStatus(runId)]);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -147,9 +150,9 @@ export default async function RunDetailPage({
   const connectionId = resolveRunConnectionId(runStatus, events);
   const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
-  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorManifests = sample ? [] : await listConnectorManifests().catch(() => []);
   const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
-  const connectorName = connectorManifest?.display_name ?? "Data source";
+  const connectorName = sample ? "Northwind" : connectorManifest?.display_name ?? "Data source";
 
   const checkpoints = summarizeCheckpoints(events);
   const progress = summarizeProgress(events);

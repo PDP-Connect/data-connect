@@ -12,11 +12,11 @@ export function readSentence(read: AppReadEntry, source: string | null): string 
     case "connector_list": return "Listed the data sources it may read";
     case "stream_metadata": return `Asked about ${kind}${from}`;
     case "record_list": return `Listed ${read.records === null ? "" : `${read.records} `}${kind}${from}`;
-    case "record_detail": return `Opened one record${from}`;
-    case "field_window": return `Read part of a field${from}`;
+    case "record_detail": return `Opened one record${read.record_kind ? ` in ${kind}` : ""}${from}`;
+    case "field_window": return `Read part of a field${read.record_kind ? ` in ${kind}` : ""}${from}`;
     case "search": case "search_hybrid": case "search_semantic": return `Searched ${source ? `your ${source} data` : "across your data sources"}${results}`;
     case "stream_aggregate": {
-      const action = read.metric === "sum" ? "Added up" : read.metric === "min" ? "Found the smallest value in" : read.metric === "max" ? "Found the largest value in" : "Counted";
+      const action = read.metric === "count_distinct" ? "Counted distinct values in" : read.metric === "sum" ? "Added up" : read.metric === "min" ? "Found the smallest value in" : read.metric === "max" ? "Found the largest value in" : "Counted";
       return `${action} ${source ? `${source} ` : ""}${kind}`;
     }
     default: return `Read your data${from}`;

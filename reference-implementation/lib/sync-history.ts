@@ -44,7 +44,7 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
   const rows = await historyRows<Record<string, unknown>>(`WITH bucketed AS (
     SELECT *, ${day} AS day, ROW_NUMBER() OVER (PARTITION BY ${day}, connector_instance_id
       ORDER BY CASE WHEN ${ran} THEN 0 ELSE 1 END, ${time} DESC, id DESC) AS latest
-    FROM run_history WHERE ${where}
+    FROM run_history WHERE ${where} AND status IN ('succeeded','failed','cancelled','abandoned','skipped','surface_failed')
   ) SELECT day, connector_instance_id AS connection_id, MAX(connector_id) AS connector_id,
     SUM(CASE WHEN ${ran} THEN 1 ELSE 0 END) AS ran,
     SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS finished,

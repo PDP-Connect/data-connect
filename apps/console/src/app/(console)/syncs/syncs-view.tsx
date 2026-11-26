@@ -772,6 +772,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
 // ─── The view ─────────────────────────────────────────────────────────────────
 
 export function SyncsView({
+  title = "Sync history",
   connectorIcons = {},
   model,
   recentSyncsPaging,
@@ -779,6 +780,7 @@ export function SyncsView({
   sourcePager,
   seeded = false,
 }: {
+  title?: string;
   connectorIcons?: ConnectorIconMap;
   model: SyncsViewModel;
   sourceSummaries?: readonly RefConnectorSummary[];
@@ -791,7 +793,7 @@ export function SyncsView({
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
       <header className="mb-6">
         <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]">
-          Sync history
+          {title}
         </h1>
         {seeded ? <p className="mt-2 text-[13px] text-muted-foreground">Sample data</p> : null}
       </header>
