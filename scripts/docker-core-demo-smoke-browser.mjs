@@ -157,7 +157,8 @@ try {
 
   const whatsapp = await page.goto(`${origin}/connect/manual-upload/whatsapp`, { waitUntil: "domcontentloaded" });
   assert.equal(whatsapp?.status(), 200, "WhatsApp manual-upload route must render");
-  await page.getByLabel("Choose the file").waitFor({ state: "visible" });
+  // The step region is also named "Choose the file"; wait for the file input itself.
+  await page.getByRole("button", { name: /^Choose the file/ }).waitFor({ state: "visible" });
   assert.ok(
     (await page.locator("main").innerText()).match(/WhatsApp|export/i),
     "manual-upload route must render WhatsApp export instructions"
