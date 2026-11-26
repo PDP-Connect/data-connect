@@ -211,15 +211,16 @@ process.exit(0)
 }
 
 describe("npm-release.yml attestation verification", () => {
-  it("delegates to the provenance verification script for all three published packages, with GITHUB_SHA", () => {
+  // The package names come from the release config, so a package added to
+  // the stream is verified without editing this step.
+  it("delegates to the provenance verification script for every lockstep package, with GITHUB_SHA", () => {
     const step = findVerificationStep(loadNpmReleaseWorkflow())
     const run = step.run ?? ""
 
+    expect(run).toContain("packages=$(node --import tsx scripts/lockstep-packages.ts)")
     expect(run).toContain("scripts/verify-npm-provenance.ts")
-    expect(run).toContain('"$GITHUB_SHA"')
-    expect(run).toContain("@pdpp/connector-protocol")
-    expect(run).toContain("@pdpp/collector-runtime")
-    expect(run).toContain("@pdpp/local-collector")
+    expect(run).toContain('"$GITHUB_SHA" $packages')
+    expect(run).not.toContain("@pdpp/")
   })
 
   it("binds verification to an exact source commit via --source-digest", () => {

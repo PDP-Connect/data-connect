@@ -125,6 +125,36 @@ test("dataset summary projection reports rebuilding metadata when rows are missi
     assert.match(projection.metadata.stale_since, ISO_TIMESTAMP);
   }));
 
+test("unreadable persisted summary is not reported as a fresh empty result", () =>
+  withTempDb(() => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const metadata: DatasetSummaryMetadata = {
+      computed_at: timestamp,
+      last_error: null,
+      rebuild_status: "idle",
+      source_high_watermark: null,
+      stale_since: null,
+      state: "fresh",
+    };
+    getDb()
+      .prepare(
+        `INSERT INTO dataset_summary_projection
+         (projection_key, summary_json, metadata_json, updated_at, generation)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("global", '{"fixture-private-fragment":', JSON.stringify(metadata), timestamp, 7);
+
+    const projection = getDatasetSummaryProjection();
+    assert.equal(projection.generation, 7);
+    assert.equal(projection.counts.record_count, 0);
+    assert.equal(projection.metadata.state, "failed");
+    assert.equal(projection.metadata.rebuild_status, "failed");
+    assert.equal(projection.metadata.computed_at, null);
+    assert.match(projection.metadata.stale_since ?? "", ISO_TIMESTAMP);
+    assert.equal(projection.metadata.last_error, "dataset summary projection summary is unreadable");
+    assert.doesNotMatch(JSON.stringify(projection), /fixture-private-fragment/);
+  }));
+
 test("dataset summary projection rebuild persists bounded rows from canonical dependencies", async () =>
   withTempDb(async () => {
     await rebuildDatasetSummaryProjection({
@@ -278,7 +308,15 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
         key: "m1",
         stream: "messages",
       });
+      await ingestRecord("gmail", {
+        data: { id: "m1", subject: "v3" },
+        emitted_at: "2026-01-03T00:00:00.000Z",
+        key: "m1",
+        stream: "messages",
+      });
 
+      // v1 is pruned; v2 (the newest row at the horizon, kept for changes_since)
+      // and v3 (the current anchor) remain.
       const projection = getDatasetSummaryProjection();
       assert.equal(projection.retained_bytes.record_changes_json_bytes, recordChangeJsonBytes());
       assert.equal(
@@ -286,7 +324,7 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
           getDb().prepare("SELECT COUNT(*) AS n FROM record_changes").get<{ n: number }>(),
           "record change count row must exist"
         ).n,
-        1
+        2
       );
     } finally {
       if (previousLimit === undefined) {

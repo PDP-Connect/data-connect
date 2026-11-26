@@ -389,16 +389,18 @@ export function getDatasetSummaryProjection(): DatasetSummaryProjection {
     };
   }
 
-  const summary = parseJson<DatasetSummary>(row.summary_json, EMPTY_SUMMARY);
+  const summary = parseJson<DatasetSummary | null>(row.summary_json, null);
   const metadata = parseJson<ProjectionMetadata | null>(row.metadata_json, null);
   const generation = Number(row.generation || 0);
-  if (metadata === null) {
+  if (summary === null || metadata === null) {
     return {
-      ...summary,
+      ...(summary ?? EMPTY_SUMMARY),
       generation,
       metadata: {
         computed_at: null,
-        last_error: "dataset summary projection metadata is unreadable",
+        last_error: summary === null
+          ? "dataset summary projection summary is unreadable"
+          : "dataset summary projection metadata is unreadable",
         rebuild_status: "failed",
         source_high_watermark: null,
         stale_since: nowIso(),

@@ -448,6 +448,68 @@ test("SQLite record rejection store tracks bounded run provenance and stale-afte
   assertSqliteQuotaMatchesRows("owner_a");
 });
 
+test("SQLite record rejection list narrows to a run inside the owner and connection scope, with paging", async () => {
+  initDb();
+  seedSqliteConnection({ runId: "run_a" });
+  seedSqliteConnection({
+    connectorInstanceId: "cin_other",
+    ownerSubjectId: "owner_b",
+    runId: "run_a_other_owner",
+  });
+  for (const runId of ["run_b", "run_c"]) {
+    getDb()
+      .prepare(
+        `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, started_at)
+         VALUES(?, 'cin_test', 'test_connector', '{}', 'running', ?)`
+      )
+      .run(runId, now());
+  }
+  const store = createRecordRejectionStore();
+  const reject = (inputIndex: number, rawLine: string, runId: string, scope = {}) =>
+    store.insertOrReplay({
+      connectorId: "test_connector",
+      connectorInstanceId: "cin_test",
+      inputIndex,
+      ownerSubjectId: "owner_a",
+      rawLine,
+      reasonCode: "invalid_record_identity",
+      runId,
+      stream: "items",
+      ...scope,
+    });
+  const receiptA = await reject(0, '{"id":"a"}', "run_a");
+  const receiptB = await reject(1, '{"id":"b"}', "run_b");
+  const receiptA2 = await reject(2, '{"id":"a2"}', "run_a");
+  // Replayed in a later run: one receipt, first run_a, latest run_c.
+  await reject(5, '{"id":"a"}', "run_c");
+  await reject(0, '{"id":"a"}', "run_a_other_owner", {
+    connectorInstanceId: "cin_other",
+    ownerSubjectId: "owner_b",
+  });
+  const ids = (page: { items: readonly { receiptId: string }[] }) => page.items.map((item) => item.receiptId);
+  const list = (extra: { cursor?: string | null; limit?: number; runId?: string | null }) =>
+    store.list({
+      connectorInstanceId: "cin_test",
+      limit: 10,
+      ownerSubjectId: "owner_a",
+      ...extra,
+    });
+
+  assert.equal((await list({})).items.length, 3, "no run filter lists the whole connection");
+  assert.deepEqual(ids(await list({ runId: "run_a" })), [receiptA.receiptId, receiptA2.receiptId]);
+  assert.deepEqual(ids(await list({ runId: "run_c" })), [receiptA.receiptId], "matches the latest run too");
+  assert.deepEqual(ids(await list({ runId: "run_b" })), [receiptB.receiptId]);
+  assert.deepEqual(ids(await list({ runId: "run_nobody" })), []);
+  assert.deepEqual(ids(await list({ runId: "run_a_other_owner" })), [], "another owner's run is not visible");
+
+  const firstPage = await list({ limit: 1, runId: "run_a" });
+  assert.deepEqual(ids(firstPage), [receiptA.receiptId]);
+  assert.ok(firstPage.nextCursor, "a second matching receipt remains");
+  const secondPage = await list({ cursor: firstPage.nextCursor, limit: 1, runId: "run_a" });
+  assert.deepEqual(ids(secondPage), [receiptA2.receiptId], "the cursor keeps the run filter");
+  assert.equal(secondPage.nextCursor, null);
+});
+
 test("SQLite record rejection retained-size accounting covers insert, replay, restart, and delete cleanup", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-record-rejection-retained-size-"));
   const dbPath = join(dir, "pdpp.sqlite");
