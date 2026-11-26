@@ -86,7 +86,7 @@ async function main(): Promise<void> {
     }
     const repository = collectionProfileRepository({ connectorKey });
     const resolved = (await fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: definition.connector_id,

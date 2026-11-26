@@ -95,13 +95,13 @@ export interface ConnectorCatalogSnapshot {
 
 interface InstallerCore {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
-  fetchCatalog?: (options: Record<string, unknown>) => Promise<unknown>;
-  fetchResolvedArtifact?: (
-    source: Record<string, unknown>,
+  fetchCatalog: (options: Record<string, unknown>) => Promise<unknown>;
+  fetchResolvedArtifact: (
+    source: null,
     entry: Record<string, unknown>,
     options: Record<string, unknown>
   ) => Promise<unknown>;
-  installFromLock: (options: Record<string, unknown>) => Promise<unknown>;
+  installFromLock: (options: Record<string, unknown> & { source: null }) => Promise<unknown>;
 }
 
 export interface ConnectorInstallStore {
@@ -1167,9 +1167,6 @@ export function createConnectorInstallService(options: {
       return null;
     }
     const core = await loadPinnedCore();
-    if (!core.fetchResolvedArtifact) {
-      throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-    }
     const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
       if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
         return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1178,7 +1175,7 @@ export function createConnectorInstallService(options: {
     };
     const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
     const artifact = await core.fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: entry.connector_id,
@@ -1279,9 +1276,6 @@ async function loadPinnedCore(): Promise<InstallerCore> {
 
 async function loadCatalogFromPinnedCore(lastAcceptedGeneratedAt: string | null): Promise<ConnectorCatalogSnapshot> {
   const core = await loadPinnedCore();
-  if (!core.fetchCatalog) {
-    throw new Error("Pinned connector installer core does not expose fetchCatalog.");
-  }
   const value = (await core.fetchCatalog({
     identity: core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
     registry: "ghcr.io",
@@ -1459,9 +1453,6 @@ async function installPinnedArtifact(
   const core = await loadPinnedCore();
   const abortableFetch: FetchLike = (input, init) =>
     fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
-  if (!core.fetchResolvedArtifact) {
-    throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-  }
   const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
     if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
       return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1470,7 +1461,7 @@ async function installPinnedArtifact(
   };
   const preflightTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
-    { doc: {}, mode: "locked" },
+    null,
     {
       artifactKind: "pdpp-collection-profile",
       connectorId: entry.connector_id,
@@ -1507,7 +1498,6 @@ async function installPinnedArtifact(
   }
   const limitedTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   await core.installFromLock({
-    artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,
     installRoot: root,
     layout: "source",
@@ -1536,7 +1526,7 @@ async function installPinnedArtifact(
       registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
         ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
         : null,
-    source: { doc: {}, mode: "locked" },
+    source: null,
   });
   const installedConfigDigest = limitedTransport.configDigest();
   if (!installedConfigDigest || installedConfigDigest !== configDigest) {
