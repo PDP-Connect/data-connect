@@ -4366,10 +4366,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Omissions this run reported without a durable work item, in the shape
   // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
   // DETAIL_GAPs, which START serves independently of cursors, so only
-  // unaccounted keys count.
+  // unaccounted keys count. A stream whose batch was dropped for transient
+  // manifest drift omitted records the same way a retryable SKIP_RESULT does.
   function collectReportedOmissions(): ReportedOmission[] {
     return [
       ...skipOmissions,
+      ...[...driftSkippedStreams].map((stream) => ({ source: "retryable_skip" as const, stream })),
       ...[...streamEvidenceByStream]
         .filter(([, evidence]) => evidence.unaccounted > 0)
         .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),

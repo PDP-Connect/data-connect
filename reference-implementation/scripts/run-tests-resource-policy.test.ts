@@ -33,6 +33,16 @@ test("only reviewed files bypass outer allocation; restore remains separate", ()
   assert.equal(isDedicatedPostgresTestDatabaseName(restoreName), true);
 });
 
+test("runtime checkpoint fixtures are template-eligible, not cold-required", () => {
+  for (const file of [
+    "test/runtime-ingest-manifest-drift.test.ts",
+    "test/runtime-stream-collection-failed-commit.test.ts",
+  ]) {
+    assert.equal(isPostgresTemplateEligibleFilePath(file), true, file);
+    assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.includes(file), false, file);
+  }
+});
+
 test("all 43 cold-required entries remain cold, including helper-owned bootstrap and durable startup retry", () => {
   assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length, 43);
   assert.ok(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.includes("test/startup-backfill-durable-retry.test.ts"));
