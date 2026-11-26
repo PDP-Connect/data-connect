@@ -9815,6 +9815,7 @@ export async function startServer(opts: ServerOpts = {}) {
         onRound: (summary: SweepSummary, round: number) => {
           if (
             ((summary as unknown as Record<string, unknown>).repaired as number) > 0 ||
+            ((summary as unknown as Record<string, unknown>).failed as number) > 0 ||
             ((summary as unknown as Record<string, unknown>).skipped as number) > 0 ||
             summary.incomplete
           ) {

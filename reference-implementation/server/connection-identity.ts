@@ -47,6 +47,20 @@ interface ConnectionWarning {
   param: string;
 }
 
+export function projectPinnedConnectionDisplayName(
+  instance: { connectorId: string; displayName: Parameters<typeof projectStorageDisplayName>[0] },
+  connectorInstanceId: string,
+  connectorId: string | null | undefined
+): string | null {
+  if (connectorId && instance.connectorId !== connectorId) {
+    return null;
+  }
+  return projectStorageDisplayName(instance.displayName, {
+    connectorId: connectorId || instance.connectorId,
+    connectorInstanceId,
+  });
+}
+
 class ConnectionNotFoundError extends Error {
   code = "connection_not_found";
   param = "connection_id";
@@ -74,10 +88,7 @@ export async function lookupConnectionDisplayName(
     if (!instance) {
       return null;
     }
-    return projectStorageDisplayName(instance.displayName, {
-      connectorId: connectorId || instance.connectorId,
-      connectorInstanceId,
-    });
+    return projectPinnedConnectionDisplayName(instance, connectorInstanceId, connectorId);
   } catch {
     return null;
   }
