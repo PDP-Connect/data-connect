@@ -24,3 +24,10 @@ test("same stored evidence comparison records the source-page differences awaiti
   assert.notEqual(sourceSentence.text,history.sentence);
   assert.equal(history.action,"Sign in again");
 });
+test("day counts describe copied records, including singular and zero",()=>{
+  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days")throw Error("mode");
+  const base=fixture.history.data[0]!;
+  assert.match(syncDaySentence({...base,records:1},"Northwind"),/copied 1 record(?:$| ·)/);
+  assert.match(syncDaySentence({...base,records:0},"Northwind"),/Nothing to copy/);
+  assert.doesNotMatch(syncDaySentence({...base,records:58000},"Northwind"),/new/);
+});

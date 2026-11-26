@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { clockLabel, sentenceDayLabel, startedAgo, personDay } from "../../history/day-cut.ts";
 import { StopCopying } from "../../connect/status/[connectionId]/stop-copying.tsx";
-import { resolveSyncCause } from "../../history/sync-cause.ts";
+import { copiedRecords, resolveSyncCause } from "../../history/sync-cause.ts";
 import { buttonVariants } from "@/components/ui/button";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { durationWords, recordKindName, type OneSyncModel } from "./one-sync-model.ts";
@@ -27,7 +27,7 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
     {m.outcome === "needs_you" ? <Link className="inline-block min-h-11 py-3 text-primary" href={`/syncs/${encodeURIComponent(m.id)}/stream`}>Continue</Link> : null}
     {m.assistance?.kind === "credentials" && m.assistance.responseContract === "response_required" && m.assistance.ownerAction === "provide_value" ? <RunInteractionForm fields={m.assistance.fields} interactionId={m.assistance.id} kind={m.assistance.kind} message={m.assistance.message} runId={m.id} serviceName={m.name} heading={false} preview={practice} /> : null}
     {m.trigger ? <p className="mb-6 text-[13px] text-muted-foreground">{m.trigger === "manual" ? "You started it." : m.trigger === "scheduled" ? "Started by the schedule." : m.trigger === "retry" ? "A second try after a failure." : ""}</p> : null}
-    {m.kinds?.some(kind => kind.count > 0) ? <Section title="What it brought"><ul className="divide-y divide-border">{m.kinds.filter(kind=>kind.count>0).map(kind => <li className="py-3" key={kind.kind}><Link className="flex justify-between gap-4" href={`/sources/${encodeURIComponent(m.connection ?? m.connector)}/${encodeURIComponent(kind.kind)}`}><span>{m.kindNames?.[kind.kind] ?? recordKindName(kind.kind)}</span><span>{kind.count} new records</span></Link></li>)}</ul></Section> : m.total !== null && ["finished","stopped","interrupted","failed"].includes(m.outcome) ? <p className="my-6">{m.total ? `${m.total} new records.` : "Nothing new this time."}</p> : null}
+    {m.kinds?.some(kind => kind.count > 0) ? <Section title="What it brought"><ul className="divide-y divide-border">{m.kinds.filter(kind=>kind.count>0).map(kind => <li className="py-3" key={kind.kind}><Link className="flex justify-between gap-4" href={`/sources/${encodeURIComponent(m.connection ?? m.connector)}/${encodeURIComponent(kind.kind)}`}><span>{m.kindNames?.[kind.kind] ?? recordKindName(kind.kind)}</span><span>{copiedRecords(kind.count)}</span></Link></li>)}</ul></Section> : m.total !== null && ["finished","stopped","interrupted","failed"].includes(m.outcome) ? <p className="my-6">{copiedRecords(m.total)}</p> : null}
     {m.missing.length ? <Section title="Didn't come">{m.missing.map(row => <div className="py-3" key={row.name}><p>{row.name}</p><p>DataConnect could not copy this.</p>{row.canRetry ? <p>It will try again the next time DataConnect checks {m.name}.</p> : null}</div>)}</Section> : null}
     {m.connection ? <p className="my-6"><Link href={`/sources/${encodeURIComponent(m.connection)}`}>See {m.name}</Link></p> : null}
     <Link className="text-[13px] text-muted-foreground" href={`/syncs/${encodeURIComponent(m.id)}/technical${practice ? "?demo=technical" : ""}`}>Technical details</Link>

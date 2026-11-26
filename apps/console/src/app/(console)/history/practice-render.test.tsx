@@ -29,7 +29,7 @@ for (const state of SYNC_STATES) test(`sync history practice ${state} uses plain
   const model = syncPractice(state,120);
   assert.equal(model.history.mode,"days"); if (model.history.mode !== "days") return;
   const document = assertPlain(<DailySyncsView rows={model.history.data} sources={model.sources} current={model.now} offset={120} demo={state} />);
-  if (state === "mixed") { assert.match(document.body.textContent ?? "",/Checked 24 times · nothing new/); assert.match(document.body.textContent ?? "",/3 could not start/); }
+  if (state === "mixed") { assert.match(document.body.textContent ?? "",/Checked 24 times · Nothing to copy/); assert.match(document.body.textContent ?? "",/3 could not start/); }
   if (state === "forty") assert.equal(document.querySelectorAll('a[href^="/syncs/day"]').length,40);
 });
 for (const state of SYNC_DAY_STATES) test(`one data source day practice ${state} renders real sync rows`, () => {

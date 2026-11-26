@@ -19,3 +19,7 @@ export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): Syn
   if (/\b(interaction_timeout|assistance_timeout|assistance_timed_out|login_timeout)\b/.test(text)) return { sentence: "The sign-in wasn't finished.", action: "Try again", known: true };
   return { sentence: "Something went wrong while copying.", action: "Try again", known: false };
 }
+
+export function copiedRecords(count: number): string {
+  return count === 0 ? "Nothing to copy" : `copied ${count.toLocaleString("en-US")} record${count === 1 ? "" : "s"}`;
+}

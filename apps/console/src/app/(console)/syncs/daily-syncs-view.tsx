@@ -3,7 +3,7 @@
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
-import { resolveSyncCause } from "../history/sync-cause.ts";
+import { copiedRecords, resolveSyncCause } from "../history/sync-cause.ts";
 import type { SyncDay } from "../lib/ref-client.ts";
 import { ConnectorMark } from "../components/connector-mark.tsx";
 import { dayLabel, startedAgo, historyHref, historyTime, visibleDays } from "../history/day-cut.ts";
@@ -21,7 +21,7 @@ export function syncDaySentence(row: SyncDay, name: string, missingNames: string
   }
   const checked = row.ran === 1 ? row.manual === 1 ? "You started it" : "Checked once" : `Checked ${row.ran} times`;
   const incomplete = row.failed+row.stopped+row.interrupted;
-  return `${checked} · ${row.records ? `${row.records.toLocaleString("en-US")} new records` : "nothing new"}${incomplete ? ` · ${incomplete} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start} could not start` : ""}${missing}`;
+  return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start} could not start` : ""}${missing}`;
 }
 export function DailySyncsView({ rows, sources, current = [], offset, days = 7, params = {}, demo }: {
   rows: SyncDay[]; sources: HistorySource[]; current?: { id: string; name: string; needs: boolean; at: string }[];
