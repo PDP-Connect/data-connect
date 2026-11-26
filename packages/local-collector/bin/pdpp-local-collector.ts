@@ -1162,7 +1162,9 @@ type RevokeExistingProfileFn = (input: { baseUrl: string; deviceId: string; devi
  * `profileName` unless `--force` is given, and when it is, revoke that
  * profile's device credential server-side BEFORE returning — so the caller
  * only proceeds to consume the new one-time code once the old credential is
- * confirmed gone. Extracted out of {@link runConnect} to keep that
+ * confirmed gone. Returns the profile name to write: the resolved destination
+ * the guard checked, so the write lands where the next named lookup reads.
+ * Extracted out of {@link runConnect} to keep that
  * function's branching within the repo's cognitive-complexity budget; the
  * behavior (and its tests) are unchanged by the extraction.
  */
@@ -1170,10 +1172,12 @@ async function guardConnectProfileOverwrite(
   profileName: string,
   force: boolean | undefined,
   revokeExistingProfile: RevokeExistingProfileFn
-): Promise<void> {
-  const existingProfilePath = existingCollectorProfilePath(profileName);
-  if (!existingProfilePath) {
-    return;
+): Promise<string> {
+  const destination = resolveConnectProfileDestination(profileName);
+  const destinationName = destination.fileName.replace(PROFILE_ENV_EXTENSION, "");
+  const existingProfilePath = destination.path;
+  if (!destination.exists) {
+    return destinationName;
   }
   if (!force) {
     throw new CollectorUsageError(
@@ -1190,7 +1194,7 @@ async function guardConnectProfileOverwrite(
   // biome-ignore lint/suspicious/noUnnecessaryConditions: Record<string, string> does not guarantee a key exists at runtime; matches applyProfileEnv's established idiom.
   const existingDeviceToken = existingEnv.PDPP_LOCAL_DEVICE_TOKEN?.trim();
   if (!(existingBaseUrl && existingDeviceId && existingDeviceToken)) {
-    return;
+    return destinationName;
   }
   try {
     await revokeExistingProfile({
@@ -1202,7 +1206,7 @@ async function guardConnectProfileOverwrite(
     const alreadyGone = error instanceof LocalDeviceHttpError && (error.status === 401 || error.status === 403);
     if (alreadyGone) {
       // Already revoked/invalid server-side: nothing further to revoke, safe to proceed.
-      return;
+      return destinationName;
     }
     const detail = error instanceof Error ? error.message : String(error);
     throw new CollectorUsageError(
@@ -1212,6 +1216,7 @@ async function guardConnectProfileOverwrite(
       { cause: error }
     );
   }
+  return destinationName;
 }
 
 export async function runConnect(options: CliOptions, deps: RunConnectDeps = {}): Promise<ConnectOutput> {
@@ -1241,7 +1246,7 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
   }
 
   const profileName = options.profile ?? normalizedConnector;
-  await guardConnectProfileOverwrite(profileName, options.force, revokeExistingProfile);
+  const destinationProfileName = await guardConnectProfileOverwrite(profileName, options.force, revokeExistingProfile);
 
   const scopeChoice = resolveConnectScopeChoice(options);
   const nowIso = now();
@@ -1272,7 +1277,7 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
     connectorId: normalizedConnector,
     deviceId: enrollment.device_id,
     deviceToken: enrollment.device_token,
-    name: profileName,
+    name: destinationProfileName,
     sourceInstanceId: enrollment.source_instance_id,
   });
 
@@ -1357,8 +1362,7 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  migrateLegacyProfileFiles(profileDir, { profileName: name });
-  const path = join(profileDir, selectedProfileFileName(name));
+  const { path } = resolveRequestedProfile(profileDir, name);
 
   if (!existsSync(path)) {
     return {
@@ -2376,14 +2380,83 @@ function canonicalProfileName(name: string): string {
 }
 
 /**
- * The file name for a profile the user asked for by name. A legacy spelling
- * selects the migrated file; the raw writer keeps {@link safeProfileFileName}
- * so tests can still seed a real legacy file.
+ * A requested profile name matches two files on disk and the underscore one
+ * is not clearly a custom profile, so no credential can be picked safely.
  */
-function selectedProfileFileName(name: string): string {
-  const fileName = safeProfileFileName(name);
-  const canonical = canonicalProfileName(name);
-  return canonical === fileName.replace(PROFILE_ENV_EXTENSION, "") ? fileName : `${canonical}.env`;
+export class AmbiguousProfileNameError extends CollectorUsageError {
+  readonly canonicalPath: string;
+  readonly literalPath: string;
+
+  constructor(requested: string, literalPath: string, canonicalPath: string) {
+    super(
+      `--profile ${requested} matches both ${literalPath} and ${canonicalPath}, and they hold different credentials ` +
+        "for the same connector. Nothing was changed. Remove the stale file, or pass the exact profile name you mean."
+    );
+    this.literalPath = literalPath;
+    this.canonicalPath = canonicalPath;
+  }
+}
+
+/**
+ * Which profile file a requested name selects, decided from the files left on
+ * disk after migration. Every command that takes a profile name (lookup,
+ * `connect`'s guard and write, `logout`, removal) reads this one answer.
+ *   a. A file with exactly the requested name is left (migration only leaves
+ *      an underscore file that is custom, or one it could not safely merge):
+ *      with no canonical file beside it, or when it names another connector,
+ *      that file is the profile.
+ *   b. Otherwise a bundled legacy spelling selects the canonical file.
+ *   c. Both files are left and the underscore one is not clearly custom (same
+ *      connector with different contents, or no connector named): fail closed.
+ * Call after {@link migrateLegacyProfileFiles}. The raw writer
+ * {@link safeProfileFileName} stays literal so tests can still seed a real
+ * legacy file.
+ */
+function resolveMigratedProfileFile(profileDir: string, name: string): { fileName: string; path: string } {
+  const literalFileName = safeProfileFileName(name);
+  const canonicalName = canonicalProfileName(name);
+  const canonicalFileName = `${canonicalName}.env`;
+  const resolved = (fileName: string) => ({ fileName, path: join(profileDir, fileName) });
+  if (canonicalFileName === literalFileName) {
+    return resolved(literalFileName);
+  }
+  const literalPath = join(profileDir, literalFileName);
+  let literalContents: string;
+  try {
+    literalContents = readFileSync(literalPath, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return resolved(canonicalFileName);
+    }
+    throw error;
+  }
+  const canonicalPath = join(profileDir, canonicalFileName);
+  if (!existsSync(canonicalPath) || classifyLegacyProfile(literalContents, canonicalName) === "custom") {
+    return resolved(literalFileName);
+  }
+  throw new AmbiguousProfileNameError(name, literalPath, canonicalPath);
+}
+
+/** Migrate legacy files, then resolve the requested name. */
+function resolveRequestedProfile(profileDir: string, name: string): { fileName: string; path: string } {
+  migrateLegacyProfileFiles(profileDir, { profileName: name });
+  return resolveMigratedProfileFile(profileDir, name);
+}
+
+/**
+ * What a legacy-spelled profile file is, judged by the connector it names:
+ * `bundled` names this bundled connector (migration may rename it),
+ * `custom` names another connector (an operator's own profile, never touched),
+ * `unidentified` names none (left in place and reported).
+ */
+type LegacyProfileKind = "bundled" | "custom" | "unidentified";
+
+function classifyLegacyProfile(contents: string, current: string): LegacyProfileKind {
+  const namedConnector = parseCollectorProfileEnv(contents).PDPP_COLLECTOR_CONNECTOR?.trim();
+  if (!namedConnector) {
+    return "unidentified";
+  }
+  return namedConnector.replaceAll("_", "-") === current ? "bundled" : "custom";
 }
 
 /**
@@ -2482,16 +2555,14 @@ function needsLegacyProfileRename(entry: LegacyProfileEntry, sourceInstanceId: s
     }
     throw error;
   }
-  const env = parseCollectorProfileEnv(contents);
-  if (sourceInstanceId !== null && profileSourceInstanceId(env) !== sourceInstanceId) {
+  if (sourceInstanceId !== null && profileSourceInstanceId(parseCollectorProfileEnv(contents)) !== sourceInstanceId) {
     return false;
   }
-  const namedConnector = env.PDPP_COLLECTOR_CONNECTOR?.trim();
-  if (!namedConnector) {
+  const kind = classifyLegacyProfile(contents, entry.current);
+  if (kind === "unidentified") {
     reportUnidentifiedLegacyProfile(entry);
-    return false;
   }
-  return namedConnector.replaceAll("_", "-") === entry.current;
+  return kind === "bundled";
 }
 
 function reportUnidentifiedLegacyProfile(entry: LegacyProfileEntry): void {
@@ -2516,12 +2587,11 @@ function migrateLegacyProfileFile(
     requireMigratedProfile(entry);
     return;
   }
-  const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
-  if (!namedConnector) {
+  const kind = classifyLegacyProfile(legacyContents, current);
+  if (kind === "unidentified") {
     reportUnidentifiedLegacyProfile(entry);
-    return;
   }
-  if (namedConnector.replaceAll("_", "-") !== current) {
+  if (kind !== "bundled") {
     return;
   }
   hooks.beforeInstall?.();
@@ -2583,12 +2653,14 @@ function isFileExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
-/** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */
-function existingCollectorProfilePath(name: string): string | null {
+/**
+ * Where `connect` writes the profile for `name`, and the file already there if
+ * any. The overwrite guard and the write both use this one destination.
+ */
+function resolveConnectProfileDestination(name: string): { exists: boolean; fileName: string; path: string } {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  migrateLegacyProfileFiles(profileDir, { profileName: name });
-  const path = join(profileDir, selectedProfileFileName(name));
-  return existsSync(path) ? path : null;
+  const { fileName, path } = resolveRequestedProfile(profileDir, name);
+  return { exists: existsSync(path), fileName, path };
 }
 
 /**
@@ -2672,9 +2744,7 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
 } {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const fileName = selectedProfileFileName(input.name);
-  migrateLegacyProfileFiles(profileDir, { profileName: input.name });
-  const path = join(profileDir, fileName);
+  const { path } = resolveRequestedProfile(profileDir, input.name);
   if (!existsSync(path)) {
     return { path, removed: false };
   }
@@ -2692,7 +2762,7 @@ export function findLocalCollectorProfiles(input: {
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
   migrateLegacyProfileFiles(profileDir, { profileName: input.profileName, sourceInstanceId });
   const files = input.profileName
-    ? [selectedProfileFileName(input.profileName)]
+    ? [resolveMigratedProfileFile(profileDir, input.profileName).fileName]
     : (() => {
         try {
           return readdirSync(profileDir)
