@@ -102,6 +102,7 @@ type PathReport = { paths: { path: string; fixable: boolean }[]; command: string
 // A folder the service refuses because others can write to it. The host repairs
 // the ones inside DataConnect's own directory; for any other it shows the command.
 function StatePathsFix({ recover }: { recover: Recover }) {
+  const { technical } = useContext(DiagnosticsContext);
   const [report, setReport] = useState<PathReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
@@ -141,7 +142,7 @@ function StatePathsFix({ recover }: { recover: Recover }) {
         </Button>
       ) : null}
       {hasUnfixable && report?.command ? (
-        <>
+        technical ? <>
           <p className="pdpp-caption">Run this command, then try again:</p>
           <code className="rounded-lg border bg-muted/40 px-3 py-2 font-mono text-sm break-all">{report.command}</code>
           <div className="flex flex-wrap gap-3">
@@ -152,7 +153,11 @@ function StatePathsFix({ recover }: { recover: Recover }) {
               </Button>
             )}
           </div>
-        </>
+        </> : <div className="grid gap-2">
+          <p className="pdpp-caption">Change the folder permissions where DataConnect is installed, then try again.</p>
+          <a className="underline underline-offset-4" href="/settings/technical">Technical details</a>
+          {!fixable ? <Button onClick={recover.onRefresh} type="button" variant="outline">Try again</Button> : null}
+        </div>
       ) : null}
       {failed ? <p className="pdpp-caption">{failed}</p> : null}
     </div>

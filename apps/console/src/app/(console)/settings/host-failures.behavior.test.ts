@@ -89,7 +89,8 @@ async function withScreen<T>(
     mainText: () => string;
     alerts: () => number;
     buttons: () => string[];
-  }) => Promise<T>
+  }) => Promise<T>,
+  technical = false
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
@@ -104,7 +105,7 @@ async function withScreen<T>(
   }) as typeof requestReachability;
   const settle = () => act(async () => {});
   try {
-    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
+    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test", technical })));
     await settle();
     return await run({
       calls,
@@ -174,9 +175,9 @@ test("a folder outside DataConnect's own directory shows the command to copy and
   });
   await withScreen(handler, async ({ calls, mainText, buttons }) => {
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.ok(mainText().includes(command));
+    assert.ok(!mainText().includes(command));
     assert.ok(!buttons().includes("Fix permissions"));
-    assert.ok(buttons().includes("Copy command"));
+    assert.ok(!buttons().includes("Copy command"));
     assert.ok(!calls.some((call) => call.url === "/state-paths/fix"));
   });
 });
@@ -197,7 +198,7 @@ test("when the fix leaves a folder outside the data directory, the card shows it
   await withScreen(handler, async ({ press, mainText, buttons }) => {
     await press(/^Fix permissions$/);
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.ok(mainText().includes(command));
+    assert.ok(!mainText().includes(command));
     assert.ok(!buttons().includes("Fix permissions"));
   });
 });
@@ -235,9 +236,9 @@ test("when some paths are not fixable, the command shows once with one sentence"
   await withScreen(handler, async ({ mainText, buttons }) => {
     assert.match(mainText(), UNSAFE_WORDS);
     assert.ok(buttons().includes("Fix permissions"));
-    assert.ok(buttons().includes("Copy command"));
-    assert.ok(mainText().includes(command));
-    assert.match(mainText(), /Run this command, then try again:/);
+    assert.ok(!buttons().includes("Copy command"));
+    assert.ok(!mainText().includes(command));
+    assert.match(mainText(), /folder permissions/);
     assert.doesNotMatch(mainText(), /Others need a command/);
   });
 });
@@ -429,4 +430,16 @@ test("earlier setup is a non-blocking notice that clears after reentry", async (
     await settle();
     assert.doesNotMatch(mainText(), /earlier setup.*older version/i);
   });
+});
+
+test("folder repair commands remain available on Settings technical details", async () => {
+  const command = "chmod go-w -- '/home/someone'";
+  await withScreen(host({
+    "/catalog": fail("unsafe_state_path"),
+    "/state-paths": ok({ paths: [{ path: "/home/someone", fixable: false }], command }),
+  }), async ({ text, buttons, calls }) => {
+    assert.ok(text().includes(command));
+    assert.ok(buttons().includes("Copy command"));
+    assert.ok(!calls.some(call => call.url === "/state-paths/fix"));
+  }, true);
 });

@@ -1482,6 +1482,7 @@ export function RemoteAccessSetting({
         })}
       </section>
       </>}
+      {technical && error ? <RecoveryContext.Provider value={recover}><ErrorNotice error={error} /></RecoveryContext.Provider> : null}
       {technical ? <Diagnostics label="This computer">
         {Object.entries(capabilities).map(([id, observation]) => (
           <p key={id}>
