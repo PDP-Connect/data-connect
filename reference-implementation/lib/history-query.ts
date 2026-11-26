@@ -1,0 +1,57 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import { getDb } from "../server/db.ts";
+import { isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
+
+export interface HistoryInput {
+  first: string;
+  last: string;
+  /** Minutes east of UTC (the negative of Date.getTimezoneOffset()). */
+  offset: number;
+  connection_id?: string;
+  day?: string;
+  limit?: number;
+  cursor?: string;
+}
+export type HistoryBackend = "sqlite" | "postgres";
+export function historyBackend(): HistoryBackend {
+  return isPostgresStorageBackend() ? "postgres" : "sqlite";
+}
+export function historyBounds(input: HistoryInput): [string, string] {
+  const validDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day) && new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
+  if (!validDay(input.first) || !validDay(input.last) || (input.day && !validDay(input.day)) ||
+      !Number.isInteger(input.offset) || Math.abs(input.offset) > 840 || input.first > input.last ||
+      Date.parse(input.last) - Date.parse(input.first) > 366 * 86_400_000 ||
+      (input.day && (input.day < input.first || input.day > input.last))) {
+    throw new RangeError("Invalid history day range or UTC distance");
+  }
+  const shift = input.offset * 60_000;
+  return [new Date(Date.parse(input.day ?? input.first) - shift).toISOString(),
+    new Date(Date.parse(input.day ?? input.last) + 86_400_000 - shift).toISOString()];
+}
+export function historyDaySql(column: string, backend: HistoryBackend, offset: number): string {
+  return backend === "postgres"
+    ? `to_char((${column})::timestamptz AT TIME ZONE 'UTC' + interval '${offset} minutes', 'YYYY-MM-DD')`
+    : `date(${column}, '${offset} minutes')`;
+}
+export async function historyRows<T>(sql: string, values: unknown[], backend: HistoryBackend): Promise<T[]> {
+  if (backend === "sqlite") return getDb().prepare(sql).all(...values) as T[];
+  let index = 0;
+  return (await postgresQuery(sql.replaceAll("?", () => `$${++index}`), values)).rows as T[];
+}
+export interface HistoryList<T, M extends string> {
+  mode: M;
+  data: T[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
+export function historyPage<T, M extends string>(rows: T[], limit: number, mode: M, cursor: (row: T) => string): HistoryList<T, M> {
+  const more = rows.length > limit;
+  const data = rows.slice(0, limit);
+  return { mode, data, has_more: more, next_cursor: more && data.length ? cursor(data[data.length - 1] as T) : null };
+}
+export function historyLimit(input: HistoryInput): number {
+  const limit = input.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("Invalid page size");
+  return limit;
+}

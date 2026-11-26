@@ -6,6 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./sync-history": "./lib/sync-history.ts",
+    "./history-query": "./lib/history-query.ts",
     "./app-access": "./lib/app-access.ts",
     "./reference-local-defaults": "./server/reference-local-defaults.ts",
     "./reference-topology": "./server/reference-topology.ts",
