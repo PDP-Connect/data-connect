@@ -46,7 +46,7 @@ import {
   createWebPushSubscriptionStore,
   fanoutEscalationWebPush,
   fanoutPendingInteractionWebPush,
-  resolveWebPushConfig,
+  type WebPushConfig,
 } from "./web-push-notifications.ts";
 
 const SURFACE_UNAVAILABLE_HANDLE_STATUSES = Object.freeze([
@@ -202,7 +202,7 @@ interface SchedulerManagerOptions {
     connector_id: string;
     connector_instance_id?: string;
   };
-  readonly webPushConfig: ReturnType<typeof resolveWebPushConfig>;
+  readonly webPushConfig?: WebPushConfig;
   readonly webPushSubscriptionStore: ReturnType<typeof createWebPushSubscriptionStore>;
 }
 
@@ -513,7 +513,7 @@ export function createReferenceSchedulerManager({
   schedulerStore = getDefaultSchedulerStore(),
   connectorPathResolver = resolveDefaultConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
-  webPushConfig = resolveWebPushConfig(),
+  webPushConfig,
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
   // DI: index.js helpers used by the factory that also live elsewhere in index.js
   createConnectorInstanceStore,

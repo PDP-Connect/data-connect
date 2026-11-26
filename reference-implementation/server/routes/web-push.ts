@@ -12,15 +12,13 @@
 // receives badge notifications about pending interactions and assistance
 // alerts). Subscription state is owner-subject-scoped. The `test`
 // endpoint is the operator's "ping my browser" smoke check; it requires
-// VAPID to be configured.
+// the server's VAPID key pair to be resolved.
 
 import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
 
-interface WebPushConfig {
-  readonly enabled: boolean;
-  readonly publicKey?: string;
-  readonly unavailableReason?: string;
-}
+type WebPushConfig =
+  | { readonly enabled: true; readonly publicKey: string }
+  | { readonly enabled: false; readonly unavailableReason: string };
 
 interface WebPushSubscriptionRecord {
   readonly endpoint: string;
@@ -41,6 +39,7 @@ interface WebPushStore {
   upsert: (
     ownerSubjectId: string,
     subscription: unknown,
+    vapidPublicKey: string,
     meta: WebPushUpsertMetadata
   ) => Promise<WebPushSubscriptionRecord> | WebPushSubscriptionRecord;
 }
@@ -90,8 +89,8 @@ function bodyOf(req: RouteRequest): Record<string, unknown> | null {
 }
 
 export function mountRefWebPushConfig(app: AppLike, ctx: MountRefWebPushContext): void {
-  // Operator-visible VAPID-status surface. Returns the public key only
-  // when web push is configured; otherwise reports the static reason.
+  // Operator-visible VAPID-status surface. Returns the server's public key
+  // when web push is available; otherwise reports the reason.
   app.get("/_ref/web-push/config", ctx.requireOwnerSession, (_req: RouteRequest, res: RouteResponse) => {
     res.json({
       enabled: ctx.webPushConfig.enabled,
@@ -133,7 +132,7 @@ export function mountRefWebPushCreateSubscription(app: AppLike, ctx: MountRefWeb
       const subscription = body?.subscription || req.body;
       const platform = body && typeof body.platform === "string" ? body.platform : null;
       const deviceLabel = body && typeof body.device_label === "string" ? body.device_label : null;
-      const record = await ctx.webPushStore.upsert(ownerSubjectId, subscription, {
+      const record = await ctx.webPushStore.upsert(ownerSubjectId, subscription, ctx.webPushConfig.publicKey, {
         device_label: deviceLabel,
         platform,
         user_agent: req.get("user-agent") || null,

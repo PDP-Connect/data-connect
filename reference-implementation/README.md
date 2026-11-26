@@ -383,7 +383,7 @@ generic resolver above. No provider-app-config key is platform-owned.
 This PR lands the rule, its generic form, and the platform-owned exception —
 it does not migrate additional env vars into the store. `PDPP_INSTANCE_NAME`,
 `PDPP_TRUSTED_HOSTS`/`PDPP_TRUSTED_PROXIES`, the `GOOGLE_DATAPORTABILITY_*`
-vars, VAPID web-push keys, operational limits
+vars, operational limits
 (`PDPP_MANUAL_UPLOAD_MAX_BYTES`, `PDPP_RECORD_REJECTION_*_QUOTA_BYTES`,
 `PDPP_CHANGE_HISTORY_LIMIT`), feature toggles
 (`PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION`, `PDPP_DCR_INITIAL_ACCESS_TOKENS`,

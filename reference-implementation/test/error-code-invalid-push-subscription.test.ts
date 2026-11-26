@@ -37,7 +37,7 @@ function validSubscription() {
 test("a valid subscription upserts without error (control)", async () => {
   const store = createMemoryWebPushSubscriptionStore();
   // `upsert` validates synchronously via `normalizeSubscription`.
-  const record = await Promise.resolve(store.upsert("owner_local", validSubscription(), {}));
+  const record = await Promise.resolve(store.upsert("owner_local", validSubscription(), "vapid-public-key", {}));
   assert.ok(record, "a valid subscription upsert SHALL return a record");
   assert.equal(record.endpoint, "https://push.example.invalid/sub/one");
 });
@@ -57,7 +57,7 @@ test("upsert rejects malformed subscriptions with invalid_push_subscription (400
   for (const { label, sub } of cases) {
     // biome-ignore lint/performance/noAwaitInLoops: ordered setup is intentionally sequential because each iteration advances shared test state.
     await assert.rejects(
-      Promise.resolve().then(() => store.upsert("owner_local", sub, {})),
+      Promise.resolve().then(() => store.upsert("owner_local", sub, "vapid-public-key", {})),
       (err: unknown) => {
         assert.ok(hasCodeAndStatus(err));
         assert.equal(err.code, "invalid_push_subscription", `${label}: expected invalid_push_subscription`);

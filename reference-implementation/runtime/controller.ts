@@ -115,6 +115,7 @@ import {
   type RunTriggerKind,
 } from "./run-automation-policy.ts";
 import { type SatisfactionEvidenceBag, satisfiedOwnerActions } from "./satisfaction-watcher.ts";
+import type { WebPushConfig } from "../server/web-push-notifications.ts";
 import type { RunRecord } from "./scheduler.ts";
 import { type BackoffDecision, computeNextRunWithBackoff } from "./scheduler-backoff.ts";
 import {
@@ -534,7 +535,8 @@ export interface RunTargetNonceHooks {
  * instead of an owner bearer; the hook stores only its hash, bound to the
  * run's connector instance. Revoked when the run ends.
  */
-export type RunBlobUploadCredentialHooks = import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks;
+export type RunBlobUploadCredentialHooks =
+  import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks;
 
 export interface ControllerOptions {
   /**
@@ -552,6 +554,8 @@ export interface ControllerOptions {
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
   asPublicUrl?: string;
+  /** The server's resolved Web Push configuration; when omitted, each fanout resolves its own. */
+  webPushConfig?: WebPushConfig;
   /** Binds a host-provided browser lease to the run before the host is asked to allocate it. */
   beforeBrowserSurfaceLeaseEnsure?: (args: {
     readonly connectionId: string | null;
@@ -1482,9 +1486,7 @@ export async function resolveActiveInstallFirstConnectorPath(
   if (active.status === "invalid") {
     throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
   }
-  return active.status === "active"
-    ? active.path
-    : resolveDefaultConnectorPath(connectorId, manifest);
+  return active.status === "active" ? active.path : resolveDefaultConnectorPath(connectorId, manifest);
 }
 
 // Reset cached manifest/path discovery. Tests rewrite manifest files on
@@ -1967,6 +1969,7 @@ async function buildAttentionOutcomeRecorder(args: { runId: string; requestId: s
 }
 
 async function fireWebPush(args: {
+  webPushConfig?: WebPushConfig | undefined;
   interaction: RuntimeInteraction;
   connectorDisplayName: string;
   ownerSubjectId: string;
@@ -1978,6 +1981,7 @@ async function fireWebPush(args: {
     const requestId = args.interaction.request_id;
     const recordOutcome = await buildAttentionOutcomeRecorder({ requestId, runId: args.runId });
     await fanoutPendingInteractionWebPush({
+      ...(args.webPushConfig ? { config: args.webPushConfig } : {}),
       connectorDisplayName: args.connectorDisplayName,
       interaction: { kind: args.interaction.kind, request_id: args.interaction.request_id },
       log: args.log as Console,
@@ -1992,6 +1996,7 @@ async function fireWebPush(args: {
 }
 
 async function fireAssistanceWebPush(args: {
+  webPushConfig?: WebPushConfig | undefined;
   assistance: Record<string, unknown>;
   connectorDisplayName: string;
   ownerSubjectId: string;
@@ -2006,6 +2011,7 @@ async function fireAssistanceWebPush(args: {
         : null;
     const recordOutcome = await buildAttentionOutcomeRecorder({ requestId, runId: args.runId });
     await fanoutAssistanceWebPush({
+      ...(args.webPushConfig ? { config: args.webPushConfig } : {}),
       assistance: args.assistance,
       connectorDisplayName: args.connectorDisplayName,
       log: args.log as Console,
@@ -2050,7 +2056,12 @@ function brokerInteraction(
   runId: string,
   connectorId: string,
   interaction: RuntimeInteraction,
-  notifyArgs?: { connectorDisplayName: string; log: ControllerLogger; ownerSubjectId: string }
+  notifyArgs?: {
+    connectorDisplayName: string;
+    log: ControllerLogger;
+    ownerSubjectId: string;
+    webPushConfig?: WebPushConfig | undefined;
+  }
 ): Promise<InteractionResponse> {
   return new Promise((resolve) => {
     const entry = activeRunInteractions.get(runId) ?? { connector_id: connectorId, pending: null };
@@ -2092,6 +2103,7 @@ function brokerInteraction(
           log: notifyArgs.log,
           ownerSubjectId: notifyArgs.ownerSubjectId,
           runId,
+          webPushConfig: notifyArgs.webPushConfig,
         })
       );
     }
@@ -3515,7 +3527,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
           const message = err instanceof Error ? err.message : String(err);
           log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
         }
-        await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+        await browserSurface.releaseLease(
+          input.browserSurfaceLease,
+          input.connectorId,
+          input.runId,
+          input.traceContext
+        );
       }
       resolveCancelledInteraction(input.runId);
     } finally {
@@ -4092,9 +4109,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (connectors.length === 0) {
       return states;
     }
-    const installed = new Set(
-      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
-    );
+    const installed = new Set((await activeConnectorInstallStore.listActive()).map((record) => record.connectorId));
     // Developer-local sources are rare; skip the per-connector selection
     // lookup entirely when none are registered.
     const hasLocalSources = (await localSourceStore.list()).length > 0;
@@ -4122,7 +4137,11 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     options: RunNowOptions,
     key: string
-  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest; readonly runSource?: ConnectorRunSource }> {
+  ): Promise<{
+    readonly connectorPath: string;
+    readonly manifest: ConnectorManifest;
+    readonly runSource?: ConnectorRunSource;
+  }> {
     await assertNotSourcePressureCoolingOff(connectorId, options);
 
     const activeLocalSource = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
@@ -4133,7 +4152,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
     }
     const activeInstall =
-      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+      activeLocalSource.status === "none"
+        ? await inspectActiveConnector(activeConnectorInstallStore, connectorId)
+        : null;
     if (activeInstall?.status === "invalid") {
       throw new ControllerError(
         `Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`,
@@ -4144,8 +4165,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeLocalSource.status === "active"
         ? (activeLocalSource.record.manifest as ConnectorManifest)
         : activeInstall?.status === "active"
-        ? activeInstall.record.manifest as ConnectorManifest
-        : options.manifest ?? (await getConnectorManifest(connectorId));
+          ? (activeInstall.record.manifest as ConnectorManifest)
+          : (options.manifest ?? (await getConnectorManifest(connectorId)));
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
@@ -4162,8 +4183,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeLocalSource.status === "active"
         ? activeLocalSource.path
         : activeInstall?.status === "active"
-        ? activeInstall.path
-        : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+          ? activeInstall.path
+          : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
       throw new ControllerError(
         `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
@@ -4174,9 +4195,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return {
       connectorPath,
       manifest,
-      ...(activeLocalSource.status === "active"
-        ? { runSource: { ...activeLocalSource.source, id: connectorId } }
-        : {}),
+      ...(activeLocalSource.status === "active" ? { runSource: { ...activeLocalSource.source, id: connectorId } } : {}),
     };
   }
 
@@ -4459,6 +4478,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
         connectorDisplayName,
         log,
         ownerSubjectId: runOwnerSubjectId,
+        webPushConfig: opts.webPushConfig,
       });
     const interactionHandler = browserSurface.wrapInteractionHandlerWithSurfaceLossDetection(
       runId,
@@ -4493,6 +4513,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
             log,
             ownerSubjectId: runOwnerSubjectId,
             runId,
+            webPushConfig: opts.webPushConfig,
           })
         );
       }
