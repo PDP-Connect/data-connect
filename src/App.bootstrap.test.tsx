@@ -82,3 +82,19 @@ describe("legacy App bootstrap", () => {
     })
   })
 })
+
+it("places valid four-digit early calendar years on the timeline", async () => {
+  const { deriveTimeline } = await import("./apps/timeline/timeline-derivation")
+  const result = deriveTimeline({ streams: [{
+    stream: { id: "archive", label: "Archive", fields: [{ name: "date", format: "date" }],
+      primaryKey: [], timestampFields: ["date"] },
+    records: [
+      { id: "date", data: { date: "0099-01-01" } },
+      { id: "datetime", data: { date: "0004-02-29T12:00:00Z" } },
+      { id: "invalid", data: { date: "0003-02-29" } },
+    ],
+    hasMore: false,
+  }] }, { maxRecords: 10, maxStreams: 1 })
+  expect(result.dayGroups.map(group => group.dayKey)).toEqual(["0099-01-01", "0004-02-29"])
+  expect(result.undatedRecords.map(record => record.recordId)).toEqual(["invalid"])
+})

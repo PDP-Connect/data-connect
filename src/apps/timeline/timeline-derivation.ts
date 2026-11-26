@@ -253,7 +253,7 @@ function parseTimestamp(
   const dateOnlyMatch = value.match(dateOnlyPattern)
   if (dateOnlyMatch) {
     const [, year, month, day] = dateOnlyMatch
-    const milliseconds = Date.UTC(Number(year), Number(month) - 1, Number(day))
+    const milliseconds = utcCalendarDay(year, month, day)
     return isValidCalendarDay(year, month, day, milliseconds)
       ? milliseconds
       : null
@@ -347,11 +347,17 @@ function isDateLikeFieldName(name: string): boolean {
   )
 }
 
+// Date.UTC treats years 0–99 as 1900–1999. This input already has a four-digit year.
+function utcCalendarDay(year: string, month: string, day: string): number {
+  const date = new Date(0)
+  return date.setUTCFullYear(Number(year), Number(month) - 1, Number(day))
+}
+
 function isValidCalendarDay(
   year: string,
   month: string,
   day: string,
-  milliseconds = Date.UTC(Number(year), Number(month) - 1, Number(day))
+  milliseconds = utcCalendarDay(year, month, day)
 ): boolean {
   if (!isValidTimestamp(milliseconds)) {
     return false
