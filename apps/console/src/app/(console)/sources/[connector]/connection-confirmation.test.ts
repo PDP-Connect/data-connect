@@ -24,7 +24,7 @@ const HORIZONS = [
   {
     basis: "provider_stated",
     confirmedAt: "2026-08-20T00:00:00.000Z",
-    confirmedBy: "Tim",
+    confirmedBy: "Alex",
     connectorInstanceId: "connection-1",
     earliestAvailable: "2021-04-03",
     horizonId: "horizon-current",
@@ -37,7 +37,7 @@ const HORIZONS = [
   {
     basis: "provider_confirmed",
     confirmedAt: "2026-08-19T00:00:00.000Z",
-    confirmedBy: "Tim",
+    confirmedBy: "Alex",
     connectorInstanceId: "connection-1",
     earliestAvailable: "2020-01-01",
     horizonId: "horizon-old",
@@ -122,7 +122,7 @@ test("the owner sees the full structured acknowledgement record", () => {
     ...ACTIONS,
     acknowledgedLoss: {
       acknowledgedAt: "2026-08-21T00:00:00.000Z",
-      acknowledgedBy: "Tim",
+      acknowledgedBy: "Alex",
       cause: "provider_data_contradictory",
       note: "Reviewed with the owner.",
       scope: "partial",
@@ -136,7 +136,7 @@ test("the owner sees the full structured acknowledgement record", () => {
   for (const value of [
     "provider_data_contradictory",
     "partial",
-    "Tim",
+    "Alex",
     "2026-08-21T00:00:00.000Z",
     "Reviewed with the owner.",
     'name="acknowledged_by"',
@@ -150,7 +150,7 @@ test("a stream-scoped acknowledgement leaves other loss evidence pending", () =>
     ...ACTIONS,
     acknowledgedLoss: {
       acknowledgedAt: "2026-08-21T00:00:00.000Z",
-      acknowledgedBy: "Tim",
+      acknowledgedBy: "Alex",
       cause: "provider_deleted_upstream",
       scope: "partial",
       streams: ["messages"],

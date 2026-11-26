@@ -25,12 +25,10 @@
  * the server. Source IDs and opaque grant-selection values remain separate.
  * Older servers without display identity retain their explicit-icon fallback.
  *
- * Preserves the owner feedback items from rounds 1-4 of the design task
- * (/home/tnunamak/code/pdpp/local/CONSENT-OWNER-FEEDBACK-0902.md): arbitrary
- * grant expiry with quick-fill chips, three trust tiers, keyboard-navigable
- * search, inline field disclosure, a sticky decision rail with duration folded
- * in, real platform icons, and two distinct date axes (grant validity vs
- * per-stream data range).
+ * Per owner feedback rounds 1-4 (2026-09-02): arbitrary grant expiry with
+ * quick-fill chips, three trust tiers, keyboard-navigable search, inline field
+ * disclosure, a sticky decision rail with duration folded in, real platform
+ * icons, and two distinct date axes (grant validity vs per-stream data range).
  */
 
 import {
