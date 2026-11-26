@@ -17,7 +17,7 @@ export default async function DataSourcePackagesPage() {
   return (
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
-        <PageHeader title={packagesCopy.heading} />
+        <PageHeader title={packagesCopy.heading} description="Each service has its own small piece of DataConnect. An update here applies to every account of that service." />
         <PackageTable rows={rows} />
       </main>
     </RecordroomShellWithPalette>

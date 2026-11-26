@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Button } from "@/components/ui/button.tsx"
 import { useState } from "react"
 import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
 
@@ -21,8 +22,10 @@ import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
  */
 export function RecoveryKeySetting({
   exportKit: suppliedExportKit,
+  practice = false,
 }: {
   exportKit?: typeof exportRecoveryKitAction
+  practice?: boolean
 } = {}) {
   const exportKit = suppliedExportKit ?? exportRecoveryKitAction
   const [code, setCode] = useState<string | null>(null)
@@ -31,6 +34,7 @@ export function RecoveryKeySetting({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
 
   const runExport = () => {
+    if (practice) { setError("This is a practice state. Your recovery code is unchanged."); return }
     setBusy(true)
     setError(null)
     setCopyState("idle")
@@ -60,7 +64,7 @@ export function RecoveryKeySetting({
   return (
     <div className="grid gap-3">
       <p className="pdpp-caption text-muted-foreground">
-        This code restores encryption keys only. Keep your database backup separately. Anyone who has both can read everything in your Personal Server vault.
+        DataConnect locks your saved sign-ins with a key that this computer keeps. If the computer ever loses that key, this code unlocks them again. If your DataConnect database is encrypted, it also restores the key that unlocks your data. Keep it somewhere safe, such as a password manager. It does not hold your data: keep a backup of your DataConnect files as well. Anyone who has both can read everything.
       </p>
 
       {error ? (
@@ -68,7 +72,7 @@ export function RecoveryKeySetting({
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
-          {error}
+          Could not show the recovery code. Try again.
         </p>
       ) : null}
 
@@ -78,30 +82,30 @@ export function RecoveryKeySetting({
             {code}
           </pre>
           <div className="flex flex-wrap items-center gap-2">
-            <button
+            <Button
               className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={copyCode}
               type="button"
             >
-              {copyState === "copied" ? "Copied" : "Copy kit"}
-            </button>
+              {copyState === "copied" ? "Copied" : "Copy"}
+            </Button>
             {copyState === "failed" ? (
               <span className="pdpp-caption text-muted-foreground">
-                Could not copy automatically. Select the kit above and copy it manually.
+                Could not copy automatically. Select the code above and copy it manually.
               </span>
             ) : null}
           </div>
         </div>
       ) : null}
 
-      <button
+      <Button
         className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         disabled={busy}
         onClick={runExport}
         type="button"
       >
-        {busy ? "Exporting…" : code ? "Export kit again" : "Export recovery kit"}
-      </button>
+        {busy ? "Opening…" : code ? "Show recovery code again" : "Show recovery code"}
+      </Button>
     </div>
   )
 }

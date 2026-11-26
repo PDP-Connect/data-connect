@@ -53,8 +53,8 @@ export function buildPackageRows(input: PackageRowsInput): PackageRow[] {
 
 export const packagesCopy = {
   couldNot: "Couldn't complete this. Try again.",
-  empty: "No packages to show.",
-  heading: "Data source packages",
-  settingsLink: "Data source packages",
-  uninstallConfirm: "Uninstall this package? This is allowed only when no data sources use it.",
+  empty: "No data source updates to show.",
+  heading: "Data source updates",
+  settingsLink: "Data source updates",
+  uninstallConfirm: (service: string) => `Remove the piece for ${service}? You can only do this when no data source uses it.`,
 } as const;

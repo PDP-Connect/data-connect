@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Button } from "@/components/ui/button.tsx"
 import { useEffect, useState } from "react"
 import { createDesktopPairingAction } from "./desktop-pairing-actions.ts"
 import { countdownLabel, secondsRemaining } from "./desktop-pairing.ts"
@@ -69,27 +70,27 @@ export function DesktopPairingDisplay({
               readOnly
               value={serverOrigin}
             />
-            <button
+            <Button
               aria-label="Copy server address"
               className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(serverOrigin, "Address")}
               type="button"
             >
               Copy
-            </button>
+            </Button>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <p className="w-fit rounded-md border border-border/70 bg-muted px-3 py-2 text-lg tracking-widest text-foreground">
               {code}
             </p>
-            <button
+            <Button
               aria-label="Copy pairing code"
               className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(code, "Code")}
               type="button"
             >
               Copy
-            </button>
+            </Button>
           </div>
           <div className="flex max-w-xl flex-wrap items-center gap-2">
             <input
@@ -99,26 +100,25 @@ export function DesktopPairingDisplay({
               readOnly
               value={link}
             />
-            <button
+            <Button
               aria-label="Copy pairing link"
               className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               onClick={() => void copy(link, "Link")}
               type="button"
             >
               Copy
-            </button>
+            </Button>
           </div>
           {copyMessage ? (
             <p className="pdpp-caption text-muted-foreground" role="status">
               {copyMessage}
             </p>
           ) : null}
-          <details>
-            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+          <div>
             <p className="pdpp-caption text-muted-foreground">
               Server ID <span className="text-foreground">{serverFingerprint}</span>. The desktop app shows the same ID when it connects.
             </p>
-          </details>
+          </div>
           <p className="text-sm text-foreground">
             In the DataConnect desktop app choose Connect to a server, then
             paste the link (or the address and the code).
@@ -133,7 +133,8 @@ export function DesktopPairingDisplay({
  * The "Attach a desktop app" section. The server mints the code; this holds
  * it in memory only for as long as it is valid.
  */
-export function DesktopPairingSetting() {
+export function DesktopPairingSetting({ practice = false }: { practice?: boolean } = {}) {
+  const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pairing, setPairing] = useState<IssuedPairing | null>(null)
@@ -159,6 +160,7 @@ export function DesktopPairingSetting() {
   }, [pairing, remaining])
 
   async function create() {
+    if (practice) { setError("This is a practice state. No computer was connected."); return }
     setBusy(true)
     setError(null)
     try {
@@ -189,23 +191,25 @@ export function DesktopPairingSetting() {
 
   return (
     <div className="grid gap-4">
+      <Button aria-expanded={expanded} className="justify-self-start" onClick={() => setExpanded(!expanded)} type="button" variant="ghost">Connect a DataConnect app on another computer</Button>
+      {expanded ? <>
       {error ? (
         <p
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
-          {error}
+          Could not make a connection code. Try again.
         </p>
       ) : null}
       <div>
-        <button
+        <Button
           className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           disabled={busy}
           onClick={() => void create()}
           type="button"
         >
           {busy ? "Creating…" : "Create pairing code"}
-        </button>
+        </Button>
       </div>
       {pairing ? (
         <DesktopPairingDisplay
@@ -218,8 +222,9 @@ export function DesktopPairingSetting() {
       ) : null}
       <p className="pdpp-caption text-muted-foreground">
         A code works once and expires in 10 minutes. Paired computers appear
-        under Signed-in devices and can be signed out there.
+        under Where you’re signed in and can be signed out there.
       </p>
+      </> : null}
     </div>
   )
 }

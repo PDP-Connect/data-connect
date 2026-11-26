@@ -25,7 +25,9 @@ export function OwnerPasswordSetting({
   managedDesktop = false,
   passwordSet = true,
   source,
+  practice = false,
 }: {
+  practice?: boolean
   canReveal?: boolean
   managedDesktop?: boolean
   /** False while the owner has not chosen a password yet (desktop only). */
@@ -46,6 +48,7 @@ export function OwnerPasswordSetting({
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (submitting.current) return
+    if (practice) { setMessage("This is a practice state. Your password is unchanged."); return }
     setMessage(null)
     if (Array.from(newPassword).length < 15) {
       setMessage("Use at least 15 characters for the new password.")
@@ -85,6 +88,7 @@ export function OwnerPasswordSetting({
   }
 
   async function requestDesktopChange() {
+    if (practice) { setMessage("This is a practice state. Your password is unchanged."); return }
     setMessage(null)
     setBusy(true)
     try {
@@ -122,7 +126,7 @@ export function OwnerPasswordSetting({
         <p className="pdpp-caption text-muted-foreground">
           {passwordSet ? "You chose this password." : "DataConnect made a password for you. You need it only to sign in from another device."}
         </p>
-        {canReveal ? <OwnerCredentialSetting /> : null}
+        {canReveal ? <OwnerCredentialSetting practice={practice} /> : null}
         {message ? (
           <p className="pdpp-caption text-muted-foreground" role="status">
             {message}

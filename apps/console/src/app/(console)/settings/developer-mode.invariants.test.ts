@@ -53,7 +53,7 @@ test("developer-only data sources share one settings gate", async () => {
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
   // RAISE-RULES.md 4: visible copy uses plain words for development data sources.
-  assert.match(setting, /Enable developer data sources/)
+  assert.match(setting, /Show data sources that are still being built/)
   assert.match(setting, /in-development data sources/)
   assert.match(page, /<DeveloperModeSetting \/>/)
   // DIRECTION.md "The frame and the menu": Settings is a menu item with an icon and children.

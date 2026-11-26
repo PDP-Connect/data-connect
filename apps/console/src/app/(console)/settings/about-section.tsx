@@ -21,14 +21,11 @@ const SUPPORT_URL = `${PROJECT_URL}/issues`
 export function AboutSection({ identity }: { identity: ProductIdentity }) {
   return (
     <Section
-      description={`The ${identity.protocolName} protocol lets apps read your data while you stay in control.`}
       title="About"
     >
       <KV>
         <KVRow k="Product">{identity.name}</KVRow>
         <KVRow k="Version">{identity.version}</KVRow>
-        <KVRow k="Build">{identity.build}</KVRow>
-        <KVRow k="Protocol">{identity.protocolName}</KVRow>
         <KVRow k="Copyright">© 2026 The PDP-Connect Contributors</KVRow>
       </KV>
       <nav

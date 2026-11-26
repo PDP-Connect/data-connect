@@ -15,11 +15,10 @@ test("the settings page mounts the About surface with product metadata", async (
   ])
 
   assert.match(page, /<AboutSection identity=\{identity\} \/>/)
+  assert.doesNotMatch(about, /<KVRow k="(?:Build|Protocol)"/)
   for (const field of [
     "Product",
     "Version",
-    "Build",
-    "Protocol",
     "Copyright",
   ]) {
     assert.match(

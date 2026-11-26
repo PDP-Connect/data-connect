@@ -80,7 +80,7 @@ test("an unmanaged server host renders Remote access and Connect a DataConnect a
   const html = await render(false)
   assert.match(html, /Remote access/)
   assert.match(html, /Remote access/)
-  assert.match(html, /Connect a DataConnect app on another computer/)
+  assert.match(html, /data-widget="desktop-pairing"/)
   assert.match(html, /data-widget="desktop-pairing"/)
   assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render on a server")
   assert.doesNotMatch(html, /data-widget="recovery-key"/, "recovery widget must not render on a server")

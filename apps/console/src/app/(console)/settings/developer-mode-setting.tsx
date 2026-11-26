@@ -29,7 +29,7 @@ export function DeveloperModeSetting() {
         />
         <span className="grid gap-1">
           <span className="text-[15px] font-medium text-foreground">
-            Enable developer data sources
+            Show data sources that are still being built
           </span>
           <span className="text-[13px] text-muted-foreground">
             This shows in-development data sources on Add source. It is stored

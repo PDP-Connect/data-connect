@@ -23,8 +23,10 @@ import { revealOwnerCredentialAction } from "./owner-credential-actions.ts"
  */
 export function OwnerCredentialSetting({
   reveal: suppliedReveal,
+  practice = false,
 }: {
   reveal?: typeof revealOwnerCredentialAction
+  practice?: boolean
 } = {}) {
   const reveal = suppliedReveal ?? revealOwnerCredentialAction
   const [password, setPassword] = useState<string | null>(null)
@@ -34,6 +36,7 @@ export function OwnerCredentialSetting({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
 
   const runReveal = () => {
+    if (practice) { setError("This is a practice state. No password was shown."); return }
     setBusy(true)
     setError(null)
     setLinuxPolkitUnverified(false)

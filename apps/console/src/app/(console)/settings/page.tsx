@@ -14,6 +14,7 @@ import { loadSettingsSummary } from "./settings-summary-data.ts"
 import { ServerRemoteAccess } from "./server-remote-access.tsx"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
+import { DesktopSettingsPractice } from "./desktop-settings-practice.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
@@ -64,6 +65,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
                 canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
                 managedDesktop={managedDesktopHost}
                 passwordSet={ownerPasswordSet}
+                practice={!!practice}
                 source={ownerPasswordSource}
               />
             </div>
@@ -82,10 +84,10 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
             {/* Shown in any signed-in browser, not only the desktop window: the
                 owner may change how the desktop app starts from a phone that
                 reaches it over remote access (e2e/live-settings.spec.ts). */}
-            <DesktopSettingsSetting />
+            {practice ? <DesktopSettingsPractice /> : <DesktopSettingsSetting />}
             <div className="grid gap-3 py-5">
               <Text as="h3">Recovery code</Text>
-              <RecoveryKeySetting />
+              {practice ? <RecoveryKeySetting practice /> : <RecoveryKeySetting />}
             </div>
           </Section>
         ) : null}
@@ -97,8 +99,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
         <Section title="Advanced" description="For scripts, other devices, and people who run DataConnect on a server.">
           {ownerSessions.enabled ? (
             <div className="grid gap-3 py-3">
-              <Text as="h3">Connect a DataConnect app on another computer</Text>
-              <DesktopPairingSetting />
+              {practice ? <DesktopPairingSetting practice /> : <DesktopPairingSetting />}
             </div>
           ) : null}
           <SettingsRow href="/device-exporters" title="Collectors on your devices" state={summary.collectors === null ? "Could not check" : `${summary.collectors} sending`} />

@@ -51,7 +51,7 @@ function PackageRowView({ row }: { row: PackageRow }) {
               className="min-h-11 sm:min-h-[30px]"
               disabled={isPending}
               onClick={() => {
-                if (window.confirm(packagesCopy.uninstallConfirm)) run(() => uninstallConnectorAction(row.connectorKey));
+                if (window.confirm(packagesCopy.uninstallConfirm(row.displayName))) run(() => uninstallConnectorAction(row.connectorKey));
               }}
               size="sm"
               type="button"

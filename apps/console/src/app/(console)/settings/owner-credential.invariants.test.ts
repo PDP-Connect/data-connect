@@ -19,7 +19,7 @@ test("the settings page places one Password row inside Password and sign-in", as
   assert.equal(page.match(/<h3[^>]*>Password<\/h3>/g)?.length, 1)
   assert.match(page, /title="Password and sign-in"[\s\S]*?id="owner-password"/)
   assert.doesNotMatch(page, /<OwnerCredentialSetting/)
-  assert.match(passwordSetting, /canReveal \? <OwnerCredentialSetting \/> : null/)
+  assert.match(passwordSetting, /canReveal \? <OwnerCredentialSetting practice=\{practice\} \/> : null/)
   assert.doesNotMatch(page, /Sign in from another device, such as your phone over remote access/)
 })
 
