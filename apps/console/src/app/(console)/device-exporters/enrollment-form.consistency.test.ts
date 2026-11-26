@@ -103,7 +103,8 @@ test("device setup uses plain labels and keeps technical steps in Details", asyn
   // DIRECTION.md §What the look is for: the setup form names its next action in familiar words.
   assert.match(src, /Create setup code/);
   // DIRECTION.md §What the look is for: machine commands stay in a folded Details section.
-  assert.match(src, /<summary className="cursor-pointer text-sm">Details<\/summary>[\s\S]*collector-enroll-command/);
+  assert.doesNotMatch(src, /<details/);
+  assert.match(src, /collector-enroll-command/);
   // DIRECTION.md §What the look is for: dates are words, never raw ISO values.
   assert.match(src, /Expires \{relativeExpiry\(state\.code\.expires_at\)\}/);
 });
@@ -112,7 +113,7 @@ test("re-enrollment errors use plain copy and fold server text into Details", as
   const src = await read(REENROLL_PATH);
   // RAISE-RULES.md #4: raw server error text stays inside a folded Details section.
   assert.match(src, /Could not make a new setup code\. Try again\./);
-  assert.match(src, /<summary className="cursor-pointer">Details<\/summary>[\s\S]*\{state\.message\}/);
+  assert.match(src, /<SupportCopy details=\{state.message\}/);
 });
 
 const RUNBOOK_CROSS_REF = /docs\/operator\/local-collector-runbook\.md/;

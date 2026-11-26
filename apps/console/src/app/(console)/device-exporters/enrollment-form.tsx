@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { SupportCopy } from "../components/support-copy.tsx";
 import { IcButton, IcInput } from "@pdpp/brand-react";
 import { formatRelative } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
@@ -92,10 +93,7 @@ export function EnrollmentForm({
       {state.ok === false ? (
         <div className="mt-3">
           <p className="pdpp-caption text-destructive">Could not create a setup code. Try again.</p>
-          <details className="pdpp-caption mt-2">
-            <summary className="cursor-pointer">Details</summary>
-            <p className="mt-1">{state.message}</p>
-          </details>
+          <SupportCopy details={state.message} />
         </div>
       ) : null}
       {state.ok === true && enrollCommand && runCommand ? (
@@ -111,8 +109,7 @@ export function EnrollmentForm({
             <p className="pdpp-caption mt-1 text-muted-foreground">Expires {relativeExpiry(state.code.expires_at)}</p>
           </div>
 
-          <details className="mt-3">
-            <summary className="cursor-pointer text-sm">Details</summary>
+          <div className="mt-3">
             <div className="mt-3 space-y-3">
 
           {isMacosOnly ? (
@@ -127,7 +124,7 @@ export function EnrollmentForm({
                   <strong>File &rarr; Export &rarr; Export Unmodified Originals</strong>, and save into{" "}
                   <code className="font-mono">~/.pdpp/imports/apple_photos/</code> (or set{" "}
                   <code className="font-mono">APPLE_PHOTOS_EXPORT_DIR</code> to a different folder before running the
-                  command below). This connector reads that exported folder &mdash; it does not read the Photos library
+                  command below). This data source reads that exported folder &mdash; it does not read the Photos library
                   database directly.
                 </p>
               ) : (
@@ -151,11 +148,11 @@ export function EnrollmentForm({
               <p className="pdpp-caption text-foreground">
                 <strong>Requires the external `gmcli` tool and a one-time QR pairing, done by you first.</strong>{" "}
                 Install <code className="font-mono">gmcli</code> from{" "}
-                <code className="font-mono">github.com/johnlindquist/gmkit</code> (AGPL-3.0; this connector spawns it as
+                <code className="font-mono">github.com/johnlindquist/gmkit</code> (AGPL-3.0; this data source uses it as
                 a subprocess and never bundles or imports its code) and put it on your PATH, or set{" "}
                 <code className="font-mono">GMCLI_BIN</code> to its absolute path. Then run{" "}
                 <code className="font-mono">gmcli auth</code> yourself, interactively, to QR-pair with your Android
-                phone &mdash; this connector cannot do that step for you. The phone must stay online and reachable for
+                phone &mdash; this data source cannot do that step for you. The phone must stay online and reachable for
                 gmcli to sync, and pairing expires after roughly 14 days of inactivity (re-run{" "}
                 <code className="font-mono">gmcli auth</code> to re-pair). Only after pairing succeeds will the command
                 below produce real records.
@@ -226,7 +223,7 @@ export function EnrollmentForm({
               onClick={() => setShowOtherConnectors((prev) => !prev)}
               type="button"
             >
-              {showOtherConnectors ? "Hide" : "Show"} run commands for other connectors
+              {showOtherConnectors ? "Hide" : "Show"} run commands for other data sources
             </button>
             {showOtherConnectors ? (
               <div className="mt-3 space-y-2">
@@ -264,7 +261,7 @@ export function EnrollmentForm({
             ) : null}
             </div>
             </div>
-          </details>
+          </div>
         </div>
       ) : null}
     </Callout>
