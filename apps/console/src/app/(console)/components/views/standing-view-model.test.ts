@@ -787,10 +787,10 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   assert.equal(unknown.recordCount, null);
 
   // DIRECTION.md, Home: "N data sources · N records" under the title, counted words in the singular for one.
-  assert.equal(buildHomeViewModel(base()).subtitle, "4 data sources · 48,120 records");
+  assert.equal(buildHomeViewModel(base()).subtitle, "0 data sources · 48,120 records");
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, connector_count: 1, record_count: 1 } })).subtitle,
-    "1 data source · 1 record",
+    "0 data sources · 1 record",
   );
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
   assert.equal(stale.subtitle, "0 data sources");
@@ -1045,7 +1045,7 @@ test("the record total shows while the summary is refreshing, not while rebuildi
   // Lead decision (deputy-fixes-1 E7): refreshing still carries the last known total.
   assert.equal(
     buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "refreshing" } } })).subtitle,
-    "4 data sources · 48,120 records",
+    "0 data sources · 48,120 records",
   );
   // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
   assert.equal(
@@ -1063,4 +1063,11 @@ test("Home names a connection by the shared rule: a saved connector key is not a
 
   assert.deepEqual(data.dataSources.map((row) => row.name), ["GitHub", "Reddit"]);
   assert.equal(data.title, "Syncing GitHub");
+});
+
+
+test("Home counts the same Sources inventory as its All link", () => {
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: Array.from({ length: 13 }, (_, i) => statusSource(20, `Example ${i}`)) }, summary: { ...SUMMARY, connector_count: 66 } }));
+  assert.match(data.subtitle ?? "", /^13 data sources/);
+  assert.equal(data.sourceTotalLink, "All 13 data sources");
 });

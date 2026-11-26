@@ -41,7 +41,7 @@ export const SOURCE_PRACTICE_STATES = [
 	"dialog-delete-running",
 ] as const;
 
-export function buildSourcePracticeModel(
+function buildPracticeModel(
 	state: string,
 ): ConnectorPageModel | null {
 	if (!(SOURCE_PRACTICE_STATES as readonly string[]).includes(state))
@@ -223,7 +223,7 @@ export function buildSourcePracticeModel(
   if (state === "long-account-name") model.source = { ...model.source, display_name: "Northwind - a deliberately long account name" };
   if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: "Northwind" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
   if (state === "settings-machine-change" || state === "settings-long-list") {
-    const base = buildSourcePracticeModel("settings-question")!;
+    const base = buildPracticeModel("settings-question")!;
     const revision = { ...base.configRevisions[0]!, origin: "agent" as const, set_by: state === "settings-machine-change" ? "migration" : "app:Sample app", source_of_change: "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
     model.configuration = { ...base.configuration!, options_schema: { ...base.configuration!.options_schema!, options: [{ ...base.configuration!.options_schema!.options[0]!, option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
     model.configRevisions = [revision];
@@ -240,4 +240,14 @@ export function buildSourcePracticeModel(
     model.overview = { ...model.overview, isRunning: true };
   }
 	return model;
+}
+
+
+export function buildSourcePracticeModel(state: string): ConnectorPageModel | null {
+  const model = buildPracticeModel(state);
+  if (!model) return null;
+  const counts = model.streams.map((stream) => stream.count_state === "stale" || stream.count_state === "unknown" || stream.count_state === "unobserved" ? null : stream.record_count);
+  const total = counts.every((count) => count !== null) ? counts.reduce((sum, count) => sum + (count ?? 0), 0) : null;
+  model.source = { ...model.source, total_records: total ?? 0, total_records_state: total === null ? "unobserved" : total === 0 ? "known_zero" : "known" };
+  return model;
 }

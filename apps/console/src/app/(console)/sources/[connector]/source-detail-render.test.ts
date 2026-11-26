@@ -169,7 +169,7 @@ test("all 24 status rows keep the shared state choice and their actions", async 
     const dom = await renderDemo(`status-${row}`);
     assert.equal(dom.window.document.querySelector('[data-status-row]')?.getAttribute("data-status-row"), String(row));
     const model = buildRecoveryDemoModel(row as SourceStatusRow);
-    const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName });
+    const sentence = sourceStateSentence(model.source, { now: NOW, name: model.source.connector_display_name ?? model.manifest.display_name ?? model.displayName });
     if (![11, 14, 15, 16, 19, 20].includes(row)) assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text));
     assert.ok(dom.window.document.querySelector('a[href*="/technical"]'));
     assert.equal(dom.window.document.querySelector('details[data-testid="source-details"]'), null);
@@ -286,7 +286,8 @@ test("the main device steps keep exactly the technical page's resolved commands"
 test("unknown counts are omitted while known zero remains a fact", async () => {
   const document = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(document.querySelector('a[href$="/messages"]')?.textContent ?? "", /999|count unavailable|not measured/);
-  assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", /0 records/);
+  assert.equal(document.querySelector('a[href$="/sessions"]'), null);
+  assert.match(document.body.textContent ?? "", /Nothing in: Sessions/);
 });
 
 test("a local-device sign-in action opens device steps instead of a sign-in address", async () => {
@@ -323,14 +324,14 @@ test("state-specific sections, counts and sentences do not contradict each other
   const unknown = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(unknown.querySelector("header")?.textContent ?? "", /records/);
   const install = (await renderDemo("status-4")).window.document.body.textContent ?? "";
-  assert.equal(install.split("DataConnect needs to get Claude Code workstation ready again.").length, 2);
+  assert.equal(install.split("DataConnect needs to get Claude Code ready again.").length, 2);
   assert.equal([...((await renderDemo("status-10")).window.document.querySelectorAll("a, button"))].filter((node) => /Resume/.test(node.textContent ?? "")).length, 1);
 });
 
 test("a source that never connected offers only retry and removal", async () => {
   const document = (await renderDemo("status-2")).window.document;
   const text = document.body.textContent ?? "";
-  assert.match(text, /Claude Code workstation was never connected\./);
+  assert.match(text, /Claude Code was never connected\./);
   assert.match(text, /Try again/);
   assert.match(text, /Takes Claude Code workstation off your list\. There is nothing to erase\./);
   assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again/);
@@ -395,4 +396,24 @@ test("pending settings summarize codes and hide machine changes", async () => {
   assert.match(visibleOutsideDetails(app), /250 channels/);
   assert.doesNotMatch(visibleOutsideDetails(app), /C000|migration:/);
   assert.match(visibleOutsideDetails(app), /Sample app asked to change this/);
+});
+
+
+test("empty kinds collapse and missing measurement never claims permanent loss", async () => {
+  const document = (await renderDemo("records-zero-one")).window.document;
+  assert.match(document.body.textContent ?? "", /1 record\b/);
+  assert.doesNotMatch(document.body.textContent ?? "", /1 records|0 records/);
+  assert.match(document.body.textContent ?? "", /Nothing in: Sessions/);
+  assert.equal(document.querySelector('a[href$="/sessions"]'), null);
+  assert.doesNotMatch(visibleOutsideDetails(await renderDemo("measurement-shortfall")), /Some could not be copied|Some of it didn't come/);
+  assert.match(visibleOutsideDetails(await renderDemo("partly-some-lost")), /Some could not be copied/);
+});
+
+test("short service names stay in sentences and other accounts exclude this source", async () => {
+  const document = (await renderDemo("long-account-name")).window.document;
+  assert.match(document.querySelector("h1")?.textContent ?? "", /deliberately long account name/);
+  const schedule = [...document.querySelectorAll("section")].find((node) => node.querySelector("h2")?.textContent === "Schedule");
+  assert.doesNotMatch(schedule?.textContent ?? "", /deliberately/);
+  const others = (await renderDemo("own-account")).window.document;
+  assert.equal(others.querySelectorAll('a[href="/sources/cin_demo_claude_code_workstation"]').length, 0);
 });

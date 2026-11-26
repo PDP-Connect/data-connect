@@ -345,12 +345,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
   // The server counts connections in the same projection as records, so a
   // stale summary can say 0 while the full source list shows three. Without a
   // current summary, count the source list when it was read in full.
-  const dataSourceTotal =
-    summaryCurrent && input.summary
-      ? input.summary.connector_count
-      : sourceReadComplete
-        ? preparedSources.length
-        : null;
+  const dataSourceTotal = sourceReadComplete ? preparedSources.length : null;
   const dataSourceCount = dataSourceTotal === null ? null : number(dataSourceTotal);
   const recordTotal = summaryCurrent ? (input.summary?.record_count ?? null) : null;
   const subtitle =

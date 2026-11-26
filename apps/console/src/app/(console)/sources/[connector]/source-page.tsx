@@ -21,7 +21,7 @@ import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { buildBreakdownLabel } from "@pdpp/operator-ui/lib/source-storage";
-import { formatTotalRecordsLabel } from "../../lib/total-records-label.ts";
+import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../../lib/total-records-label.ts";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
 import Link from "next/link";
 import { Suspense } from "react";
@@ -446,7 +446,7 @@ export default async function ConnectorPage({
   const updateDemo = practiceModel && (sp.demo === "update-ready" || sp.demo === "update-ready-shared") ? buildDemoSourceUpdate(sp.demo === "update-ready-shared") : null;
   if (practiceModel) {
     model = practiceModel;
-    if (model.otherAccounts) otherAccounts = <OtherAccountsLine accounts={model.otherAccounts} />;
+    if (model.otherAccounts) otherAccounts = <OtherAccountsLine accounts={model.otherAccounts.filter((account) => account.connectionId !== model.connectionId && account.connectionId !== model.connectorInstanceId)} />;
   } else {
     try {
       model = await loadConnectorPageModel(routeId, sp.connection_id ?? null);
@@ -766,6 +766,7 @@ function ConnectorPageView({
     source,
   } = model;
   const displayName = connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id);
+  const serviceName = source.connector_display_name ?? manifest.display_name ?? manifest.name ?? formatConnectorKeyForDisplay(connectorId);
   const { running } = resolveActiveRunNavigation({
     overview,
     scheduleActiveRunId,
@@ -827,12 +828,12 @@ function ConnectorPageView({
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
+  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
   const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? { kind: "sync_now" as const, label: "Try again", filled: true } : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
   const hasDeviceLocalRemediation = primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
-  const partial = source.collection_report?.some((entry) => typeof entry.collected === "number" && typeof entry.considered === "number" && entry.collected < entry.considered) || gaps.length > 0;
-  const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && typeof entry.collected === "number" && typeof entry.considered === "number" && entry.collected < entry.considered));
+  const partial = source.collection_report?.some((entry) => ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)) || gaps.length > 0;
+  const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)));
   if (hasDeviceLocalRemediation) {
     const device = sourceInstances[0];
     const deviceName = device?.display_name ?? device?.local_binding_name;
@@ -844,12 +845,11 @@ function ConnectorPageView({
     const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
     stateSentence = { text: `Synced${when ? ` ${when}` : ""}. Some of it didn't come.`, slot: null };
   } else if (([14, 15].includes(sourceStatus.row) && !markedMissing) || (partial && !markedMissing && [19, 20, 21].includes(sourceStatus.row))) {
-    stateSentence = { text: `${displayName} synced, but DataConnect could not copy some of it.`, slot: null };
+    stateSentence = { text: `${serviceName} synced, but DataConnect could not copy some of it.`, slot: null };
   } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
-    stateSentence = { text: `Something stopped ${displayName} from syncing.`, slot: null };
+    stateSentence = { text: `Something stopped ${serviceName} from syncing.`, slot: null };
   }
-  const counts = model.streams.map(knownStreamRecordCount);
-  const visibleTotal = counts.every((count) => count !== null) ? `${counts.reduce((sum, count) => sum + (count ?? 0), 0).toLocaleString()} records` : undefined;
+  const visibleTotal = isTotalRecordsAuthoritative(source.total_records_state) ? `${source.total_records.toLocaleString()} record${source.total_records === 1 ? "" : "s"}` : undefined;
 
   return (
     <RecordroomShellWithPalette>
@@ -863,7 +863,7 @@ function ConnectorPageView({
             connectionId={connectorInstanceId}
             connectorId={connectorId}
             credentialUpdateHref={credentialUpdateHref}
-            displayName={displayName}
+            displayName={serviceName}
             installPromptShown={installPromptShown}
             primaryAction={primaryAction}
             renderedAction={connectionPrimaryAction}
@@ -905,7 +905,7 @@ function ConnectorPageView({
         </div> : null}
       </Section> : null}
       {apps}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
       <RecentRunsSection recentRuns={recentRuns} />
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
@@ -957,17 +957,19 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
     return declared && declared !== name ? declared : humanizeFieldLabel(name);
   };
   const missing = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && gaps.some((gap) => gap.stream === stream.name));
-  const present = streams.filter((stream) => !missing.includes(stream));
+  const empty = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && !missing.includes(stream));
+  const present = streams.filter((stream) => !missing.includes(stream) && !empty.includes(stream));
   return <>
     {present.length ? <DataList>{present.map((stream) => {
       const report = source.collection_report?.find((entry) => entry.stream === stream.name);
       const gap = gaps.find((item) => item.stream === stream.name);
-      const partial = Boolean(gap) || (report && typeof report.collected === "number" && typeof report.considered === "number" && report.collected < report.considered);
+      const partial = Boolean(gap) || Boolean(report && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(report.coverage_condition));
       const more = report ? report.forward_disposition === "resumable" : gap?.recovery_hint?.retryable === true;
+      const lost = report?.coverage_condition === "terminal_gap" && report.forward_disposition === "terminal";
       const recordCount = knownStreamRecordCount(stream);
-      const count = recordCount === null ? null : `${recordCount.toLocaleString()} records`;
+      const count = recordCount === null ? null : `${recordCount.toLocaleString()} record${recordCount === 1 ? "" : "s"}`;
       const sentence = partial
-        ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : `${count ? `${count}. ` : ""}Some could not be copied.`
+        ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : lost ? `${count ? `${count}. ` : ""}Some could not be copied.` : count
         : count;
       const newest = recordCount === 0 ? null : recordDateLabel(stream.last_updated);
       const cause = gap ? "DataConnect could not copy this." : null;
@@ -981,6 +983,7 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
         </Link>
       </li>;
     })}</DataList> : null}
+    {empty.length ? <p className="pdpp-body mt-3 text-muted-foreground">Nothing in: {empty.slice(0, 3).map((stream) => label(stream.name)).join(", ")}{empty.length > 3 ? ` and ${empty.length - 3} more` : ""}.</p> : null}
     {missing.length ? <>
       <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
       <DataList ariaLabel="Didn't come">{missing.map((stream) => {
@@ -1015,6 +1018,7 @@ async function OtherAccounts({ connectionId, connectorId }: { connectionId: stri
 }
 
 function OtherAccountsLine({ accounts }: { accounts: readonly { connectionId: string; displayName: string }[] }) {
+  if (accounts.length === 0) return null;
   return <p className="mb-6 text-sm text-muted-foreground">Also connected: {accounts.map((account, index) => <span key={account.connectionId}>
     {index ? ", " : ""}<Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(account.connectionId)}`}>{account.displayName}</Link>
   </span>)}</p>;
