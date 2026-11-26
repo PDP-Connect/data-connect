@@ -2782,8 +2782,7 @@ function rekeyRecordRejectionReplayKeys(raw: SqliteDatabase): void {
 }
 
 function migrateRecordRejectionBytePayload(raw: SqliteDatabase): void {
-  raw.exec("BEGIN IMMEDIATE");
-  try {
+  raw.transaction(() => {
     addColumnIfMissing(raw, "record_rejection_quota", "pending_receipt_count", "INTEGER NOT NULL DEFAULT 0");
     const columns = raw.prepare("PRAGMA table_info(record_rejections)").all<{ name: string }>();
     const hasPayloadText = columns.some((column) => column.name === "payload_text");
@@ -2941,11 +2940,7 @@ function migrateRecordRejectionBytePayload(raw: SqliteDatabase): void {
         )
   `);
     rekeyRecordRejectionReplayKeys(raw);
-    raw.exec("COMMIT");
-  } catch (error) {
-    raw.exec("ROLLBACK");
-    throw error;
-  }
+  }).immediate();
 }
 
 function testOnlySourceRevisionInstallationLockMarker(): void {
@@ -6520,6 +6515,30 @@ export function publishSchemaSnapshotFile(
  * `buildPrivateSchemaSnapshot`) as well as on the connection it returns.
  */
 function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
+  // SQLite's documented table-rebuild procedure disables FK enforcement before
+  // BEGIN, checks references before COMMIT, then restores enforcement outside
+  // the transaction: https://www.sqlite.org/lang_altertable.html#otheralter
+  raw.pragma("foreign_keys = OFF");
+  try {
+    // Hold the writer lock across every schema probe and DDL replacement.
+    // With the default 30s busy timeout and five attempts, contenders can wait
+    // about 151.5s; busyTimeoutMs can raise that bound for larger migrations.
+    runWithSqliteBusyRetrySync(
+      () => raw.transaction(() => {
+        buildSqliteSchemaInTransaction(raw, opts);
+        const violations = raw.prepare("PRAGMA foreign_key_check").all();
+        if (violations.length > 0) {
+          throw new Error(`SQLite bootstrap failed foreign_key_check: ${JSON.stringify(violations)}`);
+        }
+      }).immediate(),
+      { onRetry: opts.onSchemaRetry }
+    );
+  } finally {
+    raw.pragma("foreign_keys = ON");
+  }
+}
+
+function buildSqliteSchemaInTransaction(raw: SqliteDatabase, opts: InitDbOptions): void {
   // The first non-trivial write on the freshly opened DB. On Docker dev
   // restart the previous process may still be closing its WAL writer;
   // wrap with the same bounded retry policy used by
@@ -6773,17 +6792,12 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // default (0) on both fresh and upgraded tables; legacy delayed rows remain
   // NULL until an automatic failure or explicit control action classifies them.
   runWithSqliteBusyRetrySync(() => {
-    raw.exec("BEGIN IMMEDIATE");
-    try {
+    raw.transaction(() => {
       if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
         raw.exec(`UPDATE search_index_dirty
                   SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
       }
-      raw.exec("COMMIT");
-    } catch (error) {
-      raw.exec("ROLLBACK");
-      throw error;
-    }
+    }).immediate();
   });
   // Monotonic per-scope CAS generation (see the CREATE TABLE comment above):
   // a pre-existing reference DB created the table before this column
@@ -6852,8 +6866,7 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // floor cannot tell. The column and seed commit together so an interrupted
   // seed cannot leave a column that makes the next startup skip it.
   runWithSqliteBusyRetrySync(() => {
-    raw.exec("BEGIN IMMEDIATE");
-    try {
+    raw.transaction(() => {
       if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
         raw.exec(
           `UPDATE version_counter
@@ -6866,11 +6879,7 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
                              AND r.stream = version_counter.stream), 0))`
         );
       }
-      raw.exec("COMMIT");
-    } catch (error) {
-      raw.exec("ROLLBACK");
-      throw error;
-    }
+    }).immediate();
   });
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
