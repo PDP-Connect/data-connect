@@ -1,495 +1,142 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-import { buttonVariants, IcButton, IcInput, IcTimestamp } from "@pdpp/brand-react";
-import { formatRelative } from "@pdpp/display";
-import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
-import { Callout, PageHeader } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
-import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ServerUnreachable } from "../../components/server-unreachable.tsx";
-import { buildOwnerBootstrapExamples, takeOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts";
-import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
+import { SupportCopy } from "../../components/support-copy.tsx";
+import { IcButton, IcInput } from "@pdpp/brand-react"
+import { CopyButton } from "@pdpp/operator-ui/components/copy-button"
+import { PageHeader } from "@pdpp/operator-ui/components/primitives"
+import Link from "next/link"
+import { RecordroomShellWithPalette } from "../../components/recordroom-shell-with-palette.tsx"
+import { takeOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts"
 import {
   listOwnerClientTokens,
   listOwnerIssuedClients,
-  type OwnerClientToken,
-  type OwnerIssuedClient,
-} from "../../lib/ref-client.ts";
-import { issueOwnerTokenAction, renameOwnerTokenAction } from "./actions.ts";
-import { ConfirmTokenRevoke, TokenAccessList, type AccessTokenRow } from "./token-access-list.tsx";
-
-export const dynamic = "force-dynamic";
-
-interface Params {
-  error?: string;
-  flow?: string;
-  notice?: string;
-  reproduce?: string;
-}
-
-type FlowState = NonNullable<ReturnType<typeof takeOwnerBootstrapFlow>>;
-type FlowExamples = NonNullable<Awaited<ReturnType<typeof buildOwnerBootstrapExamples>>>;
-type ReproduceFormat = "curl" | "cli";
-
-function InlineError({ prefix, message }: { message: string; prefix: string }) {
-  return (
-    <p className="pdpp-caption mb-4 text-destructive">
-      <span className="font-medium text-destructive">{prefix}:</span> <span>{message}</span>
-    </p>
-  );
-}
-
-function CodeBlock({ children }: { children: string }) {
-  return (
-    <pre className="pdpp-caption overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-border/80 bg-muted/30 p-3 font-mono">
-      <code>{children}</code>
-    </pre>
-  );
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
-  const command = [
-    "pdpp owner-agent onboard",
-    shellQuote(entrypoint),
-    "--client-name",
-    shellQuote("local assistant"),
-  ].join(" ");
-  return (
-    <section className="mb-6 border-b border-border/70 pb-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0 max-w-3xl">
-          <p className="pdpp-eyebrow text-muted-foreground">Recommended owner-agent path</p>
-          <h2 className="pdpp-title mt-1 text-foreground">Let the local agent complete onboarding</h2>
-          <p className="pdpp-caption mt-2 text-muted-foreground">
-            Use this for a trusted local agent. The agent starts from the public entrypoint, opens the
-            browser approval flow, and writes the owner credential directly to its local state. No bearer needs to be
-            pasted into chat or copied out of the dashboard.
-          </p>
-        </div>
-        <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
-          Review deployment metadata
-        </Link>
-      </div>
-      <div className="mt-4 flex items-start gap-2">
-        <div className="min-w-0 flex-1">
-          <CodeBlock>{command}</CodeBlock>
-        </div>
-        <CopyButton ariaLabel="Copy owner-agent onboarding command" value={command} />
-      </div>
-      <p className="pdpp-caption mt-3 text-muted-foreground">
-        The CLI stores the credential under <code className="font-mono">~/.pdpp/owner-agents/&lt;host&gt;.json</code>.
-        The assistant can read the top-level <code className="font-mono">access_token</code> for owner-level REST
-        reads and should not send it to{" "}
-        <code className="font-mono">/mcp</code>.
-      </p>
-    </section>
-  );
-}
-
-/**
- * Single card that holds both the issuance form and the issued-token result.
- * SLVP convention (GitHub/Stripe/Vercel/Linear) — operator's eye stays on one
- * surface across the create-then-copy transition.
- */
-function IssueCard({ flow }: { flow: FlowState | null }) {
-  return (
-    <section className="mb-6 border-b border-border/70 pb-5">
-      <form action={issueOwnerTokenAction} className="flex flex-col gap-2">
-        <label className="flex min-w-0 flex-col gap-1" htmlFor="token-name">
-          <span className="text-[13px] font-medium text-foreground">Name</span>
-        </label>
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
-          <IcInput
-            className="min-h-11 min-w-0 flex-1"
-            defaultValue=""
-            id="token-name"
-            name="name"
-            placeholder="e.g. Backup script"
-            type="text"
-          />
-          <IcButton className="min-h-11 w-full sm:w-auto" size="sm" type="submit" variant="default">
-            Create access token
-          </IcButton>
-        </div>
-      </form>
-
-      {flow?.token ? (
-        <div className="mt-4 border-border/60 border-t pt-4">
-          <div className="mb-2 text-[13px] font-medium text-foreground">
-            <span>{flow.name ?? "Unnamed token"}</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <pre className="break-all rounded-md border border-border/80 bg-muted/30 p-3 text-[13px] text-foreground">{flow.token}</pre>
-            </div>
-            <CopyButton ariaLabel="Copy access token" value={flow.token} />
-          </div>
-          {/* takeOwnerBootstrapFlow (lib/operator-bootstrap.ts) drops the token
-              from the flow store once this page has read it, so a reload of
-              this address does not show it again. */}
-          <p className="mt-2 text-[13px] text-muted-foreground">Copy it now. You won't see it again.</p>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-/**
- * Flat transcript of the device flow that just ran. Numbered, no nested
- * cards, no re-execute buttons (the steps already ran). Operators inspecting
- * the wire don't need to drive each step again — they need to see what
- * happened. Introspection runs once at issuance (actions.ts), because the
- * server drops the token after this page first shows it.
- */
-function TranscriptStep({ index, method, path, body }: { index: number; method: string; path: string; body?: string }) {
-  return (
-    <li>
-      <div className="pdpp-caption mb-1 inline-flex items-baseline gap-2 text-muted-foreground">
-        <span className="font-mono text-foreground">
-          {index}. {method} {path}
-        </span>
-      </div>
-      {body ? <CodeBlock>{body}</CodeBlock> : null}
-    </li>
-  );
-}
-
-function Transcript({ flow }: { flow: FlowState }) {
-  const start = JSON.stringify({ client_id: flow.clientId }, null, 2);
-  const approve = JSON.stringify({ user_code: flow.userCode }, null, 2);
-  const exchange = JSON.stringify(
-    {
-      client_id: flow.clientId,
-      device_code: flow.deviceCode,
-      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-    },
-    null,
-    2
-  );
-  return (
-    <ol className="space-y-4">
-      <TranscriptStep body={start} index={1} method="POST" path="/oauth/device_authorization" />
-      <TranscriptStep body={approve} index={2} method="POST" path="/device/approve" />
-      <TranscriptStep body={exchange} index={3} method="POST" path="/oauth/token" />
-    </ol>
-  );
-}
-
-function IntrospectResult({ flow }: { flow: FlowState }) {
-  if (!flow.introspection) {
-    return <p className="pdpp-caption text-muted-foreground">This token was not checked.</p>;
-  }
-  return (
-    <div>
-      <div className="pdpp-caption mb-1 text-muted-foreground">
-        POST /introspect · checked{" "}
-        {flow.introspectedAt ? <IcTimestamp value={flow.introspectedAt} /> : "just now"}
-      </div>
-      <CodeBlock>{JSON.stringify(flow.introspection, null, 2)}</CodeBlock>
-    </div>
-  );
-}
-
-function ReproduceToggle({ flowId, format }: { flowId: string; format: ReproduceFormat }) {
-  const base = `/deployment/tokens?flow=${encodeURIComponent(flowId)}`;
-  return (
-    <div className="pdpp-caption inline-flex gap-1 rounded-md border border-border p-0.5">
-      <Link
-        className={`rounded px-2 py-0.5 ${format === "curl" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-        href={`${base}&reproduce=curl`}
-        prefetch={false}
-      >
-        curl
-      </Link>
-      <Link
-        className={`rounded px-2 py-0.5 ${format === "cli" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-        href={`${base}&reproduce=cli`}
-        prefetch={false}
-      >
-        pdpp CLI
-      </Link>
-    </div>
-  );
-}
-
-function ReproduceBlock({ examples, format }: { examples: FlowExamples; format: ReproduceFormat }) {
-  if (format === "cli") {
-    return (
-      <div className="space-y-3">
-        <CodeBlock>{examples.cliLogin}</CodeBlock>
-        <CodeBlock>{examples.cliIntrospect}</CodeBlock>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-3">
-      <CodeBlock>{examples.startCurl}</CodeBlock>
-      <CodeBlock>{examples.approveCurl}</CodeBlock>
-      <CodeBlock>{examples.exchangeCurl}</CodeBlock>
-      <CodeBlock>{examples.introspectCurl}</CodeBlock>
-      <CodeBlock>{examples.ownerReadExample}</CodeBlock>
-    </div>
-  );
-}
-
-function InlineNotice({ message }: { message: string }) {
-  return <p className="pdpp-caption mb-4 text-muted-foreground">{message}</p>;
-}
-
-// Owner bearers and the routine MCP scoped-grant flow are two separate paths
-// with two separate audiences. Tokens issued here cover the whole RS read
-// surface under the operator's identity — fine for a CLI you wrote yourself,
-// a backup script you run from your laptop, or a trusted local agent that
-// acts on the operator's behalf. They are explicitly the wrong shape for
-// ordinary MCP clients (Claude, ChatGPT, third-party agents); the hosted
-// MCP endpoint rejects owner bearers by design.
-function OwnerScopeCallout() {
-  return (
-    <Callout className="mb-6" title="Use this for operator and trusted-agent access only" tone="warning">
-      <p className="pdpp-caption text-callout-warning-fg/80">
-        Owner-agent credentials are owner bearers — they grant the operator's full read access to{" "}
-        <code className="font-mono">/v1/*</code>. Use them for the operator themselves, for CLI tools and scripts you
-        wrote, and for trusted local agents that run on your behalf.
-      </p>
-      <p className="pdpp-caption mt-2 text-callout-warning-fg/80">
-        Ordinary MCP clients (Claude, ChatGPT, third-party agents) should connect through the OAuth scoped-grant flow at{" "}
-        <code className="font-mono">/mcp</code>. That path is documented in the{" "}
-        <Link className="underline-offset-2 hover:underline" href="/connect">
-          connect page
-        </Link>
-        . <code className="font-mono">/mcp</code> rejects owner bearers on purpose.
-      </p>
-    </Callout>
-  );
-}
-
-/**
- * Per-client token drilldown, shown only when a client has more than one
- * active token. Lists each token with its issued/expiry facts and a per-token
- * revoke that targets exactly that bearer (not the whole client). The
- * `token_id_public` is a non-reversible digest, never a usable bearer.
- */
-function TokenDrilldown({ clientId, tokens }: { clientId: string; tokens: OwnerClientToken[] }) {
-  return (
-    <details className="mt-2 rounded-md border border-border/70 bg-muted/20">
-      <summary className="cursor-pointer select-none px-3 py-2 font-medium text-xs">
-        Show individual tokens ({tokens.length})
-      </summary>
-      <ul className="divide-y divide-border/60 border-border/60 border-t">
-        {tokens.map((token) => (
-          <li
-            className="flex flex-col gap-1.5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-            key={token.token_id_public}
-          >
-            <div className="min-w-0">
-              <div className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-2 text-muted-foreground">
-                <span>
-                  issued <IcTimestamp value={token.created_at} />
-                </span>
-                <span aria-hidden>·</span>
-                <span>
-                  {token.expires_at ? (
-                    <>
-                      expires <IcTimestamp value={token.expires_at} />
-                    </>
-                  ) : (
-                    "no expiry"
-                  )}
-                </span>
-                <span aria-hidden>·</span>
-                <code className="font-mono text-xs">{token.token_id_public}</code>
-              </div>
-            </div>
-            <ConfirmTokenRevoke clientId={clientId} tokenIdPublic={token.token_id_public} />
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
-
-function TokensListSection({
-  tokens,
-  tokenDetailsByClient,
+} from "../../lib/ref-client.ts"
+import { loadOwnerSessionInventory } from "../../settings/owner-sessions-data.ts"
+import { issueOwnerTokenAction } from "./actions.ts"
+import { PlainTokenList } from "./plain-token-list.tsx"
+import {
+  buildTokenPractice,
+  tokenGroups,
+  type TokenGroup,
+} from "./token-model.ts"
+export const dynamic = "force-dynamic"
+export default async function TokensPage({
+  searchParams,
 }: {
-  tokens: OwnerIssuedClient[];
-  tokenDetailsByClient: Map<string, OwnerClientToken[]>;
+  searchParams: Promise<{
+    demo?: string
+    flow?: string
+    error?: string
+    notice?: string
+  }>
 }) {
-  const rows: AccessTokenRow[] = tokens.map((token) => {
-    const detailTokens = tokenDetailsByClient.get(token.client_id) ?? [];
-    const showDrilldown = token.active_token_count > 1 && detailTokens.length > 0;
-    return {
-      ...token,
-      createdLabel: formatTokenTime(token.created_at),
-      lastUsedLabel: "Not available",
-      details: (
-        <details className="mt-2 min-w-0 rounded-[6px] border border-border p-3">
-          <summary className="min-h-11 cursor-pointer select-none text-[13px] text-muted-foreground">
-            Details
-          </summary>
-          <div className="grid gap-3 border-t border-border/70 pt-3">
-            <p className="break-all font-mono text-[12px] text-muted-foreground">{token.client_id}</p>
-            <p className="text-[13px] text-muted-foreground">{token.active_token_count} active token{token.active_token_count === 1 ? "" : "s"}</p>
-            <form action={renameOwnerTokenAction} className="flex flex-wrap items-center gap-2">
-              <input name="client_id" type="hidden" value={token.client_id} />
-              <IcInput
-                aria-label={`Rename ${token.client_name ?? "access token"}`}
-                className="min-h-11 min-w-0 flex-1"
-                defaultValue={token.client_name ?? ""}
-                name="client_name"
-                placeholder="Access token name"
-                type="text"
-              />
-              <IcButton size="sm" type="submit" variant="ghost">Rename</IcButton>
-            </form>
-            {showDrilldown ? <TokenDrilldown clientId={token.client_id} tokens={detailTokens} /> : null}
-          </div>
-        </details>
-      ),
-    };
-  });
-  return <TokenAccessList tokens={rows} />;
-}
-
-function formatTokenTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Not available" : formatRelative(date, Date.now());
-}
-
-function FlowInspector({
-  flow,
-  examples,
-  format,
-}: {
-  flow: FlowState;
-  examples: FlowExamples | null;
-  format: ReproduceFormat;
-}) {
-  return (
-    <details className="rounded-md border border-border bg-card/30">
-      <summary className="cursor-pointer select-none px-4 py-3 font-medium text-sm">
-        Show manual bearer wire details
-        <span className="pdpp-caption ml-2 text-muted-foreground">
-          (real RFC 8628 wire — inspect, debug, or replay outside the dashboard)
-        </span>
-      </summary>
-      <div className="space-y-6 border-border/70 border-t p-5">
-        {flow.lastError ? <InlineError message={flow.lastError} prefix="Last action error" /> : null}
-
-        <section>
-          <h3 className="pdpp-eyebrow mb-3">Wire transcript</h3>
-          <Transcript flow={flow} />
-        </section>
-
-        <section>
-          <h3 className="pdpp-eyebrow mb-3">Verify</h3>
-          <IntrospectResult flow={flow} />
-        </section>
-
-        {examples ? (
-          <section>
-            <div className="mb-3 flex items-baseline justify-between gap-3">
-              <h3 className="pdpp-eyebrow">Reproduce out-of-band</h3>
-              <ReproduceToggle flowId={flow.flowId} format={format} />
-            </div>
-            <ReproduceBlock examples={examples} format={format} />
-          </section>
-        ) : null}
-      </div>
-    </details>
-  );
-}
-
-export default async function DeploymentTokensPage({ searchParams }: { searchParams: Promise<Params> }) {
-  const params = await searchParams;
-  const flow = params.flow ? takeOwnerBootstrapFlow(params.flow) : null;
-  const examples = flow ? await buildOwnerBootstrapExamples(flow) : null;
-  const error = params.error ?? null;
-  const notice = params.notice ?? null;
-  const format: ReproduceFormat = params.reproduce === "cli" ? "cli" : "curl";
-  const entrypoint = await getReferencePublicOrigin();
-
-  let tokens: OwnerIssuedClient[] = [];
-  const tokenDetailsByClient = new Map<string, OwnerClientToken[]>();
-  try {
-    const resp = await listOwnerIssuedClients();
-    tokens = resp.data;
-    // Only clients with more than one active token get a per-token drilldown;
-    // a single-token client is fully described by its row.
-    const multiTokenClients = tokens.filter((t) => t.active_token_count > 1);
-    await Promise.all(
-      multiTokenClients.map(async (client) => {
-        try {
-          const detail = await listOwnerClientTokens(client.client_id);
-          tokenDetailsByClient.set(client.client_id, detail.data);
-        } catch {
-          // A per-client drilldown failure must not break the whole page; the
-          // row still renders its aggregate count without the expansion.
-        }
-      })
-    );
-  } catch (err) {
-    if (err instanceof ReferenceServerUnreachableError) {
-      return (
-        <RecordroomShellWithPalette>
-          <PageHeader title="Tokens for scripts and tools" />
-          <ServerUnreachable />
-        </RecordroomShellWithPalette>
-      );
-    }
-    throw err;
+  const params = await searchParams
+  const practice =
+    process.env.NODE_ENV !== "production" && params.demo
+      ? buildTokenPractice(params.demo)
+      : null
+  const flow =
+    !practice && params.flow ? takeOwnerBootstrapFlow(params.flow) : null
+  let groups: TokenGroup[]
+  let inventoryFailed = false
+  if (practice)
+    groups = tokenGroups(practice.clients, practice.details, practice.owners)
+  else {
+    const [clients, inventory] = await Promise.all([
+      listOwnerIssuedClients(),
+      loadOwnerSessionInventory()
+        .then(inventory => ({ inventory, failed: false }))
+        .catch(() => ({ inventory: null, failed: true })),
+    ])
+    inventoryFailed = inventory.failed
+    const details = Object.fromEntries(
+      await Promise.all(
+        clients.data.map(
+          async client =>
+            [
+              client.client_id,
+              (
+                await listOwnerClientTokens(client.client_id).catch(() => ({
+                  data: [],
+                }))
+              ).data,
+            ] as const
+        )
+      )
+    )
+    groups = tokenGroups(
+      clients.data,
+      details,
+      inventory.inventory?.bearers ?? []
+    )
   }
-
+  const created = practice?.created ?? flow?.token
   return (
     <RecordroomShellWithPalette>
-      <PageHeader
-        actions={<Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">Server</Link>}
-        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Tokens for scripts and tools" }]}
-        description="For scripts and tools that read your data without signing in."
-        title="Tokens for scripts and tools"
-      />
-
-      {error ? (
-        <div className="mb-4">
-          <p className="text-[13px] text-destructive">This could not be done. Try again.</p>
-          <details className="mt-2">
-            <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground">Details</summary>
-            <p className="break-all font-mono text-[12px] text-muted-foreground">{error}</p>
-          </details>
-        </div>
-      ) : null}
-      {notice === "revoked" ? <InlineNotice message="Access token revoked." /> : null}
-      {notice === "token_revoked" ? (
-        <InlineNotice message="Access token revoked. The other access tokens still work." />
-      ) : null}
-      {notice === "renamed" ? <InlineNotice message="Access token renamed." /> : null}
-
-      <IssueCard flow={flow} />
-
-      <TokensListSection
-        tokenDetailsByClient={tokenDetailsByClient}
-        tokens={tokens}
-      />
-
-      <details className="mt-6 border-t border-border/70 pt-4">
-        <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground">Details</summary>
-        <div className="grid gap-5 border-b border-border/70 pb-5">
-          <OwnerAgentOnboardingCard entrypoint={entrypoint} />
-          <OwnerScopeCallout />
-          <section>
-            <h3 className="pdpp-eyebrow mb-2">Manual/debug bearer</h3>
-            <p className="pdpp-caption text-muted-foreground">
-              Use this for debugging a script you control or inspecting the sign-in steps. Each access token is a freshly registered OAuth client. Revoke it to remove that client and its active credentials.
-            </p>
+      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+        <PageHeader title="Tokens for scripts and tools" />
+        <p className="text-muted-foreground">
+          A token lets a script or tool of yours read all your data without
+          signing in. Give one only to something you run yourself. For ChatGPT,
+          Claude and other apps, use{" "}
+          <Link className="underline" href="/connect">
+            Connect an app
+          </Link>{" "}
+          instead.
+        </p>
+        {params.error || flow?.lastError ? (
+          <div role="status">
+            <p>This could not be done. Try again.</p>
+            <SupportCopy details={params.error || flow?.lastError || ""} />
+          </div>
+        ) : null}
+        {params.notice ? (
+          <p role="status">
+            {params.notice === "renamed" ? "Token renamed." : "Token removed."}
+          </p>
+        ) : null}
+        {inventoryFailed ? (
+          <p role="status">
+            Some tokens could not be loaded. Refresh this page to try again.
+          </p>
+        ) : null}
+        {created ? (
+          <section className="grid gap-3">
+            <div className="flex items-start gap-2">
+              <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all rounded-md border border-border p-3">
+                {created}
+              </pre>
+              <CopyButton ariaLabel="Copy token" value={created} />
+            </div>
+            <p>Copy it now. You won’t see it again.</p>
+            <Link className="min-h-11 py-2 underline" href="/deployment/tokens">
+              Done
+            </Link>
           </section>
-          {flow ? <FlowInspector examples={examples} flow={flow} format={format} /> : null}
-        </div>
-      </details>
+        ) : (
+          <form action={issueOwnerTokenAction} className="grid gap-2">
+            <label htmlFor="token-name">Name</label>
+            <div className="flex flex-wrap gap-2">
+              <IcInput
+                id="token-name"
+                name="name"
+                placeholder="Backup script"
+                required
+              />
+              <IcButton disabled={Boolean(practice)} type="submit">
+                Create a token
+              </IcButton>
+            </div>
+          </form>
+        )}
+        <PlainTokenList groups={groups} practice={Boolean(practice)} />
+        <Link
+          className="min-h-11 py-3 text-sm underline"
+          href={`/deployment/tokens/technical${params.flow ? `?flow=${encodeURIComponent(params.flow)}` : ""}`}
+        >
+          Technical details
+        </Link>
+      </main>
     </RecordroomShellWithPalette>
-  );
+  )
 }
