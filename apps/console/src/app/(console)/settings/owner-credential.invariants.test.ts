@@ -11,13 +11,13 @@ const SETTING_FILE = `${HERE}owner-credential-setting.tsx`
 const ACTIONS_FILE = `${HERE}owner-credential-actions.ts`
 const PAGE_FILE = `${HERE}page.tsx`
 
-test("the settings page places one Owner password row inside Sign-in", async () => {
+test("the settings page places one Password row inside Password and sign-in", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
   const passwordSetting = await readFile(`${HERE}owner-password-setting.tsx`, "utf8")
   assert.match(page, /export default async function SettingsPage/)
   // Brief settings-pages, decision 1: Owner password is a row under Sign-in.
-  assert.equal(page.match(/<h3[^>]*>Owner password<\/h3>/g)?.length, 1)
-  assert.match(page, /title="Sign-in"[\s\S]*?id="owner-password"/)
+  assert.equal(page.match(/<h3[^>]*>Password<\/h3>/g)?.length, 1)
+  assert.match(page, /title="Password and sign-in"[\s\S]*?id="owner-password"/)
   assert.doesNotMatch(page, /<OwnerCredentialSetting/)
   assert.match(passwordSetting, /canReveal \? <OwnerCredentialSetting \/> : null/)
   assert.doesNotMatch(page, /Sign in from another device, such as your phone over remote access/)
@@ -125,7 +125,7 @@ test("the desktop password setting has one shared action target", async () => {
   const setting = await readFile(`${HERE}owner-password-setting.tsx`, "utf8")
   // Brief settings-pages, decision 1: keep the owner-password anchor within Sign-in.
   assert.match(page, /id="owner-password"/)
-  assert.match(page, /title="Sign-in"[\s\S]*?id="owner-password"/)
+  assert.match(page, /title="Password and sign-in"[\s\S]*?id="owner-password"/)
   assert.match(setting, /Change password/)
   assert.doesNotMatch(setting, /No OS prompt on Linux yet\./)
 })

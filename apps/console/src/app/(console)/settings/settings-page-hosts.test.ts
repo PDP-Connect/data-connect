@@ -28,6 +28,7 @@ function loadPage(): Promise<Page> {
           [exportName]: () => createElement("div", { "data-widget": marker }),
         },
       })
+    mock.module(new URL("./settings-summary-data.ts", import.meta.url).href, { namedExports: { loadSettingsSummary: async () => ({ tokens: 2, collectors: 4, webhooks: 0, updates: 0, publicAddress: null }) } })
     stub("./remote-access-setting.tsx", "RemoteAccessSetting", "remote-access")
     stub("./owner-password-setting.tsx", "OwnerPasswordSetting", "owner-password")
     stub("./owner-sessions-setting.tsx", "OwnerSessionsSetting", "owner-sessions")
@@ -75,15 +76,15 @@ async function render(managedDesktopHost: boolean, inDesktopWindow = managedDesk
   }
 }
 
-test("an unmanaged server host renders Remote access and Attach a desktop app but not Desktop or Vault recovery", async () => {
+test("an unmanaged server host renders Remote access and Connect a DataConnect app on another computer but not Desktop or Vault recovery", async () => {
   const html = await render(false)
   assert.match(html, /Remote access/)
   assert.match(html, /data-widget="remote-access"/)
-  assert.match(html, /Attach a desktop app/)
+  assert.match(html, /Connect a DataConnect app on another computer/)
   assert.match(html, /data-widget="desktop-pairing"/)
   assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render on a server")
   assert.doesNotMatch(html, /data-widget="recovery-key"/, "recovery widget must not render on a server")
-  assert.doesNotMatch(html, /Vault recovery code/)
+  assert.doesNotMatch(html, /Recovery code/)
   assert.doesNotMatch(html, /Control how DataConnect starts on the computer that runs it/)
 })
 
@@ -92,7 +93,7 @@ test("in the desktop app window a managed desktop host renders the Desktop and V
   assert.match(html, /data-widget="remote-access"/)
   assert.match(html, /Control how DataConnect starts on the computer that runs it/)
   assert.match(html, /data-widget="desktop-settings"/)
-  assert.match(html, /Vault recovery code/)
+  assert.match(html, /Recovery code/)
   assert.match(html, /data-widget="recovery-key"/)
 })
 
@@ -109,7 +110,7 @@ test("a browser reaching a managed desktop host over remote access still renders
 
 test("settings keeps the required section order and links to access tokens", async () => {
   const html = await render(true)
-  const order = ["Remote access", "Sign-in", "Desktop", "Vault recovery code", "Developer mode", "About"]
+  const order = ["Remote access", "Password and sign-in", "Notifications", "This computer", "Updates", "Advanced", "About"]
   // Brief settings-pages, decision 1: these sections stay in this order; Desktop remains host-gated.
   const positions = order.map((label) => html.indexOf(label))
   assert.ok(positions.every((position) => position >= 0))

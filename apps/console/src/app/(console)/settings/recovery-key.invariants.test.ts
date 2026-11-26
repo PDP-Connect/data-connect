@@ -14,7 +14,7 @@ const PAGE_FILE = `${HERE}page.tsx`
 test("the settings page mounts the Vault recovery code section with the recovery key component", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
   assert.match(page, /<RecoveryKeySetting \/>/)
-  assert.match(page, /title="Vault recovery code"/)
+  assert.match(page, />Recovery code<\/Text>/)
 })
 
 test("the warning copy is about custody and says the kit is keys-only", async () => {

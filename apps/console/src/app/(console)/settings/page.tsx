@@ -7,6 +7,10 @@ import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
+import { OpenExternalLink } from "../components/open-external-link.tsx"
+import { NotificationsRow } from "./notifications-row.tsx"
+import { SettingsRow } from "./settings-row.tsx"
+import { loadSettingsSummary } from "./settings-summary-data.ts"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
@@ -39,30 +43,22 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
       loadOwnerPasswordSet(),
     ])
 
+  const summary = practice ? { tokens: 2, collectors: 4, webhooks: 0, updates: 0, publicAddress: practice.publicAddress } : await loadSettingsSummary()
+
   return (
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Settings" />
-        <Section title="Data sources">
-          <Text
-            as="a"
-            className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            href="/settings/packages"
-          >
-            <span>Data source packages</span>
-            <span aria-hidden="true" className="text-muted-foreground">→</span>
-          </Text>
-        </Section>
         <Section
           id="remote-access"
           title="Remote access"
         >
           {practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}
         </Section>
-        <Section title="Sign-in">
+        <Section title="Password and sign-in">
           {ownerPasswordSource ? (
             <div className="border-b border-border/70 pb-5" id="owner-password">
-              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Owner password</h3>
+              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Password</h3>
               <OwnerPasswordSetting
                 canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
                 managedDesktop={managedDesktopHost}
@@ -88,36 +84,40 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
             <span>Tokens for scripts and tools</span>
             <span aria-hidden="true" className="text-muted-foreground">→</span>
           </Text>
+        </Section>
+        <Section title="Notifications"><NotificationsRow practice={!!practice} /></Section>
+        {managedDesktopHost ? (
+          <Section description="Control how DataConnect starts on the computer that runs it." title="This computer">
+            {/* Shown in any signed-in browser, not only the desktop window: the
+                owner may change how the desktop app starts from a phone that
+                reaches it over remote access (e2e/live-settings.spec.ts). */}
+            <DesktopSettingsSetting />
+            <div className="grid gap-3 py-5">
+              <Text as="h3">Recovery code</Text>
+              <RecoveryKeySetting />
+            </div>
+          </Section>
+        ) : null}
+        <Section title="Updates">
+          <Text as="p">DataConnect {identity.version}</Text>
+          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases">See the latest version</OpenExternalLink>
+          <SettingsRow href="/settings/packages" title="Data source updates" state={summary.updates === null ? "Could not check" : summary.updates ? `${summary.updates} available` : "All up to date"} />
+        </Section>
+        <Section title="Advanced" description="For scripts, other devices, and people who run DataConnect on a server.">
           {ownerSessions.enabled ? (
-            <div className="py-5">
-              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Attach a desktop app</h3>
+            <div className="grid gap-3 py-3">
+              <Text as="h3">Connect a DataConnect app on another computer</Text>
               <DesktopPairingSetting />
             </div>
           ) : null}
-        </Section>
-        {managedDesktopHost ? (
-          <>
-        {/* Shown in any signed-in browser, not only the desktop window: the
-            owner may change how the desktop app starts from a phone that
-            reaches it over remote access (e2e/live-settings.spec.ts). */}
-        <Section
-          description="Control how DataConnect starts on the computer that runs it."
-          title="Desktop"
-        >
-          <DesktopSettingsSetting />
-        </Section>
-        <Section
-          description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
-          title="Vault recovery code"
-        >
-          <RecoveryKeySetting />
-        </Section>
-          </>
-        ) : null}
-        <Section title="Developer mode">
-          <DeveloperModeSetting />
+          <SettingsRow href="/device-exporters" title="Collectors on your devices" state={summary.collectors === null ? "Could not check" : `${summary.collectors} sending`} />
+          <SettingsRow href="/event-subscriptions" title="Webhooks" state={summary.webhooks === null ? "Could not check" : String(summary.webhooks)} />
+          <SettingsRow href="/deployment" title="Server" state="Checks that DataConnect itself is working" />
+          <SettingsRow href="/deployment/provider-apps" title="Sign-in apps for data sources" />
+          <div id="developer-mode"><DeveloperModeSetting /></div>
         </Section>
         <AboutSection identity={identity} />
+        <Text as="a" href="/settings/technical" link>Technical details</Text>
       </main>
     </RecordroomShellWithPalette>
   )

@@ -95,13 +95,13 @@ test("at zero the code and link are gone and the panel says to make a new one", 
 test("the settings page shows the section whenever owner sessions are shown", async () => {
   const page = await readFile(`${HERE}page.tsx`, "utf8")
   const sessions = page.indexOf("{ownerSessions.enabled ? (")
-  const pairing = page.indexOf(">Attach a desktop app</h3>")
+  const pairing = page.indexOf("Connect a DataConnect app on another computer")
   assert.ok(sessions >= 0 && pairing > sessions)
   const gate = page.slice(page.lastIndexOf("{ownerSessions.enabled ? (", pairing), pairing)
   assert.match(gate, /ownerSessions\.enabled/)
   assert.match(page, /<DesktopPairingSetting \/>/)
   // Brief settings-pages, decision 1: desktop pairing stays within the Sign-in section.
-  assert.match(page, /<Section title="Sign-in">[\s\S]*?Attach a desktop app/)
+  assert.match(page, /title="Advanced"[\s\S]*?Connect a DataConnect app on another computer/)
 })
 
 test("the pairing action stays a server-only module and the setting a client module", async () => {
