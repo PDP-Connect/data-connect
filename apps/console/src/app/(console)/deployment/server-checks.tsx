@@ -5,7 +5,9 @@
 
 import { buttonVariants, Text } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { checksHeadline, plainServerChecks, type PlainCheck } from "./plain-checks.ts";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   embeddingCacheRow,
   overallVerdict,
@@ -18,7 +20,19 @@ import {
   storageBackendRow,
 } from "../components/deployment-readiness-rows.ts";
 
-export function ServerChecks({ inputs }: { inputs: ServerInputs }) {
+export function ServerChecks({ inputs, technical = false, desktop = false, practice }: { inputs: ServerInputs; technical?: boolean; desktop?: boolean; practice?: { address: string | null; probe: RefreshTokenProbe } }) {
+  if (technical) return <TechnicalServerChecks inputs={inputs} />;
+  return <PlainServerChecks inputs={inputs} practice={practice} desktop={desktop} />;
+}
+function PlainServerChecks({ inputs, practice, desktop }: { inputs: ServerInputs; desktop: boolean; practice?: { address: string | null; probe: RefreshTokenProbe } }) {
+  const address = useBrowserOrigin();
+  const probe = useRefreshTokenProbe(Boolean(practice));
+  return <ServerChecksView rows={plainServerChecks(inputs, practice ? practice.address : address, practice ? practice.probe : probe, desktop)} />;
+}
+export function ServerChecksView({ rows }: { rows: PlainCheck[] }) {
+  return <><Text>{checksHeadline(rows)}</Text><Section title="Checks"><ul className="divide-y divide-border/70 border-y border-border/70">{rows.map((row) => <li className="grid gap-1 py-4 sm:grid-cols-[10rem_1fr]" key={row.name}><Text>{row.name}</Text><div className="grid gap-1"><Text color="muted">{row.sentence}</Text>{row.action ? row.href ? <Link className="min-h-11 py-2 underline" href={row.href}>{row.action}</Link> : <Text color="muted">{row.action}</Text> : null}</div></li>)}</ul></Section></>;
+}
+function TechnicalServerChecks({ inputs }: { inputs: ServerInputs }) {
   const browserOrigin = useBrowserOrigin();
   const refreshProbe = useRefreshTokenProbe();
   const [originAction, setOriginAction] = useState<"idle" | "copied" | "failed">("idle");
@@ -132,17 +146,15 @@ function summaryWords(verdict: ReturnType<typeof overallVerdict>): string {
   }
 }
 
+const subscribeToAddress = () => () => {};
 function useBrowserOrigin(): string | null {
-  const [origin, setOrigin] = useState<string | null>(null);
-  useEffect(() => {
-    setOrigin(window.location.origin);
-  }, []);
-  return origin;
+  return useSyncExternalStore(subscribeToAddress, () => window.location.origin, () => null);
 }
 
-function useRefreshTokenProbe(): RefreshTokenProbe {
+function useRefreshTokenProbe(skip = false): RefreshTokenProbe {
   const [probe, setProbe] = useState<RefreshTokenProbe>({ state: "loading" });
   useEffect(() => {
+    if (skip) return;
     let cancelled = false;
     void fetch("/.well-known/oauth-authorization-server", { cache: "no-store", credentials: "omit" })
       .then(async (response) => {
@@ -160,6 +172,6 @@ function useRefreshTokenProbe(): RefreshTokenProbe {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [skip]);
   return probe;
 }

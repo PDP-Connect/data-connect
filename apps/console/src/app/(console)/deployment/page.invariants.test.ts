@@ -45,13 +45,14 @@ test("server page leads with reachability and folds diagnostics under Details", 
   // Settings repair brief, decision 1: reachability comes from the browser-side address check.
   assert.match(src, /title="Server"/);
   assert.doesNotMatch(src, /The server is reachable/);
-  assert.match(src, /<ServerChecks inputs=\{extractReadinessInputs\(report\)\} \/>/);
-  assert.match(src, /<summary[^>]*>Details<\/summary>/);
+  assert.match(src, /<ServerChecks[^>]+inputs=\{extractReadinessInputs\(report\)\} \/>/);
+  assert.doesNotMatch(src, /<details/);
+  assert.match(src, /href="\/deployment\/technical"/);
 });
 
 test("the Details fold opens when the rebuild action returns, so its result is seen", async () => {
   // RAISE-RULES.md 6: a failed action shows its sentence; the rebuild notice and
   // error render inside Details, so the fold must open on ?notice= / ?error=.
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /open=\{Boolean\(params\.error\) \|\| params\.notice === "dataset_summary_rebuilt"\}/);
+  const src = await readFile(`${HERE}technical/page.tsx`, "utf8");
+  assert.match(src, /open=\{\s*Boolean\(params\.error\) \|\| params\.notice === "dataset_summary_rebuilt"\s*\}/);
 });
