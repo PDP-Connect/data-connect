@@ -306,17 +306,8 @@ function AppRow({ app }: { app: HomeData["apps"][number] }) {
       className="block border-b border-border/70 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       href={app.href}
     >
-      <Text as="span" className="block truncate text-[15px] font-medium text-foreground">
-        {app.name}
-      </Text>
-      <Text as="span" className={`${SECOND_LINE} block`}>
-        Can read {app.reads}
-      </Text>
-      {app.lastRead ? (
-        <Text as="span" className={`${SECOND_LINE} block tabular-nums`}>
-          Last read {app.lastRead}
-        </Text>
-      ) : null}
+      <Text as="span" className="text-[15px]">{app.name}</Text>
+      <Text as="span" className={SECOND_LINE}> · {app.lastRead ? <>Last read {app.lastRead}</> : "Has not read anything yet"}</Text>
     </Link>
   );
 }
@@ -346,7 +337,7 @@ function AppsBlock({ data }: { data: HomeData }) {
             </Link>
           ) : null}
           <Link
-            className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={FILLED_BUTTON}
             href={data.appsHref}
           >
             Connect an app
@@ -354,9 +345,10 @@ function AppsBlock({ data }: { data: HomeData }) {
         </div>
       </div>
 
-      {data.apps.map((app) => (
+      {data.apps.slice(0, 3).map((app) => (
         <AppRow app={app} key={app.id} />
       ))}
+      {data.apps.length > 3 ? <Link className={`${SECOND_LINE} block py-3`} href={data.allAppsHref}>and {data.apps.length - 3} more</Link> : null}
       {data.activeTokenCount > 0 ? (
         // Lead decision (home-pictures 7): a quiet line under the apps, not set like an app name.
         <Link
