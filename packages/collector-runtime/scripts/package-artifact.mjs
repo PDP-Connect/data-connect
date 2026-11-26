@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runGit } from "../../connector-protocol/scripts/git-runner.mjs";
 import {
   assertArtifactMetadata,
   assertPackageDirectoriesCommitted,
@@ -137,11 +138,9 @@ export function assertProtocolBuildMatchesReceipt(metadata, sourceInputsSha256, 
 export async function cloneCommittedSourceTree(ref = "HEAD") {
   const cloneDir = await mkdtemp(join(tmpdir(), "pdpp-collector-runtime-clone-"));
   const archivePath = join(cloneDir, "source.tar");
-  await execFile(
-    "git",
-    ["archive", "--output", archivePath, ref, "--", runtimePackageRelPath, protocolPackageRelPath],
-    { cwd: repoRoot }
-  );
+  await runGit(["archive", "--output", archivePath, ref, "--", runtimePackageRelPath, protocolPackageRelPath], {
+    cwd: repoRoot,
+  });
   await execFile("tar", ["-xf", archivePath, "-C", cloneDir]);
   await rm(archivePath, { force: true });
   const clonedRuntimeRoot = join(cloneDir, runtimePackageRelPath);
@@ -187,7 +186,7 @@ async function packOnce(root) {
 }
 
 async function reproducibleArtifact() {
-  const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  const { stdout } = await runGit(["rev-parse", "HEAD"], { cwd: repoRoot });
   const ref = stdout.trim();
   const clones = [await cloneCommittedSourceTree(ref), await cloneCommittedSourceTree(ref)];
   try {

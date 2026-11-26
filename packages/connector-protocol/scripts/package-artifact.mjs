@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runGit } from "./git-runner.mjs";
 
 const execFile = promisify(execFileCallback);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -103,8 +104,7 @@ async function readPackageManifest(root = packageRoot) {
 
 export async function assertPackageDirectoriesCommitted(roots = [packageRoot]) {
   const paths = roots.map((root) => relative(repoRoot, root));
-  const { stdout } = await execFile(
-    "git",
+  const { stdout } = await runGit(
     [
       "status",
       "--porcelain=v1",
@@ -164,7 +164,7 @@ async function cloneCommittedSourceTree(ref = "HEAD") {
   // buffer through the `input` option to a second execFile call is prone to
   // hanging (no consumer draining the child's stdout fast enough while its
   // stdin is still being written). A temp file avoids that pipe entirely.
-  await execFile("git", ["archive", "--output", archivePath, ref, "--", packageRelPath], {
+  await runGit(["archive", "--output", archivePath, ref, "--", packageRelPath], {
     cwd: repoRoot,
   });
   await execFile("tar", ["-xf", archivePath, "-C", cloneDir]);
@@ -277,7 +277,7 @@ export function assertArtifactMetadata(metadata, manifest, sourceInputsSha256, d
  * which is a strictly weaker (and, on its own, misleading) claim.
  */
 async function reproducibleArtifact() {
-  const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  const { stdout } = await runGit(["rev-parse", "HEAD"], { cwd: repoRoot });
   const ref = stdout.trim();
   const clones = [await cloneCommittedSourceTree(ref), await cloneCommittedSourceTree(ref)];
   try {

@@ -1,41 +1,20 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { execFile as execFileCallback } from "node:child_process";
 import { copyFile, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { runGit } from "./git-runner.mjs";
 
-const execFileRaw = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const packages = ["connector-protocol", "collector-runtime"];
+const GIT_RUNNER_PATH = "packages/connector-protocol/scripts/git-runner.mjs";
 
-let repositoryLocationVariables;
-
-// Git itself names the variables that point it at a repository, index or
-// object store (`git rev-parse --local-env-vars`). A hook or a wrapper shell
-// can set them, and a child git that inherits them acts on the caller's
-// repository instead of the one in its `cwd`.
-function repositoryLocationVariableNames() {
-  repositoryLocationVariables ??= execFileRaw("git", ["rev-parse", "--local-env-vars"]).then(({ stdout }) =>
-    stdout.split("\n").filter(Boolean)
-  );
-  return repositoryLocationVariables;
-}
-
-export async function isolatedGitEnv(env = process.env) {
-  const isolated = { ...env };
-  for (const name of await repositoryLocationVariableNames()) {
-    delete isolated[name];
-  }
-  return isolated;
-}
-
-// Every git subprocess of the fixture goes through this one function.
-async function git(args, options = {}) {
-  return execFileRaw("git", args, { ...options, env: await isolatedGitEnv() });
+// Every git subprocess of the fixture goes through the shared sanitized runner;
+// the repository is the `cwd`, so a clone is started from the source checkout.
+function git(args, { cwd = repoRoot } = {}) {
+  return runGit(args, { cwd });
 }
 
 export async function createArtifactTestFixture(packageName) {
@@ -57,12 +36,14 @@ export async function createArtifactTestFixture(packageName) {
         await copyFile(join(repoRoot, scriptPath), join(root, scriptPath));
       })
     );
+    await copyFile(join(repoRoot, GIT_RUNNER_PATH), join(root, GIT_RUNNER_PATH));
     await git(
       [
         "update-index",
         "--assume-unchanged",
         "--",
         ...packages.map((name) => `packages/${name}/scripts/package-artifact.mjs`),
+        GIT_RUNNER_PATH,
       ],
       { cwd: root }
     );
