@@ -2831,12 +2831,11 @@ test("Collection Profile conformance", async (t) => {
   });
 
   await t.test(
-    "STATE flushes co-emitted streams before it stages their parent",
+    "STATE flushes the named stream but leaves unrelated buffered streams alone",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const base = buildMultiStreamManifest("test-multi-stream-state-boundary");
-      const manifest = { ...base, streams: base.streams.map((stream) => ({ ...stream, ...(stream.name === "other_items" ? { state_stream: "items", coverage_strategy: "checkpoint_window", freshness_strategy: "scheduled_window" } : {}) })) };
+      const manifest = buildMultiStreamManifest("test-multi-stream-state-boundary");
       const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
       const asUrl = `http://localhost:${asPort}`;
 
@@ -2893,8 +2892,8 @@ rl.on('line', (line) => {
 
         assert.equal(result.status, "failed");
         assert.equal(result.exit_code, 1);
-        assert.equal(checkpointSummaryOf(result).records_flushed, 2);
-        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
+        assert.equal(checkpointSummaryOf(result).records_flushed, 1);
+        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 1);
         assert.equal(checkpointSummaryOf(result).state_streams_staged, 1);
         assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
 
@@ -2910,10 +2909,7 @@ rl.on('line', (line) => {
 
         const otherPage = await fetchRecords(rsPort, connectorId, ownerToken, "", "other_items");
         const otherFound = otherPage.find((record) => record.data?.id === "stream_other_1");
-        assert.ok(
-          otherFound,
-          "other buffered streams are flushed too: a cursor may pass only records the store already holds"
-        );
+        assert.ok(!otherFound, "an unrelated stream stays buffered until its own STATE or terminal flush");
 
         const { body: runTimeline } = await fetchJson<TimelineBody>(
           `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
@@ -2928,8 +2924,8 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent);
         assert.equal(failedEvent.data.reason, "connector_exit_without_done");
-        assert.equal(failedEvent.data.records_flushed, 2);
-        assert.equal(failedEvent.data.buffered_records_dropped, 0);
+        assert.equal(failedEvent.data.records_flushed, 1);
+        assert.equal(failedEvent.data.buffered_records_dropped, 1);
         assert.equal(failedEvent.data.state_streams_staged, 1);
         assert.equal(failedEvent.data.state_streams_committed, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");

@@ -274,6 +274,11 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // and this feature is explicitly unsigned/unregistered developer tooling
   // (see this file's own module doc comment), not connector catalog data.
   'reference-implementation/server/connector-install/local-source.ts::readConfinedFile::readSync(fd, buffer, length, buffer.length - length, null)',
+  // readVerifiedSpoolBlob() reads a runtime BLOB payload through a descriptor
+  // opened only after its filename is constrained to one spool basename and
+  // the spool directory is checked before and after opening. The bytes are
+  // caller-produced run data, not an RI-owned policy resource.
+  'reference-implementation/runtime/host-blob-spool.ts::readVerifiedSpoolBlob::readSync(fd, bytes, offset, Math.min(READ_CHUNK_BYTES, bytes.length - offset), null)',
   // SQLite file checks: readSync compares the 16-byte SQLite header or
   // streams the file into a SHA-256 digest. The bytes never reach a parser,
   // so they cannot carry connector or provider identity.
