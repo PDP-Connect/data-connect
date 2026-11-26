@@ -224,6 +224,7 @@ import {
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import {
   pinnedLocalCollectorManifest,
+  readPinnedLocalCollectorManifest,
   readLocalCollectorArtifactDigest,
   readLocalCollectorRelease,
 } from "./local-collector-profiles.ts";
@@ -1701,16 +1702,11 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 // use the canonical key (`claude-code`) so a legacy-alias enroll cannot fork
 // the connector type away from its canonical identity.
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
-  const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
-  try {
-    return pinnedLocalCollectorManifest(connectorId);
-  } catch {
-    return {
-      connector_id: connectorKey,
-      display_name: connectorKey,
-      streams: [],
-    };
-  }
+  return pinnedLocalCollectorManifest(connectorId);
+}
+
+function readReferenceLocalConnectorCatalogManifestResult(connectorId: string) {
+  return readPinnedLocalCollectorManifest(connectorId);
 }
 
 async function ensureReferenceConnectorCatalogEntry(
@@ -7982,6 +7978,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     hashDeviceSecret,
     pdppError,
     readReferenceLocalConnectorCatalogManifest,
+    readReferenceLocalConnectorCatalogManifestResult,
     requireOwner,
     requireToken,
     resolveEnrollBaseUrl: resolveAsIssuerBase,

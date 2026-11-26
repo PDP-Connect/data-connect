@@ -34,6 +34,7 @@ import {
   OWNER_WINDOW_SINCE_REQUIREMENT,
 } from "../../runtime/owner-time-window.ts";
 import { buildConnectionSetupPlan, type ConnectorIntentModality } from "../connection-setup-plan.ts";
+import type { PinnedLocalCollectorManifestResult } from "../local-collector-profiles.ts";
 import { auditActorKind, buildAuditTrace } from "./_owner-connection-helpers.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_route-contract.ts";
 
@@ -112,10 +113,8 @@ export interface MountOwnerConnectionIntentContext {
   hashDeviceSecret: (value: string) => string;
   now?: () => string;
   pdppError: PdppErrorFn;
-  // Resolves a local-collector catalog manifest (claude-code, codex) by key, or
-  // `null` for connectors not in the local-collector catalog. Mirrors the host's
-  // `readReferenceLocalConnectorCatalogManifest`.
-  readReferenceLocalConnectorCatalogManifest: (connectorId: string) => ConnectorManifestLike | null;
+  // Resolves the shipped local-collector inventory and its verified pin state.
+  readReferenceLocalConnectorCatalogManifestResult: (connectorId: string) => PinnedLocalCollectorManifestResult;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
   // Resolves the caller-visible trusted AS issuer base (forwarded-origin-safe).
@@ -414,18 +413,23 @@ export function mountOwnerConnectionIntent(app: AppLike, ctx: MountOwnerConnecti
         const { connectorId, displayName, displayNameSupplied, collectionScope } = parsed;
         const connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
 
-        // Resolve the manifest from the local-collector catalog first (so a
-        // claude-code/codex intent classifies even before any instance exists),
-        // then fall back to a registered connector manifest. A null manifest is
-        // an unknown connector.
-        const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-        const manifest = localManifest ?? (await ctx.getConnectorManifest(connectorKey));
+        // Resolve shipped local connectors first. Only keys outside that
+        // inventory may fall back to the registered connector catalog.
+        const localResult = ctx.readReferenceLocalConnectorCatalogManifestResult(connectorKey);
+        const localManifest = localResult.kind === "verified" ? localResult.manifest : null;
+        const manifest =
+          localResult.kind === "not_local" ? await ctx.getConnectorManifest(connectorKey) : localManifest;
         const plan = buildConnectionSetupPlan({
           connectorKey,
           manifest,
           // Both sources are server-owned: the profile the server pins for
           // local collectors, or the registry.
-          proofProvenance: localManifest ? "server_pinned_profile" : "registered_catalog",
+          proofProvenance:
+            localResult.kind === "verified"
+              ? "server_pinned_profile"
+              : localResult.kind === "not_local"
+                ? "registered_catalog"
+                : null,
         });
         const modality = plan.connectorModality;
         const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
@@ -488,7 +492,7 @@ export function mountOwnerConnectionIntent(app: AppLike, ctx: MountOwnerConnecti
         // return the same setup-plan projection. They do not mint codes, return
         // secrets, or create connection rows.
         // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-        const reason = plan.ownerAgentIntent.reason;
+        const reason = localResult.kind === "invalid_pin" ? localResult.reason : plan.ownerAgentIntent.reason;
         // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
         const nextStepKind = plan.ownerAgentIntent.nextStepKind;
         await emitConnectionIntentAudit(ctx, req, res, {

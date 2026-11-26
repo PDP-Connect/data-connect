@@ -38,7 +38,33 @@ export interface LocalCollectorRelease {
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
+export const LOCAL_COLLECTOR_CONNECTOR_KEYS = [
+  "apple-photos",
+  "claude-code",
+  "codex",
+  "google-takeout",
+  "imessage",
+] as const;
+
+export type PinnedLocalCollectorManifestResult =
+  | { readonly kind: "not_local" }
+  | { readonly kind: "verified"; readonly manifest: Record<string, unknown> }
+  | { readonly kind: "invalid_pin"; readonly reason: string };
+
 const releaseOverrides = new Map<string, LocalCollectorRelease>();
+const manifestResultOverrides = new Map<string, PinnedLocalCollectorManifestResult>();
+
+/** Test seam for exercising route behavior when a shipped pin is unreadable. */
+export function __setPinnedLocalCollectorManifestResultForTest(
+  connectorKey: string,
+  result: PinnedLocalCollectorManifestResult | null
+): void {
+  if (result) {
+    manifestResultOverrides.set(connectorKey, result);
+  } else {
+    manifestResultOverrides.delete(connectorKey);
+  }
+}
 
 /**
  * Test seam: serve `release` for `connectorKey` in place of its checked-in pin,
@@ -72,9 +98,12 @@ export function readLocalCollectorProfile(connectorKey: string): Record<string, 
  */
 export function pinnedLocalCollectorManifest(connectorId: string): Record<string, unknown> | null {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
+  if (!(LOCAL_COLLECTOR_CONNECTOR_KEYS as readonly string[]).includes(connectorKey)) {
+    return null;
+  }
   const profile = readLocalCollectorProfile(connectorKey);
   if (!profile) {
-    return null;
+    throw new Error(`pinned local collector profile is missing for ${connectorKey}`);
   }
   return {
     ...profile,
@@ -83,6 +112,33 @@ export function pinnedLocalCollectorManifest(connectorId: string): Record<string
     // RI-side fallback string to disagree with it.
     display_name: profile.display_name || connectorKey,
   };
+}
+
+/** Resolve a local-collector manifest without confusing a broken pin with an unknown key. */
+export function readPinnedLocalCollectorManifest(connectorId: string): PinnedLocalCollectorManifestResult {
+  const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
+  const override = manifestResultOverrides.get(connectorKey);
+  if (override) {
+    return override;
+  }
+  if (!(LOCAL_COLLECTOR_CONNECTOR_KEYS as readonly string[]).includes(connectorKey)) {
+    return { kind: "not_local" };
+  }
+  try {
+    const manifest = pinnedLocalCollectorManifest(connectorKey);
+    if (!manifest) {
+      return {
+        kind: "invalid_pin",
+        reason: "The installed local connector profile is missing and could not be verified. Reinstall the local collector to repair it.",
+      };
+    }
+    return { kind: "verified", manifest };
+  } catch {
+    return {
+      kind: "invalid_pin",
+      reason: "The installed local connector profile failed verification. Reinstall the local collector to repair it.",
+    };
+  }
 }
 
 /** The server's current OCI artifact identity for a local-device connector. */
