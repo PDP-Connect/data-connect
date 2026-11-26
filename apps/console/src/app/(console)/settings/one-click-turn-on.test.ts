@@ -1261,3 +1261,52 @@ test("a catalog read that fails at once is tried again on the poll, 3 s on, neve
     assert.match(text(), /couldn.t check remote access|background service isn.t running/i);
   });
 });
+
+async function withProviderSetup(
+  nextAction: unknown,
+  request: typeof requestReachability,
+  run: (container: Element) => Promise<void>
+) {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
+  const { ProviderSetup } = await import("./provider-setup.tsx");
+  const container = dom.window.document.querySelector("#root")!;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(ProviderSetup, {
+      reservation: { operationId: "op-provider", providerId: "p-tunnel", providerLabel: "Tunnel service", draftId: "d-1", actionId: "act-1", expectedConfigurationRevision: "r2", usage: "session" },
+      request: (async (url, body) => body ? request(url, body) : ok({ operationId: "op-provider", revision: 1, state: "authorization-required", resources: [], evidence: { known: false }, scope: { draftId: "d-1", configurationRevision: "r2" }, nextAction })) as typeof requestReachability,
+      disabled: false,
+      acknowledgeDisconnect: true,
+      onChange: async () => {},
+      onReadiness: () => {},
+    })));
+    await run(container);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+}
+
+const providerBrowserStep = () => action({ kind: "open-url", step: { browser: { expiresAt: "2999-01-01T00:00:00.000Z", pollAfterMs: 2000 } } });
+
+test("two same-tick provider Cancel clicks send one cancel", async () => {
+  for (const nextAction of [null, providerBrowserStep()]) {
+    const held = deferred<Result>();
+    const calls: Call[] = [];
+    await withProviderSetup(nextAction, async (url, body) => {
+      calls.push({ url, body });
+      return held.promise;
+    }, async container => {
+      const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Cancel setup");
+      assert.ok(cancel);
+      try {
+        await act(async () => { cancel.click(); cancel.click(); });
+        assert.equal(calls.filter(call => call.url === "/setup-operations/op-provider/cancel").length, 1);
+        assert.equal(cancel.disabled, true, "the one request remains busy until it settles");
+      } finally {
+        await act(async () => held.resolve(fail("service_unreachable")));
+      }
+    });
+  }
+});

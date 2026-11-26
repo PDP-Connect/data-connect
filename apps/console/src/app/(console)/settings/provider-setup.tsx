@@ -345,6 +345,7 @@ export function ProviderSetup({
 }) {
   const [view, setView] = useState<SetupView | null>(null)
   const [busy, setBusy] = useState(false)
+  const changing = useRef(false)
   const [error, setError] = useState<DisplayError | null>(null)
   const [missing, setMissing] = useState(false)
   // Bumped by Cancel setup: the input card remounts, so a half-typed secret is gone with its field.
@@ -459,6 +460,8 @@ export function ProviderSetup({
   // here, chosen by its code. The server's message and any echo of the request
   // never reach state, the page or the copied details.
   async function change(run: () => Promise<SetupView>, mutation = false, kind: ActionKind = "turn-on", secret = false) {
+    if (changing.current) return
+    changing.current = true
     ++readEpoch.current
     setBusy(true)
     setError(null)
@@ -473,6 +476,7 @@ export function ProviderSetup({
         secret ? new ReachabilityFailure(publicError(failure instanceof ReachabilityFailure ? failure.detail.code : "client_error", undefined, kind)) : failure
       setError(toDisplayError(reported, "action", reservation.providerLabel, kind))
     } finally {
+      changing.current = false
       setBusy(false)
     }
   }
@@ -913,10 +917,10 @@ export function ProviderSetup({
             variant="outline"
             type="button"
             disabled={busy || disabled}
-            onClick={() => {
+            onClick={() => void change(() => {
               setCancelEpoch(n => n + 1)
-              void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")
-            }}
+              return send<SetupView>(`${path}/cancel`, { providerId })
+            }, false, "turn-off")}
           >
             {view.state === "complete" ? "Undo setup" : "Cancel setup"}
           </Button>
