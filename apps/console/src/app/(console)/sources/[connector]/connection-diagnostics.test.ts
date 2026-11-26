@@ -177,7 +177,7 @@ const COLLECTION_RATE_UNAVAILABLE_COPY = /Collection rate unavailable/;
 const REDUNDANT_OUTBOX_HELPER = /summarizeOutboxForRow/;
 
 const FORWARD_DISPOSITION_TESTID = /data-testid="diagnostics-forward-disposition"/;
-const FORWARD_DISPOSITION_HELPER = /formatForwardDisposition\(connectionHealth\.forward_disposition\)/;
+const FORWARD_DISPOSITION_HELPER = /formatForwardDisposition\(connectionHealth\.forward_disposition[,)]/;
 const FORWARD_DISPOSITION_GUARDED = /forwardDisposition \? \(/;
 const FORWARD_DISPOSITION_TONE_CLASS = /forwardDispositionTextClass\(forwardDisposition\.tone\)/;
 const FORWARD_DISPOSITION_NEXT_RUN_COPY = /Next run:/;

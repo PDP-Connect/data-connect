@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import fs, { createReadStream, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { createReadStream, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -169,6 +169,62 @@ describe("LocalDeviceBlobSpool", () => {
     assert.ok(spool.has(kept.sha256), "committed bodies survive a temp sweep");
   });
 
+  it("keeps an old temp with a live writer across spool instances", async (t) => {
+    const root = makeRoot();
+    const writer = new LocalDeviceBlobSpool({ root });
+    const sweeper = new LocalDeviceBlobSpool({ root });
+    const tempDir = join(root, "tmp");
+    const orphan = join(tempDir, "spool-crashed");
+    const old = new Date(0);
+    writeFileSync(orphan, Buffer.from("orphan"));
+    utimesSync(orphan, old, old);
+
+    // Observe stream open without wall-clock polling; hold the synthetic
+    // source open so the writer cannot commit while the sweep runs.
+    let opened!: (path: string) => void;
+    const activePath = new Promise<string>((resolve) => {
+      opened = resolve;
+    });
+    const realOpen = fs.open;
+    t.mock.method(
+      fs,
+      "open",
+      (path: string, flags: string, mode: number, callback: (error: Error | null, fd: number) => void) =>
+        realOpen(path, flags, mode, (error, fd) => {
+          callback(error, fd);
+          if (!error) {
+            opened(path);
+          }
+        })
+    );
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const bytes = Buffer.from("slow synthetic capture");
+    const pending = writer.put(
+      (async function* () {
+        await paused;
+        yield bytes;
+      })()
+    );
+    const settled = Promise.allSettled([pending]);
+    try {
+      const active = await Promise.race([
+        activePath,
+        pending.then(() => assert.fail("writer committed before release")),
+      ]);
+      utimesSync(active, old, old);
+      assert.equal(await sweeper.sweepTemp(60_000), 1);
+      assert.deepEqual(readdirSync(tempDir), [active.slice(tempDir.length + 1)]);
+    } finally {
+      resume();
+      await settled;
+    }
+    const captured = await pending;
+    assert.deepEqual(await readFile(writer.pathFor(captured.sha256)), bytes);
+  });
+
   it("surfaces a disk-full write failure instead of reporting a capture", async () => {
     const root = makeRoot();
     const spool = new LocalDeviceBlobSpool({ root });
@@ -199,7 +255,7 @@ describe("captureBlobArtifact", () => {
     const body = randomBytes(64 * 1024);
 
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -233,7 +289,7 @@ describe("captureBlobArtifact", () => {
     // makes the re-spool a no-op and the queue id deterministic.
     const outbox = makeOutbox(root);
     const first = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -243,7 +299,7 @@ describe("captureBlobArtifact", () => {
       stream: "attachments",
     });
     const second = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -266,7 +322,7 @@ describe("captureBlobArtifact", () => {
 
     const outbox = makeOutbox(root);
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -300,7 +356,7 @@ describe("captureBlobArtifact", () => {
     writeFileSync(sourcePath, body);
 
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: createReadStream(sourcePath),
       mimeType: "text/plain",
       outbox,

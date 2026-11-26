@@ -44,6 +44,7 @@ import {
   connectorInstallRowModel,
   connectorLookupKey,
 } from "./connector-install-presentation.ts";
+import { filterCatalogForDevelopmentVisibility } from "./source-setup-development.ts";
 import {
   browserBoundWithStoredCredentials,
   isRunnableAddOffer,
@@ -81,6 +82,8 @@ test("development and unavailable entries cannot become runnable add offers", ()
   assert.ok(development);
   assert.equal(development.publicTier, "development");
   assert.equal(isRunnableAddOffer(development), false);
+  // An undeclared tier is neither supported nor preview, so it is no offer.
+  assert.equal(isRunnableAddOffer({ ...development, publicTier: "unknown" }), false);
 });
 
 const TRAILING_SLASH_RE = /\/$/;
@@ -377,10 +380,10 @@ test("non-browser static-secret connectors keep the existing single capture path
   const catalog = buildConnectorCatalog([
     {
       // No public_listing declared -> defaults to Development (the same
-      // fixture shape this test always used). "gmail" is a real,
-      // live-proven connector key (STATIC_SECRET_LIVE_PROVEN_KEYS), so the
-      // shared planner resolves static_secret_connect purely from the
-      // connector key regardless of this synthetic manifest's declared tier.
+      // fixture shape this test always used). The manifest claims a live
+      // static-secret proof, so the shared planner resolves
+      // static_secret_connect regardless of the declared tier.
+      capabilities: { proven: { static_secret_live: { proven: true } } },
       connector_id: "https://registry.pdpp.dev/connectors/gmail",
       display_name: "Gmail",
       runtime_requirements: { bindings: { network: { required: true } } },
@@ -401,12 +404,11 @@ test("non-browser static-secret connectors keep the existing single capture path
   assert.equal(entry.modality, "api_network");
   assert.equal(entry.setupModality, "static_secret");
   assert.equal(entry.disposition, "static_secret_connect");
-  // "gmail" is real (not a known scaffold) and its disposition
-  // (static_secret_connect) IS in the Development disclosure's self-test
+  // "gmail" has a disposition (static_secret_connect) that IS in the Development disclosure's self-test
   // allowlist, so it gets a self-test action in the Development disclosure
   // even though it is not owner-actionable (the whole Development tier is
   // hard-excluded from ownerActionable).
-  assert.equal(entry.isKnownScaffold, false);
+  assert.equal(entry.readiness, null, "an entry built from manifests alone carries no server verdict");
   assert.equal(sourceSetupAction(entry) !== null, true, "a real development entry gets a self-test action");
   assert.equal(sourceSetupSecondaryAction(entry), null);
   assert.equal(sourceSetupStatus(entry).label, "In development");
@@ -612,7 +614,7 @@ test("requested-connector reachability: Google Takeout is bundled into @pdpp/loc
   // Google Takeout Photos reads an already-extracted GOOGLE_TAKEOUT_DIR on the
   // local filesystem — exactly the local-collector shape (runs on the machine
   // that has the extracted archive), not a browser-upload connector. It is
-  // bundled into @pdpp/local-collector's SUPPORTED_LOCAL_COLLECTOR_CONNECTORS,
+  // bundled into @pdpp/local-collector (its manifest claims `proven.local_collector`),
   // so it must classify as the proven, actionable local-collector disposition.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);
@@ -857,7 +859,6 @@ test("configured Google provider readiness exposes the existing owner authorizat
   // ready-to-authorize entry gets a self-test action even though it is not
   // owner-actionable (the whole Development tier is hard-excluded from
   // ownerActionable, and sourceSetupAvailability stays "not_available_here").
-  assert.equal(entry.isKnownScaffold, false);
   assert.equal(sourceSetupAction(entry) !== null, true, "a real development entry gets a self-test action");
   assert.equal(sourceSetupAvailability(entry), "not_available_here");
   assert.deepEqual(providerAuthConnectEntries(catalog), [entry]);
@@ -1014,15 +1015,14 @@ test("a supported owner action has an invariant actionable provider projection",
   assert.equal(entry.displayName, "test-provider");
 });
 
-test("claude-code manifest slug maps to the claude_code enrollment key", async () => {
-  // The manifest slug is `claude-code` (hyphen); the proven enrollment path and
-  // the form's COLLECTOR_RUN_CONNECTORS literal use `claude_code` (underscore).
-  // The deep-link key must be the form's value or the prefill is rejected.
+test("claude-code enrollment key is its manifest key", async () => {
+  // The deep-link key the catalog mints is the canonical connector key, which
+  // is the id the enrollment form and the server accept.
   const catalog = buildConnectorCatalog(await loadCommittedManifests());
   const claudeCode = catalog.find((e) => e.connectorKey === "claude-code");
   assert.ok(claudeCode, "claude-code must be in the catalog");
   assert.equal(claudeCode.disposition, "local_collector_enroll");
-  assert.equal(claudeCode.enrollmentKey, "claude_code");
+  assert.equal(claudeCode.enrollmentKey, "claude-code");
 });
 
 test("amazon defaults to source-scoped credential capture, not manual browser enrollment", async () => {
@@ -1054,11 +1054,16 @@ test("the grouping helpers partition the catalog without overlap or loss", async
   // At least one of each supported path class that still has committed entries.
   assert.ok(
     localCollectorEntries(catalog).length >= 6,
-    "claude_code + codex + google_takeout + imessage + apple_photos + google_messages"
+    "claude-code + codex + google-takeout + imessage + apple-photos + google-messages"
+  );
+  assert.deepEqual(
+    browserCollectorEntries(catalog),
+    [],
+    "a manifest alone grants no browser enrollment: that verdict comes from the server's templates"
   );
   assert.ok(
-    browserCollectorEntries(catalog).some((entry) => entry.connectorKey === "whoop"),
-    "whoop uses browser-collector enrollment"
+    browserBoundRunbookEntries(catalog).some((entry) => entry.connectorKey === "whoop"),
+    "whoop waits for the server's readiness verdict"
   );
   assert.ok(browserBoundRunbookEntries(catalog).length >= 1);
   assert.ok(experimentalEntries(catalog).length >= 1, "wave-0807 experimental static-secret connectors");
@@ -1269,8 +1274,7 @@ test("presentation consistency: helper functions agree with ownerActionable auth
   // Exception: a real (non-scaffold) Development entry with a runnable
   // disposition also has a real action -- the Development disclosure's own
   // self-test opt-in -- even though isOwnerActionableEntry is false for the
-  // whole tier. A KNOWN scaffold never gets an action regardless of
-  // disposition: clicking it can never collect anything.
+  // whole tier.
   //
   // Exception: a browser-bound static_secret_connect entry (e.g. amazon, heb)
   // always has a real browser-session action regardless of live-proof status
@@ -1285,7 +1289,7 @@ test("presentation consistency: helper functions agree with ownerActionable auth
     const isActionable = isOwnerActionableEntry(entry);
     const hasAction = sourceSetupAction(entry) !== null;
     const isDevelopmentSelfTestable =
-      entry.publicTier === "development" && !entry.isKnownScaffold && DEVELOPMENT_SELF_TEST_DISPOSITIONS.has(entry.disposition);
+      entry.publicTier === "development" && DEVELOPMENT_SELF_TEST_DISPOSITIONS.has(entry.disposition);
     const hasBrowserBoundStoredCredentialsSetupPath =
       entry.disposition === "static_secret_connect" && browserBoundWithStoredCredentials(entry);
 
@@ -1318,12 +1322,6 @@ test("presentation consistency: helper functions agree with ownerActionable auth
       `${entry.connectorKey}: sourceSetupAction must match isOwnerActionableEntry (or the development self-test exception). ` +
         `Helper says ${isActionable}, action is ${hasAction ? "set" : "null"}, isDevelopmentSelfTestable=${isDevelopmentSelfTestable}`
     );
-
-    // A KNOWN scaffold must NEVER get an action, regardless of disposition:
-    // it cannot collect anything, so an add button would be a dead end.
-    if (entry.publicTier === "development" && entry.isKnownScaffold) {
-      assert.equal(hasAction, false, `${entry.connectorKey}: a known scaffold must never expose an action`);
-    }
   }
 });
 
@@ -1566,15 +1564,46 @@ test("console catalog uses the manifest tier as its sole listing authority", () 
   assert.ok(entry);
   assert.equal(isRunnableAddOffer(entry), false, "UAT exposure must not override development");
 
-  // A KNOWN scaffold never gets a self-test action, regardless of UAT exposure.
-  const scaffoldTemplate: OwnerConnectorTemplateLike = {
-    ...ownerTemplate({ connectorKey: "test-scaffold", tier: "development" }),
-    is_known_scaffold: true,
+  // The server's readiness verdict rides on the template and is parsed at the
+  // catalog boundary. A well-formed verdict is kept; a malformed one reads as
+  // no verdict.
+  const verdict = {
+    action: "install",
+    browser_bound: true,
+    connector_key: "test-installable",
+    detail: null,
+    reason: "not_installed",
   };
-  catalog = buildOwnerConnectorCatalog([], [scaffoldTemplate]);
+  catalog = buildOwnerConnectorCatalog(
+    [],
+    [{ ...ownerTemplate({ connectorKey: "test-installable", tier: "development" }), connector_readiness: verdict }]
+  );
   entry = catalog[0];
   assert.ok(entry);
-  assert.equal(entry.isKnownScaffold, true);
-  assert.equal(isRunnableAddOffer(entry), false, "a scaffold is never a runnable add offer");
-  assert.equal(sourceSetupAction(entry), null, "a scaffold never gets a self-test action");
+  assert.deepEqual(entry.readiness, {
+    action: "install",
+    browserBound: true,
+    connectorKey: "test-installable",
+    detail: null,
+    reason: "not_installed",
+  });
+  assert.equal(sourceSetupStatus(entry).label, "In development", "no verdict ever relabels a tier as 'Not built yet'");
+  catalog = buildOwnerConnectorCatalog(
+    [],
+    [{ ...ownerTemplate({ connectorKey: "test-garbled", tier: "development" }), connector_readiness: { action: "launch" } }]
+  );
+  assert.equal(catalog[0]?.readiness, null);
+});
+
+test("an install-catalog entry published without a tier carries an unknown tier, not development", () => {
+  const [published] = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  assert.ok(published);
+  const { tier: _declared, ...withoutTier } = published;
+  const catalog = buildOwnerConnectorCatalog([], [], [withoutTier]);
+  const entry = catalog.find((candidate) => candidate.connectorKey === published.connector_key);
+  assert.ok(entry);
+  assert.equal(entry.publicTier, "unknown");
+  assert.notEqual(sourceSetupStatus(entry).label, "In development");
+  assert.notEqual(publicTierLabel(entry.publicTier), "In development");
+  assert.equal(filterCatalogForDevelopmentVisibility([entry], false).length, 1, "unknown is not hidden as development");
 });

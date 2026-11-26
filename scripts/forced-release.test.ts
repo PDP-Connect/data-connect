@@ -13,6 +13,7 @@ import { load } from "js-yaml"
 import getConfig from "semantic-release/lib/get-config.js"
 import { describe, expect, it } from "vitest"
 import { buildForcedReleaseConfig, loadReleaseConfig } from "./forced-release-config.ts"
+import { lockstepPackages } from "./lockstep-packages.ts"
 import {
   buildForcedReleaseOptions,
   ForcedReleaseRefusal,
@@ -242,27 +243,26 @@ describe("the ordinary path keeps refusing unscoped commits", () => {
 
   // A forced release must ship the same artifacts through the same
   // publishing chain — forcing changes which commits count, nothing else.
-  it("keeps every non-analyzer plugin, including all three npm publishes", () => {
+  it("keeps every non-analyzer plugin, including every npm publish", () => {
     const gated = loadReleaseConfig()
     const forced = buildForcedReleaseConfig("patch")
     const names = (config: { plugins: unknown[] }) =>
       config.plugins.map(plugin => (Array.isArray(plugin) ? plugin[0] : plugin))
     expect(names(forced)).toEqual(names(gated))
 
-    // The three packages publish in a fixed order: connector-protocol first,
-    // then the publish-ordering barrier, then the two packages that depend on
-    // it. A forced release must keep that order, or forcing would be the one
-    // path that can publish a dependent package before its dependency is live.
+    // The packages publish in a fixed order, each dependent after its
+    // dependencies and their barrier. A forced release must keep the same
+    // steps in the same order, or forcing would be the one path that can
+    // publish a dependent package before its dependency is live.
+    const nonAnalyzer = (config: { plugins: unknown[] }) =>
+      config.plugins.filter(plugin => !(Array.isArray(plugin) && plugin[0] === "@semantic-release/commit-analyzer"))
+    expect(nonAnalyzer(forced)).toEqual(nonAnalyzer(gated))
     const pkgRoots = forced.plugins
       .filter((plugin): plugin is [string, Record<string, unknown>] =>
         Array.isArray(plugin) && plugin[0] === "@semantic-release/npm"
       )
       .map(([, options]) => options.pkgRoot)
-    expect(pkgRoots).toEqual([
-      "packages/connector-protocol",
-      "packages/collector-runtime",
-      "packages/local-collector",
-    ])
+    expect(pkgRoots).toEqual(lockstepPackages().map(pkg => pkg.root))
   })
 })
 
@@ -295,12 +295,12 @@ describe("forced-release refusals", () => {
   })
 
   it("accepts a valid request and records the audit trail", () => {
-    const plan = planForcedRelease({ ...valid, actor: "tnunamak" })
-    expect(plan).toMatchObject({ releaseType: "patch", actor: "tnunamak" })
+    const plan = planForcedRelease({ ...valid, actor: "example-user" })
+    expect(plan).toMatchObject({ releaseType: "patch", actor: "example-user" })
 
     const record = formatAuditRecord(plan)
     expect(record).toContain("connector fix merged unscoped")
-    expect(record).toContain("tnunamak")
+    expect(record).toContain("example-user")
     expect(record).toContain("patch")
   })
 })

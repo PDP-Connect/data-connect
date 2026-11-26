@@ -41,7 +41,7 @@ import {
   summarizeStreakDots,
   syncActionIdleLabel,
 } from "../../lib/connection-evidence.ts";
-import { isBrowserBoundConnector, isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
+import { isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
 import { connectorInstallKey, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
@@ -56,6 +56,7 @@ import {
   type RefConnectionHealthSnapshot,
   type RefConnectorRunSummary,
   type RefConnectorSummary,
+  type RefCoverageAsOf,
   type RefCoverageHorizon,
   type RefRenderedVerdict,
   type RefRequiredAction,
@@ -176,6 +177,8 @@ export interface ConnectorPageModel {
    * up front and offers Install, instead of letting Sync fail.
    */
   connectorNotInstalled: boolean;
+  /** The run the connection's local coverage describes; `null` when none backs it. */
+  coverageAsOf: RefCoverageAsOf | null;
   /** Current durable horizon disclosures from the reference owner projection. */
   coverageHorizons: readonly RefCoverageHorizon[];
   deviceLabels: string[];
@@ -505,7 +508,13 @@ async function loadConnectorPageModel(
   const connectorNotInstalled = isConnectorNotInstalled(summary);
   const collectionFactsByStream = new Map<string, StreamCollectionFacts>();
   for (const [stream, entry] of indexCollectionReportByStream(summary.collection_report)) {
-    collectionFactsByStream.set(stream, formatStreamCollectionFacts(entry, { connectorNotInstalled }));
+    collectionFactsByStream.set(
+      stream,
+      formatStreamCollectionFacts(entry, {
+        connectorNotInstalled,
+        coverageAsOf: summary.coverage_as_of ?? null,
+      })
+    );
   }
   const actionability = projectSourceActionability(summary);
   const collectionOwnerActionByStream = actionability.ownerActionByStream;
@@ -515,9 +524,9 @@ async function loadConnectorPageModel(
     name: manifest.name,
   });
   // Source instances surface the device(s) that fed this connection. For
-  // filesystem-class collectors (claude_code, codex), the same connector
+  // filesystem-class collectors (claude-code, codex), the same connector
   // type can be active on multiple devices; without these labels, two
-  // claude_code instances are visually indistinguishable.
+  // claude-code instances are visually indistinguishable.
   const { deviceLabels, pendingOnDevices } = summarizeSourceInstancesForHeader(diagnostics.sourceInstances);
   const headerCount = formatConnectorHeaderCount({
     pendingOnDevices,
@@ -562,6 +571,7 @@ async function loadConnectorPageModel(
     connectorInstallKey: connectorInstallKey(summary),
     connectorInstanceId,
     connectorNotInstalled,
+    coverageAsOf: summary.coverage_as_of ?? null,
     coverageHorizons: summary.coverage_horizons ?? [],
     deviceLabels,
     displayName,
@@ -704,6 +714,7 @@ function ConnectorPageView({
     connectorInstanceId,
     connectorNotInstalled,
     connectionLabelSeed,
+    coverageAsOf,
     coverageHorizons,
     deviceLabels,
     displayName,
@@ -757,14 +768,15 @@ function ConnectorPageView({
   // (e.g. a ChatGPT connection that logs in via SSO through the browser). Only a
   // connection that is NOT browser-session-bound routes to static-secret capture.
   // The connection binding wins over the connector-level static-secret capability
-  // and `isBrowserBoundConnector` facts.
+  // and the manifest's browser-binding fact.
   const sessionBound = isBrowserSessionBoundConnection(sourceBindingKind);
   const staticSecretCapture = staticSecretCredentialCaptureFromManifest(manifest);
   const repairConnectionId = connectorInstanceId ?? connectionId;
   const storedCredentialUpdateHref =
     staticSecretCapture === null ? null : updateCredentialHref(connectorId, repairConnectionId);
+  const manifestBrowserBound = Object.hasOwn(manifest?.runtime_requirements?.bindings ?? {}, "browser");
   const browserSessionRepairHref =
-    sessionBound || isBrowserBoundConnector(connectorId)
+    sessionBound || manifestBrowserBound
       ? browserSessionReconnectHref(connectorId, repairConnectionId)
       : null;
   const credentialUpdateHref = resolveCredentialUpdateHref({
@@ -846,7 +858,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={manifest.icon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}
@@ -977,6 +989,7 @@ function ConnectorPageView({
         connectionId={connectorInstanceId ?? connectionId}
         connectorId={connectorId}
         connectorNotInstalled={connectorNotInstalled}
+        coverageAsOf={coverageAsOf}
         localDeviceProgress={overview.localDeviceProgress ?? null}
         now={now}
         providerOrigin={providerOrigin}
@@ -1338,7 +1351,7 @@ function RenderedVerdictHeaderAction({
     // forever — so a concluded run still produced a `/syncs/<id>` link. The
     // owner clicked "Complete the requested action" and nothing happened,
     // because the run that owned the interaction had already ended and taken
-    // the interaction with it (production, ChatGPT chaka.dondo@gmail.com: three
+    // the interaction with it (production, ChatGPT alex.roe@example.com: three
     // consecutive `expired` attention records, each still carrying a run id).
     //
     // With no live run there is nothing to complete. The honest destination is

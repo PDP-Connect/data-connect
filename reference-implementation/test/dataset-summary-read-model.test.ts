@@ -35,6 +35,7 @@ import {
 const BULK_CONNECTOR_DELETE_ERROR = /bulk connector record delete/;
 const BULK_STREAM_DELETE_ERROR = /bulk stream record delete/;
 const DIRTY_BOUNDS_ERROR = /could not be safely reconciled/;
+const DROPPED_DELTA_ERROR = /record delta arrived during projection rebuild/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T/;
 const REBUILT_HIGH_WATERMARK = /^rebuilt:/;
 const SECRET_TOKEN_ERROR = /secret-token/;
@@ -119,6 +120,36 @@ test("dataset summary projection reports rebuilding metadata when rows are missi
     assert.equal(projection.metadata.rebuild_status, "running");
     assert.ok(projection.metadata.stale_since);
     assert.match(projection.metadata.stale_since, ISO_TIMESTAMP);
+  }));
+
+test("unreadable persisted summary is not reported as a fresh empty result", () =>
+  withTempDb(() => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const metadata: DatasetSummaryMetadata = {
+      computed_at: timestamp,
+      last_error: null,
+      rebuild_status: "idle",
+      source_high_watermark: null,
+      stale_since: null,
+      state: "fresh",
+    };
+    getDb()
+      .prepare(
+        `INSERT INTO dataset_summary_projection
+         (projection_key, summary_json, metadata_json, updated_at, generation)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("global", '{"fixture-private-fragment":', JSON.stringify(metadata), timestamp, 7);
+
+    const projection = getDatasetSummaryProjection();
+    assert.equal(projection.generation, 7);
+    assert.equal(projection.counts.record_count, 0);
+    assert.equal(projection.metadata.state, "failed");
+    assert.equal(projection.metadata.rebuild_status, "failed");
+    assert.equal(projection.metadata.computed_at, null);
+    assert.match(projection.metadata.stale_since ?? "", ISO_TIMESTAMP);
+    assert.equal(projection.metadata.last_error, "dataset summary projection summary is unreadable");
+    assert.doesNotMatch(JSON.stringify(projection), /fixture-private-fragment/);
   }));
 
 test("dataset summary projection rebuild persists bounded rows from canonical dependencies", async () =>
@@ -274,7 +305,15 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
         key: "m1",
         stream: "messages",
       });
+      await ingestRecord("gmail", {
+        data: { id: "m1", subject: "v3" },
+        emitted_at: "2026-01-03T00:00:00.000Z",
+        key: "m1",
+        stream: "messages",
+      });
 
+      // v1 is pruned; v2 (the newest row at the horizon, kept for changes_since)
+      // and v3 (the current anchor) remain.
       const projection = getDatasetSummaryProjection();
       assert.equal(projection.retained_bytes.record_changes_json_bytes, recordChangeJsonBytes());
       assert.equal(
@@ -282,7 +321,7 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
           getDb().prepare("SELECT COUNT(*) AS n FROM record_changes").get<{ n: number }>(),
           "record change count row must exist"
         ).n,
-        1
+        2
       );
     } finally {
       if (previousLimit === undefined) {
@@ -493,6 +532,54 @@ test("dirty record-time bounds reconcile from durable records for one stream", a
     assert.equal(projection.record_time_bounds.earliest, "2025-02-01T00:00:00.000Z");
     assert.equal(projection.record_time_bounds.latest, "2025-02-01T00:00:00.000Z");
     assert.equal(getStreamDirtyFlag("gmail", "messages"), 0);
+  }));
+
+test("repairing dirty record-time bounds keeps a projection stale while a dropped delta still needs a full rebuild", async () =>
+  withTempDb(async () => {
+    await rebuildEmptyProjection();
+    for (const [key, createdAt] of [
+      ["m1", "2025-01-01T00:00:00.000Z"],
+      ["m2", "2025-02-01T00:00:00.000Z"],
+    ]) {
+      await ingestRecord("gmail", {
+        data: { created_at: createdAt, id: key },
+        emitted_at: "2026-01-01T00:00:00.000Z",
+        key,
+        stream: "messages",
+      });
+    }
+    registerConnectorManifest("gmail", {
+      connector_id: "gmail",
+      streams: [{ consent_time_field: "created_at", name: "messages" }],
+    });
+    await rebuildFromCurrentDb();
+
+    assert.equal(await deleteRecord("gmail", "messages", "m1"), 1);
+    // An earlier reconcile pass left the dirty-bounds reason; a later dropped
+    // delta must replace it rather than hide behind it.
+    markDatasetSummaryProjectionStale("dirty record-time bounds could not be safely reconciled");
+    markDatasetSummaryProjectionStale("record delta arrived during projection rebuild");
+
+    const result = await reconcileDirtyDatasetSummaryRecordTimeBounds({
+      getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
+    });
+    const repaired = getDatasetSummaryProjection();
+
+    assert.deepEqual(result, { deferred: 0, reconciled: 1, residual: 0 });
+    assert.equal(getStreamDirtyFlag("gmail", "messages"), 0);
+    assert.equal(repaired.metadata.state, "stale");
+    assert.match(repaired.metadata.last_error ?? "", DROPPED_DELTA_ERROR);
+
+    await rebuildFromCurrentDb();
+    const rebuilt = getDatasetSummaryProjection();
+    assert.equal(rebuilt.metadata.state, "fresh");
+    assert.equal(rebuilt.counts.record_count, 1);
+
+    await deleteRecord("gmail", "messages", "m2");
+    await reconcileDirtyDatasetSummaryRecordTimeBounds({
+      getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
+    });
+    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh", "after a full rebuild, a time repair clears stale state again");
   }));
 
 test("dirty record-time reconciliation defers unsafe rows instead of clearing stale state", async () =>

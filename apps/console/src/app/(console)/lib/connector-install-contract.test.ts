@@ -60,29 +60,69 @@ test("connector-install status accepts an installed package without an activatio
   assert.equal(withoutValue.data[0]?.activated_at, null);
 });
 
-test("connector-install status rejects an empty activation timestamp", () => {
-  assert.throws(
-    () =>
-      parseConnectorInstallStatusResponse({
-        ...connectorInstallStatusFixture,
-        data: [{ ...connectorInstallStatusFixture.data[0], activated_at: "" }],
-      }),
-    /activated_at must be a non-empty string or null/
+test("connector-install status drops an entry with an empty activation timestamp", () => {
+  const parsed = parseConnectorInstallStatusResponse({
+    ...connectorInstallStatusFixture,
+    data: [{ ...connectorInstallStatusFixture.data[0], activated_at: "" }],
+  });
+  assert.equal(parsed.skipped, 1);
+  assert.deepEqual(parsed.data, []);
+});
+
+test("connector-install catalog skips an entry with an untrusted digest shape and keeps the rest", () => {
+  const [first, ...rest] = connectorInstallCatalogFixture.data;
+  assert.ok(first);
+  const parsed = parseConnectorInstallCatalogResponse({
+    data: [{ ...first, digest: "sha256:not-a-digest" }, ...rest],
+    object: "connector_install_catalog",
+  });
+  assert.equal(parsed.skipped, 1);
+  assert.deepEqual(
+    parsed.data.map((entry) => entry.digest),
+    rest.map((entry) => entry.digest)
   );
 });
 
-test("connector-install client rejects an untrusted digest shape", () => {
+test("connector-install status skips a malformed entry and keeps the rest", () => {
+  const [first, ...rest] = connectorInstallStatusFixture.data;
+  assert.ok(first);
+  const parsed = parseConnectorInstallStatusResponse({
+    data: [{ ...first, digest: "not-a-digest" }, ...rest],
+    object: "connector_install_status",
+  });
+  assert.equal(parsed.skipped, 1);
+  assert.equal(parsed.data.length, rest.length);
+});
+
+test("connector-install catalog still rejects a bad envelope and counts nothing skipped for a clean one", () => {
+  assert.throws(
+    () => parseConnectorInstallCatalogResponse({ data: "nope", object: "connector_install_catalog" }),
+    ConnectorInstallContractError
+  );
+  assert.equal(parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).skipped, 0);
+});
+
+test("connector-install mutation response still rejects a malformed status record", () => {
   assert.throws(
     () =>
-      parseConnectorInstallCatalogResponse({
-        data: [
-          {
-            ...connectorInstallCatalogFixture.data[0],
-            digest: "sha256:not-a-digest",
-          },
-        ],
-        object: "connector_install_catalog",
+      parseConnectorInstallResponse({
+        data: { ...connectorInstallStatusFixture.data[0], digest: "not-a-digest" },
+        object: "connector_install",
       }),
     ConnectorInstallContractError
   );
+});
+
+test("connector-install catalog drops a mistyped cosmetic field without dropping the entry", () => {
+  const [first] = connectorInstallCatalogFixture.data;
+  assert.ok(first);
+  const parsed = parseConnectorInstallCatalogResponse({
+    ...connectorInstallCatalogFixture,
+    data: [{ ...first, display_name: 123, published_at: { when: "now" } }],
+  });
+  assert.equal(parsed.skipped, 0);
+  assert.equal(parsed.data.length, 1);
+  assert.equal(parsed.data[0]?.display_name, undefined);
+  assert.equal(parsed.data[0]?.published_at, undefined);
+  assert.equal(parsed.data[0]?.digest, first.digest);
 });

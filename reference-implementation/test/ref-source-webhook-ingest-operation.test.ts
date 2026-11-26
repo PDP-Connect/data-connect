@@ -279,13 +279,13 @@ test("ref.source-webhook canonicalizes a URL-shaped configured connector id for 
   assert.equal(captured.connectorInstanceId, "cin_url_gmail");
 });
 
-test("ref.source-webhook canonicalizes a legacy-alias configured connector id for scheduler signal", async () => {
+test("ref.source-webhook passes a bare-key configured connector id through for scheduler signal", async () => {
   let captured: Parameters<SourceWebhookDependencies["signalScheduler"]>[0] | undefined;
   const result = await executeSourceWebhook(
     input('{"action":"schedule_run"}'),
     deps({
       resolveTarget: () => ({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         connectorInstanceId: "cin_claude_code",
         ownerSubjectId: "owner_custom",
       }),

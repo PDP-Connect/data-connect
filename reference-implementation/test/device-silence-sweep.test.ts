@@ -69,7 +69,7 @@ async function seed(
       });
     }
     await store.upsertSourceInstance({
-      connectorId: row.connectorId ?? "claude_code",
+      connectorId: row.connectorId ?? "claude-code",
       createdAt,
       deviceId,
       localBindingId: row.sourceInstanceId,

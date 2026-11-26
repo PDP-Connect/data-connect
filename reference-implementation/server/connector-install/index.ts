@@ -43,6 +43,7 @@ import {
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
 } from "./local-source.ts";
@@ -103,13 +104,13 @@ export interface ConnectorCatalogSnapshot {
 
 interface InstallerCore {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
-  fetchCatalog?: (options: Record<string, unknown>) => Promise<unknown>;
-  fetchResolvedArtifact?: (
-    source: Record<string, unknown>,
+  fetchCatalog: (options: Record<string, unknown>) => Promise<unknown>;
+  fetchResolvedArtifact: (
+    source: null,
     entry: Record<string, unknown>,
     options: Record<string, unknown>
   ) => Promise<unknown>;
-  installFromLock: (options: Record<string, unknown>) => Promise<unknown>;
+  installFromLock: (options: Record<string, unknown> & { source: null }) => Promise<unknown>;
 }
 
 export interface ConnectorInstallStore {
@@ -565,6 +566,60 @@ export async function listVerifiedActiveConnectors(store: ConnectorInstallStore)
   return { invalid, verified };
 }
 
+/**
+ * The artifact a run would execute for this connector: a selected
+ * developer-local source first (an invalid one blocks, there is no fallback),
+ * then the installed active version, as the run path chooses between those two.
+ * The run path has a third fallback, the built-in seed connectors; they are not
+ * browser-bound connectors, so this inspection does not consider them. Both
+ * kinds are re-verified against their recorded bytes. A store that throws is
+ * not handled here: the caller decides what "could not inspect" means.
+ */
+export type SelectedConnectorArtifact =
+  | { readonly status: "none" }
+  | {
+      readonly status: "active";
+      readonly source: "installed" | "developer_local";
+      readonly version: string | null;
+      readonly digest: string | null;
+      readonly manifest: Record<string, unknown>;
+    }
+  | { readonly status: "invalid"; readonly source: "installed" | "developer_local"; readonly reason: string };
+
+export async function inspectSelectedConnectorArtifact(
+  store: ConnectorInstallStore,
+  localStore: LocalConnectorSourceStore,
+  connectorId: string
+): Promise<SelectedConnectorArtifact> {
+  const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
+  if (local.status === "invalid") {
+    return { reason: local.reason, source: "developer_local", status: "invalid" };
+  }
+  if (local.status === "active") {
+    return {
+      digest: local.record.entrypointSha256,
+      manifest: local.record.manifest,
+      source: "developer_local",
+      status: "active",
+      version: local.record.version,
+    };
+  }
+  const installed = await inspectActiveConnector(store, connectorId);
+  if (installed.status === "invalid") {
+    return { reason: installed.reason, source: "installed", status: "invalid" };
+  }
+  if (installed.status === "active") {
+    return {
+      digest: installed.record.digest,
+      manifest: installed.record.manifest,
+      source: "installed",
+      status: "active",
+      version: installed.record.version,
+    };
+  }
+  return { status: "none" };
+}
+
 /** Returns a runnable installed entrypoint only after every recorded byte check passes. */
 export async function resolveActiveConnectorPath(
   store: ConnectorInstallStore,
@@ -912,6 +967,9 @@ export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
+  inspectSelected: (connectorId: string) => Promise<SelectedConnectorArtifact>;
+  /** Ids of active installs, read from the store without verifying their bytes. */
+  installedConnectorIds?: () => Promise<readonly string[]>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -1258,9 +1316,6 @@ export function createConnectorInstallService(options: {
       return null;
     }
     const core = await loadPinnedCore();
-    if (!core.fetchResolvedArtifact) {
-      throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-    }
     const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
       if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
         return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1269,7 +1324,7 @@ export function createConnectorInstallService(options: {
     };
     const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
     const artifact = await core.fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: entry.connector_id,
@@ -1304,6 +1359,8 @@ export function createConnectorInstallService(options: {
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
+    inspectSelected: (connectorId) => inspectSelectedConnectorArtifact(store, localSourceStore, connectorId),
+    installedConnectorIds: async () => (await store.listActive()).map((record) => record.connectorId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {
@@ -1368,9 +1425,6 @@ async function loadPinnedCore(): Promise<InstallerCore> {
 
 async function loadCatalogFromPinnedCore(lastAcceptedGeneratedAt: string | null): Promise<ConnectorCatalogSnapshot> {
   const core = await loadPinnedCore();
-  if (!core.fetchCatalog) {
-    throw new Error("Pinned connector installer core does not expose fetchCatalog.");
-  }
   const value = (await core.fetchCatalog({
     identity: core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
     registry: "ghcr.io",
@@ -1548,9 +1602,6 @@ async function installPinnedArtifact(
   const core = await loadPinnedCore();
   const abortableFetch: FetchLike = (input, init) =>
     fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
-  if (!core.fetchResolvedArtifact) {
-    throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-  }
   const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
     if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
       return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1559,7 +1610,7 @@ async function installPinnedArtifact(
   };
   const preflightTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
-    { doc: {}, mode: "locked" },
+    null,
     {
       artifactKind: "pdpp-collection-profile",
       connectorId: entry.connector_id,
@@ -1596,7 +1647,6 @@ async function installPinnedArtifact(
   }
   const limitedTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   await core.installFromLock({
-    artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,
     installRoot: root,
     layout: "source",
@@ -1625,7 +1675,7 @@ async function installPinnedArtifact(
       registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
         ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
         : null,
-    source: { doc: {}, mode: "locked" },
+    source: null,
   });
   const installedConfigDigest = limitedTransport.configDigest();
   if (!installedConfigDigest || installedConfigDigest !== configDigest) {

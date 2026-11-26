@@ -1,44 +1,11 @@
 # Settings
 
-## What this is
+`page.tsx` composes settings. Developer mode remains browser-local and controls optional connector development surfaces.
 
-- Owns browser-local optional Console surfaces and the desktop remote-access
-  posture.
+`remote-access-setting.tsx` renders the provider inventory from `/v1/owner/reachability`, with no initial selection. Declared fields and actions drive setup drafts. `reachability-consent.tsx` renders separate setup and route approvals from their exact consent snapshots. Missing or inconsistent snapshots disable approval.
 
-## Files
+`reachability-client.ts` sends each request to the console's route handler (`app/api/reachability`) with fetch, and its 15 s deadline counts from the send. The handler checks the owner session and calls `reachability-forward.ts`, which forwards the request to the reference service with the owner's bearer. It is a route handler and not a Server Action because Next.js runs one client's Server Actions one at a time, which made Turn on wait behind the page's own polling. The browser receives projected observations, never credentials, secret handles or candidate tokens. A reload keeps only a draft reference and reads fresh actions through the public draft API.
 
-- `page.tsx`: `/settings` route and page composition.
-- `developer-mode-setting.tsx`: client-side developer-mode toggle.
-- `developer-mode.invariants.test.ts`: persistence and surface-gating checks.
-- `remote-access-setting.tsx`: desktop-only Off / My devices only / Public URL
-  control and owner-password gate.
-- `remote-access.ts`: origin validation, reachability fields, and browser-safe
-  remote-access types.
-- `remote-access.test.ts`: origin, privacy-badge, and password-gate oracles.
+The service owns leases, route watching, operation intents and cleanup retries. The screen shows proof evidence, requested and observed binding, generic capability reasons and cleanup debt. Listener, password and port changes require the host supervisor. `proof_refresh_unsupported` leaves only Stop available.
 
-## Data flow
-
-- The toggle writes `dataconnect_developer_mode` to browser local storage → the shared developer-mode store notifies client surfaces → `/sources/add` updates its visible controls.
-- The remote-access setting reads and writes the native Tauri provider config;
-  the native side persists the four `PDPP_*` reachability fields and restarts
-  the managed loopback stack after a change.
-
-## App integration
-
-- Route: `/settings`
-- Entry points: the RecordroomShell Workspace navigation group.
-- Integration: gates developer connector sources and development connector visibility on `/sources/add`.
-- This page is unrelated to grant flow. Remote access changes reachability
-  configuration but does not read or mutate Personal Server data.
-
-## Behavior
-
-- Developer mode is off by default.
-- When enabled, the Add source page shows the developer connector sources panel and the development connector filter.
-- Remote access is Off by default. Public URL requires an HTTPS origin and an
-  owner password in the same blocking flow.
-
-## Notes
-
-- Developer mode is browser-local. Remote access is a desktop configuration and
-  is unavailable in a normal browser session.
+The native provider modules and legacy-file importer remain for the migration follow-on. Their deletion requires a crash-safe cutover. Pairing and attach are outside this change.

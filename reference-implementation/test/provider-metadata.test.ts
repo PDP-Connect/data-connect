@@ -358,7 +358,7 @@ test("composed mode env drives browser-facing metadata when explicit public urls
 });
 
 // ─── Discovery round-trip: advertised agent URLs must not 404 ───────────────
-// Regression for the Simon/agent discoverability defect: the RS metadata can
+// Regression for the external-agent discoverability defect: the RS metadata can
 // advertise agent-facing docs/skill pointers (`skill`, `skill_catalog`,
 // `llms_txt`, `llms_full_txt`, `mcp.endpoint`). Those routes are served by the
 // console/site Next.js origin, NOT the RS origin. In direct/ephemeral topology

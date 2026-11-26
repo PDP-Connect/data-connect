@@ -22,9 +22,11 @@
  * for that scope.
  */
 
-import { exec, getOne, iterate, referenceQueries } from "../../lib/db.ts";
+import { exec, getOne, iterate, referenceQueries, writeTransaction } from "../../lib/db.ts";
+import { withConnectorInstanceControlPlaneWrite } from "../connector-instance-write-coordinator.ts";
 import type { PostgresTransactionClient } from "../postgres-storage.ts";
-import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
+import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
+import { assertCurrentStorageGeneration } from "../storage-generation.ts";
 
 interface SqlClient {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
@@ -344,4 +346,144 @@ export async function countDirtySearchIndexScopes(): Promise<number> {
   }
   const row = getOne<{ n: number }>(referenceQueries.searchIndexDirtyCountDirty, []);
   return row?.n ?? 0;
+}
+
+/** The stream a canonical semantic scope key (`[stream, field]` JSON) names, or null for anything else. */
+function streamOfSemanticScopeKey(scopeKey: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(scopeKey);
+    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Startup failures preserve retry policy; ingest alone resets changed-input history.
+ * Discover extant streams inside the same instance fence as deletion. No instance
+ * row is required for legacy direct ingest, but retained/index state is required.
+ */
+export async function markStartupSearchIndexFailure({
+  connectorId,
+  connectorInstanceId,
+  generation,
+}: {
+  connectorId: string;
+  connectorInstanceId: string;
+  generation: number;
+}): Promise<void> {
+  await withConnectorInstanceControlPlaneWrite(connectorInstanceId, async () => {
+    assertCurrentStorageGeneration(generation);
+    const now = new Date().toISOString();
+    if (isPostgresStorageBackend()) {
+      await withPostgresTransaction(
+        async (client) => {
+          assertCurrentStorageGeneration(generation);
+          const extant = await client.query<{ stream: string }>(
+            `SELECT stream FROM records WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM lexical_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM semantic_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM lexical_search_index WHERE connector_instance_id = $1 AND connector_id = $2`,
+            [connectorInstanceId, connectorId]
+          );
+          // Decode semantic keys here, not with a SQL jsonb cast: one malformed key
+          // must not fail the whole mark. Untrusted keys name no stream and are left
+          // for the repair that fails closed on them (same rule as the SQLite query).
+          const blobKeys = await client.query<{ scope_key: string }>(
+            "SELECT DISTINCT scope_key FROM semantic_search_blob WHERE connector_instance_id = $1 AND connector_id = $2",
+            [connectorInstanceId, connectorId]
+          );
+          const streams = new Set(extant.rows.map((row) => row.stream));
+          for (const { scope_key: scopeKey } of blobKeys.rows) {
+            const stream = streamOfSemanticScopeKey(scopeKey);
+            if (stream !== null) {
+              streams.add(stream);
+            }
+          }
+          for (const stream of streams) {
+            // Extant orphan streams must also be repaired even after manifest removal.
+            assertCurrentStorageGeneration(generation);
+            // biome-ignore lint/performance/noAwaitInLoops: One connection's stream batch shares its deletion fence and transaction.
+            await client.query(
+              `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+             SELECT $1, $2, $3, 1, $4, 1, 0
+             WHERE NOT EXISTS (SELECT 1 FROM connector_instances WHERE connector_instance_id = $1 AND connector_id <> $2)
+               AND NOT EXISTS (SELECT 1 FROM connector_instance_tombstones WHERE connector_instance_id = $1)
+             ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
+               connector_id = excluded.connector_id,
+               marked_at = CASE WHEN search_index_dirty.dirty <> 0 THEN search_index_dirty.marked_at ELSE excluded.marked_at END,
+               attempts = CASE WHEN search_index_dirty.dirty <> 0 OR search_index_dirty.operator_parked <> 0 THEN search_index_dirty.attempts ELSE 0 END,
+               next_attempt_at = CASE WHEN search_index_dirty.dirty <> 0 OR search_index_dirty.operator_parked <> 0 THEN search_index_dirty.next_attempt_at ELSE NULL END,
+               dirty = 1, revision = search_index_dirty.revision + 1`,
+              [connectorInstanceId, connectorId, stream, now]
+            );
+          }
+          assertCurrentStorageGeneration(generation);
+        },
+        { lockConnectorInstanceId: connectorInstanceId }
+      );
+      return;
+    }
+    writeTransaction(() => {
+      assertCurrentStorageGeneration(generation);
+      for (const { stream } of [
+        ...iterate<{ stream: string }>(
+          referenceQueries.searchIndexDirtyStartupStreams,
+          Array.from({ length: 7 }, () => [connectorInstanceId, connectorId]).flat()
+        ),
+      ]) {
+        exec(referenceQueries.searchIndexDirtyMarkStartupFailure, [
+          connectorInstanceId,
+          connectorId,
+          stream,
+          now,
+          connectorInstanceId,
+          connectorId,
+          connectorInstanceId,
+        ]);
+      }
+    });
+  });
+}
+
+/** Every instance that holds records or search-index state for a connector. Instances with neither cannot need a ticket. */
+export async function listStartupSearchIndexInstances(connectorId: string): Promise<string[]> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery<{ connector_instance_id: string }>(
+      `SELECT connector_instance_id FROM records WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM lexical_search_meta WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM lexical_search_index WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_meta WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_backfill_progress WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_blob WHERE connector_id = $1`,
+      [connectorId]
+    );
+    return result.rows.map((row) => row.connector_instance_id);
+  }
+  return [
+    ...iterate<{ connector_instance_id: string }>(
+      referenceQueries.searchIndexDirtyStartupIndexInstances,
+      Array.from({ length: 7 }, () => connectorId)
+    ),
+  ].map((row) => row.connector_instance_id);
+}
+
+/** True when any instance of the connector still holds semantic index state (meta, progress or vectors). */
+export async function connectorHasRetainedSemanticState(connectorId: string): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_meta WHERE connector_id = $1
+         UNION ALL SELECT 1 FROM semantic_search_backfill_progress WHERE connector_id = $1
+         UNION ALL SELECT 1 FROM semantic_search_blob WHERE connector_id = $1
+       ) AS present`,
+      [connectorId]
+    );
+    return result.rows[0]?.present === true;
+  }
+  const row = getOne<{ present: number }>(
+    referenceQueries.searchIndexDirtyStartupSemanticState,
+    Array.from({ length: 4 }, () => connectorId)
+  );
+  return row?.present === 1;
 }

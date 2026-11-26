@@ -18,6 +18,10 @@ name: package-verify
 # - local-collector: both of the above, plus polyfill-connectors and
 #   reference-implementation. It vendors their code, and its smoke test
 #   starts the reference server.
+# - read-core, cli, mcp-server (under reference-implementation/vendor/):
+#   reference-implementation and the shared test runners in scripts/. The
+#   cli tests also spawn local-collector, so cli follows its inputs too.
+#   mcp-server packs cli and read-core from source as its siblings.
 #
 # Every package also depends on the root package.json, package-lock.json,
 # and .npmrc (install and toolchain versions) and on this workflow file.
@@ -82,24 +86,34 @@ jobs:
           protocol=false
           runtime=false
           collector=false
+          readcore=false
+          cli=false
+          mcp=false
           while IFS= read -r path; do
             case "$path" in
-              package.json|package-lock.json|.npmrc|.github/workflows/package-verify.yml|\
+              package.json|package-lock.json|.npmrc|.releaserc.yaml|.github/workflows/package-verify.yml|\
               packages/connector-protocol/*)
-                protocol=true; runtime=true; collector=true ;;
+                protocol=true; runtime=true; collector=true; readcore=true; cli=true; mcp=true ;;
               packages/collector-runtime/*)
-                runtime=true; collector=true ;;
-              packages/local-collector/*|packages/polyfill-connectors/*|reference-implementation/*)
-                collector=true ;;
+                runtime=true; collector=true; cli=true; mcp=true ;;
+              packages/local-collector/*|packages/polyfill-connectors/*)
+                collector=true; cli=true; mcp=true ;;
+              reference-implementation/*)
+                collector=true; readcore=true; cli=true; mcp=true ;;
+              scripts/test-scratch/*|scripts/run-node-tests.mjs)
+                readcore=true; cli=true; mcp=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files.txt"
 
-          # Order matters: the jobs below verify in this order, matching
-          # npm-release's quality job.
+          # Workspace paths, in verify order: each package after the packages
+          # it depends on.
           packages=""
-          [[ "${protocol}" == "true" ]] && packages+="connector-protocol "
-          [[ "${runtime}" == "true" ]] && packages+="collector-runtime "
-          [[ "${collector}" == "true" ]] && packages+="local-collector "
+          [[ "${protocol}" == "true" ]] && packages+="packages/connector-protocol "
+          [[ "${runtime}" == "true" ]] && packages+="packages/collector-runtime "
+          [[ "${collector}" == "true" ]] && packages+="packages/local-collector "
+          [[ "${readcore}" == "true" ]] && packages+="reference-implementation/vendor/read-core "
+          [[ "${cli}" == "true" ]] && packages+="reference-implementation/vendor/cli "
+          [[ "${mcp}" == "true" ]] && packages+="reference-implementation/vendor/mcp-server "
           packages="${packages% }"
 
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
@@ -110,11 +124,14 @@ jobs:
     needs: classify
     if: needs.classify.outputs.packages != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # mcp-server's artifact receipt binds a merge-base with a fixed
+          # commit, which a shallow clone does not have.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -133,13 +150,62 @@ jobs:
           set -euo pipefail
           for package in ${PACKAGES}; do
             echo "::group::verify ${package}"
-            npm run --workspace "packages/${package}" verify
+            npm run --workspace "${package}" verify
             echo "::endgroup::"
           done
 
+  # cli and read-core declare `engines.node >=22.14.0` and publish from this
+  # repository. `verify` above runs on Node 24, which proves nothing about the
+  # floor, so their dedicated gates pack, install and run the artifact on the
+  # exact Node 22.14.0 runtime. Dependencies install with Node 24 first,
+  # because the workspace root requires it.
+  node-floor:
+    name: Node 22.14 floor for cli and read-core
+    needs: classify
+    if: contains(needs.classify.outputs.packages, 'vendor/cli') || contains(needs.classify.outputs.packages, 'vendor/read-core')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The CLI gate's harness hosts the reference server, which needs this
+      # newer Node; only the installed CLI runs on 22.14.
+      - name: Record the harness Node
+        run: echo "PDPP_ARTIFACT_HARNESS_NODE=$(command -v node)" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js 22.14.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Run the floor gates
+        env:
+          PACKAGES: ${{ needs.classify.outputs.packages }}
+        run: |
+          set -euo pipefail
+          node --version
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/read-core "* ]]; then
+            npm run --workspace reference-implementation/vendor/read-core verify:node-22.14
+          fi
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/cli "* ]]; then
+            npm run --workspace reference-implementation/vendor/cli pack-install-run:node-22.14
+          fi
+
   gate:
     name: package-verify gate
-    needs: [classify, verify]
+    needs: [classify, verify, node-floor]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -149,6 +215,7 @@ jobs:
           CLASSIFY_RESULT: ${{ needs.classify.result }}
           PACKAGES: ${{ needs.classify.outputs.packages }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          NODE_FLOOR_RESULT: ${{ needs.node-floor.result }}
         run: |
           set -euo pipefail
           if [[ "${CLASSIFY_RESULT}" != "success" ]]; then
@@ -166,5 +233,11 @@ jobs:
           if [[ "${VERIFY_RESULT}" != "success" ]]; then
             echo "::error::verify for [${PACKAGES}] reported ${VERIFY_RESULT}"
             exit 1
+          fi
+          if [[ " ${PACKAGES} " == *" reference-implementation/vendor/cli "* || " ${PACKAGES} " == *" reference-implementation/vendor/read-core "* ]]; then
+            if [[ "${NODE_FLOOR_RESULT}" != "success" ]]; then
+              echo "::error::the Node 22.14 floor gate reported ${NODE_FLOOR_RESULT}"
+              exit 1
+            fi
           fi
           echo "verify passed for: ${PACKAGES}"

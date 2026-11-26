@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The postcondition of the release pipeline: after a run that published a
-// release, ALL THREE lockstep packages are live at that version.
+// release, EVERY lockstep package (scripts/lockstep-packages.ts) is live at
+// that version.
 //
 // This exists because "the release job exited 0" is not the same claim as
 // "the release happened". The v2.2.1 failure is the proof: the run reported a
@@ -10,7 +11,7 @@
 // pipeline ever asserted the difference. The tag said the release existed;
 // the registry disagreed; no step was responsible for noticing.
 //
-// So this step makes the lockstep invariant — the three packages share a
+// So this step makes the lockstep invariant — the packages share a
 // version — an ENFORCED postcondition rather than a property the pipeline
 // hopes it maintained. A run that leaves the set incomplete fails here, with
 // the missing packages named, instead of succeeding quietly and leaving the
@@ -34,12 +35,8 @@
 // gets the real 30s; a test passes a fast wait and still drives this exact
 // code. Nothing here reads the environment to decide how long to wait.
 
-import {
-  LOCKSTEP_PACKAGES,
-  registryStateFor,
-  RegistryUnknownError,
-  type LockstepPackage,
-} from "./release-registry-state.js"
+import { lockstepPackageNames } from "./lockstep-packages.js"
+import { registryStateFor, RegistryUnknownError } from "./release-registry-state.js"
 
 // 8 attempts sleep 7 times = 210s of waiting, above the ~180s propagation lag
 // measured for this repo's packages. N attempts sleep N-1 times, so a budget
@@ -85,7 +82,7 @@ export interface PropagationWait {
 // Resolves once the package is live, or throws after the propagation budget.
 // An UNKNOWN registry answer is rethrown immediately rather than retried.
 export async function awaitPublished(
-  name: LockstepPackage,
+  name: string,
   version: string,
   wait: PropagationWait = {}
 ): Promise<void> {
@@ -127,10 +124,11 @@ export async function main(wait: PropagationWait = {}): Promise<void> {
     fail("Usage: verify-release-complete.ts <version>")
   }
 
-  log(`asserting all ${LOCKSTEP_PACKAGES.length} lockstep packages are live at ${version}`)
+  const packages = lockstepPackageNames()
+  log(`asserting all ${packages.length} lockstep packages are live at ${version}`)
 
   const missing: string[] = []
-  for (const name of LOCKSTEP_PACKAGES) {
+  for (const name of packages) {
     try {
       await awaitPublished(name, version, wait)
       log(`  ok  ${name}@${version}`)

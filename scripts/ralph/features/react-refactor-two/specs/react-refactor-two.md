@@ -1,7 +1,7 @@
 # React Refactor - Two
 
 ## Source
-- `docs/260130-react-refactor-implementation-gap.md`
+- a source doc since removed from the tree (see git history)
 
 ## Goals
 - Close remaining Phase 1–3 gaps from the refactor plan

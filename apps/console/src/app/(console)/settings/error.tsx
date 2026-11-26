@@ -16,7 +16,7 @@ import { DetailLoadingSkeleton } from "../components/route-loading.tsx";
  * segment-appropriate one, or — if the throw happened above any boundary's
  * mount point — white-screened outright.
  *
- * Confirmed live, 2026-09-19: the actual settings-page hang Tim hit
+ * Confirmed live, 2026-09-19: the actual settings-page hang an owner hit
  * ("Reading the current remote access state…" stuck forever) was NOT a
  * throw this boundary would have caught — the page's own JS chunk 404'd
  * because a live rebuild replaced the console's staged build directory out

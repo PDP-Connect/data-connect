@@ -4,11 +4,9 @@
 /**
  * Unit tests for the canonical connector-key helpers.
  *
- * These pin the first-party allowlist, the URL→key normalization, the
- * legacy local-collector alias mapping, and the fail-closed posture for
- * unknown third-party identifiers. Subsequent migration / runtime slices
- * depend on this mapping being stable, so each known input shape gets an
- * explicit assertion.
+ * These pin the registry-URL to key normalization and the rule that no
+ * connector list decides a key: a connector this repository does not ship
+ * resolves like one it does, and a retired underscore id is not rewritten.
  */
 
 import assert from "node:assert/strict";
@@ -22,13 +20,9 @@ import {
   canonicalConnectorKey,
   canonicalConnectorKeyFromManifest,
   connectorKeyFromRegistryUrl,
-  firstPartyConnectorKeys,
   isConnectorKey,
   isInternalConnectorId,
-  isLegacyLocalAlias,
   isRegistryUrlConnectorId,
-  legacyLocalAliasMap,
-  nativeConnectorKeys,
 } from "../server/connector-key.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -68,15 +62,23 @@ function readShippedPolyfillManifestEntries(): ManifestFileEntry[] {
   }));
 }
 
-test("connectorKeyFromRegistryUrl returns the canonical slug for every first-party URL", () => {
-  for (const key of firstPartyConnectorKeys()) {
+/** Every connector key the pinned `@pdpp/polyfill-connectors` package ships,
+ * read from its own manifests. No list in this repository stands behind it. */
+function vendoredConnectorKeys(): Set<string> {
+  return shippedConnectorKeysFromEntries(readShippedPolyfillManifestEntries());
+}
+
+test("connectorKeyFromRegistryUrl returns the canonical slug for every vendored connector URL", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}${key}`), key, `expected ${key} round-trip`);
   }
 });
 
-test("connectorKeyFromRegistryUrl rejects non-first-party / malformed URLs", () => {
-  // Slug not in the allowlist — fail closed.
-  assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}fictional`), null);
+test("connectorKeyFromRegistryUrl returns the slug of a connector this repository does not ship", () => {
+  assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}fictional`), "fictional");
+});
+
+test("connectorKeyFromRegistryUrl rejects malformed URLs", () => {
   // Wrong host or scheme.
   assert.equal(connectorKeyFromRegistryUrl("http://registry.pdpp.dev/connectors/gmail"), null);
   assert.equal(connectorKeyFromRegistryUrl("https://other.example/connectors/gmail"), null);
@@ -98,47 +100,46 @@ test("connectorKeyFromRegistryUrl tolerates one trailing slash", () => {
   assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}gmail//`), null);
 });
 
-test("canonicalConnectorKey accepts a bare first-party slug", () => {
-  for (const key of firstPartyConnectorKeys()) {
+test("a registry URL whose tail is not a connector key gives no key", () => {
+  for (const tail of ["gmail\\extra", "..", ".", "bad key", "gmail%2Fextra", "Gmail", "-gmail"]) {
+    assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}${tail}`), null, tail);
+    assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}${tail}`), null, tail);
+    assert.equal(canonicalConnectorKeyFromManifest({ connector_id: `${REGISTRY_PREFIX}${tail}` }), null, tail);
+  }
+});
+
+test("canonicalConnectorKey accepts a bare vendored slug", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(canonicalConnectorKey(key), key);
   }
 });
 
-test("canonicalConnectorKey accepts native bare slugs", () => {
-  for (const key of nativeConnectorKeys()) {
-    assert.equal(canonicalConnectorKey(key), key);
-  }
-});
-
-test("canonicalConnectorKey maps legacy snake_case local aliases to canonical hyphenated keys", () => {
-  // Pin the exact alias set so a silent expansion of the generated table
-  // (which would create new owner-visible aliases) breaks the test. The set
-  // is generated from LOCAL_COLLECTOR_DEFINITIONS cross-referenced against
-  // each connector's manifest connector_key — see
-  // connector-registry.generated.ts — so it includes one entry per bundled
-  // local-collector connector, identity mappings included.
-  assert.deepEqual(legacyLocalAliasMap(), {
-    apple_photos: "apple-photos",
-    claude_code: "claude-code",
-    codex: "codex",
-    google_messages: "google-messages",
-    google_takeout: "google-takeout",
-    imessage: "imessage",
+test("canonicalConnectorKey passes native bare slugs through", () => {
+  // Native reference manifests carry their key in storage_binding.connector_id.
+  const nativeKeys = readManifestsFromDir(REFERENCE_MANIFESTS_DIR).flatMap(({ manifest }) => {
+    const binding = manifest.storage_binding as { connector_id?: unknown } | undefined;
+    return typeof binding?.connector_id === "string" ? [binding.connector_id] : [];
   });
-  assert.equal(canonicalConnectorKey("claude_code"), "claude-code");
-  assert.equal(canonicalConnectorKey("codex"), "codex");
-  assert.equal(canonicalConnectorKey("google_takeout"), "google-takeout");
-  assert.equal(canonicalConnectorKey("apple_photos"), "apple-photos");
-  assert.equal(canonicalConnectorKey("google_messages"), "google-messages");
-  assert.equal(canonicalConnectorKey("imessage"), "imessage");
-  assert.equal(isLegacyLocalAlias("claude_code"), true);
-  assert.equal(isLegacyLocalAlias("codex"), true);
-  assert.equal(isLegacyLocalAlias("google_takeout"), true);
-  assert.equal(isLegacyLocalAlias("apple_photos"), true);
-  assert.equal(isLegacyLocalAlias("google_messages"), true);
-  assert.equal(isLegacyLocalAlias("imessage"), true);
-  assert.equal(isLegacyLocalAlias("gmail"), false);
-  assert.equal(isLegacyLocalAlias(""), false);
+  assert.ok(nativeKeys.length > 0, "the reference fixtures must include a native-binding manifest");
+  for (const key of nativeKeys) {
+    assert.equal(canonicalConnectorKey(key), key);
+  }
+});
+
+test("canonicalConnectorKey does not rewrite a retired underscore id to its current key", () => {
+  // The four ids older collectors spelled with underscores are plain unknown
+  // ids now: nothing at runtime maps one to the other, and a lookup under the
+  // old id finds nothing (see retired-connector-id-lookup.test.ts).
+  const vendored = vendoredConnectorKeys();
+  for (const retired of ["apple_photos", "claude_code", "google_messages", "google_takeout"]) {
+    assert.equal(canonicalConnectorKey(retired), retired);
+    assert.equal(isConnectorKey(retired), true, "still a well-formed key, just not a registered connector");
+    assert.ok(!vendored.has(retired), `${retired} is not a vendored connector key`);
+  }
+  for (const current of ["apple-photos", "claude-code", "google-messages", "google-takeout"]) {
+    assert.equal(canonicalConnectorKey(current), current);
+    assert.ok(vendored.has(current), `${current} is a vendored connector key`);
+  }
 });
 
 test("bundled local-collector connector ids all resolve to a canonical key the manifest catalog also resolves (alias/canonical equivalence)", async () => {
@@ -168,8 +169,15 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
     );
     assert.ok(
       bundleIdCanonicalKey,
-      `${definition.connector_id}: bundle connector_id must canonicalize (add a LEGACY_LOCAL_ALIASES entry if it uses a directory-name id distinct from its manifest's connector_key)`
+      `${definition.connector_id}: bundle connector_id must canonicalize`
     );
+    if (definition.connector_id.replaceAll("_", "-") === manifestCanonicalKey) {
+      // The pinned @pdpp/polyfill-connectors tarball still bundles the four
+      // underscore spellings. The server no longer rewrites them, so the only
+      // acceptable gap is the underscore spelling of the manifest key; refresh
+      // the pin and this branch goes dead.
+      continue;
+    }
     assert.equal(
       bundleIdCanonicalKey,
       manifestCanonicalKey,
@@ -178,8 +186,8 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
   }
 });
 
-test("canonicalConnectorKey accepts URL-shaped first-party ids", () => {
-  for (const key of firstPartyConnectorKeys()) {
+test("canonicalConnectorKey accepts URL-shaped vendored ids", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}${key}`), key);
   }
 });
@@ -195,16 +203,18 @@ test("isConnectorKey accepts operational keys and rejects URLs", () => {
   assert.equal(isConnectorKey(null), false);
 });
 
-test("canonicalConnectorKey fails closed on unknown URLs and arbitrary strings", () => {
-  // The reference must NOT silently promote an unknown registry URL into
-  // a canonical first-party key — custom connectors have to declare their
-  // own key explicitly (per OpenSpec design §3).
-  assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}unknown-thing`), null);
-  assert.equal(canonicalConnectorKey("https://other.example/connectors/gmail"), null);
-  // Bare strings that look like keys but are not in any allowlist.
-  assert.equal(canonicalConnectorKey("custom_provider"), null);
-  assert.equal(canonicalConnectorKey("unknown"), null);
-  // Whitespace / empty / non-string.
+test("canonicalConnectorKey gives a connector this repository does not ship the same key it would get if it did", () => {
+  // No list stands behind the answer: a connector installed from the catalog
+  // after this server was built resolves exactly like a vendored one.
+  assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}unknown-thing`), "unknown-thing");
+  assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}unknown-thing/`), "unknown-thing");
+  assert.equal(canonicalConnectorKey("unknown-thing"), "unknown-thing");
+  assert.equal(canonicalConnectorKey("custom_provider"), "custom_provider");
+});
+
+test("canonicalConnectorKey rejects empty input and malformed registry URLs", () => {
+  assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}gmail/extra`), null);
+  assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}`), null);
   assert.equal(canonicalConnectorKey("   "), null);
   assert.equal(canonicalConnectorKey(""), null);
   assert.equal(canonicalConnectorKey(null), null);
@@ -212,14 +222,18 @@ test("canonicalConnectorKey fails closed on unknown URLs and arbitrary strings",
   assert.equal(canonicalConnectorKey({}), null);
 });
 
-test("canonicalConnectorKey trims surrounding whitespace before lookup", () => {
-  assert.equal(canonicalConnectorKey("  gmail  "), "gmail");
-  assert.equal(canonicalConnectorKey("\tclaude_code\n"), "claude-code");
+test("canonicalConnectorKey leaves a URL on another host as it is", () => {
+  assert.equal(canonicalConnectorKey("https://other.example/connectors/gmail"), "https://other.example/connectors/gmail");
 });
 
-test("isRegistryUrlConnectorId reports the URL shape regardless of allowlist membership", () => {
+test("canonicalConnectorKey trims surrounding whitespace before lookup", () => {
+  assert.equal(canonicalConnectorKey("  gmail  "), "gmail");
+  assert.equal(canonicalConnectorKey("\tclaude-code\n"), "claude-code");
+  assert.equal(canonicalConnectorKey("\tclaude_code\n"), "claude_code", "trims, and does not rewrite a retired id");
+});
+
+test("isRegistryUrlConnectorId reports the URL shape for any slug", () => {
   assert.equal(isRegistryUrlConnectorId(`${REGISTRY_PREFIX}gmail`), true);
-  // Unknown slug still looks like a registry URL — true.
   assert.equal(isRegistryUrlConnectorId(`${REGISTRY_PREFIX}unknown`), true);
   assert.equal(isRegistryUrlConnectorId("gmail"), false);
   assert.equal(isRegistryUrlConnectorId("https://other.example/connectors/gmail"), false);
@@ -268,19 +282,18 @@ test("canonicalConnectorKeyFromManifest falls back to storage_binding.connector_
   assert.equal(canonicalConnectorKeyFromManifest(manifest), "northstar_hr_native");
 });
 
-test("canonicalConnectorKeyFromManifest returns null for unrecognized manifests", () => {
+test("canonicalConnectorKeyFromManifest returns null when a manifest names no connector", () => {
   assert.equal(canonicalConnectorKeyFromManifest(null), null);
   assert.equal(canonicalConnectorKeyFromManifest({}), null);
-  assert.equal(canonicalConnectorKeyFromManifest({ connector_id: "https://other.example/x" }), null);
-  assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: "custom_thing" } }), null);
+  assert.equal(canonicalConnectorKeyFromManifest({ streams: [] }), null);
 });
 
-// -------- Allowlist parity with shipped manifests --------
-//
-// These tests guard against drift between the in-code allowlist and the
-// shipped JSON manifests: if a new polyfill / reference manifest is added
-// (or removed) without updating `connector-key.js`, the test fails loudly
-// rather than silently dropping the new connector to `null`.
+test("canonicalConnectorKeyFromManifest gives a manifest that declares only a registry URL its slug", () => {
+  assert.equal(canonicalConnectorKeyFromManifest({ connector_id: `${REGISTRY_PREFIX}whatsapp-web` }), "whatsapp-web");
+  assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: "custom_thing" } }), "custom_thing");
+});
+
+// -------- Keys read from shipped manifests --------
 
 function shippedConnectorKeysFromEntries(entries: ManifestFileEntry[]): Set<string> {
   const keys = new Set<string>();
@@ -344,20 +357,11 @@ test("registry-backed first-party manifests declare connector_key and manifest_u
   }
 });
 
-test("allowlist covers every shipped polyfill-connectors manifest", () => {
-  const shipped = shippedConnectorKeysFromEntries(readShippedPolyfillManifestEntries());
-  const known = new Set([...firstPartyConnectorKeys(), ...nativeConnectorKeys()]);
-  // biome-ignore lint/suspicious/useArraySortCompare: the test relies on the platform default lexical sort behavior.
-  const missing = [...shipped].filter((key) => !known.has(key)).sort();
-  assert.deepEqual(missing, [], `polyfill manifests reference unknown canonical keys: ${missing.join(", ")}`);
-});
-
-test("allowlist covers every shipped reference-implementation manifest", () => {
+test("canonicalConnectorKey passes every shipped reference-implementation manifest key through", () => {
   const shipped = shippedConnectorKeysFromEntries(readManifestsFromDir(REFERENCE_MANIFESTS_DIR));
-  const known = new Set([...firstPartyConnectorKeys(), ...nativeConnectorKeys()]);
-  // biome-ignore lint/suspicious/useArraySortCompare: the test relies on the platform default lexical sort behavior.
-  const missing = [...shipped].filter((key) => !known.has(key)).sort();
-  assert.deepEqual(missing, [], `reference manifests reference unknown canonical keys: ${missing.join(", ")}`);
+  for (const key of shipped) {
+    assert.equal(canonicalConnectorKey(key), key);
+  }
 });
 
 test("isInternalConnectorId identifies test/stub/internal connector ids", () => {
@@ -380,4 +384,17 @@ test("isInternalConnectorId identifies test/stub/internal connector ids", () => 
   assert.equal(isInternalConnectorId(undefined), false);
   assert.equal(isInternalConnectorId(""), false);
   assert.equal(isInternalConnectorId(42), false);
+});
+
+test("a non-registry URL connector_id keeps its spelling as the key", () => {
+  const url = "https://test.pdpp.dev/connectors/acme";
+  assert.equal(canonicalConnectorKeyFromManifest({ connector_id: url }), url);
+  assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: url } }), url);
+});
+
+test("manifest key derivation rejects malformed id-only identities", () => {
+  for (const value of ["bad key", `${REGISTRY_PREFIX}gmail/extra`]) {
+    assert.equal(canonicalConnectorKeyFromManifest({ connector_id: value }), null, value);
+    assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: value } }), null, value);
+  }
 });

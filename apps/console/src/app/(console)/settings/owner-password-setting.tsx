@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useRef, useState } from "react"
+import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts"
 import {
   changeOwnerPasswordAction,
   requestDesktopOwnerPasswordChangeAction,
@@ -21,10 +22,13 @@ import type { OwnerPasswordSource } from "./owner-password-data.ts"
 export function OwnerPasswordSetting({
   canReveal = false,
   managedDesktop = false,
+  passwordSet = true,
   source,
 }: {
   canReveal?: boolean
   managedDesktop?: boolean
+  /** False while the owner has not chosen a password yet (desktop only). */
+  passwordSet?: boolean
   source: OwnerPasswordSource
 }) {
   const router = useRouter()
@@ -34,8 +38,13 @@ export function OwnerPasswordSetting({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
+  // Enter in a password field submits even while the button is disabled, and
+  // two Enters in one tick both read busy as false. A ref closes both.
+  const submitting = useRef(false)
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submitting.current) return
     setMessage(null)
     if (Array.from(newPassword).length < 15) {
       setMessage("Use at least 15 characters for the new password.")
@@ -46,6 +55,7 @@ export function OwnerPasswordSetting({
       return
     }
 
+    submitting.current = true
     setBusy(true)
     try {
       const result = await changeOwnerPasswordAction(
@@ -70,6 +80,7 @@ export function OwnerPasswordSetting({
           : "Could not change the owner password."
       )
     } finally {
+      submitting.current = false
       setBusy(false)
     }
   }
@@ -78,7 +89,9 @@ export function OwnerPasswordSetting({
     setMessage(null)
     setBusy(true)
     try {
-      const result = await requestDesktopOwnerPasswordChangeAction()
+      const result = passwordSet
+        ? await requestDesktopOwnerPasswordChangeAction()
+        : await requestOwnerPasswordWindowAction()
       if (!result.ok) {
         setMessage(
           result.message ?? "Could not open the desktop password window."
@@ -150,7 +163,7 @@ export function OwnerPasswordSetting({
           onClick={() => void requestDesktopChange()}
           type="button"
         >
-          {busy ? "Checking…" : "Change password"}
+          {busy ? "Checking…" : passwordSet ? "Change password" : "Set password"}
         </button>
       </div>
     )

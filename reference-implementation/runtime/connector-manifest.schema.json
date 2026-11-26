@@ -5,6 +5,7 @@
   "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding instances, kinds, interface versions, typed constraints, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope, except the coverage_stores declaration rule of Section 7.1.1, which reads only `streams` and `protocol_capabilities`. String patterns for constraint grammars (Section 3.3.4, 3.3.5) are a necessary but not sufficient structural check: they accept the canonical output of schemas/connector-binding-grammar.mjs, but full IDNA canonicalization, IPv4-looking-label rejection, and IPv6 normalization are that module's job, not this schema's. A string this schema accepts can still be non-canonical in a way only that module detects.",
   "type": "object",
   "properties": {
+    "legacy_source_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:[^\\s]+$" } },
     "runtime_requirements": {
       "type": "object",
       "properties": {

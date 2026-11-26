@@ -70,11 +70,6 @@ interface ResolvedArtifact {
   readonly oci: { readonly digest: string };
 }
 
-/** `claude_code` → `claude-code`, the artifact key the catalog uses. */
-function connectorKeyFor(connectorId: string): string {
-  return connectorId.replaceAll("_", "-");
-}
-
 async function main(): Promise<void> {
   const catalogResult = (await fetchCatalog({})) as { catalog: { connectors: readonly CatalogConnector[] } };
   const catalog = new Map(catalogResult.catalog.connectors.map((entry) => [entry.connector_key, entry]));
@@ -82,7 +77,8 @@ async function main(): Promise<void> {
   const pins: CollectionProfilePin[] = [];
   const profiles = new Map<string, Buffer>();
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const connectorKey = connectorKeyFor(definition.connector_id);
+    // A definition's id is the connector's manifest key, which is also the catalog's artifact key.
+    const connectorKey = definition.connector_id;
     const latest = catalog.get(connectorKey)?.latest;
     if (!latest) {
       process.stdout.write(`unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}\n`);
@@ -90,7 +86,7 @@ async function main(): Promise<void> {
     }
     const repository = collectionProfileRepository({ connectorKey });
     const resolved = (await fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: definition.connector_id,

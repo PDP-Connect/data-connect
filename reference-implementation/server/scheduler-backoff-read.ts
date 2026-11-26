@@ -58,8 +58,8 @@ export function schedulerFailureAnchorMillis(schedule: Record<string, unknown> |
 
 /**
  * True when the latest run succeeded at or after the scheduler's failure
- * anchor — i.e. a fresh success has superseded a stale recorded backoff, so
- * the projection should not surface that backoff as live.
+ * anchor. Without a usable failure timestamp we cannot establish ordering,
+ * so the persisted backoff remains live even if a success was recorded.
  */
 export function succeededRunSupersedesSchedulerBackoff(
   lastRun: ConnectorRunSummary | null,
@@ -70,5 +70,5 @@ export function succeededRunSupersedesSchedulerBackoff(
   }
   const runMillis = readIsoMillis(lastRun.last_at);
   const failureAnchor = schedulerFailureAnchorMillis(schedule);
-  return runMillis !== null && (failureAnchor === null || runMillis >= failureAnchor);
+  return runMillis !== null && failureAnchor !== null && runMillis >= failureAnchor;
 }

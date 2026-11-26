@@ -697,14 +697,14 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
 
   // ─── Allocator operations ─────────────────────────────────────────────────
 
-  async function stopAllocatorSurfaceAfterProbeFailure(surfaceId: string, probeCode: string): Promise<void> {
+  async function stopFailedAllocatorSurface(surfaceId: string, failure: string): Promise<void> {
     if (!replacementAwareAllocator) {
       return;
     }
     await runBestEffort(
       () => replacementAwareAllocator.stopSurface({ reason: "surface_failed", surfaceId }),
       (message) =>
-        log.warn?.(`[controller] allocator stopSurface(${surfaceId}) after probe ${probeCode} failed: ${message}`)
+        log.warn?.(`[controller] allocator stopSurface(${surfaceId}) after ${failure} failed: ${message}`)
     );
   }
 
@@ -727,7 +727,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     if (invalidated.surface) {
       await persistInvalidatedBrowserSurface(invalidated.surface);
     }
-    await stopAllocatorSurfaceAfterProbeFailure(surfaceId, probeCode);
+    await stopFailedAllocatorSurface(surfaceId, `probe ${probeCode}`);
   }
 
   async function invalidateIdleSurfaceAfterProbeFailure(surface: BrowserSurface, probeCode: string): Promise<void> {
@@ -740,7 +740,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     if (invalidated.surface) {
       await persistInvalidatedBrowserSurface(invalidated.surface);
     }
-    await stopAllocatorSurfaceAfterProbeFailure(surface.surface_id, probeCode);
+    await stopFailedAllocatorSurface(surface.surface_id, `probe ${probeCode}`);
   }
 
   /**
@@ -1345,6 +1345,15 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     if (readyResult.lease.status === "surface_failed") {
       pendingBrowserSurfaceLaunches.delete(runId);
       const browserSurfaceFailure = describeBrowserSurfaceStartFailure?.({ runId });
+      // The run gives up on this start. Stop the surface by its id, which is
+      // the allocator's key for the start, so a start that completes late does
+      // not keep the connection's browser profile.
+      if (readyResult.lease.surface_id) {
+        await stopFailedAllocatorSurface(
+          readyResult.lease.surface_id,
+          `start ${readyResult.lease.wait_reason ?? "failure"}`
+        );
+      }
       if (browserSurfaceFailure) {
         log.warn?.(
           `[controller] browser surface start failed for ${runId}: ${browserSurfaceFailure.code}: ${browserSurfaceFailure.message}`

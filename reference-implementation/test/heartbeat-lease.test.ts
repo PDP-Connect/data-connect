@@ -26,7 +26,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { OUTBOX_STALE_HEARTBEAT_THRESHOLD_MS } from "../server/connector-outbox-axis.ts";
-import { HEARTBEAT_LEASE_MS, presentHeartbeatHealth } from "../server/heartbeat-lease.ts";
+import {
+  HEARTBEAT_LEASE_MS,
+  presentHeartbeatHealth,
+} from "../server/heartbeat-lease.ts";
 
 const NOW = "2026-08-08T12:00:00.000Z";
 
@@ -113,4 +116,34 @@ test("the lease matches the outbox axis's stale-heartbeat window", () => {
   // they diverge, a source instance can present as healthy while its own
   // outbox axis reads stalled.
   assert.equal(HEARTBEAT_LEASE_MS, OUTBOX_STALE_HEARTBEAT_THRESHOLD_MS);
+});
+
+const NOW_MS = Date.parse("2026-11-20T00:00:00Z");
+const at = (offset: number) => new Date(NOW_MS + offset).toISOString();
+const present = (ageMs: number, leaseMs?: number) => presentHeartbeatHealth({
+  lastHeartbeatAt: at(-ageMs),
+  lastHeartbeatStatus: "healthy",
+  nowIso: at(0),
+  ...(leaseMs === undefined ? {} : { leaseMs }),
+});
+
+test("a future heartbeat is not evidence of current health", () => {
+  assert.deepEqual(present(-1), {
+    ageMs: null, lastObservedStatus: "healthy", leaseMs: HEARTBEAT_LEASE_MS, status: "unknown",
+  });
+});
+
+for (const invalid of [NaN, Infinity, -Infinity, -1]) {
+  test(`an invalid lease (${invalid}) falls back to the declared policy`, () => {
+    assert.equal(present(0, invalid).leaseMs, HEARTBEAT_LEASE_MS);
+    assert.equal(present(HEARTBEAT_LEASE_MS, invalid).status, "healthy");
+    assert.equal(present(HEARTBEAT_LEASE_MS + 1, invalid).status, "stale");
+  });
+}
+
+test("zero and the inclusive lease boundary are current", () => {
+  assert.equal(present(0, 0).status, "healthy");
+  assert.equal(present(0, 20).status, "healthy");
+  assert.equal(present(20, 20).status, "healthy");
+  assert.equal(present(21, 20).status, "stale");
 });

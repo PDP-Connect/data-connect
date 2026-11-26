@@ -12,6 +12,7 @@ import {
   substituteCommandTemplate,
 } from "@/lib/pdpp-cli-command.ts";
 import {
+  coverageIsReportedCollected,
   formatCollectionRateReadout,
   formatDominantCondition,
   formatForwardDisposition,
@@ -28,6 +29,7 @@ import type {
   DeviceSourceInstance,
   RefActionRemediation,
   RefConnectionHealthSnapshot,
+  RefCoverageAsOf,
   RefLocalDeviceProgress,
   RefRenderedVerdict,
   RefSchedule,
@@ -71,6 +73,8 @@ export interface ConnectionDiagnosticsProps {
    * coverage-derived value, matching the per-stream lines.
    */
   connectorNotInstalled?: boolean;
+  /** The run the local coverage describes; the coverage chip reads "as of" its commit time. */
+  coverageAsOf?: RefCoverageAsOf | null;
   /**
    * Connection-summary local-device progress, including the count-backed
    * `outbox_counts` rollup. Used to show the scale of stuck work in the
@@ -105,6 +109,7 @@ export function ConnectionDiagnostics({
   connectionId,
   connectorId,
   connectorNotInstalled = false,
+  coverageAsOf = null,
   localDeviceProgress,
   now,
   providerOrigin,
@@ -163,6 +168,7 @@ export function ConnectionDiagnostics({
               connectionId={connectionId}
               connectorId={connectorId}
               connectorNotInstalled={connectorNotInstalled}
+              coverageAsOf={coverageAsOf}
               localDeviceProgress={localDeviceProgress}
               providerOrigin={providerOrigin}
               renderedVerdict={renderedVerdict}
@@ -455,6 +461,7 @@ function ProjectedStateDiagnostics({
   connectionId,
   connectorId,
   connectorNotInstalled,
+  coverageAsOf,
   localDeviceProgress,
   providerOrigin,
   renderedVerdict,
@@ -464,6 +471,7 @@ function ProjectedStateDiagnostics({
   connectionId: string | null;
   connectorId: string | null;
   connectorNotInstalled: boolean;
+  coverageAsOf: RefCoverageAsOf | null;
   localDeviceProgress: RefLocalDeviceProgress | null;
   providerOrigin: string | null;
   renderedVerdict: RefRenderedVerdict | null;
@@ -486,7 +494,10 @@ function ProjectedStateDiagnostics({
   // local/device-backed connections (or when it carries a concrete verdict).
   // The diagnostics block already receives the connection's local-device
   // progress, so reuse it as the local-backing signal.
+  const coverageReportedCollected = coverageIsReportedCollected(connectionHealth);
   const axisChips = summarizeAxisChips(connectionHealth.axes, {
+    coverageAsOf,
+    coverageReportedCollected,
     isLocalDeviceBacked: Boolean(localDeviceProgress),
   });
   const outboxRemediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);
@@ -498,7 +509,7 @@ function ProjectedStateDiagnostics({
   // that don't send `remediation` fall back to the legacy steps below.
   const verdictRemediation = primaryOwnerActionRemediation(renderedVerdict);
   const forwardDisposition = dispositionForInstallState(
-    formatForwardDisposition(connectionHealth.forward_disposition),
+    formatForwardDisposition(connectionHealth.forward_disposition, { coverageReportedCollected }),
     connectorNotInstalled
   );
   const dominantCondition = formatDominantCondition(connectionHealth);

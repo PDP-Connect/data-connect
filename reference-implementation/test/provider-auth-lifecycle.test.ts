@@ -24,7 +24,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { listSpineEventsPage } from "../lib/spine.ts";
-import { PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS } from "../server/connection-setup-plan.ts";
+import { isProviderAuthLifecycleProven } from "../server/connection-setup-plan.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import type { ProviderAuthExchanger } from "../server/routes/ref-provider-auth.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -87,6 +87,7 @@ const TEST_PROVIDER_MANIFEST = withFixtureSourceDeclaration(
         deployment_config: ["TEST_PROVIDER_CLIENT_ID", "TEST_PROVIDER_CLIENT_SECRET"],
         kind: "oauth",
       },
+      proven: { provider_auth_lifecycle: true },
       refresh_policy: {
         background_safe: true,
         interaction_posture: "credentials",
@@ -101,6 +102,7 @@ const TEST_PROVIDER_MANIFEST = withFixtureSourceDeclaration(
     manifest_uri: "https://sources.example/test_provider",
     protocol_version: "0.1.0",
     runtime_requirements: { bindings: { network: { required: true } } },
+    setup: { modality: "provider_authorization" },
     streams: [
       {
         name: "items",
@@ -330,11 +332,8 @@ async function initiateProviderAuth(
 // Setup planner unit-level check
 // ---------------------------------------------------------------------------
 
-test("PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS includes test_provider", () => {
-  assert.ok(
-    PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS.includes("test_provider"),
-    "test_provider must be in the lifecycle-proven set"
-  );
+test("test_provider's manifest declares the provider-auth lifecycle proven", () => {
+  assert.ok(isProviderAuthLifecycleProven(TEST_PROVIDER_MANIFEST), "test_provider must claim the lifecycle proof");
 });
 
 // ---------------------------------------------------------------------------

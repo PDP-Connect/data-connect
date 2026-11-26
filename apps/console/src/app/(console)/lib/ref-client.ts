@@ -82,6 +82,13 @@ export type RunHandleStatus =
   | "surface_failed"
   | "waiting_for_browser_surface";
 
+export interface RunRecordOutcomes {
+  /** Records the store rejected for good in the whole run; null when the server could not compute it. */
+  permanently_rejected: number | null;
+  /** Records the connector could not account for, by stream; streams with none are absent. */
+  unaccounted_by_stream: Record<string, number>;
+}
+
 export interface RunStatusEnvelope {
   completed_at: string | null;
   connector_id: string | null;
@@ -90,7 +97,6 @@ export interface RunStatusEnvelope {
     connector_error_message: string | null;
     message: string | null;
     origin: string | null;
-    recovery_hint?: { action: "refresh_credentials"; retryable: false } | null;
     reason: string | null;
   } | null;
   /**
@@ -104,6 +110,8 @@ export interface RunStatusEnvelope {
   known_gaps_summary?: unknown;
   links: { timeline: string };
   object: "run_status";
+  /** Whole-run record totals, computed by the server over every event of the run. */
+  record_outcomes: RunRecordOutcomes;
   run_id?: string | null;
   started_at: string | null;
   status: RunHandleStatus;
@@ -183,19 +191,11 @@ function normalizeRunFailure(value: unknown): RunStatusEnvelope["failure"] {
     return null;
   }
   const failure = value as Record<string, unknown>;
-  const recoveryHint =
-    failure.recovery_hint && typeof failure.recovery_hint === "object" && !Array.isArray(failure.recovery_hint)
-      ? (failure.recovery_hint as Record<string, unknown>)
-      : null;
   return {
     connector_error_message:
       typeof failure.connector_error_message === "string" ? failure.connector_error_message : null,
     message: typeof failure.message === "string" ? failure.message : null,
     origin: typeof failure.origin === "string" ? failure.origin : null,
-    recovery_hint:
-      recoveryHint?.action === "refresh_credentials" && recoveryHint.retryable === false
-        ? { action: "refresh_credentials", retryable: false }
-        : null,
     reason: typeof failure.reason === "string" ? failure.reason : null,
   };
 }
@@ -205,6 +205,28 @@ function normalizeRunLinks(value: unknown): RunStatusEnvelope["links"] {
     return { timeline: "" };
   }
   return { timeline: String((value as Record<string, unknown>).timeline ?? "") };
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function normalizeRecordOutcomes(raw: unknown): RunRecordOutcomes {
+  const r = (raw || {}) as { permanently_rejected?: unknown; unaccounted_by_stream?: unknown };
+  const byStream =
+    r.unaccounted_by_stream && typeof r.unaccounted_by_stream === "object"
+      ? (r.unaccounted_by_stream as Record<string, unknown>)
+      : {};
+  const unaccounted: Record<string, number> = {};
+  for (const [stream, count] of Object.entries(byStream)) {
+    if (isCount(count)) {
+      unaccounted[stream] = count;
+    }
+  }
+  return {
+    permanently_rejected: isCount(r.permanently_rejected) ? r.permanently_rejected : null,
+    unaccounted_by_stream: unaccounted,
+  };
 }
 
 function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
@@ -217,6 +239,7 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary?: unknown;
     links?: unknown;
     object?: unknown;
+    record_outcomes?: unknown;
     run_id?: unknown;
     started_at?: unknown;
     status?: unknown;
@@ -233,6 +256,7 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary: r.known_gaps_summary,
     links: normalizeRunLinks(r.links),
     object: "run_status",
+    record_outcomes: normalizeRecordOutcomes(r.record_outcomes),
     run_id: typeof r.run_id === "string" ? r.run_id : "",
     started_at: typeof r.started_at === "string" ? r.started_at : null,
     status,
@@ -544,6 +568,12 @@ export interface RefCollectionReportEntry {
   considered: number | "unknown";
   /** Derived coverage condition, from the same vocabulary as the coverage axis. */
   coverage_condition: RefCoverageAxis;
+  /**
+   * True when `coverage_condition` is `unknown` only because the connector
+   * reported collecting this stream and the runtime did not enumerate the
+   * store. A labelled report, not missing evidence. Absent on older references.
+   */
+  coverage_reported_collected?: boolean;
   /** Manifest-declared coverage proof strategy, absent on older references. */
   coverage_strategy?:
     | "checkpoint_window"
@@ -632,6 +662,17 @@ export interface RefConnectorImplementation {
   state: "built_in" | "installed" | "local_source" | "not_installed" | "unknown";
 }
 
+/** See {@link RefConnectorSummary.coverage_as_of}. */
+export interface RefCoverageAsOf {
+  readonly artifact_digest: string;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
+  /** The sequence the server issued to the run at its start; it decides which proof can be current. */
+  readonly run_sequence: number;
+}
+
 export interface RefConnectorSummary {
   /**
    * Owner/control-plane acquisition provenance for manual imports, device
@@ -669,6 +710,13 @@ export interface RefConnectorSummary {
    * renders no horizons rather than inventing a state. Pass-through from
    * `server/ref-control.ts#projectConnectorSummaryConnectionHealth`.
    */
+  /**
+   * What the local coverage on this row is a fact about (`LocalCoverageAsOf`
+   * in reference `server/ref-control.ts`): the run, its release digest, and the
+   * collection revision and time it was committed at. `null` or absent when no
+   * current local proof backs the coverage shown.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   coverage_horizons?: readonly RefCoverageHorizon[];
   display_name: string;
   freshness: Record<string, unknown>;
@@ -950,6 +998,7 @@ export interface RefVerdictPill {
     | "Archived"
     | "Can't collect"
     | "Checking"
+    | "Collected, not independently checked"
     | "Healthy"
     | "Import complete"
     | "Missing data"
@@ -1314,6 +1363,12 @@ export interface RefConnectionHealthSnapshot {
    */
   collection_rate?: RefCollectionRateSnapshot | null;
   conditions?: readonly RefConnectionHealthCondition[];
+  /**
+   * What `axes.coverage` is a fact about: the same value as the summary's
+   * top-level `coverage_as_of`. Optional on the mirror because a reference
+   * predating the field omits it.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   /**
    * Additive, nullable source-pressure detail-gap backlog rollup
    * ({@link RefDetailGapBacklog}). `null` when no backlog evidence was supplied
@@ -1773,8 +1828,6 @@ export async function listExploreTimeline(
 /** Max page size the reference accepts (`CONNECTOR_SUMMARY_PAGE_LIMIT_MAX`). */
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
 const CONNECTOR_SUMMARY_DEFAULT_PAGE_LIMIT = 100;
-/** Accepted maximum for a repeated `connector_id` SET scope (design doc add-source-perf-design-agy-0730.md "Minimal contract"). */
-export const CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX = 100;
 
 /**
  * Named semantic profile on `GET /_ref/connectors` (Fable ruling §8, R8.1).
@@ -1813,7 +1866,7 @@ export interface RefConnectorRetainedCountSummariesResponse extends ListResponse
 
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1821,7 +1874,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorIdentitySummariesResponse>;
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1829,7 +1882,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorRetainedCountSummariesResponse>;
 export function listConnectorSummaries(options?: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1840,12 +1893,10 @@ export async function listConnectorSummaries(
   options: {
     connectionRouteId?: string;
     /**
-     * Bounded repeated-value SET scope on the paged (non-`connectionRouteId`)
-     * form — design doc "Minimal contract": 1..
-     * {@link CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX} canonical distinct ids,
-     * sent as repeated `connector_id` query values, never CSV-encoded.
+     * Optional connector scope, sent as repeated flat `connector_id` values.
+     * Omit to page through all owner-visible connections.
      */
-    connectorId?: readonly string[];
+    connectorId?: string | readonly string[];
     cursor?: string;
     includeFleetHealth?: boolean;
     limit?: number;
@@ -2639,6 +2690,48 @@ export interface ConnectionSetupStatus {
 }
 
 export type StaticSecretSetupStatus = ConnectionSetupStatus;
+
+export interface RejectedRecordReceipt {
+  firstInputIndex: number | null;
+  payloadBytes: number | null;
+  reasonCode: string;
+  receiptId: string;
+  stream: string;
+}
+
+export interface RecordRejectionReceiptPage {
+  nextCursor: string | null;
+  receipts: RejectedRecordReceipt[];
+}
+
+const RUN_RECEIPT_PAGE_SIZE = 25;
+
+/** One page of a run's record-rejection receipts; the server filters by run and pages by cursor. */
+export async function listRunRecordRejectionReceipts(
+  connectionId: string,
+  runId: string,
+  cursor: string | null
+): Promise<RecordRejectionReceiptPage> {
+  const body = (await refFetch(`/_ref/connections/${encodeURIComponent(connectionId)}/record-rejections`, {
+    cursor: cursor ?? undefined,
+    limit: RUN_RECEIPT_PAGE_SIZE,
+    run_id: runId,
+  })) as { data?: unknown; next_cursor?: unknown } | null;
+  const receipts: RejectedRecordReceipt[] = [];
+  for (const item of (Array.isArray(body?.data) ? body.data : []) as Record<string, unknown>[]) {
+    if (typeof item.receipt_id !== "string" || typeof item.stream !== "string") {
+      continue;
+    }
+    receipts.push({
+      firstInputIndex: isCount(item.first_input_index) ? item.first_input_index : null,
+      payloadBytes: isCount(item.payload_bytes) ? item.payload_bytes : null,
+      reasonCode: typeof item.reason_code === "string" ? item.reason_code : "unknown",
+      receiptId: item.receipt_id,
+      stream: item.stream,
+    });
+  }
+  return { nextCursor: typeof body?.next_cursor === "string" ? body.next_cursor : null, receipts };
+}
 
 export async function getConnectionSetupStatus(
   connectionId: string,

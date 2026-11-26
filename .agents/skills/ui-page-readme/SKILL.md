@@ -14,7 +14,7 @@ description: Write concise README.md files for a page/route folder or co-located
 ## Required reads (before writing)
 
 - `docs/architecture.md` to align with runtime boundaries and system roles.
-- If the page touches grant flow, also read `docs/260203-grant-connect-flow.md`.
+- If the page touches grant flow, also read `docs/260325-grant-connect-flow-architecture.md`.
 - If unrelated to grant flow, explicitly say so in the README.
 
 ## Placement

@@ -15,14 +15,12 @@
  *     (and a trailing slash) down to the bare key.
  *   - connectorKeyFromManifest: connector_key → connector_id → explicit fallback
  *     → null; canonicalized; blanks skipped.
- *   - enrollmentKeyForCanonicalKey: identity except `claude-code` → `claude_code`.
+ *   - canonicalConnectorKey leaves a retired underscore id (`claude_code`) as it is.
  *   - displayNameForConnector: manifest.display_name → manifest.name → the key.
- *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: allowlist
- *     membership over the CANONICAL key (so a registry-URL id still matches).
- *   - isSupportedLocalCollectorConnector: membership over the ENROLLMENT key
- *     (so `claude-code` matches `claude_code`); non-string => false.
- *   - isSupportedBrowserCollectorConnector / isBrowserBoundConnector: shipped
- *     capability membership over the canonical key; non-string => false.
+ *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: the claim in
+ *     the connector's own manifest (`capabilities.proven`), never a key list.
+ *   - isLocalCollectorProven: the manifest's `capabilities.proven.local_collector`.
+ *   - classifyConnectorIntentModality: browser-bound from the manifest's bindings.
  *
  * Pure classification over shipped connector capability data — no DB, no
  * server, no fixtures.
@@ -33,14 +31,12 @@ import test from "node:test";
 
 import {
   canonicalConnectorKey,
+  classifyConnectorIntentModality,
   connectorKeyFromManifest,
   displayNameForConnector,
-  enrollmentKeyForCanonicalKey,
-  isBrowserBoundConnector,
+  isLocalCollectorProven,
   isProviderAuthLifecycleProven,
   isStaticSecretLiveProven,
-  isSupportedBrowserCollectorConnector,
-  isSupportedLocalCollectorConnector,
 } from "../server/connection-setup-plan.ts";
 
 // --- canonicalConnectorKey --------------------------------------------------
@@ -66,9 +62,9 @@ test("canonicalConnectorKey: trims and strips the first-party registry prefix + 
 test("connectorKeyFromManifest: prefers connector_key, canonicalized", () => {
   assert.equal(connectorKeyFromManifest({ connector_id: "other", connector_key: "  gmail  " }), "gmail");
   assert.equal(
-    connectorKeyFromManifest({ connector_key: "https://registry.pdpp.dev/connectors/slack" }),
+    connectorKeyFromManifest({ connector_id: "https://registry.pdpp.dev/connectors/slack" }),
     "slack",
-    "connector_key is canonicalized"
+    "a registry-URL connector_id yields its slug"
   );
 });
 
@@ -79,17 +75,12 @@ test("connectorKeyFromManifest: falls back connector_id -> explicit fallback -> 
   assert.equal(connectorKeyFromManifest({}, null), null, "null fallback => null");
 });
 
-// --- enrollmentKeyForCanonicalKey -------------------------------------------
+// --- retired ids ------------------------------------------------------------
 
-test("enrollmentKeyForCanonicalKey: maps claude-code to claude_code, else identity", () => {
-  assert.equal(enrollmentKeyForCanonicalKey("claude-code"), "claude_code", "the one special case");
-  assert.equal(
-    enrollmentKeyForCanonicalKey("https://registry.pdpp.dev/connectors/claude-code"),
-    "claude_code",
-    "canonicalizes first, then maps"
-  );
-  assert.equal(enrollmentKeyForCanonicalKey("codex"), "codex", "other keys unchanged");
-  assert.equal(enrollmentKeyForCanonicalKey("gmail"), "gmail");
+test("canonicalConnectorKey: a retired underscore id is not rewritten to its current key", () => {
+  assert.equal(canonicalConnectorKey("claude_code"), "claude_code");
+  assert.equal(canonicalConnectorKey("claude-code"), "claude-code");
+  assert.equal(connectorKeyFromManifest({ connector_key: "claude_code" }), "claude_code");
 });
 
 // --- displayNameForConnector ------------------------------------------------
@@ -103,68 +94,41 @@ test("displayNameForConnector: display_name -> name -> the key", () => {
 
 // --- isProviderAuthLifecycleProven ------------------------------------------
 
-test("isProviderAuthLifecycleProven: allowlist membership over the canonical key", () => {
-  assert.equal(isProviderAuthLifecycleProven("test_provider"), true, "allowlisted");
-  assert.equal(
-    isProviderAuthLifecycleProven("https://registry.pdpp.dev/connectors/test_provider"),
-    true,
-    "registry-url id still matches via canonicalization"
-  );
-  assert.equal(isProviderAuthLifecycleProven("gmail"), false, "gmail is not lifecycle-proven");
+test("isProviderAuthLifecycleProven: reads the manifest's own claim, strictly true", () => {
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: true } } }), true);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: false } } }), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: "true" } } }), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: {} }), false, "no proven block");
+  assert.equal(isProviderAuthLifecycleProven(null), false, "no manifest");
 });
 
 // --- isStaticSecretLiveProven -----------------------------------------------
 
-test("isStaticSecretLiveProven: gmail/github/slack proven; others not", () => {
-  assert.equal(isStaticSecretLiveProven("gmail"), true);
-  assert.equal(isStaticSecretLiveProven("github"), true);
-  assert.equal(isStaticSecretLiveProven("slack"), true);
-  assert.equal(isStaticSecretLiveProven("amazon"), false, "amazon is not static-secret-proven");
-  assert.equal(isStaticSecretLiveProven("  github  "), true, "canonicalization trims before the membership check");
+test("isStaticSecretLiveProven: reads capabilities.proven.static_secret_live.proven, strictly true", () => {
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: true } } } }), true);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: false } } } }), false);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: {} } } }), false);
+  assert.equal(isStaticSecretLiveProven(undefined), false, "no manifest");
 });
 
-// --- isSupportedLocalCollectorConnector -------------------------------------
+// --- isLocalCollectorProven -------------------------------------------------
 
-test("isSupportedLocalCollectorConnector: membership over the ENROLLMENT key", () => {
-  assert.equal(isSupportedLocalCollectorConnector("claude_code"), true, "direct enrollment key");
-  // The canonical key `claude-code` maps to the enrollment key `claude_code`,
-  // so the hyphenated form must ALSO be recognized.
-  assert.equal(isSupportedLocalCollectorConnector("claude-code"), true, "hyphenated form via enrollment mapping");
-  assert.equal(isSupportedLocalCollectorConnector("codex"), true);
-  assert.equal(isSupportedLocalCollectorConnector("amazon"), false, "browser connector is not a local collector");
-  assert.equal(isSupportedLocalCollectorConnector(null), false, "null => false");
-  assert.equal(isSupportedLocalCollectorConnector(undefined), false, "undefined => false");
+test("isLocalCollectorProven: reads capabilities.proven.local_collector, strictly true", () => {
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: true } } }), true);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: false } } }), false);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: 1 } } }), false);
+  assert.equal(isLocalCollectorProven(null), false, "no manifest");
 });
 
-// --- isSupportedBrowserCollectorConnector -----------------------------------
+// --- classifyConnectorIntentModality ----------------------------------------
 
-test("isSupportedBrowserCollectorConnector: production-ready browser runtimes; canonical-key based", () => {
-  assert.equal(isSupportedBrowserCollectorConnector("amazon"), true);
-  assert.equal(
-    isSupportedBrowserCollectorConnector("https://registry.pdpp.dev/connectors/amazon"),
-    true,
-    "registry-url id matches"
+test("classifyConnectorIntentModality: browser-bound comes from the manifest's own bindings", () => {
+  const browserManifest = { runtime_requirements: { bindings: { browser: { required: true } } } };
+  assert.equal(classifyConnectorIntentModality(browserManifest), "browser_bound");
+  assert.notEqual(
+    classifyConnectorIntentModality({ runtime_requirements: { bindings: { network: {} } } }),
+    "browser_bound",
+    "a manifest that declares no browser binding is not browser-bound"
   );
-  for (const key of ["chase", "chatgpt", "heb", "reddit", "usaa"]) {
-    assert.equal(isSupportedBrowserCollectorConnector(key), true, `${key} is a shipped browser runtime`);
-  }
-  assert.equal(isSupportedBrowserCollectorConnector("anthropic"), false, "unlisted scaffold stays unavailable");
-  assert.equal(isSupportedBrowserCollectorConnector("claude_code"), false, "local collector is not browser");
-  assert.equal(isSupportedBrowserCollectorConnector(null), false);
-});
-
-// --- isBrowserBoundConnector ------------------------------------------------
-
-test("isBrowserBoundConnector: recognizes the browser-bound allowlist, rejects others", () => {
-  for (const key of ["amazon", "chase", "chatgpt", "reddit", "usaa"]) {
-    assert.equal(isBrowserBoundConnector(key), true, `${key} is browser-bound`);
-  }
-  assert.equal(isBrowserBoundConnector("gmail"), false, "gmail (static-secret) is not browser-bound");
-  assert.equal(isBrowserBoundConnector("codex"), false, "codex (local) is not browser-bound");
-  assert.equal(isBrowserBoundConnector(null), false, "null => false");
-  assert.equal(
-    isBrowserBoundConnector("https://registry.pdpp.dev/connectors/chatgpt"),
-    true,
-    "registry-url id matches via canonicalization"
-  );
+  assert.equal(classifyConnectorIntentModality(null), "unknown", "no manifest");
 });

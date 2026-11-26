@@ -117,19 +117,19 @@ authoring_evidence:
     result: "17 commits in window; coupling(fan-in proxy)=77"
 evidence_required:
   - rung: typecheck
-    command: "cd /home/tnunamak/.tmp/hone-quality-0823/reference-implementation && npx tsc --noEmit"
+    command: "cd reference-implementation && npx tsc --noEmit"
     expect: exit 0
     expect_check:
       type: exit_code
       value: 0
   - rung: direct-test
-    command: "cd /home/tnunamak/.tmp/hone-quality-0823/reference-implementation && node scripts/run-tests.ts"
+    command: "cd reference-implementation && node scripts/run-tests.ts"
     expect: all tests pass; 0 fail; no new skips (skip counts compared baseline vs post)
     expect_check:
       type: exit_code
       value: 0
   - rung: file-complexity-remeasure
-    command: "node /home/tnunamak/code/minnows/tools/hone/collectors/scope-fn.mjs --repo /home/tnunamak/.tmp/hone-quality-0823/reference-implementation --file 'runtime/controller.ts' --cog 5"
+    command: "node $HONE_ROOT/collectors/scope-fn.mjs --repo reference-implementation --file 'runtime/controller.ts' --cog 5"
     expect: "found=true and file_excess < 218 (packet baseline: whole-file Σ excess-cc) and strictly below the measured baseline; no NEW function above the cog-5 threshold vs baseline; red_scan unchanged"
     expect_check:
       type: file_excess_lt

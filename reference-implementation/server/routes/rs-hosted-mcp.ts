@@ -26,6 +26,7 @@ import {
   type ResolvePublicUrlRequest,
   resolvePublicUrl,
 } from "../metadata.ts";
+import { productIconLinkHeader, productServerIcons } from "../product-icons.ts";
 import {
   isAllowedMcpOrigin,
   type ReachabilityContract,
@@ -227,18 +228,6 @@ async function sendWebResponse(
   res.send(body);
 }
 
-function hostedMcpIconUrl(resource: string): string {
-  return new URL("/icon.svg", resource).toString();
-}
-
-function hostedMcpIcons(resource: string): readonly McpServerIcon[] {
-  return [{ mimeType: "image/svg+xml", sizes: ["any"], src: hostedMcpIconUrl(resource) }];
-}
-
-function hostedMcpIconLink(resource: string): string {
-  return `<${hostedMcpIconUrl(resource)}>; rel="icon"; type="image/svg+xml"`;
-}
-
 export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): void {
   const {
     explicitResource,
@@ -274,7 +263,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     if (isTrustedMetadataRequestOrigin(req, explicitResource, trustedMetadataHosts)) {
       const resource = resolvePublicUrl(req, explicitResource);
       res.locals[PROTECTED_RESOURCE_METADATA_URL_LOCAL] = protectedResourceMetadataUrlForResource(`${resource}/mcp`);
-      res.setHeader("link", hostedMcpIconLink(resource));
+      res.setHeader("link", productIconLinkHeader(resource));
     }
     next();
   }
@@ -287,7 +276,14 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
   ): Promise<McpServerOptions | null> {
     const access = await ctx.getGrantPackageAccess(req.tokenInfo?.grant_package_id as string);
     if (!access || access.members.length === 0) {
-      ctx.pdppError(res, 403, "package_revoked", "Grant package is revoked or has no active members");
+      const metadataUrl = res.locals[PROTECTED_RESOURCE_METADATA_URL_LOCAL];
+      if (typeof metadataUrl === "string" && metadataUrl) {
+        res.setHeader(
+          "WWW-Authenticate",
+          `Bearer resource_metadata="${metadataUrl.replace(/["\\]/g, "\\$&")}", error="invalid_token"`
+        );
+      }
+      ctx.pdppError(res, 401, "authentication_error", "Grant package is revoked or has no active members");
       return null;
     }
     const rsClient = ctx.createPackageRsClient({
@@ -300,7 +296,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
       fetch: globalThis.fetch,
       providerUrl: resource,
       rsClient,
-      serverIcons: hostedMcpIcons(resource),
+      serverIcons: productServerIcons(resource),
       serverName: "pdpp-reference-mcp",
       serverVersion: referenceRevision,
     } satisfies McpServerOptions;
@@ -330,7 +326,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
       fetch: globalThis.fetch,
       providerUrl: resource,
       rsClient,
-      serverIcons: hostedMcpIcons(resource),
+      serverIcons: productServerIcons(resource),
       serverName: "pdpp-reference-mcp",
       serverVersion: referenceRevision,
     };
@@ -368,7 +364,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
 
     const webRequest = buildMcpWebRequest(req, resource);
     const response = await ctx.handleStreamableHttpRequest(webRequest, mcpServerOptions);
-    await sendWebResponse(res, response, { iconLink: hostedMcpIconLink(resource) });
+    await sendWebResponse(res, response, { iconLink: productIconLinkHeader(resource) });
   }
 
   const middlewareChain = [

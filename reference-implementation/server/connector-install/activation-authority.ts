@@ -5,6 +5,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ConnectorManifestStorageContext,
+  assertLegacyOwnershipPostgres,
+  assertLegacyOwnershipSqlite,
   moveSourceIdentityPostgres,
   moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
@@ -133,6 +135,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
   let values: ActivationValues;
   if (isPostgresStorageBackend()) {
     values = await withPostgresTransaction(async (client) => {
+      await assertLegacyOwnershipPostgres(client, id, record.manifest);
       await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_activation'), hashtext($1))", [id]);
       const registry = await client.query<{ manifest: unknown }>(
         "SELECT manifest FROM connectors WHERE connector_id=$1 FOR UPDATE",
@@ -186,6 +189,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
     values = getDb()
       .transaction(() => {
         const db = getDb();
+        assertLegacyOwnershipSqlite(id, record.manifest);
         const old = db.prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get<{ manifest: string }>(id);
         const derived = activationValues(record, retainedStorageContext(old?.manifest));
         const identityMove = retainedSourceIdentityChange(

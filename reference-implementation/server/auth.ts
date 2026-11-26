@@ -40,10 +40,10 @@ import {
 } from "./oauth-client-auth.ts";
 import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
-import { legacyFirstPartySourceIdFor } from "./connector-legacy-source-map.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "./connector-key.ts";
 import {
   invalidConnectorManifest,
+  declaredLegacySourceIds,
   resolveManifestSensitivity,
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
@@ -73,6 +73,7 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import { PRODUCT_ICON_SVG, productIconUrl } from "./product-icons.ts";
 import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
 import {
   lockOwnerPasswordVerifierRevision,
@@ -911,11 +912,6 @@ async function pgExec(sql: string, params: unknown[] = []): Promise<{ changes: n
 }
 
 let configuredNativeManifest: DbRow | null = null;
-// Source of truth: connector-key.ts's legacyLocalAliasMap(). This used to be a
-// second, independently-maintained table here and had drifted (missing
-// google_takeout/apple_photos/google_messages) — see
-// docs/inbox/report-connector-knowledge-clusters-bc.md.
-const LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES = new Map(Object.entries(legacyLocalAliasMap()));
 const PENDING_CONSENT_REQUEST_URI_PREFIX = "urn:pdpp:pending-consent:";
 const LEADING_SLASH_RE = /^\//;
 const TRAILING_SLASHES_RE = /\/+$/;
@@ -3505,6 +3501,31 @@ function derivedRepairPlan(
   };
 }
 
+function assertLegacyOwnership(incoming: Record<string, unknown>, others: { manifest: unknown }[]): void {
+  const legacy = declaredLegacySourceIds(incoming);
+  const current = sourceIdOfDeclaration(sourceDeclarationOf(incoming));
+  for (const { manifest } of others) {
+    const other = manifestRecordOf(manifest);
+    if (!other) continue;
+    const otherLegacy = declaredLegacySourceIds(other);
+    const otherCurrent = sourceIdOfDeclaration(sourceDeclarationOf(other));
+    if (legacy.some((id) => otherLegacy.includes(id) || id === otherCurrent) || (current !== undefined && otherLegacy.includes(current))) {
+      throw invalidConnectorManifest("Legacy source identity is already owned by another connector");
+    }
+  }
+}
+
+export async function assertLegacyOwnershipPostgres(client: PostgresTransactionClient, key: string, manifest: Record<string, unknown>): Promise<void> {
+  // Serialize identity claims across different connector keys, including first registrations.
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
+  const others = await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id <> $1", [key]);
+  assertLegacyOwnership(manifest, others.rows);
+}
+
+export function assertLegacyOwnershipSqlite(key: string, manifest: Record<string, unknown>): void {
+  assertLegacyOwnership(manifest, getDb().prepare("SELECT manifest FROM connectors WHERE connector_id <> ?").all<{ manifest: string }>(key));
+}
+
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
@@ -3514,6 +3535,7 @@ async function persistManifestAndAdvanceGenerations(
   const identityOptions = { verifiedSourceDeclaration: options.verifiedSourceDeclaration === true };
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
+      await assertLegacyOwnershipPostgres(client, connectorId, JSON.parse(manifestJson));
       await lockConnectorManifestPublication(client, connectorId);
       const activation = await client.query<{ state: string; canonical_manifest_json: string }>(
         "SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=$1 FOR SHARE",
@@ -3593,6 +3615,7 @@ async function persistManifestAndAdvanceGenerations(
   }
   return transaction(() => {
     const db = getDb();
+    assertLegacyOwnershipSqlite(connectorId, JSON.parse(manifestJson));
     const activation = db
       .prepare("SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=?")
       .get<{ state: string; canonical_manifest_json: string }>(connectorId);
@@ -5512,7 +5535,7 @@ export async function registerDynamicClient(
     client_name: registered.metadata.client_name || null,
     client_uri: registered.metadata.client_uri || (asBase ? asBase : undefined),
     grant_types: registered.metadata.grant_types || undefined,
-    logo_uri: registered.metadata.logo_uri || (asBase ? `${asBase}/icon.svg` : undefined),
+    logo_uri: registered.metadata.logo_uri || (asBase ? productIconUrl(asBase, PRODUCT_ICON_SVG) : undefined),
     policy_uri: registered.metadata.policy_uri || (asBase ? asBase : undefined),
     redirect_uris: registered.metadata.redirect_uris || undefined,
     response_types: registered.metadata.response_types || undefined,
@@ -5565,7 +5588,7 @@ export async function registerConnector(
     verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
-  validateConnectorManifest(manifest);
+  validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
   // The retained identity is read here and re-checked under the publication lock in
   // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
   const storageContext = await retainedStorageContextForConnector(storageConnectorIdOf(manifest));
@@ -5676,6 +5699,7 @@ export interface ConnectorManifestStorageContext {
    * `declaration_version` under the same source identity.
    */
   readonly retainedSourceDeclaration?: unknown;
+  readonly retainedConnectorId?: string;
 }
 
 function storageConnectorIdOf(manifest: Record<string, unknown>): unknown {
@@ -5699,12 +5723,14 @@ function sourceIdOfDeclaration(declaration: Record<string, unknown> | undefined)
 
 /**
  * Storage context for a writer that replaces `previousManifest`. Call it with the row read under the same
- * lock or transaction that persists the result. A row with no retained declaration gives no context, so
- * its write takes the fresh path: a reviewed mapping or an explicit declaration, else a refusal.
+ * lock or transaction that persists the result. A pre-projection row keeps its connector key,
+ * so an update without a declaration preserves the absence of a retained source identity.
  */
 export function retainedStorageContext(previousManifest: unknown): ConnectorManifestStorageContext {
   const declaration = sourceDeclarationOf(previousManifest);
-  return declaration === undefined ? {} : { retainedSourceDeclaration: declaration };
+  const previous = manifestRecordOf(previousManifest);
+  const id = previous && storageConnectorIdOf(previous);
+  return { ...(declaration === undefined ? {} : { retainedSourceDeclaration: declaration }), ...(typeof id === "string" ? { retainedConnectorId: id } : {}) };
 }
 
 /** The declaration currently retained under a connector key, read before the registration transaction. */
@@ -5934,6 +5960,7 @@ export function normalizeConnectorManifestForStorage(
   connectorId: string;
   storedManifest: Record<string, unknown>;
 } {
+  declaredLegacySourceIds(manifest);
   const connectorId = storageConnectorIdOf(manifest);
   if (!isNonEmptyString(connectorId)) {
     throw invalidConnectorManifest("connector_id is required");
@@ -5963,16 +5990,15 @@ export function normalizeConnectorManifestForStorage(
   } else if (context.retainedSourceDeclaration !== undefined) {
     storedManifest.source_declaration = projectRetainedSourceDeclaration(storedManifest, context.retainedSourceDeclaration);
   } else {
-    // Fresh registration: no retained identity and no explicit declaration. The only identity
-    // this branch may use is the reviewed legacy source for the canonical connector key. The
-    // incoming provenance (`manifest_uri`) and alias (`connector_id`) never choose it. A key
-    // with no reviewed entry is refused here, before any write.
-    const sourceId = legacyFirstPartySourceIdFor(connectorId);
-    if (sourceId === undefined) {
-      throw invalidConnectorManifest(
-        `Connector ${connectorId} has no source declaration and no reviewed source mapping; register an explicit source_declaration`
-      );
+    const ids = declaredLegacySourceIds(storedManifest);
+    if (context.retainedConnectorId !== undefined && context.retainedConnectorId !== connectorId) {
+      throw invalidConnectorManifest("Declared legacy identity does not match the retained connector key");
     }
+    if (ids.length === 0 && context.retainedConnectorId !== undefined) return { connectorId, storedManifest };
+    if (ids.length !== 1) {
+      throw invalidConnectorManifest(`Connector ${connectorId} has no source declaration; register an explicit source_declaration or one legacy_source_ids identity`);
+    }
+    const sourceId = ids[0]!;
     storedManifest.source_declaration = snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(
       storedManifest,
       {
@@ -5996,6 +6022,16 @@ export async function listRegisteredConnectorIds(): Promise<string[]> {
 }
 
 /**
+ * Canonical keys of every installed connector (vendored, signed-catalog and
+ * local sources; all are registered in the connector catalog). Tuning-namespace
+ * ownership uses it to give a key to the connector with the longest namespace.
+ */
+export async function listInstalledConnectorKeys(): Promise<string[]> {
+  const ids = await listRegisteredConnectorIds();
+  return [...new Set(ids.map((id) => canonicalConnectorKey(id) ?? id))];
+}
+
+/**
  * Get manifest by connector_id
  */
 export async function getConnectorManifest(connectorId: unknown): Promise<DbRow | null> {
@@ -6007,15 +6043,7 @@ export async function getConnectorManifest(connectorId: unknown): Promise<DbRow 
   if (!row) {
     return null;
   }
-  try {
-    return parseAndValidateConnectorManifestRow(row, connectorId);
-  } catch (err) {
-    const legacyAlias = await getLegacyLocalConnectorAliasManifest(connectorId);
-    if (legacyAlias) {
-      return legacyAlias;
-    }
-    throw err;
-  }
+  return parseAndValidateConnectorManifestRow(row, connectorId);
 }
 
 async function getConnectorManifestRow(connectorId: string): Promise<DbRow | null> {
@@ -6060,19 +6088,6 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     err.cause = cause;
     throw err;
   }
-}
-
-async function getLegacyLocalConnectorAliasManifest(connectorId: string): Promise<DbRow | null> {
-  const canonicalConnectorId = LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES.get(connectorId);
-  if (!canonicalConnectorId) {
-    return null;
-  }
-  const canonicalRow = await getConnectorManifestRow(canonicalConnectorId);
-  if (!canonicalRow) {
-    return null;
-  }
-  const manifest = parseAndValidateConnectorManifestRow(canonicalRow, canonicalConnectorId);
-  return cloneJson(manifest);
 }
 
 export async function getManifestForStorageBinding(

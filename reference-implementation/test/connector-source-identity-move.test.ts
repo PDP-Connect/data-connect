@@ -253,7 +253,7 @@ const UNMOVED: References = {
 
 /** The connector as an instance registered it before declarations: the legacy projection of its manifest. */
 async function seedLegacyConnector(backend: Backend): Promise<void> {
-  await registerConnector(profileFor("0.9.0"));
+  await registerConnector({ ...profileFor("0.9.0"), legacy_source_ids: [LEGACY_SOURCE] });
   assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
   await seedReferences(backend);
 }

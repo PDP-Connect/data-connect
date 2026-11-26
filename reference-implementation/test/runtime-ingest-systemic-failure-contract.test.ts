@@ -224,6 +224,7 @@ test("runtime-level: a systemic failure (run_terminal) fails the run terminally 
   // harmless against an existing row — so the run's status stays cancelled
   // straight through the runtime's first ingest attempt.
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId,
     connectorInstanceId,
     data: {},
@@ -233,6 +234,7 @@ test("runtime-level: a systemic failure (run_terminal) fails the run terminally 
     status: "started",
   });
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId,
     connectorInstanceId,
     data: { reason: "owner_cancelled" },

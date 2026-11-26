@@ -26,7 +26,7 @@ paths plus the reference-contract evidence pair and the relocated doc file.
 
 Format: two whitespace-separated 40-character SHA-1s per line, `old<TAB>new`,
 one line per commit filter-repo processed in the source clone
-(`~/.tmp/pdpp-filter-src`, branch `engine-split-slice2`, at commit `9942a9d208ef23b266ca5b0e9f1d3e442d154aaf`).
+(branch `engine-split-slice2`, at commit `9942a9d208ef23b266ca5b0e9f1d3e442d154aaf`).
 `old` is the commit's SHA in the pdpp monorepo (any ref reachable in that clone,
 not just `engine-split-slice2` — filter-repo processes all refs in the repository
 by default, so this map also covers commits reachable only from the clone's many
