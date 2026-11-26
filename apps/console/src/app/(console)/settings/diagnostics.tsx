@@ -6,6 +6,7 @@
 // may show codes and flags; nothing outside it may.
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button.tsx";
+import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
 import type { requestReachability } from "./reachability-client.ts";
@@ -92,31 +93,16 @@ export function Diagnostics({ children, label = "Details", note }: { children: R
 }
 
 function CopyButton({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-  async function copy() {
-    setFailed(null);
-    setCopied(false);
-    const clipboard = navigator.clipboard;
-    if (!clipboard) {
-      setFailed("Clipboard unavailable. Copy the text by hand.");
-      return;
-    }
-    try {
-      await clipboard.writeText(text);
-      setCopied(true);
-    } catch {
-      setFailed("Couldn't copy to the clipboard. Copy the text by hand.");
-    }
-  }
+  const [outcome, setOutcome] = useState<CopyOutcome | null>(null);
+  const failure = outcome ? copyFailureLine(outcome) : null;
   return (
     <>
-      <Button onClick={() => void copy()} type="button" variant="outline">
-        {copied ? "Copied" : label}
+      <Button onClick={() => void copyText(text).then(setOutcome)} type="button" variant="outline">
+        {outcome === "copied" ? "Copied" : label}
       </Button>
-      {failed ? (
+      {failure ? (
         <span className="text-sm" role="status">
-          {failed}
+          {failure}
         </span>
       ) : null}
     </>
