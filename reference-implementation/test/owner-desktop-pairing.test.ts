@@ -27,6 +27,7 @@ import {
 } from "../server/owner-session.ts";
 import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 
 // The instance identity file lives under PDPP_DATA_DIR; keep it out of the working tree.
 const IDENTITY_DATA_DIR = mkdtempSync(join(tmpdir(), "pdpp-desktop-pairing-identity-"));
@@ -38,33 +39,8 @@ const CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}-[ABCDEFGHJKMNPQRSTVWXYZ2-9
 const CSRF_HIDDEN_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/u;
 const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
 
-interface CloseableServer {
-  close: (callback?: (err?: Error) => void) => unknown;
-  closeAllConnections: () => void;
-}
-
-type StartedServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: CloseableServer;
-  rsServer: CloseableServer;
-  schedulerManager?: { stop?: () => void };
-  abortStartupBackfill?: (reason: string) => void;
-  startupBackfillDone?: Promise<unknown>;
-};
-
-async function closeServer(server: StartedServer): Promise<void> {
-  server.schedulerManager?.stop?.();
-  server.abortStartupBackfill?.("test shutdown");
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  const closeWithTimeout = (srv: CloseableServer) =>
-    new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 2000);
-      srv.close(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  await Promise.allSettled([closeWithTimeout(server.asServer), closeWithTimeout(server.rsServer)]);
+async function closeServer(server: TestServer): Promise<void> {
+  await closeTestServer(server);
   closeDb();
 }
 
@@ -72,14 +48,14 @@ async function withServer(
   opts: Record<string, unknown>,
   fn: (ctx: { asUrl: string }) => Promise<void>
 ): Promise<void> {
-  const server = (await startServer({
+  const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
     preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...opts,
-  })) as StartedServer;
+  });
   try {
     await fn({ asUrl: `http://localhost:${server.asPort}` });
   } finally {
