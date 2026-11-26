@@ -372,6 +372,17 @@ scenario("a manifest update cannot drop a historical identity claimed by its reg
   await registerConnector(manifest, { skipDerivedRepair: true });
   await assert.rejects(() => registerConnector({ ...manifest, legacy_source_ids: undefined, version: "1.1.0" }, { skipDerivedRepair: true }), /cannot drop.*identity/);
   assert.deepEqual((await storedFor("srcid-monotonic"))?.legacy_source_ids, ["urn:source:historical"]);
+
+  const overlapId = "urn:source:monotonic-overlap";
+  await registerConnector(legacyManifest({ connector_key: "srcid-monotonic-overlap", legacy_source_ids: [overlapId] }), { skipDerivedRepair: true });
+  await registerConnector(legacyManifest({ connector_key: "srcid-monotonic-overlap", source: { id: overlapId }, version: "1.1.0" }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("srcid-overlap-claimant", () => registerConnector(
+    legacyManifest({ connector_key: "srcid-overlap-claimant", source: { id: overlapId } }), { skipDerivedRepair: true }
+  ), /already owned/);
+  const declaration = (await storedFor("srcid-monotonic-overlap"))?.source_declaration as {
+    extensions: Record<string, { legacy_source_ids?: string[] }>;
+  };
+  assert.deepEqual(declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids, [overlapId]);
 });
 
 scenario("a declared legacy identity cannot belong to another connector", async () => {
@@ -384,23 +395,43 @@ scenario("a declared legacy identity cannot equal another connector's current id
   await assertRejectedWithoutWrite("srcid-legacy", () => registerConnector(legacyManifest({ connector_key: "srcid-legacy", legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }), /already owned/);
 });
 
-scenario("a retained historical projection protects its legacy identity without a manifest alias list", async () => {
-  const { storedManifest } = normalizeConnectorManifestForStorage(
-    legacyManifest({ connector_key: "srcid-historical-owner", legacy_source_ids: [EXPLICIT_SOURCE] })
-  );
-  delete storedManifest.legacy_source_ids;
-  if (isPostgresStorageBackend()) {
-    await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)",
-      ["srcid-historical-owner", JSON.stringify(storedManifest)]);
-  } else {
-    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)")
-      .run("srcid-historical-owner", JSON.stringify(storedManifest));
-  }
-  await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
-    legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
-    { skipDerivedRepair: true }
-  ), /already owned/);
-});
+for (const path of ["registration", "activation"] as const) {
+  scenario(`a pre-alias historical projection retains legacy membership when stated as current through ${path}`, async () => {
+    const { storedManifest } = normalizeConnectorManifestForStorage(
+      legacyManifest({ connector_key: "srcid-historical-owner", legacy_source_ids: [EXPLICIT_SOURCE] })
+    );
+    delete storedManifest.legacy_source_ids;
+    if (isPostgresStorageBackend()) {
+      await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)",
+        ["srcid-historical-owner", JSON.stringify(storedManifest)]);
+    } else {
+      getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)")
+        .run("srcid-historical-owner", JSON.stringify(storedManifest));
+    }
+    await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
+      legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
+      { skipDerivedRepair: true }
+    ), /already owned/);
+
+    const update = legacyManifest({ connector_key: "srcid-historical-owner", source: { id: EXPLICIT_SOURCE }, version: "1.1.0" });
+    if (path === "registration") {
+      await registerConnector(update, { skipDerivedRepair: true });
+    } else {
+      await publishConnectorActivation(installRecord("srcid-historical-owner", update));
+    }
+    await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
+      legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
+      { skipDerivedRepair: true }
+    ), /already owned/);
+    const retained = await storedFor("srcid-historical-owner");
+    assert.ok(retained);
+    assert.equal(retainedSourceId(retained), EXPLICIT_SOURCE);
+    const declaration = retained.source_declaration as { extensions: Record<string, { legacy_source_ids?: string[] }> };
+    assert.deepEqual(declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids, [EXPLICIT_SOURCE]);
+    const replay = await postRegister(retained);
+    assert.equal(replay.outcome, "success", JSON.stringify(replay));
+  });
+}
 
 scenario("concurrent legacy identity claims by different keys commit exactly one", async () => {
   const keys = ["srcid-owner-a", "srcid-owner-b"];
