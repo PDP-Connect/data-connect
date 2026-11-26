@@ -386,8 +386,11 @@ jobs:
       - name: Check vendored connector-manifests tarball matches its pin
         run: node scripts/check-polyfill-connectors-tarball-freshness.mjs
 
+      - name: Test snapshot integrity and regeneration
+        run: node --test scripts/sync-shipped-manifests.test.mjs
+
       - name: Check shipped connector-manifest snapshot integrity
-        run: node scripts/sync-shipped-manifests.mjs --check
+        run: node scripts/sync-shipped-manifests.mjs --check --freshness
 
   check-patchright-version:
     name: check one Patchright version

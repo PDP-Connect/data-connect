@@ -95,11 +95,17 @@ function checkSnapshot() {
     )
   }
 
-  const main = execFileSync("git", ["ls-remote", REMOTE, "refs/heads/main"], { encoding: "utf8" }).trim().split(/\s+/)[0]
-  if (main && main !== provenance.commit) {
-    console.warn(
-      `[shipped-manifests] snapshot pin ${provenance.commit} differs from data-connectors main ${main}; informational only. Regenerate with --commit <sha> when ready.`
-    )
+  if (process.argv.includes("--freshness")) {
+    try {
+      const main = execFileSync("git", ["ls-remote", REMOTE, "refs/heads/main"], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim().split(/\s+/)[0]
+      if (main && main !== provenance.commit) {
+        console.warn(
+          `[shipped-manifests] snapshot pin ${provenance.commit} differs from data-connectors main ${main}; informational only. Regenerate with --commit <sha> when ready.`
+        )
+      }
+    } catch (error) {
+      console.warn(`[shipped-manifests] freshness lookup failed; integrity is valid: ${error.message}`)
+    }
   }
   console.log(`[shipped-manifests] ${Object.keys(actual).length} manifests match provenance at ${provenance.commit}`)
 }
