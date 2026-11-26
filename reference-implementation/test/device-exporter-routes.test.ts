@@ -4,7 +4,11 @@
 import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test from "node:test";
+import fs, { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import test, { mock } from "node:test";
 
 import { buildLocalDeviceRecordEnvelope } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
@@ -14,6 +18,7 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
 import { HEARTBEAT_LEASE_MS } from "../server/heartbeat-lease.ts";
 import { startServer } from "../server/index.ts";
+import { __setLocalCollectorProfilesDirectoryForTest } from "../server/local-collector-profiles.ts";
 import {
   __setIngestFaultHookForTest,
   deleteConnectionRecordRowsSqlite,
@@ -43,6 +48,23 @@ const DURABLE_SENTINEL_PATTERN = /private-durable-second-record-sentinel/;
 const BACKEND_SENTINEL_PATTERN = /private-semantic-backend-sentinel/;
 const IDENTITY_DRIFT_MODEL_A_PATTERN = /identity-drift-model-a/;
 const IDENTITY_DRIFT_MODEL_B_PATTERN = /identity-drift-model-b/;
+
+async function withBrokenCodexProfile(profileState: "tampered" | "missing", fn: () => Promise<void>): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+  const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+  copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+  if (profileState === "tampered") {
+    const bytes = readFileSync(new URL("codex.json", sourceDirectory));
+    writeFileSync(join(directory, "codex.json"), Buffer.concat([bytes, Buffer.from(" ")]));
+  }
+  __setLocalCollectorProfilesDirectoryForTest(directory);
+  try {
+    await fn();
+  } finally {
+    __setLocalCollectorProfilesDirectoryForTest(null);
+    rmSync(directory, { force: true, recursive: true });
+  }
+}
 
 type Row = Record<string, unknown>;
 
@@ -3294,6 +3316,189 @@ test("device staleness badge stays honestly non-stale when no refresh policy res
     assert.equal(projected.last_heartbeat_at, longAgo);
     assert.equal(projected.stale, false, "with no resolvable refresh policy the badge must stay honestly non-stale");
   });
+});
+
+test("device diagnostics keeps healthy sources when a local profile pin is invalid", async () => {
+  await withServer(async ({ asUrl }) => {
+    const broken = await enrollDevice(asUrl, "broken-codex", "codex");
+    const heartbeat = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(broken.device_id)}/heartbeat`,
+      {
+        connector_id: "codex",
+        records_pending: 0,
+        source_instance_id: broken.source_instance_id,
+        status: "healthy",
+      },
+      authHeaders(broken.device_token)
+    );
+    assert.equal(heartbeat.status, 200);
+    setDeviceLastHeartbeatAt(broken.device_id, new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString());
+    await registerAmazonConnector(asUrl);
+    const healthyCode = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "amazon",
+      local_binding_name: "healthy-amazon",
+    });
+    const healthyEnroll = await postJson(`${asUrl}/_ref/device-exporters/enroll`, {
+      enrollment_code: stringField(bodyOf(healthyCode), "enrollment_code"),
+    }, PROTOCOL_HEADERS);
+    assert.equal(healthyEnroll.status, 201, JSON.stringify(healthyEnroll.body));
+
+    await withBrokenCodexProfile("tampered", async () => {
+      const responses = await Promise.all([
+        fetch(`${asUrl}/_ref/device-exporters`),
+        fetch(`${asUrl}/_ref/device-exporters/source-instances`),
+        fetch(`${asUrl}/_ref/device-exporters/diagnostics`),
+      ]);
+      assert.deepEqual(
+        responses.map((response) => response.status),
+        [200, 200, 200],
+        "every device diagnostics GET remains available when a local pin is invalid"
+      );
+      const payload = (await responses[2].json()) as DiagnosticsPayload;
+      const sourceRows = payload.data.flatMap((device) => device.source_instances);
+      const brokenSource = sourceRows.find((source) => source.device_id === broken.device_id);
+      const healthySource = sourceRows.find((source) => source.connector_id === "amazon");
+      assert.ok(brokenSource);
+      assert.ok(healthySource, "healthy registry-backed source remains in diagnostics");
+      const brokenDevice = payload.data.find((device) => device.device_id === broken.device_id);
+      assert.equal(brokenDevice?.stale, false, "an invalid pin leaves freshness unknown instead of failing diagnostics");
+    });
+  });
+});
+
+test("enrollment mint rejects a broken local pin before writing a code or catalog row", async () => {
+  await withBrokenCodexProfile("tampered", async () => {
+    await withServer(async ({ asUrl }) => {
+      const response = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+        connector_id: "codex",
+        local_binding_name: "broken-codex",
+      });
+      assert.equal(response.status, 409);
+      assert.equal(errorCode(response), "local_collector_profile_repair_required");
+      assert.match(errorMessage(response), /Reinstall the local collector to repair it/);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_enrollment_codes").n, 0);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM connectors WHERE connector_id = 'codex'").n, 0);
+    });
+  });
+});
+
+test("enrollment redemption rejects a broken local pin before materializing a device", async () => {
+  await withServer(async ({ asUrl }) => {
+    const code = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "codex",
+      local_binding_name: "broken-codex",
+    });
+    assert.equal(code.status, 201);
+    const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+    const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+    copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+    const bytes = readFileSync(new URL("codex.json", sourceDirectory));
+    writeFileSync(join(directory, "codex.json"), Buffer.concat([bytes, Buffer.from(" ")]));
+    __setLocalCollectorProfilesDirectoryForTest(directory);
+    try {
+      const response = await postJson(`${asUrl}/_ref/device-exporters/enroll`, {
+        enrollment_code: stringField(bodyOf(code), "enrollment_code"),
+      }, PROTOCOL_HEADERS);
+      assert.equal(response.status, 409);
+      assert.equal(errorCode(response), "local_collector_profile_repair_required");
+      assert.match(errorMessage(response), /Reinstall the local collector to repair it/);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters").n, 0);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM connectors WHERE connector_id = 'codex'").n, 0);
+    } finally {
+      __setLocalCollectorProfilesDirectoryForTest(null);
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+});
+
+test("an already-bound device retry is refused under a broken local pin and its credential keeps working", async () => {
+  await withServer(async ({ asUrl }) => {
+    const code = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "codex",
+      local_binding_name: "bound-codex",
+    });
+    assert.equal(code.status, 201);
+    const enrollmentCode = stringField(bodyOf(code), "enrollment_code");
+    const first = await postJson(`${asUrl}/_ref/device-exporters/enroll`, { enrollment_code: enrollmentCode }, PROTOCOL_HEADERS);
+    assert.equal(first.status, 201);
+    const device: EnrolledDevice = {
+      connector_id: stringField(bodyOf(first), "connector_id"),
+      connector_instance_id: stringField(bodyOf(first), "connector_instance_id"),
+      device_id: stringField(bodyOf(first), "device_id"),
+      device_token: stringField(bodyOf(first), "device_token"),
+      source_instance_id: stringField(bodyOf(first), "source_instance_id"),
+    };
+    const credentialsBefore = selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_ingest_credentials").n;
+
+    await withBrokenCodexProfile("tampered", async () => {
+      const retry = await postJson(`${asUrl}/_ref/device-exporters/enroll`, { enrollment_code: enrollmentCode }, PROTOCOL_HEADERS);
+      assert.equal(retry.status, 409, "a valid-code retry must not rotate a credential while the pin is invalid");
+      assert.equal(errorCode(retry), "local_collector_profile_repair_required");
+      assert.equal(retry.body?.device_token, undefined);
+    });
+
+    assert.equal(
+      selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_ingest_credentials").n,
+      credentialsBefore,
+      "no credential is written"
+    );
+    const stillWorks = await getSourceInstanceState(asUrl, device);
+    assert.equal(stillWorks.status, 200, "the existing credential still authenticates after the refused retry");
+  });
+});
+
+test("first redemption reads the local pin once, so a pin change mid-request cannot split identity from the refusal", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+  const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+  copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+  copyFileSync(new URL("codex.json", sourceDirectory), join(directory, "codex.json"));
+  const pinPath = join(directory, "codex.pin.json");
+  const realReadFileSync = fs.readFileSync;
+  let pinReads = 0;
+  try {
+    await withServer(async ({ asUrl }) => {
+      const code = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+        connector_id: "codex",
+        local_binding_name: "race-codex",
+      });
+      assert.equal(code.status, 201);
+      __setLocalCollectorProfilesDirectoryForTest(directory);
+      // The first read of the pin record sees the verified pin; any later read
+      // sees a pin a reinstall has just corrupted.
+      mock.method(fs, "readFileSync", ((path: unknown, ...rest: unknown[]) => {
+        if (path === pinPath) {
+          pinReads += 1;
+          if (pinReads > 1) {
+            return Buffer.from("{");
+          }
+        }
+        return (realReadFileSync as (...args: unknown[]) => unknown)(path, ...rest);
+      }) as typeof fs.readFileSync);
+      syncBuiltinESMExports();
+      let response: JsonResponse;
+      try {
+        response = await postJson(`${asUrl}/_ref/device-exporters/enroll`, {
+          enrollment_code: stringField(bodyOf(code), "enrollment_code"),
+        }, PROTOCOL_HEADERS);
+      } finally {
+        mock.restoreAll();
+        syncBuiltinESMExports();
+        __setLocalCollectorProfilesDirectoryForTest(null);
+      }
+      // One read means the request never sees the corrupted pin, so it succeeds.
+      assert.equal(pinReads, 1, "one redemption reads the pin record once");
+      assert.equal(response.status, 201);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters").n, 1);
+      assert.equal(
+        selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters WHERE device_id = ?", stringField(bodyOf(response), "device_id")).n,
+        1,
+        "the response names the identity that was written"
+      );
+    });
+  } finally {
+    __setLocalCollectorProfilesDirectoryForTest(null);
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 // --- connect's narrowing-only device scope, end to end against the real enroll route ---

@@ -264,6 +264,8 @@ test("D2: a successful re-enroll emits a credential-rotation audit receipt", asy
   let auditEvent: Record<string, unknown> | null = null;
   const ctx = {
     canonicalConnectorKey: (k: string | null | undefined) => k ?? null,
+    // The retry path reads the pin once, before it rotates a credential.
+    readReferenceLocalConnectorCatalogManifestResult: () => ({ kind: "not_local" }),
     deviceExporterStore: {
       findEnrollmentByCodeHash: async () => ({
         connectorId: "codex",
@@ -428,7 +430,11 @@ test("D3: transient connector_instance_busy on the enroll path becomes a typed 5
     // D7: sourceKind is resolved BEFORE resolveOrCreateEnrollmentDevice is
     // called, so the mock must resolve `codex` to `local_device` (a
     // filesystem-bound manifest) for the flow to reach the write path at all.
-    readReferenceLocalConnectorCatalogManifest: () => ({ runtime_requirements: { bindings: { filesystem: {} } } }),
+    readReferenceLocalConnectorCatalogManifestResult: () => ({
+      kind: "verified",
+      manifest: { runtime_requirements: { bindings: { filesystem: {} } } },
+    }),
+    logInvalidPinnedLocalConnectorProfile: () => {},
   };
   mountRefDeviceExporterEnroll(app as never, ctx as never);
 
