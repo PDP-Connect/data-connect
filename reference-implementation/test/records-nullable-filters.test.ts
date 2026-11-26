@@ -24,8 +24,8 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
@@ -170,51 +170,54 @@ async function withHarness(fn: (harness: Harness) => Promise<void>): Promise<voi
 // One manifest covers every filter case — all scalar shapes + a non-null
 // cursor field so pagination itself never blocks these filter tests.
 function nullableFiltersManifest() {
-  return {
-    connector_id: "nullable-filters",
-    display_name: "Nullable Filters",
-    manifest_uri: "https://sources.example/nullable-filters",
-    protocol_version: "0.1.0",
-    runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
-      {
-        cursor_field: "created_at",
-        name: "items",
-        primary_key: ["id"],
-        query: {
-          range_filters: {
-            rating: ["gte", "lte"],
-            score: ["gte", "gt", "lte", "lt"],
-            updated_at: ["gte", "lt"],
-            // `label` deliberately NOT declared: confirms plain nullable
-            // string range filters are rejected below.
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: "nullable-filters",
+      display_name: "Nullable Filters",
+      manifest_uri: "https://sources.example/nullable-filters",
+      protocol_version: "0.1.0",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      streams: [
+        {
+          cursor_field: "created_at",
+          name: "items",
+          primary_key: ["id"],
+          query: {
+            range_filters: {
+              rating: ["gte", "lte"],
+              score: ["gte", "gt", "lte", "lt"],
+              updated_at: ["gte", "lt"],
+              // `label` deliberately NOT declared: confirms plain nullable
+              // string range filters are rejected below.
+            },
           },
-        },
-        schema: {
-          properties: {
-            // Nullable boolean — exact only.
-            archived: { type: ["boolean", "null"] },
-            // Ordering basis — non-null so pagination parity is trivial.
-            created_at: { format: "date-time", type: "string" },
-            id: { type: "string" },
-            // Nullable string — used for exact filters.
-            label: { type: ["string", "null"] },
-            // Nullable number — exact + range.
-            rating: { type: ["number", "null"] },
-            // Nullable integer — exact + range.
-            score: { type: ["integer", "null"] },
-            // Nullable date-time — range.
-            updated_at: { format: "date-time", type: ["string", "null"] },
+          schema: {
+            properties: {
+              // Nullable boolean — exact only.
+              archived: { type: ["boolean", "null"] },
+              // Ordering basis — non-null so pagination parity is trivial.
+              created_at: { format: "date-time", type: "string" },
+              id: { type: "string" },
+              // Nullable string — used for exact filters.
+              label: { type: ["string", "null"] },
+              // Nullable number — exact + range.
+              rating: { type: ["number", "null"] },
+              // Nullable integer — exact + range.
+              score: { type: ["integer", "null"] },
+              // Nullable date-time — range.
+              updated_at: { format: "date-time", type: ["string", "null"] },
+            },
+            required: ["id", "created_at"],
+            type: "object",
           },
-          required: ["id", "created_at"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://sources.example/nullable-filters" }
+  );
 }
 
 async function seedItems(rsUrl: string, token: string, connectorId: string): Promise<void> {

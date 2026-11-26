@@ -53,6 +53,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -165,31 +166,34 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   return body.access_token;
 }
 
-const MANIFEST = {
-  connector_id: "stream-evidence-flush-ordering",
-  display_name: "STREAM_EVIDENCE Flush Ordering Regression",
-  manifest_uri: "https://sources.example/stream-evidence-flush-ordering",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "messages",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      coverage_strategy: "checkpoint_window",
-      name: "message_bodies",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-      state_stream: "messages",
-    },
-  ],
-  version: "1.0.0",
-};
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "stream-evidence-flush-ordering",
+    display_name: "STREAM_EVIDENCE Flush Ordering Regression",
+    manifest_uri: "https://sources.example/stream-evidence-flush-ordering",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "messages",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+      {
+        coverage_strategy: "checkpoint_window",
+        name: "message_bodies",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+        state_stream: "messages",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/stream-evidence-flush-ordering" }
+);
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
 

@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
-
 import { emitSpineEvent } from "../lib/spine.ts";
 import { configureNativeManifest, registerConnector } from "../server/auth.ts";
 import {
@@ -17,6 +16,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 type SourceKind = "connector" | "provider_native";
@@ -54,28 +54,31 @@ function withIsolatedPostgresJourney<T>(journey: (databaseUrl: string) => Promis
 }
 
 function runtimeManifest(connectorKey: string): JsonObject {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: "Source kind runtime neutrality",
-    manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" }, label: { type: "string" } },
-          required: ["id"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: "Source kind runtime neutrality",
+      manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" }, label: { type: "string" } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://implementations.example/connectors/${connectorKey}` }
+  );
 }
 
 function localFulfillment(sourceId: string, kind: SourceKind, connectorKey: string): JsonObject {

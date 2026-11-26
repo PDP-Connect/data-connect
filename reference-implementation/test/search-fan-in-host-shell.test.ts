@@ -29,6 +29,7 @@ import { drainConnectorInstanceIndexWork, ingestRecord } from "../server/records
 import { runLexicalSearch } from "../server/search.ts";
 import { buildSemanticSearchPlanForGrant as buildSemanticSearchPlanForGrantUntyped } from "../server/search-semantic.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // buildSemanticSearchPlanForGrant is imported from checkJs:false JS. Its
 // destructured params (connectorId/connectorInstanceId) default to `null`,
@@ -63,56 +64,59 @@ const ALERTS_STREAM = "alerts";
 const INSTANCE_A = "cin_search_fanin_account_a";
 const INSTANCE_B = "cin_search_fanin_account_b";
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Search Fan-in Test Connector",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: {
-        search: { lexical_fields: ["subject"] },
-      },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Search Fan-in Test Connector",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: {
+          search: { lexical_fields: ["subject"] },
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
-      },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: ALERTS_STREAM,
-      primary_key: ["id"],
-      query: {
-        search: { lexical_fields: ["subject"] },
-      },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: ALERTS_STREAM,
+        primary_key: ["id"],
+        query: {
+          search: { lexical_fields: ["subject"] },
+        },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 function target(instanceId: string) {
   return { connector_id: CONNECTOR_ID, connector_instance_id: instanceId };

@@ -31,7 +31,6 @@ import { createController } from "../../runtime/controller.ts";
 import { registerConnector } from "../../server/auth.ts";
 import { closeDb, initDb } from "../../server/db.ts";
 import { getSyncState, putSyncState } from "../../server/records.ts";
-
 import {
   announceHarnessRunStarted,
   CONNECTOR_A,
@@ -39,6 +38,7 @@ import {
   runHarnessBootReconciliation,
   spineHasRunAbandoned,
 } from "./connector-state-scheduler-conformance.ts";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 
 interface StateScope {
   connectorId: string;
@@ -268,7 +268,7 @@ export function createSqliteConnectorStateSchedulerDriver() {
       initDb();
       for (const manifest of HARNESS_MANIFESTS) {
         // biome-ignore lint/performance/noAwaitInLoops: ordered setup is intentionally sequential because each iteration advances shared test state.
-        await registerConnector(manifest);
+        await registerConnector(withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri }));
       }
       // Establish this incarnation's boot epoch before any run is
       // announced: the spine refuses an unstamped `run.started`, and the

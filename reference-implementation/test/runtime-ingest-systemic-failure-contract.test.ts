@@ -35,6 +35,7 @@ import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
 import { writeSqliteRunHistoryForSpineEvent } from "../server/stores/run-history-writer.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function fakeAdmitRunConnection(): (input: {
   connectorId: string;
@@ -102,23 +103,26 @@ function streamSchema() {
 }
 
 function manifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    connector_key: connectorId,
-    display_name: "Runtime Systemic Failure Contract Test Connector",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: streamSchema(),
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      connector_key: connectorId,
+      display_name: "Runtime Systemic Failure Contract Test Connector",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: streamSchema(),
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function createTestConnector(messages: Record<string, unknown>[]) {

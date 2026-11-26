@@ -13,6 +13,7 @@ import { classifyIngestFailure, ingestRecord } from "../server/records.ts";
 import { mountRsRecordsIngest } from "../server/routes/rs-mutation.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { writeSqliteRunHistoryForSpineEvent } from "../server/stores/run-history-writer.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "systemic_redaction_route_probe";
 const CONNECTOR_URI = "https://registry.pdpp.dev/connectors/systemic-redaction-route-probe";
@@ -64,27 +65,30 @@ function freshDb(t: TestContext): void {
 }
 
 function manifest() {
-  return {
-    connector_id: CONNECTOR_ID,
-    connector_key: CONNECTOR_ID,
-    display_name: "Systemic redaction route probe",
-    manifest_uri: CONNECTOR_URI,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" } },
-          required: ["id"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: CONNECTOR_ID,
+      connector_key: CONNECTOR_ID,
+      display_name: "Systemic redaction route probe",
+      manifest_uri: CONNECTOR_URI,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: CONNECTOR_URI }
+  );
 }
 
 async function seedConnection(): Promise<void> {
