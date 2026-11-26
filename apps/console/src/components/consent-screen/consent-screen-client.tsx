@@ -31,14 +31,7 @@
  * icons, and two distinct date axes (grant validity vs per-stream data range).
  */
 
-import {
-  IcButton,
-  IcInput,
-  IcPopover,
-  IcPopoverClose,
-  IcPopoverPopup,
-  IcPopoverTrigger,
-} from "@pdpp/brand-react";
+import { IcButton, IcInput } from "@pdpp/brand-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import styles from "./consent-screen.module.css";
@@ -51,7 +44,6 @@ import type {
 } from "./consent-screen-model.ts";
 import { clientPublishedLinks, sourceAccountLabel } from "./consent-screen-model.ts";
 
-const TRUST_HINT_ID = "consent-trust-explanation";
 
 interface SelectionState {
   [sourceId: string]: {
@@ -150,13 +142,6 @@ function sourceCountPhrase(count: number): string {
   return count === 1 ? "1 kind of record" : `${count} kinds of records`;
 }
 
-function sourceNamesPhrase(names: readonly string[]): string {
-  if (names.length < 2) return names[0] ?? "";
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
-}
-
-// DATA TIME RANGE (StreamGrant.time_constraint) — never grant validity.
 function dataRangeSummary(stream: ConsentStreamModel, range: { since: string; until: string }): string {
   if (!stream.timePhrase) {
     return "";
@@ -192,12 +177,7 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
 }
 
 function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
-  const trustExplanation =
-    client.trust === "domain"
-      ? `The app proved it controls this website: ${client.domain}.`
-      : client.trust === "unverified"
-        ? "The app's name and logo have not been checked."
-        : "The operator of this server confirmed this app.";
+  const verified = client.trust !== "unverified" && Boolean(client.domain);
   return (
     <header className={styles.consentHeader}>
       {/* `client.logo` is an AS-cached, same-origin URL — never the client's
@@ -213,28 +193,11 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
           <h1 className={`pdpp-display ${styles.headline}`}>{client.name} wants to read your data</h1>
         </div>
         <div className={styles.trustLine}>
-          {client.trust === "verified" ? (
-            <>
-              {client.domain && <span>{client.domain} · </span>}
-              <span className={styles.verified}>Verified</span>
-            </>
-          ) : client.trust === "domain" ? (
-            <span>{client.domain ?? "Website verified"}</span>
-          ) : (
-            <span>{client.domain ? `${client.domain} (not verified)` : "Website not verified"}</span>
-          )}
-          <IcPopover>
-            <IcPopoverTrigger aria-describedby={TRUST_HINT_ID} className={styles.trustHintTrigger}>
-              What does this mean?
-            </IcPopoverTrigger>
-            <IcPopoverPopup id={TRUST_HINT_ID} aria-label="Trust explanation">
-              <p className="pdpp-caption">{trustExplanation}</p>
-              <IcPopoverClose aria-label="Dismiss trust explanation" className={styles.trustHintDismiss}>
-                Dismiss
-              </IcPopoverClose>
-            </IcPopoverPopup>
-          </IcPopover>
+          <span>{client.returnTo}</span>
+          {verified ? <span className={styles.verified}>Verified</span> : <span>not verified</span>}
+
         </div>
+        {!verified ? <p className="pdpp-caption">DataConnect could not confirm who runs this app. Allow it only if you started this yourself, in {client.returnTo || "the app"}.</p> : null}
       </div>
     </header>
   );
@@ -277,14 +240,14 @@ function StreamRow({
         <span className="pdpp-body">{stream.label}</span>
         <span className="pdpp-caption">{plainCopy(stream.sentence)}</span>
         {selected && (
-          <details className={styles.narrow}>
-            <summary className={styles.narrowSummary}>
+          <div className={styles.narrow}>
+            <p className={styles.narrowSummary}>
               {fieldSummary(
                 stream,
                 stream.fields.length > 0 ? stream.fields.filter((field) => selectedFields[field.name]).length : null
               )}{" "}
                 {stream.fields.length > 0 && <span className={styles.narrowChange}>Change</span>}
-            </summary>
+            </p>
             <div className={styles.narrowBody}>
               {stream.fields.length > 0 ? (
                 <fieldset className={styles.fieldList}>
@@ -356,7 +319,7 @@ function StreamRow({
                 <p className={`pdpp-caption ${styles.streamRange}`}>No date range for this kind of record.</p>
               )}
             </div>
-          </details>
+          </div>
         )}
       </div>
     </div>
@@ -483,7 +446,7 @@ export function ConsentUnavailable({
   kind,
   onRetry,
 }: {
-  kind: "expired" | "error";
+  kind: "expired" | "error" | "answered";
   onRetry?: () => void;
 }) {
   const retry = onRetry ?? (() => window.location.reload());
@@ -491,9 +454,11 @@ export function ConsentUnavailable({
     <main className={styles.unavailable} data-state={kind}>
       <h1 className="pdpp-display">
         {kind === "expired"
-          ? "This request is no longer available. Go back to the app and try again."
-          : "This request could not be loaded. Go back to the app and try again."}
+          ? "This request has run out."
+          : kind === "answered" ? "You already answered this request." : "This request couldn’t be loaded."}
       </h1>
+      {kind === "expired" ? <p>Go back to the app and connect again.</p> : null}
+      {kind === "answered" ? <a href="/grants">See your apps</a> : null}
       {kind === "error" && (
         <IcButton onClick={retry} type="button" variant="ghost">
           Try again
@@ -529,12 +494,13 @@ export function ConsentScreen({
     const preset = model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId);
     return preset?.days ? todayPlusDays(preset.days) : "";
   });
-  const [noEndDate, setNoEndDate] = useState(false);
+  const [noEndDate, setNoEndDate] = useState(model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId)?.days === null);
   const [activeChipDays, setActiveChipDays] = useState<number | null>(() => {
     const preset = model.grantExpiry.options.find((option) => option.id === model.grantExpiry.defaultId);
     return preset?.days ?? null;
   });
   const [submitState, setSubmitState] = useState<ConsentSubmitState>("idle");
+  const [completed, setCompleted] = useState<"accept" | "reject" | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   // Effects run only after hydration, so this marks the moment the inputs
   // below have live React handlers. A toggle before that point changes only
@@ -628,7 +594,7 @@ export function ConsentScreen({
   }
 
   function endsText() {
-    return noEndDate ? "No end date" : `Access ends ${humanDate(expiry)}`;
+    return noEndDate ? "Access lasts until you remove it." : `Access ends ${humanDate(expiry)}.`;
   }
 
   /**
@@ -714,7 +680,8 @@ export function ConsentScreen({
       // navigation off the console, not a router push. `replace` keeps the
       // consumed challenge out of history — going Back must not re-present a
       // decision the owner has already made.
-      window.location.replace(result.redirectUrl);
+      setCompleted(action);
+      if (result.redirectUrl) window.location.replace(result.redirectUrl);
     } catch {
       setSubmitState("failed");
       setSubmitError(`This request could not be completed. Go back to ${model.client.name} and try again.`);
@@ -723,34 +690,36 @@ export function ConsentScreen({
 
   const nothingChosen = counts.selectedStreamCount === 0;
   const busy = submitState === "submitting";
-  const selectedSourceNames = model.sources
-    .filter((source) => source.streams.some((stream) => selection[source.id]?.[stream.name]))
-    .map((source) => source.name);
   const policyLinks = clientPublishedLinks(model.client.policyLinks);
+
+  if (completed) return <ConsentFinished appName={model.client.name} allowed={completed === "accept"} />;
 
   return (
     <div className={styles.page} data-hydrated={hydrated ? "true" : "false"}>
+      <div className={styles.railFooter}><img alt="" height={20} width={20} src="/icon" /><span>DataConnect</span></div>
       <ConsentHeader client={model.client} />
+      {model.purpose.description ? <p className="pdpp-body">It says it will: {plainCopy(model.purpose.description)}</p> : null}
+      {model.retention ? <p className="pdpp-caption">It says it keeps what it reads: {plainCopy(model.retention)}</p> : null}
       <div className={styles.grid}>
         <div className={styles.body}>
           <section aria-labelledby="records-heading" className={styles.recordsSection}>
-            <h2 className="pdpp-title" id="records-heading">Choose data sources</h2>
-            <p className={`pdpp-caption ${styles.recordsHint}`}>Anything you leave unchecked stays private.</p>
+            <h2 className="pdpp-title" id="records-heading">Choose what it can read</h2>
+            <p className={`pdpp-caption ${styles.recordsHint}`}>Anything you leave unticked stays private.</p>
             {model.sources.length === 0 ? (
               <div className={styles.searchEmpty}>
-                No data sources are connected yet. Connect one, then go back to {model.client.name} and try again.
+                You have no data in DataConnect yet.<p>Add a data source first, then connect {model.client.name} again.</p><a href="/sources/add">Add a data source</a>
               </div>
             ) : (
               <>
-                <div className={styles.searchRow}>
+                {model.sources.length > 8 ? <><div className={styles.searchRow}>
                   <IcInput
-                    aria-label="Search data sources"
+                    aria-label="Find a data source"
                     onChange={(e) => {
                       setSearch(e.target.value);
                       setActiveIndex(-1);
                     }}
                     onKeyDown={onSearchKeyDown}
-                    placeholder="Search data sources"
+                    placeholder="Find a data source"
                     type="search"
                     value={search}
                   />
@@ -772,7 +741,8 @@ export function ConsentScreen({
                   {query
                     ? `${visibleSources.length} of ${model.sources.length} data sources match`
                     : `${visibleSources.length} data source${visibleSources.length === 1 ? "" : "s"}`}
-                </div>
+                </div></> : null}
+                <label className={styles.sourceLabel}><input aria-label="Everything below" type="checkbox" checked={counts.selectedStreamCount === counts.totalStreamCount} ref={(element) => { if (element) element.indeterminate = counts.selectedStreamCount > 0 && counts.selectedStreamCount < counts.totalStreamCount; }} onChange={(event) => setSelection(Object.fromEntries(model.sources.map((source) => [source.id, Object.fromEntries(source.streams.map((stream) => [stream.name, event.target.checked]))])))} />Everything below</label>
                 {visibleSources.length === 0 && (
                   <div className={styles.searchEmpty}>
                     No data sources match &ldquo;{search}&rdquo;. Clear the search to see everything.
@@ -804,38 +774,19 @@ export function ConsentScreen({
               </>
             )}
           </section>
-          <details className={styles.requestDetails}>
-            <summary>About this request</summary>
-            <div className={styles.requestDetailsBody}>
-              <h2 className="pdpp-title">Terms</h2>
-              <p className="pdpp-body">{plainCopy(model.purpose.description)}</p>
-              <p className="pdpp-caption">{plainCopy(model.retention)}</p>
-            </div>
-          </details>
+          <section><h2 className="pdpp-title">How long</h2>
+            <GrantExpiryControls activeChipDays={activeChipDays} expiry={expiry} options={model.grantExpiry.options} noEndDate={noEndDate} setActiveChipDays={setActiveChipDays} setExpiry={setExpiry} setNoEndDate={setNoEndDate} />
+            <p className="pdpp-caption">{endsText()}</p>
+          </section>
+
         </div>
 
         <aside aria-label="Your choice" className={styles.rail}>
-          <details className={styles.expiryDetails}>
-            {/* Plain second text with a "Change" word, like the field fold: the
-                fold holds the end-date controls, so it stays a fold. */}
-            <summary className={styles.expirySummary}>
-              {endsText()} <span className={styles.narrowChange}>Change</span>
-            </summary>
-            <GrantExpiryControls
-              activeChipDays={activeChipDays}
-              expiry={expiry}
-              options={model.grantExpiry.options}
-              noEndDate={noEndDate}
-              setActiveChipDays={setActiveChipDays}
-              setExpiry={setExpiry}
-              setNoEndDate={setNoEndDate}
-            />
-          </details>
-          <p className={styles.decisionSummary} aria-live="polite">
+          <div className={styles.decisionDock}><p className={styles.decisionSummary} aria-live="polite">
             {counts.selectedStreamCount === 0 ? (
-              "Choose at least one kind of record."
+              "Tick at least one data source."
             ) : (
-              <>It will read {sourceCountPhrase(counts.selectedStreamCount)} from {sourceNamesPhrase(selectedSourceNames)}.</>
+              <>{model.client.name} will be able to read {counts.selectedSourceCount} data sources {noEndDate ? "until you remove it" : `until ${humanDate(expiry)}`}.</>
             )}
           </p>
           {submitError && (
@@ -843,7 +794,7 @@ export function ConsentScreen({
               {submitError}
             </p>
           )}
-          <div className={styles.railActions}>
+          {model.sources.length > 0 ? <div className={styles.railActions}>
             <IcButton
               className={styles.decisionButton}
               disabled={busy || nothingChosen}
@@ -856,29 +807,22 @@ export function ConsentScreen({
             <IcButton className={styles.decisionButton} disabled={busy} onClick={() => submit("reject")} type="button" variant="ghost">
               Don&apos;t allow
             </IcButton>
-          </div>
+          </div> : null}</div>
+          <p className="pdpp-caption">You can remove this at any time in DataConnect, under Apps.</p>
+          {model.client.returnTo ? <p className="pdpp-caption">You’ll go back to {model.client.returnTo}.</p> : null}
           <div className={styles.policyLinks}>
             {policyLinks.length > 0
               ? policyLinks.map((link) => (
                   <a href={link.href} key={link.href} rel="noopener noreferrer nofollow" target="_blank">
-                    {plainCopy(link.label)}
+                    {model.client.name}'s {plainCopy(link.label).toLowerCase()}
                   </a>
                 ))
-              : <span>No privacy policy or terms published.</span>}
+              : null}
           </div>
         </aside>
       </div>
-      {model.client.returnTo && <p className={styles.railReturnTo}>You&apos;ll return to {model.client.returnTo}</p>}
-      {/* Product mark only: no protocol name on this screen. No theme toggle:
-          the root ThemeProvider applies the theme chosen in the console (or the
-          system's), so the page already matches the console. */}
-      <footer className={styles.pageFooter}>
-        <span className={styles.railFooter}>
-          {/* biome-ignore lint/performance/noImgElement: the 14px product mark is the app icon route (app/icon.tsx), not an optimizable image. */}
-          <img alt="" height={14} src="/icon" width={14} />
-          <span className="pdpp-caption">DataConnect</span>
-        </span>
-      </footer>
+      <details className={styles.requestDetails}><summary>Technical details</summary><pre className="overflow-x-auto">{JSON.stringify(model, null, 2)}</pre></details>
+
     </div>
   );
 }
@@ -888,7 +832,6 @@ export function ConsentScreen({
 // disables and greys the date input, so that state needs a plain-text
 // confirmation the picker alone doesn't give.
 function GrantExpiryControls({
-  expiry,
   setExpiry,
   noEndDate,
   setNoEndDate,
@@ -907,54 +850,9 @@ function GrantExpiryControls({
   // Quick-fill chips come from the server's own bounded option set, so the
   // page cannot offer a duration the accept route would reject. The bare date
   // input still accepts any date the server's bounds allow.
-  const chips = options.filter((option): option is typeof option & { days: number } => option.days !== null);
-  const allowsNever = options.some((option) => option.days === null);
+  return <div className={styles.grantExpiryRow}>{options.map((option) => <button className={styles.chip} key={option.id} type="button" aria-pressed={option.days === null ? noEndDate : !noEndDate && activeChipDays === option.days} onClick={() => { setNoEndDate(option.days === null); setActiveChipDays(option.days); if (option.days !== null) setExpiry(todayPlusDays(option.days)); }}>{option.days === null ? "Until I remove it" : option.label}</button>)}</div>;
+}
 
-  return (
-    <div className={styles.grantExpiry}>
-      <span className="pdpp-eyebrow">Access duration</span>
-      <div className={styles.grantExpiryRow}>
-        <IcInput
-          aria-label="Access ends"
-          disabled={noEndDate}
-          onChange={(e) => {
-            setExpiry(e.target.value);
-            setActiveChipDays(null);
-          }}
-          className={styles.dateInput}
-          type="date"
-          value={expiry}
-        />
-        {chips.map((option) => (
-          <button
-            aria-pressed={activeChipDays === option.days}
-            className={styles.chip}
-            key={option.id}
-            onClick={() => {
-              setNoEndDate(false);
-              setActiveChipDays(option.days);
-              setExpiry(todayPlusDays(option.days));
-            }}
-            type="button"
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-      {allowsNever && (
-        <label className={styles.noEndDate}>
-          <input
-            checked={noEndDate}
-            onChange={(e) => {
-              setNoEndDate(e.target.checked);
-              setActiveChipDays(null);
-            }}
-            type="checkbox"
-          />
-          No end date
-        </label>
-      )}
-      {noEndDate && <p className={styles.railEnds}>Access never expires.</p>}
-    </div>
-  );
+export function ConsentFinished({ appName, allowed }: { appName: string; allowed: boolean }) {
+  return <main className={styles.unavailable}><h1 className="pdpp-display">{allowed ? `Done. ${appName} can now read what you chose.` : `${appName} was not given access.`}</h1><p>{allowed ? `You can close this page and go back to ${appName}.` : "You can close this page."}</p></main>;
 }

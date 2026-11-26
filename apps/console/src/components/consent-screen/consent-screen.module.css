@@ -396,6 +396,11 @@
   border-radius: var(--radius-control);
   background: var(--card);
 }
+.decisionDock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
 .expiryDetails {
   padding-bottom: 0.25rem;
 }
@@ -516,6 +521,9 @@
     gap: 1rem;
   }
   .rail {
+    position: static;
+  }
+  .decisionDock {
     position: fixed;
     z-index: 10;
     right: 0;

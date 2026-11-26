@@ -80,7 +80,9 @@ const model = await buildHostedMcpConsentChallengeModel(
 afterEach(cleanup);
 after(() => dom.window.close());
 
-function assertPlainCopy(root) {
+function assertPlainCopy(original) {
+  const root = original.cloneNode(true);
+  for (const details of root.querySelectorAll("details")) if (details.querySelector("summary")?.textContent === "Technical details") details.remove();
   const copy = [root.textContent ?? ""];
   for (const element of root.querySelectorAll("[aria-label], [placeholder], [title]")) {
     copy.push(element.getAttribute("aria-label") ?? "");
@@ -100,10 +102,10 @@ test("verified state uses one trust line and plain consumer actions", () => {
   verifiedModel.client.domain = "spotify.example";
   const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: verifiedModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
   assert.ok(view.getByRole("heading", { name: `${verifiedModel.client.name} wants to read your data` }));
-  assert.ok(view.getByText("Anything you leave unchecked stays private."));
+  assert.ok(view.getByText("Anything you leave unticked stays private."));
   assert.ok(view.getByText("Verified"));
-  assert.ok(view.getByText("spotify.example ·"));
-  assert.ok(view.getByRole("button", { name: "What does this mean?" }));
+  assert.ok(view.getByText("Verified"));
+  assert.equal(view.queryByRole("button", { name: "What does this mean?" }), null);
   assert.ok(view.getByRole("button", { name: "Allow" }));
   assert.ok(view.getByRole("button", { name: "Don't allow" }));
   assertPlainCopy(view.container);
@@ -114,7 +116,7 @@ test("not verified state names the website without a trust chip", () => {
   unverifiedModel.client.trust = "unverified";
   unverifiedModel.client.domain = "spotify.example";
   const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: unverifiedModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
-  assert.ok(view.getByText("spotify.example (not verified)"));
+  assert.ok(view.getByText("not verified"));
   assertPlainCopy(view.container);
 });
 
@@ -146,8 +148,8 @@ test("many-source state keeps search and filters the source rows", () => {
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 1" }));
   fireEvent.click(view.getByRole("checkbox", { name: "Share data from Source 2" }));
   // Consent brief: the count names every selected data source before the decisions.
-  assert.ok(view.getByText("It will read 8 kinds of records from Source 1 and Source 2."));
-  const search = view.getByRole("searchbox", { name: "Search data sources" });
+  assert.match(view.container.querySelector("aside").textContent, /will be able to read 2 data sources/);
+  const search = view.getByRole("searchbox", { name: "Find a data source" });
   fireEvent.change(search, { target: { value: "Source 12" } });
   assert.ok(view.getByText("1 of 12 data sources match"));
   assert.ok(view.getByRole("checkbox", { name: "Share data from Source 12" }));
@@ -199,7 +201,7 @@ test("demo decisions never call a server action", () => {
 
 test("expired state gives one plain next step", () => {
   const view = render(createElement(ConsentUnavailable, { kind: "expired" }));
-  assert.ok(view.getByRole("heading", { name: "This request is no longer available. Go back to the app and try again." }));
+  assert.ok(view.getByRole("heading", { name: "This request has run out." }));
   assert.doesNotMatch(view.container.textContent ?? "", /ChatGPT/);
   assertPlainCopy(view.container);
 });
@@ -207,7 +209,7 @@ test("expired state gives one plain next step", () => {
 test("load-error state offers a retry and plain next step", () => {
   let retried = false;
   const view = render(createElement(ConsentUnavailable, { kind: "error", onRetry: () => { retried = true; } }));
-  assert.ok(view.getByRole("heading", { name: "This request could not be loaded. Go back to the app and try again." }));
+  assert.ok(view.getByRole("heading", { name: "This request couldn’t be loaded." }));
   assert.doesNotMatch(view.container.textContent ?? "", /ChatGPT/);
   fireEvent.click(view.getByRole("button", { name: "Try again" }));
   assert.equal(retried, true);
@@ -220,7 +222,7 @@ test("normal state renders Spotify's declared record label and description", asy
   const playlists = manifest.streams.find((stream) => stream.name === "playlists");
   assert.ok(view.getByText(playlists.display.detail));
   // Consent brief: show the selected record count before the two decisions.
-  assert.ok(view.getByText("It will read 4 kinds of records from Spotify."));
+  assert.match(view.container.querySelector("aside").textContent, /will be able to read 1 data sources/);
   assertPlainCopy(view.container);
 });
 
@@ -254,7 +256,7 @@ test("field titles label controls without exposing raw names", async () => {
   const stream = titledModel.sources[0].streams[0];
   const panel = view
     .getByRole("checkbox", { name: `Share ${stream.label} from Spotify` })
-    .parentElement.querySelector("details");
+    .parentElement.querySelector("div");
   await act(async () => {
     panel.open = true;
   });
@@ -287,7 +289,7 @@ async function journey() {
   const saved = model.sources[0].streams.find((stream) => stream.name === "saved_tracks");
   const panel = view
     .getByRole("checkbox", { name: `Share ${saved.label} from Spotify` })
-    .parentElement.querySelector("details");
+    .parentElement.querySelector("div");
   await act(async () => {
     panel.open = true;
   });
@@ -487,8 +489,8 @@ test("the screen signs as DataConnect and shows the end date as plain text with 
   assert.ok(view.getByText("DataConnect"));
   assert.ok(view.container.querySelector('img[src="/icon"]'));
   assert.equal(view.container.querySelector('a[href="https://pdpp.dev"]'), null);
-  const summary = view.container.querySelector("aside summary");
-  assert.match(summary?.textContent ?? "", /^(Access ends .+|No end date) Change$/);
+  assert.ok(view.getByRole("heading", { name: "How long" }));
+  assert.ok(view.getByRole("button", { name: "Until I remove it" }));
   assertPlainCopy(view.container);
 });
 
@@ -550,6 +552,18 @@ test("no connected data sources says to connect one, then return to the app", ()
   const empty = structuredClone(model);
   empty.sources = [];
   const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: empty, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
-  assert.ok(view.getByText(`No data sources are connected yet. Connect one, then go back to ${model.client.name} and try again.`));
-  assert.equal(view.getByRole("button", { name: "Allow" }).disabled, true);
+  assert.ok(view.getByText(/You have no data in DataConnect yet/));
+  assert.equal(view.queryByRole("button", { name: "Allow" }), null);
+});
+
+test("Everything below posts the same decision as ticking each data source", async () => {
+  async function decide(bulk) {
+    let posted;
+    const view = render(createElement(ConsentScreen, { model: buildConsentDemoModel("normal"), acceptAction: async (decision) => { posted = decision; return { ok: false, message: "Saved for comparison" }; }, rejectAction: async () => ({ ok: false, message: "unused" }) }));
+    if (bulk) fireEvent.click(view.getByRole("checkbox", { name: "Everything below" }));
+    else for (const name of ["Spotify", "Gmail"]) fireEvent.click(view.getByRole("checkbox", { name: `Share data from ${name}` }));
+    await act(async () => fireEvent.click(view.getByRole("button", { name: "Allow" })));
+    cleanup(); return posted;
+  }
+  assert.deepEqual(await decide(true), await decide(false));
 });

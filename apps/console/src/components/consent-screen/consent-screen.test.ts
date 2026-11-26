@@ -49,11 +49,9 @@ test("a repeated source name is stripped from the account label", () => {
   assert.equal(sourceAccountLabel("H-E-B", "HEB - x"), "x");
 });
 
-test("the trust link opens its explanation on touch and desktop", () => {
-  // Consent brief: the trust explanation stays reachable from a one-line link.
-  assert.match(CLIENT_SOURCE, /aria-describedby=\{TRUST_HINT_ID\}/);
-  assert.match(CLIENT_SOURCE, /<IcPopoverPopup id=\{TRUST_HINT_ID\}[^>]*>/);
-  assert.match(CLIENT_SOURCE, /What does this mean\?/);
+test("trust explanation is visible with no extra press", () => {
+  assert.match(CLIENT_SOURCE, /DataConnect could not confirm who runs this app/);
+  assert.doesNotMatch(CLIENT_SOURCE, /What does this mean/);
 });
 
 test("client metadata line has both, one, and no published links", () => {
@@ -68,7 +66,7 @@ test("client metadata line has both, one, and no published links", () => {
     { href: "https://client.example/privacy", label: "Privacy policy" },
   ]);
   assert.deepEqual(clientPublishedLinks([]), []);
-  assert.match(CLIENT_SOURCE, /No privacy policy or terms published\./);
+  assert.doesNotMatch(CLIENT_SOURCE, /No privacy policy or terms published\./);
 });
 
 // ─── Owner gating ───────────────────────────────────────────────────────────
@@ -212,21 +210,9 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
   assert.deepEqual(offenders, [], "every color must reference a design token");
 });
 
-test("client trust explanations stay reachable from a plain link", () => {
-  // Consent brief: trust is one line with a small explanation link, never a chip.
-  assert.doesNotMatch(CLIENT_SOURCE, /What was checked/);
-  assert.match(CLIENT_SOURCE, /What does this mean\?/);
-  assert.match(CLIENT_SOURCE, /<IcPopover>/, "touch uses a dismissible, anchored shared popover");
-  assert.doesNotMatch(CLIENT_SOURCE, /<IcPopoverPopup[^>]+role=/, "the shared popover retains its dialog role");
-  assert.match(CLIENT_SOURCE, /Dismiss trust explanation/, "the touch popover has an explicit dismiss control");
-});
-
-test("only verified apps receive the tone-colored trust word", () => {
-  // Consent repair 1: the server's domain tier proves control; only unverified may say not verified.
-  assert.match(CLIENT_SOURCE, /client\.trust === "verified"/);
-  assert.match(CLIENT_SOURCE, /<span className=\{styles\.verified\}>Verified<\/span>/);
-  assert.match(CLIENT_SOURCE, /client\.trust === "unverified"/);
-  assert.match(CLIENT_SOURCE, /The app proved it controls this website/);
+test("address proof controls the verified label", () => {
+  assert.match(CLIENT_SOURCE, /client.trust !== "unverified" && Boolean\(client.domain\)/);
+  assert.match(CLIENT_SOURCE, /styles.verified/);
 });
 
 test("client metadata links render only when the challenge model supplies them", () => {
