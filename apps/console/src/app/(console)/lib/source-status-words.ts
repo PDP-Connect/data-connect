@@ -6,6 +6,7 @@ import { resolveSyncCause } from "./sync-cause.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
+import { summarizeOutboxStallRemediation } from "./connection-evidence.ts";
 import { projectSourceActionability } from "./source-actionability.ts";
 
 export type SourceStatusRow =
@@ -196,32 +197,34 @@ function lifecycleRow(
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
     const surface = requiredAction?.surface?.kind;
-    if (surface === "local_device" && source.local_device_progress?.records_pending === 0) {
+    // A collector on another computer owns this data: its answer is the
+    // device sentence and next step even when the server names no owner step.
+    const isDevice = surface === "local_device" || source.source_kind === "local_device";
+    if (isDevice && source.local_device_progress?.records_pending === 0) {
       return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null , sentence: { text: "No records are waiting to be sent.", slot: null }, problem: false };
     }
     const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
     const devicePending = source.local_device_progress?.records_pending;
     const deviceName = source.local_device_progress?.device_name;
-    const deviceHasSteps = Boolean(requiredAction?.remediation?.commands.some(command=>substituteCommandTemplate(command.command_template,{connectionId:source.connection_id,connectorId:source.connector_id,sourceInstanceId:source.local_device_progress?.source_instance_id ?? null,providerUrl:null}) !== null));
+    const deviceHasSteps = Boolean(requiredAction?.remediation?.commands.some(command=>substituteCommandTemplate(command.command_template,{connectionId:source.connection_id,connectorId:source.connector_id,sourceInstanceId:source.local_device_progress?.source_instance_id ?? null,providerUrl:null}) !== null)) ||
+      (!requiredAction?.remediation && summarizeOutboxStallRemediation(source.connection_health, source.local_device_progress) !== null);
     const deviceText = deviceHasSteps && typeof devicePending === "number" && devicePending > 0
       ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send ${devicePending.toLocaleString()} record${devicePending === 1 ? "" : "s"}.`
       : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${name}.`;
-    const sentence = surface === "local_device" ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
-    const words = surface === "local_device" && typeof devicePending === "number" && devicePending > 0 ? deviceText .replace(FINAL_STOP, "") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
+    const sentence = isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
+    const words = isDevice ? deviceText.replace(FINAL_STOP, "") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
         : surface === "provider_interaction"
           ? "Waiting for you to finish a step"
-          : surface === "local_device"
-            ? "Needs attention on your device"
-            : "Needs you";
+          : "Needs you";
     return {
       row: 8,
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
-      action: unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : surface === "local_device" && !deviceHasSteps ? null : requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {

@@ -47,6 +47,11 @@ for(const state of AGREEMENT_STATES) { test(`five places agree: ${state}`,async(
  assert.ok(page.length>0);
  assert.ok(text(history).includes(status.words),"history must print the present short words");
  assert.ok(text(sync).includes(status.words),"sync page must print the present short words");
+ if(state.startsWith("device")) {
+  assert.ok(status.words.startsWith("The computer that holds this data (Practice computer) could not send 4,959 records"),status.words);
+  assert.equal(status.action?.label,"See what to do on that computer");
+  assert.ok(sourceStateSentence(source,{now,name:"Northwind"}).text.startsWith("The computer that holds this data"));
+ }
  const expected=status.action?[status.action.label]:[];
  assert.deepEqual(labels(history),expected,"history action must be the current source action");
  assert.deepEqual(labels(sync),expected,"sync page action must be the current source action");

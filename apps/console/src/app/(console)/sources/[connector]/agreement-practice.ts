@@ -4,7 +4,7 @@ import { buildRecoveryDemoModel } from "./source-detail-demo-data.ts";
 import type { SourceStatusRow } from "../../lib/source-status-words.ts";
 import type { RefConnectorSummary, RefRequiredAction } from "../../lib/ref-client.ts";
 
-const SHAPES: Record<string,{row:SourceStatusRow;failed?:boolean;gap?:boolean;off?:boolean;device?:boolean;held?:number;canonical?:number;copied?:number;reason?:string;stream?:string}> = {
+const SHAPES: Record<string,{row:SourceStatusRow;failed?:boolean;gap?:boolean;off?:boolean;device?:boolean;bare?:boolean;held?:number;canonical?:number;copied?:number;reason?:string;stream?:string}> = {
   "maintainer-failure": {row:13,failed:true},
   "schedule-off-failure": {row:16,failed:true,off:true},
   "maintainer-partial": {row:13,gap:true},
@@ -16,6 +16,7 @@ const SHAPES: Record<string,{row:SourceStatusRow;failed?:boolean;gap?:boolean;of
   "maintainer-unknown-kind": {row:13,failed:true,gap:true},
   "maintainer-copy-failure": {row:13,failed:true,gap:true,reason:"stream_collection_failed"},
   "device-unsent": {row:8,device:true},
+  "device-stalled-no-owner-step": {row:8,device:true,bare:true},
   "install-again": {row:4},
 };
 /** Invented accounts with the stored shapes in the final agreement ledger. */
@@ -49,7 +50,8 @@ export function agreementPractice(state:string) {
     source.source_kind="local_device";
     source.local_device_progress={last_heartbeat_at:null,last_heartbeat_status:null,last_ingest_at:null,source_count:1,records_pending:4959,device_name:"Practice computer",source_instance_id:"practice-instance"};
     source.owner_state={evidence_as_of:null,owner_of_state:"owner",posture:"observed",resolver:"needs_owner"};
-    actions=[{...maintainer,audience:"owner",kind:"add_info",cta:"See what to do on that computer",surface:{kind:"local_device"},terminal:false,remediation:buildRecoveryDemoModel(16).connectionRenderedVerdict?.required_actions[0]?.remediation}];
+    actions=shape.bare ? [] : [{...maintainer,audience:"owner",kind:"add_info",cta:"See what to do on that computer",surface:{kind:"local_device"},terminal:false,remediation:buildRecoveryDemoModel(16).connectionRenderedVerdict?.required_actions[0]?.remediation}];
+    if(shape.bare) {source.connection_health={...source.connection_health,conditions:[{condition:"outbox",status:"false",reason:"dead_lettered",remediation:{action:"clear_backlog",label:"Inspect the local collector backlog"}}]} as typeof source.connection_health;}
   }
   if(source.rendered_verdict) {source.rendered_verdict={...source.rendered_verdict,required_actions:actions};}
   return {...model,connectionRenderedVerdict:source.rendered_verdict ?? null,connectionPrimaryAction:actions.find(item=>item.audience === "owner") ?? null,sourceInstances:model.sourceInstances.map(device=>({...device,connector_instance_id:id,source_instance_id:"practice-instance",device_display_name:"Practice computer",records_pending:source.local_device_progress?.records_pending ?? null})),connectionId:id,connectorInstanceId:id,connectorId:"northwind",displayName:source.display_name,source,latestKnownGaps:[],streams:records.map(record=>({...record,name:record.stream,object:"stream" as const})),overview:{...model.overview,localDeviceProgress:source.local_device_progress}};
