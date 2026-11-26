@@ -704,6 +704,7 @@ test("a failure before any effect says remote access did not turn on and offers 
   const failed = { operationId: "op-1", stage: "settled", kind: "start", failureCode: "provider_unavailable", handle: null, recovery: null };
   await withScreen(host({ "/state": ok({ ...idleState, operations: [failed] }) }), async ({ text, press }) => {
     assert.match(text(), /Remote access did not turn on/);
+    assert.doesNotMatch(text(), /Turn on remote access/, "the failure is the only thing to act on");
     await press(/^Try again$/);
   });
 });

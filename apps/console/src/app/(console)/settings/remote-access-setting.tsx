@@ -1131,7 +1131,7 @@ export function RemoteAccessSetting({
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
         <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
       ) : null}
-      {idle && !passwordMissing ? (
+      {idle && !passwordMissing && !(operation && outcome === "did-not-turn-on") ? (
         <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
           {visibleRoutes.length === 0 && !operation && reservations.length === 0 ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
           <div className="grid gap-4 p-4">
