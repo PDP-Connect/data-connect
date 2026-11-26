@@ -354,7 +354,7 @@ pub async fn check_connected_platforms(
         .join("exported_data");
 
     // Build a map from platform ID to company name so we can check both paths
-    let all_platforms = get_platforms(app).await.unwrap_or_default();
+    let all_platforms = get_platforms(app).await?;
     let id_to_company: HashMap<String, String> = all_platforms
         .into_iter()
         .map(|p| (p.id.clone(), p.company))

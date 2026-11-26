@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use tempfile::NamedTempFile;
 
 static ACTIVE_CONNECTOR_MANIFEST_LOCK: Mutex<()> = Mutex::new(());
+const ACTIVE_CONNECTOR_MANIFEST_VERSION: &str = "1.0";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +72,11 @@ pub fn get_active_manifest_path() -> Option<PathBuf> {
 #[derive(Debug)]
 enum ManifestReadError {
     Io(io::Error),
-    Malformed(serde_json::Error),
+    Malformed {
+        bytes: Vec<u8>,
+        error: serde_json::Error,
+    },
+    Unsupported(String),
 }
 
 fn manifest_read_message(path: &std::path::Path, error: ManifestReadError) -> String {
@@ -79,8 +84,11 @@ fn manifest_read_message(path: &std::path::Path, error: ManifestReadError) -> St
         ManifestReadError::Io(error) => {
             format!("Failed to read active connector manifest at {}: {error}", path.display())
         }
-        ManifestReadError::Malformed(error) => {
+        ManifestReadError::Malformed { error, .. } => {
             format!("Malformed active connector manifest at {}: {error}", path.display())
+        }
+        ManifestReadError::Unsupported(reason) => {
+            format!("Unsupported active connector manifest at {}: {reason}", path.display())
         }
     }
 }
@@ -102,31 +110,58 @@ fn decode_active_connector_manifest(
     content: io::Result<Vec<u8>>,
 ) -> Result<Option<ActiveConnectorManifest>, ManifestReadError> {
     match content {
-        Ok(content) => serde_json::from_slice(&content)
-            .map(Some)
-            .map_err(ManifestReadError::Malformed),
+        Ok(bytes) => match serde_json::from_slice::<ActiveConnectorManifest>(&bytes) {
+            Ok(manifest) if manifest.version == ACTIVE_CONNECTOR_MANIFEST_VERSION => {
+                Ok(Some(manifest))
+            }
+            Ok(_) => Err(ManifestReadError::Unsupported("unknown registry version".into())),
+            Err(error) => {
+                // Typed decoding can fail before reaching the malformed part of
+                // a file. Check the complete JSON before deciding it is safe to
+                // quarantine. Ignore values here so future number ranges do not
+                // turn an unsupported schema into apparent corruption.
+                if std::str::from_utf8(&bytes).is_ok()
+                    && serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_ok()
+                {
+                    Err(ManifestReadError::Unsupported(error.to_string()))
+                } else {
+                    Err(ManifestReadError::Malformed { bytes, error })
+                }
+            }
+        },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ManifestReadError::Io(error)),
     }
 }
 
 // Called only while holding the existing manifest writer lock.
-fn quarantine_active_connector_manifest(path: &std::path::Path) -> Result<PathBuf, String> {
+fn quarantine_active_connector_manifest(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
     let name = path.file_name().ok_or("Active connector manifest path has no filename")?;
+    let parent = path
+        .parent()
+        .ok_or("Active connector manifest path has no parent directory")?;
+    let mut copy = NamedTempFile::new_in(parent)
+        .map_err(|error| format!("Failed to stage active connector manifest quarantine: {error}"))?;
+    copy.write_all(bytes)
+        .and_then(|()| copy.as_file().sync_all())
+        .map_err(|error| format!("Failed to write active connector manifest quarantine: {error}"))?;
     let mut millis = chrono::Utc::now().timestamp_millis();
     loop {
         let mut quarantine_name = name.to_os_string();
         quarantine_name.push(format!(".corrupt-{millis}"));
         let quarantine_path = path.with_file_name(quarantine_name);
-        match fs::symlink_metadata(&quarantine_path) {
-            Ok(_) => millis += 1,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::rename(path, &quarantine_path).map_err(|error| {
-                    format!("Failed to quarantine active connector manifest: {error}")
-                })?;
-                return Ok(quarantine_path);
+        match copy.persist_noclobber(&quarantine_path) {
+            Ok(_) => return Ok(quarantine_path),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                copy = error.file;
+                millis += 1;
             }
-            Err(error) => return Err(format!("Failed to check manifest quarantine path: {error}")),
+            Err(error) => {
+                return Err(format!("Failed to quarantine active connector manifest: {error}"));
+            }
         }
     }
 }
@@ -158,6 +193,9 @@ fn write_active_connector_manifest_to(
         .as_file()
         .sync_all()
         .map_err(|e| format!("Failed to sync active connector manifest: {}", e))?;
+    read_active_connector_manifest_from(temp_file.path())
+        .map_err(|error| manifest_read_message(manifest_path, error))?
+        .ok_or("Staged active connector manifest disappeared")?;
     temp_file
         .persist(manifest_path)
         .map_err(|e| format!("Failed to activate connector manifest: {}", e))?;
@@ -212,8 +250,8 @@ fn update_active_connector_install_at(
         .map_err(|e| format!("Failed to lock active connector manifest: {}", e))?;
     let mut manifest = match read_active_connector_manifest_from(manifest_path) {
         Ok(manifest) => manifest,
-        Err(ManifestReadError::Malformed(error)) => {
-            let quarantined = quarantine_active_connector_manifest(manifest_path)?;
+        Err(ManifestReadError::Malformed { bytes, error }) => {
+            let quarantined = quarantine_active_connector_manifest(manifest_path, &bytes)?;
             log::warn!(
                 "Quarantined malformed active connector manifest at {}: {error}",
                 quarantined.display()
@@ -223,7 +261,7 @@ fn update_active_connector_install_at(
         Err(error) => return Err(manifest_read_message(manifest_path, error)),
     }
     .unwrap_or_else(|| ActiveConnectorManifest {
-        version: "1.0".to_string(),
+        version: ACTIVE_CONNECTOR_MANIFEST_VERSION.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         connectors: HashMap::new(),
     });
@@ -311,9 +349,10 @@ pub fn activate_bundled_connector_install(install: ActiveConnectorInstall) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_active_connector_manifest, read_active_connector_manifest_from,
-        update_active_connector_install_at, ActiveConnectorInstall, ConnectorInstallUpdatePolicy,
-        ManifestReadError,
+        decode_active_connector_manifest, quarantine_active_connector_manifest,
+        read_active_connector_manifest_from, update_active_connector_install_at,
+        write_active_connector_manifest_to, ActiveConnectorInstall, ActiveConnectorManifest,
+        ConnectorInstallUpdatePolicy, ManifestReadError,
     };
     use fs2::FileExt;
     use std::fs::OpenOptions;
@@ -368,7 +407,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert!(matches!(
             read_active_connector_manifest_from(&path),
-            Err(ManifestReadError::Malformed(_))
+            Err(ManifestReadError::Malformed { .. })
         ));
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(matches!(
@@ -403,6 +442,58 @@ mod tests {
         });
         assert_eq!(std::fs::read(quarantine.next().unwrap()).unwrap().as_slice(), bytes);
         assert!(quarantine.next().is_none());
+    }
+
+    #[test]
+    fn quarantine_copies_bytes_while_the_active_file_stays_in_place() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("active.json");
+        let bytes = b"{bad json";
+        std::fs::write(&path, bytes).unwrap();
+        let first = quarantine_active_connector_manifest(&path, bytes).unwrap();
+        let second = quarantine_active_connector_manifest(&path, bytes).unwrap();
+        assert_ne!(first, second);
+        for copy in [first, second] {
+            assert_eq!(std::fs::read(copy).unwrap().as_slice(), bytes);
+        }
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), bytes);
+    }
+
+    #[test]
+    fn valid_json_in_an_unsupported_schema_is_never_replaced() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("active.json");
+        for bytes in [
+            br#"{"version":"2.0","updatedAt":"","connectors":{}}"#.as_slice(),
+            br#"{"version":"2.0","installations":[{"quota":1e999}]}"#.as_slice(),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let error = update_active_connector_install_at(
+                &path,
+                install("2.0.0", &dir.path().to_string_lossy()),
+                ConnectorInstallUpdatePolicy::ReplaceExisting,
+            )
+            .unwrap_err();
+            assert!(error.contains("Unsupported active connector manifest"));
+            assert_eq!(std::fs::read(&path).unwrap().as_slice(), bytes);
+            assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+                entry.unwrap().file_name().to_string_lossy().contains(".corrupt-")
+            }));
+        }
+    }
+
+    #[test]
+    fn staged_replacement_must_validate_before_publication() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("active.json");
+        let bytes = b"{bad json";
+        std::fs::write(&path, bytes).unwrap();
+        let unsupported = ActiveConnectorManifest {
+            version: "2.0".into(),
+            ..Default::default()
+        };
+        assert!(write_active_connector_manifest_to(&path, &unsupported).is_err());
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), bytes);
     }
 
     #[test]
