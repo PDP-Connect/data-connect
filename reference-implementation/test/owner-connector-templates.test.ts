@@ -583,7 +583,7 @@ test("client grant bearer cannot list owner connector templates", async () => {
     });
     const clientToken = await approveClientGrant(
       asUrl,
-      String(manifest.connector_id),
+      String(asRecord(manifest.source).id),
       "saved_tracks",
       "cin_spotify_template_auth"
     );
