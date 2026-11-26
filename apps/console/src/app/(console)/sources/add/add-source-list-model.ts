@@ -74,13 +74,22 @@ function compareByName(a: { displayName: string }, b: { displayName: string }): 
 export function buildAddSourceList(input: AddSourceListInput): AddSourceListModel {
   const rows: AddSourceRow[] = [];
   const notAddable: string[] = [];
-  const seen = new Set<string>();
+  const accounts = new Map<string, string>();
+  for (const [key, ids] of Object.entries(input.existingConnectionIds)) {
+    if (ids[0]) accounts.set(connectorLookupKey(key), ids[0]);
+  }
+  const groups = new Map<string, ConnectorCatalogEntry[]>();
   for (const entry of input.catalog) {
     const identity = connectorLookupKey(entry.connectorKey);
-    if (seen.has(identity)) continue;
-    seen.add(identity);
-    const connectable = isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable);
-    const firstAccount = input.existingConnectionIds[entry.connectorKey]?.[0] ?? null;
+    const group = groups.get(identity);
+    if (group) group.push(entry);
+    else groups.set(identity, [entry]);
+  }
+  for (const [identity, aliases] of groups) {
+    const usable = aliases.find((entry) => isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable));
+    const entry = usable ?? aliases.find((alias) => input.existingConnectionIds[alias.connectorKey]?.length) ?? aliases[0]!;
+    const connectable = usable !== undefined;
+    const firstAccount = accounts.get(identity) ?? null;
     if (connectable || firstAccount !== null) {
       rows.push({
         added: firstAccount !== null,

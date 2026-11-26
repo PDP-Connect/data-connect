@@ -102,3 +102,17 @@ test("fixtures cover each kind of service the design names", () => {
     ["browser_collector_manual", "static_secret_connect", "manual_upload_connect", "local_collector_enroll"]
   );
 });
+
+
+test("an unavailable-first alias does not hide a usable service", () => {
+  const blocked = { ...appleHealth, connectorKey: "apple_health", disposition: "unknown_unsupported" } as ConnectorCatalogEntry;
+  const model = build({}, [blocked, appleHealth]);
+  assert.equal(model.rows.length, 1);
+  assert.equal(model.rows[0]?.connectorKey, "apple-health");
+  assert.deepEqual(model.notAddable, []);
+});
+
+test("saved account keys normalize across catalog aliases", () => {
+  const model = build({ apple_health: ["cin_a"] }, [appleHealth]);
+  assert.equal(model.rows[0]?.added, true);
+});
