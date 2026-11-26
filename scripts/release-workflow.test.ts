@@ -1277,3 +1277,46 @@ docker() {
     }
   })
 })
+
+
+describe("offline Fly Core release preflight CLI", () => {
+  const cli = resolve(process.cwd(), "scripts/check-flyio-deploy-env.ts")
+
+  it("reports a valid dotenv file as structured JSON without deployment output", () => {
+    const root = mkdtempSync(join(tmpdir(), "fly-preflight-"))
+    try {
+      const envFile = join(root, "core.env")
+      writeFileSync(envFile, [
+        "# synthetic values; no connection is made",
+        'PDPP_REFERENCE_ORIGIN = "https://core.example.invalid"',
+        'DATABASE_URL = "postgres://db.example.invalid/core?application_name=preflight"',
+        "",
+      ].join("\n"))
+      const result = spawnSync(process.execPath, [cli, "--core", envFile, "--json"], {
+        encoding: "utf8",
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(JSON.parse(result.stdout)).toEqual({ ok: true, violations: [] })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("fails without emitting a JSON verdict when the supplied dotenv file cannot be read", () => {
+    const root = mkdtempSync(join(tmpdir(), "fly-preflight-"))
+    try {
+      const envFile = join(root, "absent.env")
+      const result = spawnSync(process.execPath, [cli, "--core", envFile, "--json"], {
+        encoding: "utf8",
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(`Error reading env file "${envFile}"`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
