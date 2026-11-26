@@ -6,6 +6,7 @@
 // may show codes and flags; nothing outside it may.
 import { createContext, isValidElement, useContext, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button.tsx";
+import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
 import type { requestReachability } from "./reachability-client.ts";
@@ -83,17 +84,19 @@ export function Diagnostics({ children, label = "Details", note, technicalOnly =
 }
 
 function CopyButton({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false);
+  const [outcome, setOutcome] = useState<CopyOutcome | null>(null);
+  const failure = outcome ? copyFailureLine(outcome) : null;
   return (
-    <Button
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => setCopied(true));
-      }}
-      type="button"
-      variant="outline"
-    >
-      {copied ? "Copied" : label}
-    </Button>
+    <>
+      <Button onClick={() => void copyText(text).then(setOutcome)} type="button" variant="outline">
+        {outcome === "copied" ? "Copied" : label}
+      </Button>
+      {failure ? (
+        <span className="text-sm" role="status">
+          {failure}
+        </span>
+      ) : null}
+    </>
   );
 }
 

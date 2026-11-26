@@ -36,7 +36,10 @@ import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
+import {
+  createRunManagedConnectorViaController,
+  projectManagedRuntimeFailure,
+} from "../server/scheduler-manager-factory.ts";
 import {
   type ConfigRevision,
   getDefaultConnectorInstanceConfigStore,
@@ -56,6 +59,32 @@ const MANIFEST = {
 };
 
 const TERMINAL_EVENT_TYPES = new Set(["run.completed", "run.failed", "run.cancelled", "run.abandoned"]);
+
+test("managed runtime failure projection preserves runtime facts without accepting connector retry claims", () => {
+  const terminalData = {
+    failure_message: "The connector configuration store could not be read.",
+    reason: "store_unreadable",
+    runtime_failure: { retryable: true },
+  };
+  assert.deepEqual(projectManagedRuntimeFailure(terminalData, null), {
+    failure_message: terminalData.failure_message,
+    failure_reason: "store_unreadable",
+    runtime_retryable: true,
+  });
+  assert.equal(
+    projectManagedRuntimeFailure({ ...terminalData, runtime_failure: { retryable: false } }, null).runtime_retryable,
+    false
+  );
+  assert.equal(
+    projectManagedRuntimeFailure({ ...terminalData, runtime_failure: undefined }, null).runtime_retryable,
+    null
+  );
+  assert.equal(projectManagedRuntimeFailure(terminalData, { retryable: true }).runtime_retryable, null);
+  assert.deepEqual(
+    projectManagedRuntimeFailure({ failure_message: 42, reason: 42, runtime_failure: { retryable: "true" } }, null),
+    { failure_message: null, failure_reason: null, runtime_retryable: null }
+  );
+});
 
 function createSchedulerStore(): SchedulerStore {
   const activeRuns = new Map<string, ActiveRunRecord>();
@@ -202,12 +231,14 @@ test("an unreadable config store records a typed terminal and retries with sched
   assert.equal(terminal?.event_type, "run.failed");
   assert.equal(terminal?.data?.reason, "store_unreadable");
   assert.equal(records[0]?.attempt, 2);
+  assert.equal(records[0]?.connectorError, null, "a runtime store failure is not a connector terminal claim");
   const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
   assert.equal(stored?.failureReason, "store_unreadable");
+  assert.equal(stored?.error, "The connector configuration store could not be read.");
 });
 
 test("automatic runs skip an invalid revision once and resume when the active revision changes", async (t) => {
-  const { launches, records, scheduler } = scheduleConfigLaunches(t);
+  const { connectorInstanceId, launches, records, scheduler, schedulerStore } = scheduleConfigLaunches(t);
   let active = { config: [], revision: 1 } as unknown as ConfigRevision;
   let reads = 0;
   t.mock.method(getDefaultConnectorInstanceConfigStore(), "getActiveRevision", () => {
@@ -222,6 +253,7 @@ test("automatic runs skip an invalid revision once and resume when the active re
   assert.equal(refusal?.status, "failed");
   assert.equal(refusal?.failureReason, "invalid_active_config");
   assert.equal(refusal?.attempt, 1, "the invalid revision does not retry in the same tick");
+  assert.equal(refusal?.connectorError, null, "a runtime config refusal is not a connector terminal claim");
   assert.equal(pending?.status, "skipped");
   assert.ok(pending?.error?.includes("invalid_active_config:1"));
   await waitForScheduledConfig(() => reads >= 5);
@@ -234,6 +266,8 @@ test("automatic runs skip an invalid revision once and resume when the active re
   assert.equal(terminal?.event_type, "run.failed");
   assert.equal(terminal?.data?.reason, "invalid_active_config");
   assert.ok(String(terminal?.data?.failure_message).includes("Confirm a replacement"));
+  const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
+  assert.equal(stored?.error, "Confirm a replacement connector configuration before retrying.");
 
   active = { ...active, config: {}, revision: 2 };
   await waitForScheduledConfig(() => records.length >= 3);

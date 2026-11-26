@@ -92,7 +92,7 @@ export interface ReadinessFacts {
   /** From the offered catalog entry's bindings. Used only when no artifact is selected. */
   readonly catalogBrowserBound: boolean | null;
   readonly connectorKey: string;
-  /** Null when the host was not asked: no verified browser-bound artifact. */
+  /** Null when the host was not asked. Never read as ready: a verified browser-bound artifact with a null host is `retry`. */
   readonly host: { readonly ready: boolean; readonly reason?: string } | null;
   /** A registered manifest the caller holds. The last resort for `browser_bound`. */
   readonly hintBrowserBound: boolean;
@@ -136,6 +136,7 @@ function artifactSummary(artifact: ArtifactFact): BrowserEnrollmentReadiness["ar
  *   artifact bytes fail verification                -> repair     artifact_invalid
  *   artifact verified, manifest not browser-bound   -> unavailable not_browser_bound
  *   artifact verified, declares no collection       -> unavailable not_implemented
+ *   artifact verified, host not evaluated           -> retry      inspection_unavailable
  *   artifact verified, host requirement unmet       -> configure  host_requirement_unmet
  *   artifact verified, host ready                   -> connect    runnable
  *   no artifact, catalog offers it                  -> install    not_installed
@@ -180,7 +181,12 @@ export function projectBrowserEnrollmentReadiness(facts: ReadinessFacts): Browse
     if (declaresNoCollection(artifact.manifest)) {
       return result("unavailable", "not_implemented");
     }
-    if (facts.host && !facts.host.ready) {
+    // Ready needs a positive host result. A host that was never asked is not a
+    // host that passed: answer retry, never connect.
+    if (!facts.host) {
+      return result("retry", "inspection_unavailable", { detail: "the host requirement was not evaluated" });
+    }
+    if (!facts.host.ready) {
       return result("configure", "host_requirement_unmet", { detail: facts.host.reason ?? null, host: "blocked" });
     }
     return result("connect", "runnable", { host: "ready" });

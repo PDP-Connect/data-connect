@@ -37,6 +37,7 @@ import {
   type RunExecutorRuntimeState,
 } from "../runtime/scheduler/run-executor.ts";
 import type { ConnectorSchedule, RunRecord } from "../runtime/scheduler-domain-types.ts";
+import { RunConfigBlockedError } from "../server/connector-run-config.ts";
 import { closeDb, initDb } from "../server/db.ts";
 
 const CONNECTOR_ID = "https://registry.pdpp.org/connectors/failure-reason-populated";
@@ -83,7 +84,7 @@ function freshRuntime(): RunExecutorRuntimeState {
   };
 }
 
-function makeHarness(runtime: RunExecutorRuntimeState): {
+function makeHarness(runtime: RunExecutorRuntimeState, runConnectorImpl?: RunExecutorDeps["runConnectorImpl"]): {
   launchRun: ReturnType<typeof createRunExecutor>["launchRun"];
 } {
   const deps: RunExecutorDeps = {
@@ -117,6 +118,7 @@ function makeHarness(runtime: RunExecutorRuntimeState): {
     resolveStaticSecretRunEnv: null,
     rsUrl: "http://localhost.invalid",
     runManagedConnectorViaController: null,
+    ...(runConnectorImpl ? { runConnectorImpl } : {}),
     runtime,
     schedulerStore: null,
     setState: async () => {
@@ -150,6 +152,28 @@ function withTmpDir(fn: (tmpDir: string) => Promise<void>): () => Promise<void> 
       rmSync(tmpDir, { force: true, recursive: true });
     }
   };
+}
+
+for (const reason of ["store_unreadable", "invalid_active_config", "missing_instance_identity"] as const) {
+  test(
+    `direct scheduler classifies runtime config failure ${reason} without a connector error`,
+    withTmpDir(async (tmpDir) => {
+      let attempts = 0;
+      const harness = makeHarness(freshRuntime(), async () => {
+        attempts += 1;
+        throw new RunConfigBlockedError(reason);
+      });
+      const record = await harness.launchRun(
+        { ...schedule(join(tmpDir, "never-spawned.mjs")), maxRetries: 1 },
+        false,
+        SCHEDULED_POLICY
+      );
+      assert.equal(attempts, reason === "store_unreadable" ? 2 : 1);
+      assert.equal(record.status, "failed");
+      assert.equal(record.failureReason, reason);
+      assert.equal(record.connectorError, null);
+    })
+  );
 }
 
 test(

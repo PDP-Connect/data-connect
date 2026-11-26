@@ -205,7 +205,11 @@ function isAdmissionDeniedMessage(message: string): boolean {
 
 function coerceRunError(err: unknown): RunConnectorError {
   if (err instanceof RunConfigBlockedError) {
-    return { connector_error: describeRunConfigFailure(err.reason), failure_reason: err.reason, message: err.message };
+    return {
+      failure_reason: err.reason,
+      message: err.message,
+      runtime_retryable: describeRunConfigFailure(err.reason)?.retryable ?? false,
+    };
   }
   if (err && typeof err === "object") {
     const candidate = err as RunConnectorError;
@@ -529,7 +533,7 @@ function runTimedOutError(result: RunConnectorResult, maxRunWallClockMs: number)
     // known_gaps: [] / checkpoint_summary: null on every timed-out run
     // regardless of how much work it durably completed before being killed.
     checkpoint_summary: result.checkpoint_summary || null,
-    connector_error: result.connector_error || { message },
+    connector_error: result.connector_error || null,
     failure_reason: "run_timed_out",
     known_gaps: result.known_gaps || null,
     message,
@@ -1384,6 +1388,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       connectorId,
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       connectorInstanceId: connectorInstanceId ?? null,
+      ...(runNowResult.failure_message ? { error: runNowResult.failure_message } : {}),
       failureReason: runNowResult.failure_reason || null,
       knownGaps: runNowResult.known_gaps || [],
       recordsEmitted: 0,
@@ -1470,6 +1475,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           connector_error: runNowResult.connector_error || null,
           failure_reason: runNowResult.failure_reason || null,
           known_gaps: runNowResult.known_gaps || null,
+          runtime_retryable: runNowResult.runtime_retryable ?? null,
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {

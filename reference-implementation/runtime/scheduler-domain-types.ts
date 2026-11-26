@@ -378,9 +378,15 @@ interface ManagedConnectorRun {
   readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: ConnectorError | null;
+  readonly failure_message?: string | null;
   readonly failure_reason?: string | null;
   readonly known_gaps?: readonly Record<string, unknown>[] | null;
   readonly run_id: string;
+  /**
+   * The runtime's own retry verdict, present when the run has no connector
+   * terminal error. Connector retry claims never set this field.
+   */
+  readonly runtime_retryable?: boolean | null;
   readonly status: string;
   readonly terminal_reason?: TerminalReason | null;
   readonly trace_id: string;

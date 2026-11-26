@@ -458,6 +458,20 @@ test("projection rows are evaluated top to bottom: an invalid artifact beats the
   assert.equal(projected.host, "not_evaluated");
 });
 
+test("a verified browser artifact whose host was never evaluated is retry, never connect", () => {
+  const projected = projectBrowserEnrollmentReadiness({
+    artifact: activeArtifact(),
+    catalog: "not_consulted",
+    catalogBrowserBound: null,
+    connectorKey: "acme-shop",
+    hintBrowserBound: true,
+    host: null,
+  });
+  assert.equal(projected.action, "retry");
+  assert.equal(projected.reason, "inspection_unavailable");
+  assert.equal(projected.host, "not_evaluated");
+});
+
 test("a registered manifest alone is not an artifact: it names the connector browser-bound but is never runnable", () => {
   const projected = projectBrowserEnrollmentReadiness({
     artifact: { status: "none" },

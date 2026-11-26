@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure, no-DB unit tests for the scheduler RETRY CLASSIFIER in
-// runtime/scheduler-retry-classifier.ts. No test imports this module by name.
+// runtime/scheduler-retry-classifier.ts.
 // This classifier decides whether a failed connector run is retried or left
 // terminal — a wrong verdict either hammers a permanently-broken source or
 // abandons a transient failure. It is exactly the kind of pure decision table
@@ -14,8 +14,8 @@
 //     carve-out is the load-bearing bit: 429 must ALWAYS retry.
 //   shouldRetryRunFailure -- composite AND-gate: retry only if the HTTP status is
 //     retryable AND failure_reason is not in the non-retryable set AND
-//     terminal_reason is not in the non-retryable set AND connector_error.retryable
-//     is not explicitly false. Null err -> do not retry.
+//     terminal_reason is not in the non-retryable set AND there is no
+//     connector-reported terminal error. Null err -> do not retry.
 //   isTerminalGrantFailure -- membership in the grant-terminal reason set only
 //     (auth/permission are non-retryable but are NOT grant failures).
 
@@ -90,11 +90,19 @@ test("shouldRetryRunFailure: a non-retryable terminal_reason blocks retry", () =
   assert.equal(shouldRetryRunFailure({ terminal_reason: "grant_expired" }), false);
 });
 
-test("shouldRetryRunFailure: connector_error.retryable === false blocks retry", () => {
+test("shouldRetryRunFailure: a connector-reported failed DONE without an error object is not retryable", () => {
+  assert.equal(
+    shouldRetryRunFailure({ connector_error: null, terminal_reason: "connector_reported_failed" }),
+    false,
+    "the terminal reason, not connector_error presence, marks the failure origin"
+  );
+  assert.equal(shouldRetryRunFailure({ terminal_reason: "connector_reported_failed", runtime_retryable: true }), false);
+});
+
+test("shouldRetryRunFailure: connector retryable claims never authorize a retry", () => {
   assert.equal(shouldRetryRunFailure({ connector_error: { retryable: false } }), false);
-  // retryable true or absent does not block on its own.
-  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), true);
-  assert.equal(shouldRetryRunFailure({ connector_error: {} }), true, "absent retryable flag is not a block");
+  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), false);
+  assert.equal(shouldRetryRunFailure({ connector_error: {} }), false, "absence supplies no retry authority");
 });
 
 // ---------------------------------------------------------------------------

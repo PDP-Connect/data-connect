@@ -279,7 +279,7 @@ test("the agreed add-account labels are exactly the realignment-plan vocabulary"
       display_name: "browser_src",
       runtime_requirements: { bindings: { browser: {} } },
     } as never,
-  ]);
+  ], "registered_catalog");
   const labels = [...map.values()].map((s: SourceAddSupport) => s.supportLabel);
   assert.ok(labels.length > 0, "projection must produce at least one label");
   const AGREED = new Set([

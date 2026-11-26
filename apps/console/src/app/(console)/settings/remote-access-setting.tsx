@@ -185,6 +185,8 @@ export function RemoteAccessSetting({
     snapshot: ReturnType<typeof projectRuntimeReview>;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Set in the click handler's own tick: `busy` renders only after it, so a fast second click would otherwise pass.
+  const changing = useRef(false);
   const [stale, setStale] = useState(false);
   // The last read that got no answer, for Details under the stale line.
   const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
@@ -205,6 +207,9 @@ export function RemoteAccessSetting({
   const [confirmPortSave, setConfirmPortSave] = useState(false);
   // The stop was confirmed from far away; this page is about to stop working.
   const [closingPage, setClosingPage] = useState(false);
+  // A far-away stop whose request died with no answer from the host: the route may still be on.
+  // `checked` is what a read of the host said afterwards; it never assumes the stop worked.
+  const [stopUnconfirmed, setStopUnconfirmed] = useState<{ routeId: string; checked: "none" | "still-on" | "no-answer" } | null>(null);
   // Track the displayed address and keep its change notice through later polls.
   const [seenAddress, setSeenAddress] = useState<{ origin: string; changed: boolean } | null>(null);
   // Set by Turn on again: turn on as soon as the next review is ready, but only if it shows the
@@ -230,6 +235,20 @@ export function RemoteAccessSetting({
   const actionEpoch = useRef(0);
   const loadSeq = useRef(0);
   const appliedSeq = useRef(0);
+  // The one rule that orders every read of /state. A read takes a ticket when it starts; its answer
+  // lands only if the card is mounted, no later read has landed and no action has started or ended
+  // since. Each caller keeps its own cleanup signal for its other effects.
+  const beginStateRead = () => ({ seq: ++loadSeq.current, epoch: actionEpoch.current });
+  const claimStateRead = (ticket: { seq: number; epoch: number }) => {
+    if (!mounted.current || ticket.seq < appliedSeq.current || ticket.epoch !== actionEpoch.current) return false;
+    appliedSeq.current = ticket.seq;
+    return true;
+  };
+  const applyState = (ticket: { seq: number; epoch: number }, next: State) => {
+    if (!claimStateRead(ticket)) return false;
+    setState(next);
+    return true;
+  };
   const seenSetup = useRef<string | null>(null);
   // Bumped by each poll above; a sign-in the owner is finishing reads its setup on each bump.
   const [setupTick, setSetupTick] = useState(0);
@@ -302,12 +321,11 @@ export function RemoteAccessSetting({
       return last.outcome;
     };
     const load = async () => {
-      const seq = ++loadSeq.current;
-      const startedInEpoch = actionEpoch.current;
+      const ticket = beginStateRead();
       // A poll reports on the moment it started. If an action began or ended
       // since, or a later poll already landed, this answer is out of date and
       // must not replace what the action or the later poll set.
-      const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
+      const outdated = () => !active || !claimStateRead(ticket);
       const [catalog, stateRead, hostRead, capabilityRead] = await Promise.all([
         catalogOutcome(),
         settle("/state"),
@@ -317,7 +335,6 @@ export function RemoteAccessSetting({
       if (outdated()) {
         return;
       }
-      appliedSeq.current = seq;
       const answered = (outcome: Outcome) => ("read" in outcome && outcome.read.ok ? outcome.read : null);
       const catalogResult = answered(catalog);
       const stateResult = answered(stateRead);
@@ -359,7 +376,8 @@ export function RemoteAccessSetting({
       }
       if (stateResult) {
         const next = stateResult.data as State;
-        setState(next);
+        // Claimed above, with no await since: this applies under the same ticket.
+        applyState(ticket, next);
         setStateLoaded(true);
         if (next.operations?.length) {
           setOperation((current) => (current?.stage === "applying" ? current : (next.operations?.[0] ?? current)));
@@ -427,10 +445,12 @@ export function RemoteAccessSetting({
       return;
     }
     let active = true;
+    const ticket = beginStateRead();
     void request("/state").then((result) => {
-      if (!active) return;
+      // An answer a later read or an action has passed changes neither the state nor the stale line.
+      if (!active || !claimStateRead(ticket)) return;
       if (result.ok) {
-        setState(result.data as State);
+        applyState(ticket, result.data as State);
         setStale(false);
       } else {
         setStale(true);
@@ -487,12 +507,18 @@ export function RemoteAccessSetting({
     const previous = preparing.current?.token === token ? preparing.current.tail : Promise.resolve();
     const run = previous.then(() => {
       if (!isCurrent()) throw new PreparationStopped();
-      return prepareTurnOn(request, { providerId, usage }, {
+      let passwordStateTicket: ReturnType<typeof beginStateRead> | null = null;
+      const prepareRequest: typeof requestReachability = (path, body) => {
+        if (path === "/state") passwordStateTicket = beginStateRead();
+        return request(path, body);
+      };
+      return prepareTurnOn(prepareRequest, { providerId, usage }, {
         isCurrent,
         mayRunActions: () => !passwordMissingNow.current,
         onPasswordMissing: () => {
-          if (!isCurrent()) return;
+          if (!isCurrent() || !passwordStateTicket || !claimStateRead(passwordStateTicket)) return;
           passwordMissingNow.current = true;
+          actionEpoch.current += 1;
           setState((current) => ({ ...current, passwordSet: false }));
         },
       });
@@ -619,8 +645,9 @@ export function RemoteAccessSetting({
             expectedConfigurationRevision: result.draft.configuration.revision,
             usage: wayUsage,
           });
+          const ticket = beginStateRead();
           const fresh = await request("/state");
-          if (active && fresh.ok) setState(fresh.data as State);
+          if (active && fresh.ok) applyState(ticket, fresh.data as State);
         }
         return result;
       })
@@ -679,6 +706,8 @@ export function RemoteAccessSetting({
   }, [readyReview, busy]);
 
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
+    if (changing.current) return;
+    changing.current = true;
     actionEpoch.current += 1;
     setBusy(true);
     setError(null);
@@ -687,6 +716,7 @@ export function RemoteAccessSetting({
     } catch (failure) {
       setError(toDisplayError(failure, "action", wayLabel, kind));
     } finally {
+      changing.current = false;
       actionEpoch.current += 1;
       setBusy(false);
     }
@@ -807,20 +837,20 @@ export function RemoteAccessSetting({
     }, "turn-off");
   }
   // Renews the proof before its window ends, with no click and no status change.
+  // One read of /state under the same guard as a poll: its answer is applied only while the card is
+  // mounted, no later read has landed and no action has started or ended since. Both rechecks use it.
+  async function readStateFenced(ticket = beginStateRead()) {
+    const read = await request("/state");
+    const applied = read.ok && applyState(ticket, read.data as State);
+    return { read, applied };
+  }
   async function runRecheck(id: string, generation: number): Promise<CheckOutcome> {
     setRechecking((current) => new Set(current).add(id));
     try {
       const result = await request(`/routes/${encodeURIComponent(id)}/check`, { generation });
       if (!result.ok) return { ok: false, code: result.code };
       const checked = result.data as Route;
-      // Same guard as a poll: a reply that an action or a newer poll has passed is dropped.
-      const seq = ++loadSeq.current;
-      const startedInEpoch = actionEpoch.current;
-      const fresh = await request("/state");
-      if (fresh.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current) {
-        appliedSeq.current = seq;
-        setState(fresh.data as State);
-      }
+      await readStateFenced();
       if (checked.verification.status !== "verified" || !checked.published) {
         return { ok: false, code: publicError("verification_failed").code };
       }
@@ -865,6 +895,9 @@ export function RemoteAccessSetting({
   // `accepted` runs only once the host has accepted the stop. A refused stop
   // leaves the route where it was, still needing the owner and still re-checked.
   async function stopRoute(route: Route, accepted: () => void, farAway = false) {
+    // A stop is already under way; a second click starts nothing.
+    if (changing.current) return;
+    setStopUnconfirmed(null);
     // Said before the request: the tunnel may close before a reply comes back.
     if (farAway) setClosingPage(true);
     await turnOff(async () => {
@@ -875,9 +908,13 @@ export function RemoteAccessSetting({
           acknowledgeDisconnect: true,
         });
       } catch (failure) {
-        // From far away, a request that dies because the address closed is the expected end.
-        if (farAway && !(failure instanceof ReachabilityFailure)) return;
         setClosingPage(false);
+        // From far away, a request that dies because the address closed may be the expected end, but
+        // nothing here proves it: the host sent no answer. Say so and offer a read of the host.
+        if (farAway && !(failure instanceof ReachabilityFailure)) {
+          setStopUnconfirmed({ routeId: route.handle.id, checked: "none" });
+          return;
+        }
         throw failure;
       }
       accepted();
@@ -886,6 +923,28 @@ export function RemoteAccessSetting({
       setAcknowledged((current) => new Set(current).add(route.handle.id));
       setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
     });
+  }
+  // Reads the host once. Only a read: it sends no stop, so it cannot change the route.
+  const [checkingStop, setCheckingStop] = useState(false);
+  async function checkStop() {
+    const notice = stopUnconfirmed;
+    if (!notice || checkingStop) return;
+    setCheckingStop(true);
+    // The answer belongs to the notice that was on screen when Check again was pressed. A newer stop
+    // clears or replaces that notice, so a late answer changes nothing.
+    const record = (checked: "still-on" | "no-answer") =>
+      setStopUnconfirmed((current) => (current === notice ? { ...notice, checked } : current));
+    const ticket = beginStateRead();
+    try {
+      const { read, applied } = await readStateFenced(ticket);
+      if (!mounted.current) return;
+      if (!read.ok && claimStateRead(ticket)) record("no-answer");
+      else if (applied) record("still-on");
+    } catch {
+      if (claimStateRead(ticket)) record("no-answer");
+    } finally {
+      if (mounted.current) setCheckingStop(false);
+    }
   }
   // Stop actions always ask first; the message explains whether this page will close.
   function requestStop(route: Route, again: boolean) {
@@ -920,6 +979,7 @@ export function RemoteAccessSetting({
         action: "check",
         acknowledgeDisconnect: true,
       });
+      const ticket = beginStateRead();
       const [operationResult, stateResult] = await Promise.all([
         request(`/operations/${encodeURIComponent(current.operationId)}`),
         request("/state"),
@@ -927,7 +987,7 @@ export function RemoteAccessSetting({
       if (operationResult.ok) {
         setOperation({ ...(operationResult.data as Operation), kind: (operationResult.data as Operation).kind ?? current.kind });
       }
-      if (stateResult.ok) setState(stateResult.data as State);
+      if (stateResult.ok) applyState(ticket, stateResult.data as State);
     });
   }
 
@@ -1074,6 +1134,22 @@ export function RemoteAccessSetting({
         </div>
       ) : null}
       {closingPage ? <p className="text-sm" role="status">Turning off… this page will stop working in a moment.</p> : null}
+      {stopUnconfirmed && state.routes.some((item) => item.handle.id === stopUnconfirmed.routeId && headlineOf(item) !== "Off") ? (
+        <div className="grid gap-2 rounded-xl border p-4" role="status">
+          <p className="text-sm">
+            {stopUnconfirmed.checked === "still-on"
+              ? "Checked just now: remote access is still on. Turn it off again below."
+              : stopUnconfirmed.checked === "no-answer"
+                ? "We couldn't reach the host to check. Remote access may still be on."
+                : "We couldn't confirm that remote access turned off. It may still be on. If this page stops loading, that does not show it is off: check again from this computer."}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={checkingStop} onClick={() => void checkStop()} type="button" variant="outline">
+              Check again
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {passwordMissing && canSetPasswordHere === true ? (
         <div className="grid gap-2 border-y border-border/70 py-3">
           <h3 className="pdpp-label">Choose your own password for remote access</h3>
@@ -1144,7 +1220,7 @@ export function RemoteAccessSetting({
                 action={done.action}
                 busy={mutationBlocked}
                 draft={done.draft}
-                onAllow={(action, input) => void allow(done.draft, action, input)}
+                onAllow={(action, input) => allow(done.draft, action, input)}
                 onOther={chooseAnotherWay}
               />
             ) : null}
@@ -1164,7 +1240,7 @@ export function RemoteAccessSetting({
                 busy={mutationBlocked}
                 changed={changed}
                 key={done.review.id}
-                onTurnOn={(review) => void turnOn(review)}
+                onTurnOn={(review) => turnOn(review)}
                 review={done.review}
                 steps={done.steps}
                 wayTitle={wayTitle}

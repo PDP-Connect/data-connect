@@ -95,29 +95,29 @@ test("displayNameForConnector: display_name -> name -> the key", () => {
 // --- isProviderAuthLifecycleProven ------------------------------------------
 
 test("isProviderAuthLifecycleProven: reads the manifest's own claim, strictly true", () => {
-  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: true } } }), true);
-  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: false } } }), false);
-  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: "true" } } }), false);
-  assert.equal(isProviderAuthLifecycleProven({ capabilities: {} }), false, "no proven block");
-  assert.equal(isProviderAuthLifecycleProven(null), false, "no manifest");
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: true } } }, "registered_catalog"), true);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: false } } }, "registered_catalog"), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: "true" } } }, "registered_catalog"), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: {} }, "registered_catalog"), false, "no proven block");
+  assert.equal(isProviderAuthLifecycleProven(null, "registered_catalog"), false, "no manifest");
 });
 
 // --- isStaticSecretLiveProven -----------------------------------------------
 
 test("isStaticSecretLiveProven: reads capabilities.proven.static_secret_live.proven, strictly true", () => {
-  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: true } } } }), true);
-  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: false } } } }), false);
-  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: {} } } }), false);
-  assert.equal(isStaticSecretLiveProven(undefined), false, "no manifest");
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: true } } } }, "registered_catalog"), true);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: false } } } }, "registered_catalog"), false);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: {} } } }, "registered_catalog"), false);
+  assert.equal(isStaticSecretLiveProven(undefined, "registered_catalog"), false, "no manifest");
 });
 
 // --- isLocalCollectorProven -------------------------------------------------
 
 test("isLocalCollectorProven: reads capabilities.proven.local_collector, strictly true", () => {
-  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: true } } }), true);
-  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: false } } }), false);
-  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: 1 } } }), false);
-  assert.equal(isLocalCollectorProven(null), false, "no manifest");
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: true } } }, "registered_catalog"), true);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: false } } }, "registered_catalog"), false);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: 1 } } }, "registered_catalog"), false);
+  assert.equal(isLocalCollectorProven(null, "registered_catalog"), false, "no manifest");
 });
 
 // --- classifyConnectorIntentModality ----------------------------------------

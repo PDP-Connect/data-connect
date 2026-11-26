@@ -2546,6 +2546,7 @@ function credentialsValidCondition(input: ComputeConnectionHealthInput): Connect
   const credential = input.credential ?? null;
   const credentialAbsent = credential?.capable === true && credential.present !== true;
   const credentialRejectedDurably = credential?.capable === true && credential.rejected === true;
+  const browserSessionRepairProven = browserSessionRepairAuthorized(input);
   // A connector that authenticates to no provider has no credential to probe.
   // Answered before every other branch because for these connections the
   // question has no referent at all — but deliberately NOT when contradicting
@@ -2555,7 +2556,10 @@ function credentialsValidCondition(input: ComputeConnectionHealthInput): Connect
   // `not_applicable` would hide exactly the failure the owner must act on.
   // Evidence wins over declaration, so those cases fall through to the honest
   // classification below.
-  if (input.authentication?.authenticates === false && credential === null && !(reason && isCredentialReason(reason))) {
+  if (
+    input.authentication?.authenticates === false && credential === null &&
+    !(reason && isCredentialReason(reason)) && !browserSessionRepairProven
+  ) {
     return credentialsNotApplicableCondition();
   }
   // A credential-shaped run reason is present: classify honestly by durable
@@ -2585,7 +2589,7 @@ function credentialsValidCondition(input: ComputeConnectionHealthInput): Connect
     if (credentialAbsent) {
       return credentialRequiredCondition();
     }
-    if (browserSessionRepairReason && browserSessionRepairAuthorized(input)) {
+    if (browserSessionRepairReason && browserSessionRepairProven) {
       return browserSessionRequiredCondition(reason);
     }
     if (browserSessionRepairReason || (definitiveStoredCredentialRejection && input.browserSessionRepairCapable)) {
@@ -2622,12 +2626,10 @@ function credentialsValidCondition(input: ComputeConnectionHealthInput): Connect
   if (credentialAbsent) {
     return credentialRequiredCondition();
   }
-  // A runtime-verified provider invalidation proof outranks the success
-  // branch below: a run with no failure reason must not read as "credentials
-  // accepted" while an unrepaired proof stands. Replay suppression is inside
-  // `browserSessionRepairAuthorized`.
-  if (browserSessionRepairAuthorized(input)) {
-    return browserSessionRequiredCondition(null);
+  // Verified runtime evidence stands on its own. A generic connector failure
+  // neither grants repair authority nor hides a proof the runtime already owns.
+  if (browserSessionRepairProven) {
+    return browserSessionRequiredCondition("session_required");
   }
   if (input.run?.latestStatus === "succeeded") {
     return condition({

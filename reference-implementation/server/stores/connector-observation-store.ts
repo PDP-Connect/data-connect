@@ -30,6 +30,7 @@
  */
 
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
+import { RECOVERY_ACTIONS } from "../../runtime/connector-gap-bounding.ts";
 import {
   type Diagnosis,
   type DiagnosticDescriptors,
@@ -171,13 +172,30 @@ function isSnapshot(value: unknown): value is ObservationSnapshot {
     isRecord(value) &&
     Array.isArray(value.facts) &&
     Array.isArray(value.defects) &&
-    typeof value.truncated === "boolean"
+    typeof value.truncated === "boolean" &&
+    (value.connector_suggestions === undefined || isConnectorSuggestions(value.connector_suggestions))
   );
 }
 
 /** Element-level check. It runs after the size bound, so a huge record is refused before it is validated. */
 function hasValidElements(snapshot: ObservationSnapshot): boolean {
   return snapshot.facts.every(isObservedFact) && snapshot.defects.every(isRuntimeDefect);
+}
+
+function isConnectorSuggestions(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= 16 &&
+    value.every(
+      (suggestion: unknown) =>
+        isRecord(suggestion) &&
+        Object.keys(suggestion).every((key) => key === "attribution" || key === "action" || key === "origin") &&
+        suggestion.attribution === "connector" &&
+        typeof suggestion.action === "string" &&
+        RECOVERY_ACTIONS.has(suggestion.action) &&
+        (suggestion.origin === "skip_result" || suggestion.origin === "done_error")
+    )
+  );
 }
 
 function invalid(message: string): ConnectorObservationStoreError {
@@ -232,11 +250,11 @@ function encodeRecord(input: ConnectorObservationRunInput): {
     }
     throw error;
   }
-  const { facts, defects, truncated } = input.snapshot;
+  const { facts, defects, truncated, connector_suggestions } = input.snapshot;
   const payload = JSON.stringify({
     descriptors,
     doneBasis: input.doneBasis,
-    snapshot: { defects, facts, truncated },
+    snapshot: { defects, facts, truncated, ...(connector_suggestions === undefined ? {} : { connector_suggestions }) },
   });
   if (Buffer.byteLength(payload, "utf8") > CONNECTOR_OBSERVATION_RECORD_MAX_BYTES) {
     throw new ConnectorObservationStoreError(

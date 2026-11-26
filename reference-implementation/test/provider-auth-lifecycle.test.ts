@@ -333,7 +333,7 @@ async function initiateProviderAuth(
 // ---------------------------------------------------------------------------
 
 test("test_provider's manifest declares the provider-auth lifecycle proven", () => {
-  assert.ok(isProviderAuthLifecycleProven(TEST_PROVIDER_MANIFEST), "test_provider must claim the lifecycle proof");
+  assert.ok(isProviderAuthLifecycleProven(TEST_PROVIDER_MANIFEST, "registered_catalog"), "test_provider must claim the lifecycle proof");
 });
 
 // ---------------------------------------------------------------------------

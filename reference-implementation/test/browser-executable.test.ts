@@ -53,6 +53,7 @@ function compose(sourceEnv: NodeJS.ProcessEnv, present: string[], extra: { expli
     },
     connectorId: "test-connector",
     explicitRunEnv: extra.explicit ?? {},
+    installedConnectorKeys: [],
     manifest: {},
     platform: "linux",
     sourceEnv,
@@ -126,6 +127,7 @@ test("child environment: the same stale path warns once across runs", () => {
     composeConnectorChildEnvironment({
       browserPath: { ...deps(IMAGE_EXECUTABLE), onFallback: (_w, message) => warnings.push(message), warned },
       explicitRunEnv: {},
+      installedConnectorKeys: [],
       manifest: {},
       platform: "linux",
       sourceEnv: { PLAYWRIGHT_BROWSERS_PATH: STALE },

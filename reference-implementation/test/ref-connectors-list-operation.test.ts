@@ -515,7 +515,9 @@ test("connector summary connection health degrades succeeded runs with coverage 
   });
   assert.equal(snapshot.state, "degraded");
   assert.equal(snapshot.axes.coverage, "terminal_gap");
-  assert.equal(snapshot.reason_code, "http_429");
+  // A gap reason is the connector's own text (Section 5.11), so it is not the run's
+  // reason code. The gap itself still degrades the connection, as asserted above.
+  assert.equal(snapshot.reason_code, null);
 });
 
 test("connector summary connection health surfaces retryable_gap for known transient gaps", () => {

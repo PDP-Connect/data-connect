@@ -96,6 +96,14 @@ describe("playwright-runner build options", () => {
     expect(otherPlatform).toEqual(["Build complete!"])
   })
 
+  it("rejects a missing target value before starting a build", () => {
+    expect(() => parseBuildOptions(["--target"])).toThrow("--target requires a value")
+  })
+
+  it("does not treat the next flag as an output path", () => {
+    expect(() => parseBuildOptions(["--output", "--lean"])).toThrow("--output requires a value")
+  })
+
   it("keeps lean builds incompatible with browser provisioning", () => {
     expect(() => parseBuildOptions(["--lean", "--require-browser"])).toThrow(
       "cannot be used together"

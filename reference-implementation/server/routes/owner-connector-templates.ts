@@ -359,6 +359,8 @@ function projectTemplate(
     configuredProviderAuthConnectorKeys: ctx.configuredProviderAuthConnectorKeys ?? [],
     connectorKey,
     manifest,
+    // Every template is a manifest read from the registry by `collectConnectorTemplates`.
+    proofProvenance: "registered_catalog",
   });
   const modality = plan.connectorModality;
   const connections = (connectionsByConnector.get(connectorKey) ?? []).map((instance) =>

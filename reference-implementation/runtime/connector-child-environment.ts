@@ -128,10 +128,12 @@ export interface ConnectorChildEnvironmentInput {
   explicitRunEnv: Record<string, string>;
   /**
    * Canonical keys of every installed connector, so a key inside nested
-   * namespaces goes to the connector with the longest one. Omitted means no
-   * other connector is known.
+   * namespaces goes to the connector with the longest one. Required: a caller
+   * that cannot say which connectors are installed must not build a run's
+   * environment, because an empty list would silently disable the guard. A
+   * test that means "no other connector" passes `[]` explicitly.
    */
-  installedConnectorKeys?: readonly string[];
+  installedConnectorKeys: readonly string[];
   manifest: unknown;
   platform?: NodeJS.Platform;
   sourceEnv?: NodeJS.ProcessEnv;
@@ -419,7 +421,7 @@ export function tuningNamespacePrefix(connectorKey: string): string {
 export function ownsTuningKey(
   connectorKey: string,
   key: string,
-  installedConnectorKeys: readonly string[] = []
+  installedConnectorKeys: readonly string[]
 ): boolean {
   if (reserved(key) || proxyKey(key) || isServerOwnedEnvironmentKey(key)) {
     return false;
@@ -690,7 +692,7 @@ export function composeConnectorChildEnvironment(input: ConnectorChildEnvironmen
     env,
     approvedBindingValues(
       // Operator bindings come last, so they override a declared tuning key.
-      [...tuningBindings(input.connectorId, tuningKeys, input.installedConnectorKeys ?? []), ...policy.approvedBindings],
+      [...tuningBindings(input.connectorId, tuningKeys, input.installedConnectorKeys), ...policy.approvedBindings],
       [...declaredLogicalKeys(input.manifest), ...tuningKeys],
       input.connectorId,
       proxyAuthorized,

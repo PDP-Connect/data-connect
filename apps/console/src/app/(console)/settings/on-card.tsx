@@ -5,10 +5,11 @@ import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import type { Inventory } from "./prepare-remote-access.ts";
+import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
 import { plain } from "./plain-text.ts";
 import { expiryLine, expiryTime, proofLine, type RouteDisplayInput } from "./route-display.ts";
 
-/** Copies text and says so. The clipboard may be missing; then nothing changes. */
+/** Copies text and says so, including when it cannot. */
 export function CopyButton({
   label,
   text,
@@ -19,17 +20,19 @@ export function CopyButton({
   /** Filled for the card's one primary action, quiet for everything else. */
   variant?: "default" | "secondary" | "outline";
 }) {
-  const [copied, setCopied] = useState(false);
+  const [outcome, setOutcome] = useState<CopyOutcome | null>(null);
+  const failure = outcome ? copyFailureLine(outcome) : null;
   return (
-    <Button
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => setCopied(true));
-      }}
-      type="button"
-      variant={variant}
-    >
-      {copied ? "Copied" : label}
-    </Button>
+    <>
+      <Button onClick={() => void copyText(text).then(setOutcome)} type="button" variant={variant}>
+        {outcome === "copied" ? "Copied" : label}
+      </Button>
+      {failure ? (
+        <span className="text-sm" role="status">
+          {failure}
+        </span>
+      ) : null}
+    </>
   );
 }
 

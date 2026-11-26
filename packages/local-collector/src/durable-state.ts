@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -15,13 +16,14 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome's Node module registry does not yet recognize node:sqlite; Node and tsc resolve the built-in module.
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SQLITE_HEADER = "SQLite format 3\u0000";
 const MAX_LEGACY_ENTRIES_PER_ROOT = 64;
@@ -33,6 +35,10 @@ export interface CollectorStatePathInput {
   afterMigrationInstall?: (() => void) | undefined;
   /** Test hook that simulates a crash after the legacy retirement fence commits. */
   afterRetirementFence?: (() => void) | undefined;
+  /** Test hook that simulates another process acting on the queue right after this run linked the canonical name. */
+  afterUnderscoreQueueLink?: (() => void) | undefined;
+  /** Test hook that simulates another collector acting on an underscore-named queue just before this run folds it. */
+  beforeUnderscoreQueueFold?: (() => void) | undefined;
   /** Test hook that simulates a legacy collector write after the first snapshot. */
   beforeMigrationReconcile?: (() => void) | undefined;
   /** A queue path supplied by an operator or profile. */
@@ -117,28 +123,31 @@ const QUEUE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
 
 /**
  * Fold a queue's write-ahead log into the main database file so the main file
- * alone holds every committed row. Returns false when that cannot be proven:
- * the file is not a readable database, another process holds it (a running
- * collector), or a sidecar still has content afterwards. Callers then leave
- * the file where it is.
+ * alone holds every committed row. The file must already exist: the open uses
+ * SQLite's `mode=rw`, which never creates it, so a source another process has
+ * just moved away is reported as `missing` instead of being recreated empty.
+ * `unprovable` means the fold cannot be proven: the file is not a readable
+ * database, another process holds it (a running collector), or a sidecar still
+ * has content afterwards. Callers then leave the file where it is.
  */
-function foldQueueIntoMainFile(path: string): boolean {
+function foldQueueIntoMainFile(path: string): "folded" | "missing" | "unprovable" {
   let db: DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(path);
+    db = new DatabaseSync(`${pathToFileURL(path).href}?mode=rw`);
     const row = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy?: number } | undefined;
     if (row?.busy) {
-      return false;
+      return "unprovable";
     }
   } catch {
-    return false;
+    return existsSync(path) ? "unprovable" : "missing";
   } finally {
     db?.close();
   }
-  return QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
+  const sidecarsEmpty = QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
     const sidecar = `${path}${suffix}`;
     return !existsSync(sidecar) || statSync(sidecar).size === 0;
   });
+  return sidecarsEmpty ? "folded" : "unprovable";
 }
 
 /**
@@ -155,12 +164,28 @@ function foldQueueIntoMainFile(path: string): boolean {
  * rows for the source, every run warns with the path to deliver them from.
  * A second run finds nothing to do, and nothing reads the old spelling
  * anywhere else.
+ *
+ * Two collectors can start together and both see the legacy file and no
+ * canonical one, so the checks alone do not make the move safe. One process
+ * owns the move through the same handoff lock as {@link migrateLegacyStore};
+ * a second one stops with a named error. Every change to the legacy or
+ * canonical name, including dropping the old name after a link, happens under
+ * that lock; outside it this function only reads and warns.
+ *
+ * The lock binds only collectors that run this code. An older collector does
+ * not take it, and this code does not make that collector's own migration safe:
+ * its check-then-rename can still replace the canonical file. What the steps
+ * below do is limit this code's own damage when something outside the lock
+ * changes the state under it: the legacy file is opened without creating it,
+ * and the canonical name is installed with a hard link, which fails when the
+ * name exists instead of replacing the file there.
  */
 function migrateUnderscoreSpelledQueue(
   canonicalPath: string,
   connectorId: string | null | undefined,
   sourceInstanceId: string,
-  stateRoot: string
+  stateRoot: string,
+  hooks: { afterLink?: (() => void) | undefined; beforeFold?: (() => void) | undefined } = {}
 ): void {
   const trimmed = connectorId?.trim();
   if (!trimmed?.includes("-")) {
@@ -174,24 +199,153 @@ function migrateUnderscoreSpelledQueue(
   if (legacyPath === canonicalPath || !existsSync(legacyPath)) {
     return;
   }
-  if (existsSync(canonicalPath)) {
-    warnLegacyQueuePending({
-      canonicalPath,
-      legacyPath,
-      situation: `the legacy queue ${legacyPath} exists beside the canonical local collector queue ${canonicalPath}`,
-      sourceInstanceId,
-    });
+  // Two different files: nothing to change, only to report. When both names are
+  // one file a move is unfinished, and only the lock owner may finish it.
+  if (existsSync(canonicalPath) && !isSameFile(canonicalPath, legacyPath)) {
+    settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
     return;
   }
-  if (!foldQueueIntoMainFile(legacyPath)) {
+  const lockPath = `${canonicalPath}.handoff.lock`;
+  let lock: MigrationLock;
+  try {
+    lock = acquireMigrationLock(lockPath);
+  } catch (error) {
+    if (error instanceof CollectorStateResolutionError) {
+      throw error;
+    }
+    // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+    throw new CollectorStateResolutionError(
+      "legacy_state_migration_failed",
+      `could not take the lock to move the legacy queue ${legacyPath} to ${canonicalPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+  try {
+    moveUnderscoreSpelledQueue(canonicalPath, legacyPath, sourceInstanceId, hooks);
+  } finally {
+    releaseMigrationLock(lock);
+  }
+}
+
+function moveUnderscoreSpelledQueue(
+  canonicalPath: string,
+  legacyPath: string,
+  sourceInstanceId: string,
+  hooks: { afterLink?: (() => void) | undefined; beforeFold?: (() => void) | undefined }
+): void {
+  // The state the caller checked may have changed before the lock was taken.
+  if (!existsSync(legacyPath)) {
+    requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+    return;
+  }
+  if (existsSync(canonicalPath)) {
+    settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
+    return;
+  }
+  hooks.beforeFold?.();
+  const fold = foldQueueIntoMainFile(legacyPath);
+  if (fold === "missing") {
+    requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+    return;
+  }
+  if (fold === "unprovable") {
     return;
   }
   for (const suffix of QUEUE_SIDECAR_SUFFIXES) {
-    if (existsSync(`${legacyPath}${suffix}`)) {
-      rmSync(`${legacyPath}${suffix}`);
-    }
+    rmSync(`${legacyPath}${suffix}`, { force: true });
   }
-  renameSync(legacyPath, canonicalPath);
+  try {
+    linkSync(legacyPath, canonicalPath);
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
+      return;
+    }
+    if (isNotFoundError(error)) {
+      requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+      return;
+    }
+    throw error;
+  }
+  hooks.afterLink?.();
+  if (isSameFile(canonicalPath, legacyPath)) {
+    try {
+      unlinkSync(legacyPath);
+      return;
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+  } else if (existsSync(legacyPath)) {
+    throw new CollectorStateResolutionError(
+      "legacy_state_migration_failed",
+      `the canonical queue ${canonicalPath} is not the legacy queue ${legacyPath} that was moved to it; the legacy queue was left in place`
+    );
+  }
+  // The old name was dropped by someone else. The move is complete only if the
+  // canonical queue is a usable queue.
+  requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+}
+
+/**
+ * A legacy queue beside the canonical one is left alone and reported, with one
+ * exception: when both names are the same file, a move that linked the new
+ * name was interrupted before it dropped the old one. Dropping it finishes
+ * that move and loses nothing. Call it holding the handoff lock whenever the
+ * two names can be one file.
+ */
+function settleLegacyQueueBesideCanonical(canonicalPath: string, legacyPath: string, sourceInstanceId: string): void {
+  if (isSameFile(canonicalPath, legacyPath)) {
+    rmSync(legacyPath, { force: true });
+    return;
+  }
+  warnLegacyQueuePending({
+    canonicalPath,
+    legacyPath,
+    situation: `the legacy queue ${legacyPath} exists beside the canonical local collector queue ${canonicalPath}`,
+    sourceInstanceId,
+  });
+}
+
+/**
+ * The legacy queue is gone. That is a finished move only when a usable queue now
+ * sits at the canonical path: another collector moved it there. Anything else
+ * means the rows are not where they should be, and the run must say so.
+ */
+function requireQueueAtCanonicalPath(canonicalPath: string, legacyPath: string): void {
+  if (existsSync(canonicalPath) && isSqliteDatabase(canonicalPath) && hasOutboxTable(canonicalPath)) {
+    return;
+  }
+  throw new CollectorStateResolutionError(
+    "legacy_state_migration_failed",
+    `the legacy queue ${legacyPath} disappeared while it was being moved, and there is no usable queue at ${canonicalPath}`
+  );
+}
+
+function isSameFile(first: string, second: string): boolean {
+  try {
+    const a = statSync(first);
+    const b = statSync(second);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+function hasOutboxTable(path: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    return Boolean(
+      db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'local_device_outbox'").get()
+    );
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
 }
 
 /**
@@ -229,7 +383,13 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     return canonicalPath;
   }
 
-  migrateUnderscoreSpelledQueue(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
+  migrateUnderscoreSpelledQueue(
+    canonicalPath,
+    input.connectorId,
+    sourceInstanceId,
+    stateRoot,
+    { afterLink: input.afterUnderscoreQueueLink, beforeFold: input.beforeUnderscoreQueueFold }
+  );
 
   if (existsSync(canonicalPath)) {
     // A fully installed canonical copy is authoritative. If it is an empty
@@ -434,12 +594,11 @@ function migrateLegacyStore(
   mkdirSync(dirname(canonicalPath), { mode: 0o700, recursive: true });
   const temporaryPath = `${canonicalPath}.migration-${process.pid}-${randomUUID()}.tmp`;
   const lockPath = `${canonicalPath}.handoff.lock`;
-  let lockAcquired = false;
+  let lock: MigrationLock | undefined;
   let source: DatabaseSync | undefined;
   try {
     ensureSameFilesystem(legacyPath, canonicalPath);
-    acquireMigrationLock(lockPath);
-    lockAcquired = true;
+    lock = acquireMigrationLock(lockPath);
     source = new DatabaseSync(legacyPath, { readOnly: true });
     source.exec("PRAGMA busy_timeout = 5000");
     const escapedPath = temporaryPath.replaceAll("'", "''");
@@ -454,7 +613,7 @@ function migrateLegacyStore(
     if (reconcileLegacyWrites(legacyPath, temporaryPath, canonicalPath, sourceInstanceId) === "canonical_exists") {
       // An earlier crashed attempt may have left this source fenced.
       liftRetirementFence(legacyPath, sourceInstanceId);
-      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lockPath);
+      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lock);
     }
 
     const snapshotFd = openSync(temporaryPath, "r");
@@ -466,19 +625,17 @@ function migrateLegacyStore(
 
     afterRetirementFence?.();
     if (installSnapshot(temporaryPath, canonicalPath, sourceInstanceId, legacyPath) === "canonical_exists") {
-      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lockPath);
+      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lock);
     }
     afterInstall?.();
-    if (lockAcquired) {
-      releaseMigrationLock(lockPath);
-    }
+    releaseMigrationLock(lock);
     rmSync(temporaryPath, { force: true });
     return canonicalPath;
   } catch (error) {
     source?.close();
     rmSync(temporaryPath, { force: true });
-    if (lockAcquired) {
-      releaseMigrationLock(lockPath);
+    if (lock) {
+      releaseMigrationLock(lock);
     }
     if (error instanceof CollectorStateResolutionError) {
       throw error;
@@ -503,10 +660,10 @@ function abandonMigrationForExistingCanonical(
   canonicalPath: string,
   sourceInstanceId: string,
   temporaryPath: string,
-  lockPath: string
+  lock: MigrationLock
 ): string {
   rmSync(temporaryPath, { force: true });
-  releaseMigrationLock(lockPath);
+  releaseMigrationLock(lock);
   warnLegacyQueuePending({
     canonicalPath,
     legacyPath,
@@ -646,42 +803,112 @@ function reconcileLegacyWrites(
   }
 }
 
-function acquireMigrationLock(path: string): void {
-  try {
-    const fd = openSync(path, "wx", 0o600);
-    try {
-      writeSync(fd, `${process.pid}\n`, undefined, "utf8");
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  } catch (error) {
-    if (!isAlreadyExistsError(error)) {
-      throw error;
-    }
-    let ownerPid: number | undefined;
-    try {
-      ownerPid = Number(readFileSync(path, { encoding: "utf8" }).trim());
-    } catch (lockReadError) {
-      throw new Error(`legacy state handoff is already in progress: ${path}`, { cause: lockReadError });
-    }
-    if (Number.isInteger(ownerPid) && ownerPid > 0) {
-      try {
-        process.kill(ownerPid, 0);
-      } catch (probeError) {
-        if (isNodeError(probeError) && probeError.code === "ESRCH") {
-          rmSync(path, { force: true });
-          acquireMigrationLock(path);
-          return;
-        }
-      }
-    }
-    throw new Error(`legacy state handoff is already in progress: ${path}`, { cause: error });
+/** A migration lock this process took. `content` identifies it, so release removes only this lock. */
+export interface MigrationLock {
+  readonly content: string;
+  readonly path: string;
+}
+
+/**
+ * Another process holds a migration lock. This is the one message source for a
+ * refused lock: it names the lock file and says what to do, and every migration
+ * path lets it through unchanged.
+ */
+export class MigrationLockHeldError extends CollectorStateResolutionError {
+  readonly lockPath: string;
+
+  constructor(lockPath: string, options: ErrorOptions = {}) {
+    super(
+      "legacy_state_migration_failed",
+      `legacy state handoff is already in progress: ${lockPath} (${describeLockOwner(lockPath)})`,
+      options
+    );
+    this.name = "MigrationLockHeldError";
+    this.lockPath = lockPath;
   }
 }
 
-function releaseMigrationLock(path: string): void {
-  rmSync(path, { force: true });
+/**
+ * Take the single-owner lock for a migration. Creation is exclusive, so exactly
+ * one process wins. When the file exists the call throws {@link MigrationLockHeldError}.
+ * There is deliberately no takeover of a lock whose owner has exited: two
+ * processes that both read a dead owner could each remove the file and each take
+ * a fresh one, or one could remove the other's fresh lock, and both would
+ * enter. The error says whether the recorded owner is still running; if it is
+ * not, the operator deletes the file.
+ *
+ * The file exists before its marker is written. If publishing the marker fails,
+ * the file is still this call's own (it created it exclusively), so it is
+ * removed before the error is rethrown; left behind it would refuse every later
+ * run. `io` lets tests inject those failures.
+ */
+export function acquireMigrationLock(
+  path: string,
+  io: { fsyncSync?: typeof fsyncSync; writeSync?: typeof writeSync } = {}
+): MigrationLock {
+  const content = `${process.pid} ${randomUUID()}\n`;
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", 0o600);
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      throw new MigrationLockHeldError(path, { cause: error });
+    }
+    throw error;
+  }
+  let published = false;
+  try {
+    (io.writeSync ?? writeSync)(fd, content, undefined, "utf8");
+    (io.fsyncSync ?? fsyncSync)(fd);
+    closeSync(fd);
+    published = true;
+  } finally {
+    if (!published) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The descriptor may already be closed; the file is removed either way.
+      }
+      rmSync(path, { force: true });
+    }
+  }
+  return { content, path };
+}
+
+function describeLockOwner(path: string): string {
+  let ownerPid: number;
+  try {
+    ownerPid = Number(readFileSync(path, { encoding: "utf8" }).split(/\s+/)[0]);
+  } catch {
+    return "its owner could not be read";
+  }
+  if (!(Number.isInteger(ownerPid) && ownerPid > 0)) {
+    return "its owner is not recorded; if no collector is running, delete this file and run again";
+  }
+  try {
+    process.kill(ownerPid, 0);
+    return `process ${ownerPid} holds it and is running`;
+  } catch (probeError) {
+    if (isNodeError(probeError) && probeError.code === "ESRCH") {
+      return `process ${ownerPid} held it and is no longer running; if no collector is running, delete this file and run again`;
+    }
+    return `process ${ownerPid} holds it`;
+  }
+}
+
+/** Remove the lock only when the file still holds this process's own marker. */
+export function releaseMigrationLock(lock: MigrationLock): void {
+  try {
+    if (readFileSync(lock.path, { encoding: "utf8" }) !== lock.content) {
+      return;
+    }
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+  rmSync(lock.path, { force: true });
 }
 
 function installSnapshot(
