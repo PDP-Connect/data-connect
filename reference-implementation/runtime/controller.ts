@@ -585,6 +585,8 @@ export interface ControllerOptions {
    */
   beforeRunCleanup?: (args: { readonly runId: string }) => Promise<void> | void;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
+  /** Optional non-mutating allocator capability check for inventory observation. */
+  browserSurfaceAllocatorReadiness?: () => Promise<void>;
   /** Stable non-secret identity of the dynamic allocator scope for cache coalescing. */
   browserSurfaceAllocatorScopeId?: string;
   /** Freshness budget for one health-only dynamic allocator observation. */
@@ -2638,6 +2640,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
     return await observeDynamicBrowserSurfaceRuntimeInventory({
       allocator: browserSurfaceAllocator,
+      ...(opts.browserSurfaceAllocatorReadiness ? { readiness: opts.browserSurfaceAllocatorReadiness } : {}),
       ttl_ms: browserSurfaceHealthObservationTtlMs,
     });
   }

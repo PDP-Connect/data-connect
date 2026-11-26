@@ -79,6 +79,8 @@ function unavailableInventory(
 export async function observeDynamicBrowserSurfaceRuntimeInventory(input: {
   readonly allocator: BrowserSurfaceAllocator | undefined;
   readonly now?: Date;
+  /** Optional read-only capability check, separate from inventory occupancy. */
+  readonly readiness?: () => Promise<void>;
   readonly ttl_ms: number;
 }): Promise<BrowserSurfaceRuntimeInventorySnapshot> {
   const window = observationWindow(input.now ?? new Date(), input.ttl_ms);
@@ -86,9 +88,11 @@ export async function observeDynamicBrowserSurfaceRuntimeInventory(input: {
     return unobservedInventory(window);
   }
   try {
+    const surfaces = await input.allocator.listSurfaces();
+    await input.readiness?.();
     return {
       allocator_observation: { status: "available", ...window },
-      surfaces: await input.allocator.listSurfaces(),
+      surfaces,
     };
   } catch (error) {
     return unavailableInventory(error, window);
