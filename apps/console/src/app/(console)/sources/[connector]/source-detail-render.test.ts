@@ -465,3 +465,11 @@ test("positive kinds never carry the whole-kind failure sentence", async () => {
 });
 
  test("archives carry no sync timeline", async () => { assert.doesNotMatch(visibleOutsideDetails(await renderDemo("archive-leftover")), /Last updated|Recent syncs/); });
+
+test("polished controls give disconnected setup one filled action and device navigation one home", async () => {
+  const disconnected = (await renderDemo("status-3")).window.document;
+  assert.match([...disconnected.querySelectorAll("header a")].find((node) => node.textContent === "Set up again")?.className ?? "", /variant-default/);
+  const device = (await renderDemo("status-10-local-device")).window.document;
+  assert.equal([...device.querySelectorAll("a")].filter((node) => node.textContent === "View this device").length, 1);
+  assert.equal((visibleOutsideDetails(await renderDemo("status-19")).match(/Rename/g) ?? []).length, 1);
+});

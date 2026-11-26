@@ -880,7 +880,7 @@ function ConnectorPageView({
             routeConnectionId={connectionId}
             sourceInstances={sourceInstances}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
-            statusAction={archived || (devicePending === 0 && primaryActionSurface === "local_device") ? null : pageStatusAction}
+            statusAction={archived || (devicePending === 0 && primaryActionSurface === "local_device") || (pageStatusAction?.kind === "view_device" && !oneTime && sourceTimeLabel(sourceInstances[0]?.last_heartbeat_at)) ? null : pageStatusAction}
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
@@ -930,7 +930,7 @@ function ConnectorPageView({
               currentLabel={connectionLabelSeed}
               typeName={formatConnectorKeyForDisplay(connectorId)}
             /> : null}
-            {revoked && !neverConnected ? <p className="mt-5"><Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link></p> : null}
+            {revoked && !neverConnected ? <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between"><p className="pdpp-body">Starts a new connection to {serviceName}.</p><Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link></div> : null}
             {scheduleSyncAvailable ? ( <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" /> ) : null}
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
             <CredentialRepairLinks
@@ -1279,7 +1279,7 @@ function ConnectorPrimaryHeaderAction({
     );
   }
   if (statusAction?.kind === "set_up_again") {
-    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link>;
+    return <Link className={buttonVariants({ size: "sm", variant: "default" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link>;
   }
   if (statusAction?.kind === "resume") {
     return <ResumeConnectionButton connectionId={connectionId} label={statusAction.label} />;
@@ -1934,7 +1934,7 @@ export function ScheduleSummary({ displayName, schedule, scheduleError, sourceIn
   return <Section title="Schedule" action={disconnected ? undefined : <Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
     {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
     {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}
-    {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}
+    {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link className="underline underline-offset-4 hover:text-foreground" href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}
   </Section>;
 }
 

@@ -91,7 +91,7 @@ export function RenameConnection({ connectionId, currentLabel, typeName }: Props
   if (!editing) {
     return (
       <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-        <p className="pdpp-body">Rename</p>
+        <p className="pdpp-body">Change the name shown in DataConnect.</p>
         <div className="shrink-0">
         <IcButton
           aria-label="Rename"

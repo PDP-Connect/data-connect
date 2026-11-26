@@ -23,7 +23,7 @@ export function SourceStateSentenceText({
       data-status-row={status.row}
       data-testid="source-state-sentence"
     >
-      <SourceStatusText className="!text-[length:var(--text-body)]" status={{ ...status, words: statusSentence }} />
+      <SourceStatusText className={status.tone === "attention" ? "!text-[length:var(--text-body)]" : "!text-[length:var(--text-body)] !text-foreground"} status={{ ...status, words: statusSentence }} />
       {secondText ? <><span> </span><span className="block pdpp-body text-muted-foreground">{secondText}</span></> : null}
       {sentence.slot === "what_is_kept_and_what_set_up_again_does" ? (
         <span className="block pdpp-body text-muted-foreground">

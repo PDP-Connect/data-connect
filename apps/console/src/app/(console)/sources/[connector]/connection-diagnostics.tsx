@@ -1214,7 +1214,7 @@ function OutboxStallRemediationPanel({
     : `Retryable outbound work on the local collector is not draining. The dashboard cannot clear it remotely — run these on ${hostPhrase}, in order:`;
   return (
     <div
-      className="flex w-full min-w-0 max-w-full flex-col gap-1.5 border-y border-border py-2"
+      className={["flex w-full min-w-0 max-w-full flex-col gap-1.5 border-y border-border py-2", plain ? "[&_.pdpp-caption]:text-[length:var(--text-body)]" : null].filter(Boolean).join(" ")}
       data-testid="diagnostics-outbox-remediation"
     >
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-outbox-remediation-label">

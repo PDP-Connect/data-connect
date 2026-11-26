@@ -1,6 +1,5 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { buttonVariants } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import type { AppAccess } from "../../grants/app-access.ts";
@@ -41,7 +40,7 @@ export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; conn
       ) : (
         <>
           <p>No app can read this yet.</p>
-          <Link className={buttonVariants()} href="/connect">
+          <Link className="underline underline-offset-4 hover:text-foreground" href="/connect">
             Connect an app
           </Link>
         </>
