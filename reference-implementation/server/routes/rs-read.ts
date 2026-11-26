@@ -78,8 +78,70 @@ import {
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
+import { clientFilterBinding, compileClientRequestFilters, parseClientFilterParameters } from "../client-request-filters.ts";
+import { issueRsCursor, resolveRsCursor } from "../rs-opaque-cursors.ts";
+
 import { withTokenKindRecordShape } from "../record-wire-shape.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
+
+function validateClientListFilters(tokenInfo: TokenInfo, streamName: string, params: Record<string, unknown>): void {
+  if (tokenInfo.pdpp_token_kind !== "client") {
+    return;
+  }
+  const stream = tokenInfo.grant?.streams?.find((entry) => entry.name === streamName);
+  rejectUnsupportedClientQuery("client", params, stream);
+  if (!stream) {
+    throw Object.assign(new Error(`Stream '${streamName}' not in grant`), { code: "grant_stream_not_allowed" });
+  }
+  if (!stream.filter_fields) {
+    return;
+  }
+  parseClientFilterParameters(params.filter);
+  if (params.view && params.fields) {
+    throw Object.assign(new Error("view and fields are mutually exclusive"), { code: "invalid_request" });
+  }
+  if (params.view) {
+    throw Object.assign(
+      new Error("Client record reads must use explicit fields; views are resolved when the grant is issued"),
+      { code: "invalid_request" }
+    );
+  }
+  if (params.fields !== undefined) {
+    const rawFields = Array.isArray(params.fields) ? params.fields : [params.fields];
+    if (!rawFields.every((field) => typeof field === "string")) {
+      throw Object.assign(new Error("Invalid fields syntax"), { code: "invalid_request", param: "fields" });
+    }
+    const fields = rawFields
+      .flatMap((item) => String(item).split(","))
+      .map((field) => field.trim())
+      .filter(Boolean);
+    if (!fields.length) {
+      throw Object.assign(new Error("Invalid fields syntax"), { code: "invalid_request", param: "fields" });
+    }
+    const denied = fields.filter((field) => !stream.fields?.includes(field));
+    if (denied.length) {
+      throw Object.assign(new Error(`Fields not in grant: ${[...new Set(denied)].join(", ")}`), {
+        code: "field_not_granted",
+        param: "fields",
+      });
+    }
+    params.fields = fields;
+  }
+  for (const param of ["field", "group_by", "group_by_time"]) {
+    if (typeof params[param] === "string" && !stream.fields?.includes(params[param] as string)) {
+      throw Object.assign(new Error(`Fields not in grant: ${params[param]}`), { code: "field_not_granted", param });
+    }
+  }
+  compileClientRequestFilters(params.filter, stream);
+}
+
+function clientCursorContext(tokenInfo: TokenInfo, stream: string, params: Record<string, unknown>) {
+  const { cursor: _cursor, changes_since: _changes, limit: _limit, filter, ...query } = params;
+  // Introspection derives this member from bearer expiry, which can vary
+  // between tokens for the same immutable grant.
+  const { expires_at: _bearerExpiry, ...grant } = tokenInfo.grant ?? {};
+  return { filters: clientFilterBinding(filter), grant, query, stream };
+}
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -121,6 +183,8 @@ interface TokenInfo {
 }
 
 interface GrantStreamLike {
+  readonly filter_fields?: Record<string, import("../client-request-filters.ts").FilterField>;
+  readonly fields?: string[];
   readonly instance_ids?: string[] | null;
   readonly name?: string | null;
   readonly [key: string]: unknown;
@@ -1650,7 +1714,7 @@ function buildStreamAggregateDeps(
     validateRequest: (params: Record<string, unknown>) => {
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       const mStream = manifest?.streams?.find((stream) => stream.name === streamName);
-      ctx.validateRequestedQueryFieldParams(params, mStream);
+      ctx.validateRequestedQueryFieldParams(params, tokenInfo.pdpp_token_kind === "client" && tokenInfo.grant?.streams?.find((stream) => stream.name === streamName)?.filter_fields ? undefined : mStream);
     },
   };
 }
@@ -1693,7 +1757,7 @@ export function mountRsStreamAggregate(app: AppLike, ctx: MountRsReadContext): v
           traceId,
         };
 
-        rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, requestParams);
+        validateClientListFilters(tokenInfo, req.params.stream as string, requestParams);
 
         const scope = await resolveReadScope(ctx, req, tokenInfo, queryContext);
         const { storageBinding, manifest } = scope;
@@ -1800,7 +1864,7 @@ function buildRecordsListDeps(
       });
     },
     validateRequestFields: (params: Record<string, unknown>, manifestStream: ManifestStreamLike | undefined) =>
-      ctx.validateRequestedQueryFieldParams(params, manifestStream),
+      ctx.validateRequestedQueryFieldParams(params, tokenInfo.pdpp_token_kind === "client" && tokenInfo.grant?.streams?.find((stream) => stream.name === manifestStream?.name)?.filter_fields ? undefined : manifestStream),
   };
 }
 
@@ -1841,7 +1905,31 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
           traceId,
         };
 
-        rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, requestParams);
+        validateClientListFilters(tokenInfo, req.params.stream as string, requestParams);
+
+        const cursorContext =
+          tokenInfo.pdpp_token_kind === "client"
+            ? clientCursorContext(tokenInfo, req.params.stream as string, requestParams)
+            : null;
+        const pageCursorContext = { context: cursorContext, changes_since: requestParams.changes_since ?? null };
+        const bindCursors =
+          tokenInfo.pdpp_token_kind === "client" &&
+          Boolean(tokenInfo.grant?.streams?.find((entry) => entry.name === req.params.stream)?.filter_fields);
+        if (bindCursors) {
+          for (const param of ["cursor", "changes_since"] as const) {
+            const token = requestParams[param];
+            if (typeof token === "string" && token !== "beginning") {
+              // biome-ignore lint/performance/noAwaitInLoops: Preserve cursor-before-checkpoint error precedence.
+              const resolved = await resolveRsCursor({
+                token,
+                param,
+                context: param === "cursor" ? pageCursorContext : cursorContext,
+                accept: param === "cursor" ? ["page", "changes_page"] : ["changes_since"],
+              });
+              requestParams[param] = resolved.internalCursor;
+            }
+          }
+        }
 
         // Self-export: owner can query without a client grant. `resolveReadScope`
         // sets `queryContext.sourceDescriptor` and returns the resolved trio.
@@ -1901,6 +1989,22 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
           tokenInfo,
           traceId,
         });
+
+        if (bindCursors) {
+          const pageKind = requestParams.changes_since ? "changes_page" : "page";
+          for (const key of ["next_cursor", "next_changes_since"] as const) {
+            const internalCursor = result.result[key];
+            if (typeof internalCursor === "string") {
+              // biome-ignore lint/performance/noAwaitInLoops: Registry writes share per-grant quota accounting.
+              result.result[key] = await issueRsCursor({
+                internalCursor,
+                context: key === "next_cursor" ? pageCursorContext : cursorContext,
+                scope: tokenInfo.grant_id,
+                kind: key === "next_changes_since" ? "changes_since" : pageKind,
+              });
+            }
+          }
+        }
 
         return res.json(
           ctx.finalizeCanonicalEnvelope(

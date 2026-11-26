@@ -4,6 +4,7 @@
 const serverModuleRoot = "/reference-implementation/server/";
 const allowedServerModules = [
   "/server/core-source-authorization.ts",
+  "/server/client-request-filters.ts",
   "/server/record-filters.ts",
   "/server/source-declaration.ts",
 ];

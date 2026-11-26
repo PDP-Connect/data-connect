@@ -227,7 +227,7 @@ const VIEW_DESCRIPTION =
   "Named projection. A stream-declared view id (advertised by `GET /v1/schema` under each stream's `views`) that projects the returned records down to the view's field set. Mutually exclusive with `fields` (passing both is rejected by the RS); an unknown view id is rejected rather than silently ignored. Use `view` for a curated projection and `fields` for an ad-hoc one.";
 
 const FILTER_DESCRIPTION =
-  'Typed object filter, not a pre-encoded query string: exact `{ "user_id": "U123" }` or range `{ "created_at": { "gte": "...", "lt": "..." } }`; fields AND. The adapter encodes RS `filter[field]` / `filter[field][op]` params. Fields and operators (`gte`, `gt`, `lte`, `lt`) come from `GET /v1/schema`; unsupported values are rejected.';
+  'Typed object filter, not a pre-encoded query string: exact `{ "user_id": "U123" }` or range `{ "created_at": { "gte": "...", "lt": "..." } }`; fields AND. The adapter encodes RS `filter[field]` / `filter[field][op]` params. For client grants, fields, types and operators come from frozen `filter_fields` in `GET /v1/schema`; grants without it reject filters. Owner filters use current metadata. Pass precise numbers as strings to preserve their decimal spelling; unsupported values are rejected.';
 
 const EXPAND_DESCRIPTION =
   "One-hop inline expansion list. Each entry is a manifest-declared parent-to-child relation. Expandable relations and per-relation `expand_limit` caps are advertised by `GET /v1/schema` (`expand_capabilities`); unadvertised relations are rejected by the RS.";
@@ -2591,7 +2591,7 @@ function formatFieldCapabilityFlags(capabilities: Json): string {
   }
   const flags: string[] = [];
   const schema = objectValue(capabilitiesObject.schema);
-  const type = firstString(capabilitiesObject.type, schemaType(schema));
+  const type = firstString(capabilitiesObject.filter_type, capabilitiesObject.type, schemaType(schema));
   if (type) {
     flags.push(`t=${formatInlineValue(type)}`);
   }

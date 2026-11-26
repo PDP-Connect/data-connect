@@ -3935,6 +3935,7 @@ function buildFieldCapabilities(
       : null;
   const query = (manifestStream?.query || {}) as Record<string, unknown>;
   const rangeFilters = (query.range_filters || {}) as Record<string, unknown>;
+  const frozenFilters = streamGrant?.filter_fields as Record<string, { type: string; range: string[] }> | undefined;
   const search = (query.search || {}) as Record<string, unknown>;
   const lexicalFields = new Set(Array.isArray(search.lexical_fields) ? (search.lexical_fields as unknown[]) : []);
   const semanticFields = new Set(Array.isArray(search.semantic_fields) ? (search.semantic_fields as unknown[]) : []);
@@ -3959,6 +3960,27 @@ function buildFieldCapabilities(
         typeof schemaObj.x_pdpp_role === "string" && (schemaObj.x_pdpp_role as string).trim().length > 0
           ? (schemaObj.x_pdpp_role as string).trim()
           : null;
+      const filterCapabilities: Record<string, unknown> = {};
+      if (streamGrant === null) {
+        filterCapabilities.exact_filter = buildFieldCapabilityFlag({
+          declared: isExactFilterableSchema(schemaObj),
+          granted,
+        });
+        filterCapabilities.range_filter = buildFieldCapabilityFlag({
+          declared: Boolean(rangeOperators),
+          granted,
+          operators: rangeOperators || undefined,
+        });
+      } else if (frozenFilters) {
+        const capability = Object.hasOwn(frozenFilters, field) ? frozenFilters[field] : undefined;
+        filterCapabilities.filter_type = capability?.type;
+        filterCapabilities.exact_filter = buildFieldCapabilityFlag({ declared: Boolean(capability), granted });
+        filterCapabilities.range_filter = buildFieldCapabilityFlag({
+          declared: Boolean(capability?.range.length),
+          granted,
+          operators: capability?.range ?? [],
+        });
+      }
       return [
         field,
         {
@@ -3975,19 +3997,7 @@ function buildFieldCapabilities(
             declared: semanticFields.has(field),
             granted,
           }),
-          ...(streamGrant === null
-            ? {
-                exact_filter: buildFieldCapabilityFlag({
-                  declared: isExactFilterableSchema(schemaObj),
-                  granted,
-                }),
-                range_filter: buildFieldCapabilityFlag({
-                  declared: Boolean(rangeOperators),
-                  granted,
-                  operators: rangeOperators || undefined,
-                }),
-              }
-            : {}),
+          ...filterCapabilities,
         },
       ];
     })
@@ -4028,6 +4038,9 @@ function buildStreamMetadataEntry({
     views: projectedManifestStream.views || [],
   };
   if (streamGrant) {
+    if (streamGrant.filter_fields) {
+      entry.filter_fields = structuredClone(streamGrant.filter_fields);
+    }
     entry.instance_ids = Array.isArray(streamGrant.instance_ids) ? [...streamGrant.instance_ids] : [];
     if (Array.isArray(streamGrant.resources)) {
       entry.resources = [...streamGrant.resources];
@@ -5342,6 +5355,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
               purpose_description: "Delegate scoped personal data access to a local PDPP CLI client.",
               source: configuredSource,
               streams: [{ name: "*" }],
+              grant_version: "0.2.0",
               type: "https://pdpp.dev/data-access",
             },
           ],

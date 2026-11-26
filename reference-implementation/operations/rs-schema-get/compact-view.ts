@@ -208,7 +208,11 @@ export function formatFieldCapabilityFlags(capabilities: unknown): string {
   }
   const cap = capabilities as FieldCapability;
   const flags: string[] = [];
-  const type = firstString(typeof cap.type === "string" ? cap.type : undefined, schemaTypeOf(cap.schema));
+  const type = firstString(
+    typeof cap.filter_type === "string" ? cap.filter_type : undefined,
+    typeof cap.type === "string" ? cap.type : undefined,
+    schemaTypeOf(cap.schema)
+  );
   if (type) {
     flags.push(`t=${inlineValue(type)}`);
   }

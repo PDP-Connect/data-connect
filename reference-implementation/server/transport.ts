@@ -28,6 +28,7 @@
 //     Spec review still pending — see
 //     design-notes/express-5-query-parser-open-question-2026-04-22.md.
 
+import { retainClientFilterEntries } from "./client-request-filters.ts";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -352,7 +353,7 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
       // (filter[field][gte]=..., expand[]=..., expand_limit[rel]=...) per
       // Core §8. Depth bounded to 8 + arrayLimit 64 to close the DoS surface
       // that Express 5's default `simple` parser was tightening.
-      querystringParser: (str) => qs.parse(str, { arrayLimit: 64, depth: 8 }),
+      querystringParser: (str) => retainClientFilterEntries(qs.parse(str, { arrayLimit: 64, depth: 8 }), str),
     },
   });
 
@@ -1072,7 +1073,7 @@ export function createApp({ logger, __requestValidationAllowlistForTest }: Creat
     }
     await fastify.register(fastifyFormbody, {
       bodyLimit: 100 * 1024 * 1024,
-      parser: (str) => qs.parse(str, { arrayLimit: 64, depth: 8 }),
+      parser: (str) => retainClientFilterEntries(qs.parse(str, { arrayLimit: 64, depth: 8 }), str),
     });
     formbodyRegistered = true;
   }

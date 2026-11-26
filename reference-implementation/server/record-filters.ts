@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
+import { type ClientFilter, type FilterField, compileClientRequestFilters, parseFilterRecordJson, passesClientFilter } from "./client-request-filters.ts";
 
 export interface Schema {
   format?: string;
@@ -10,6 +11,7 @@ export interface Schema {
 }
 type JsonObject = Record<string, unknown>;
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   fields?: string[] | null;
   resources?: string[];
   time_constraint?: TimeConstraint | null;
@@ -24,9 +26,12 @@ interface ManifestStream {
   schema?: { properties?: Record<string, Schema> };
 }
 export type CompiledFilter =
+  | (ClientFilter & { fieldSchema?: never; operators?: never })
   | { field: string; kind: "exact"; value: string }
   | { field: string; kind: "range"; fieldSchema: Schema; operators: Record<string, number | string> };
 interface CompiledFilterInput {
+  type?: FilterField["type"];
+  operator?: string | null;
   field: string;
   fieldSchema?: Schema;
   kind?: string;
@@ -77,12 +82,11 @@ export function invalidQueryError(message: string, code = "invalid_request"): Er
 }
 
 /**
- * v0.1 client grants do not expose request-time filters or retain relationship
- * authorization. Keep this guard independent from manifest parsing so current
- * declaration metadata cannot reinterpret an issued grant. Owner reads retain
- * the current-capability query paths.
+ * Only list and aggregate reads pass a stream's frozen filter capability.
+ * Other client endpoints continue rejecting filters. Expansion is unsupported
+ * for all client grants. Keep these checks independent of current metadata.
  */
-export function rejectUnsupportedClientQuery(tokenKind: string | null | undefined, requestParams: unknown): void {
+export function rejectUnsupportedClientQuery(tokenKind: string | null | undefined, requestParams: unknown, streamGrant?: StreamGrant): void {
   if (tokenKind !== "client" || !requestParams || typeof requestParams !== "object" || Array.isArray(requestParams)) {
     return;
   }
@@ -90,7 +94,7 @@ export function rejectUnsupportedClientQuery(tokenKind: string | null | undefine
   const unsupported = [
     { keys: ["expand", "expand[]"], message: "expand[]", param: "expand" },
     { keys: ["expand_limit", "expand_limit[]"], message: "expand_limit[...]", param: "expand_limit" },
-    { keys: ["filter"], message: "filter[...]", param: "filter" },
+    ...(streamGrant?.filter_fields ? [] : [{ keys: ["filter"], message: "filter[...]", param: "filter" }]),
   ].find(({ keys }) => keys.some((key) => Object.hasOwn(params, key)));
   if (!unsupported) {
     return;
@@ -309,6 +313,9 @@ export function compileRequestFilters(
   streamGrant: StreamGrant,
   manifestStream: ManifestStream
 ): CompiledFilter[] {
+  if (streamGrant.filter_fields) {
+    return compileClientRequestFilters(filter, streamGrant);
+  }
   if (isNullish(filter)) {
     return [];
   }
@@ -352,13 +359,11 @@ export function compileRequestFilters(
 }
 
 /**
- * A filtered changes feed would have to report records that leave the filtered
- * set, and the wire format has no entry for that: a tombstone means deletion and
- * the record still exists. Serving the feed without exits leaves a client mirror
- * stale while the watermark advances, so reject the combination instead.
+ * Owner filters retain their existing changes-feed rejection. Client filters
+ * use the frozen visibility rules, including tombstones for membership exits.
  */
 export function rejectFiltersWithChangesFeed(filters: readonly CompiledFilter[]): void {
-  if (filters.length) {
+  if (filters.some((filter) => filter.kind !== "client")) {
     throw invalidQueryError(
       "filter is not supported with changes_since: a filtered feed cannot report records that leave the filter. " +
         "Re-read the filtered set in full, or use changes_since without filter"
@@ -376,6 +381,12 @@ export function passesRequestFilters(
   }
 
   for (const filter of filters) {
+    if (filter.kind === "client") {
+      if (!passesClientFilter(data, filter as ClientFilter)) {
+        return false;
+      }
+      continue;
+    }
     const value = data?.[filter.field];
 
     if (filter.kind === "exact") {
@@ -564,7 +575,7 @@ export function allowedCandidateRecordKeysFromRows(
     // biome-ignore lint/suspicious/noImplicitAnyLet: This runtime value is intentionally narrowed after assignment.
     let data;
     try {
-      data = row.record_json ? JSON.parse(row.record_json) : null;
+      data = row.record_json ? parseFilterRecordJson(row.record_json) : null;
     } catch {
       continue;
     }

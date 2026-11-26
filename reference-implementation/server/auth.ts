@@ -172,6 +172,7 @@ interface RawStreamSelection {
 }
 
 interface GrantSelection {
+  grant_version?: "0.1.0" | "0.2.0" | undefined;
   access_mode: string;
   client_claims?: unknown | undefined;
   purpose_code: string;
@@ -969,6 +970,7 @@ const SUPPORTED_NORMALIZED_PENDING_REQUEST_FIELDS = new Set([
 ]);
 const SUPPORTED_PENDING_CLIENT_FIELDS = new Set(["client_display", "client_id", "registration_mode"]);
 const SUPPORTED_PENDING_SELECTION_FIELDS = new Set([
+  "grant_version",
   "access_mode",
   "client_claims",
   "purpose_code",
@@ -1675,6 +1677,7 @@ function isAbsoluteUriPurposeCode(value: unknown): boolean {
 }
 
 interface AuthorizationDetailInput extends Record<string, unknown> {
+  grant_version?: "0.1.0" | "0.2.0";
   access_mode: string;
   selection_preset?: string;
   streams?: RawStreamSelection[];
@@ -1834,6 +1837,7 @@ async function normalizeAuthorizationDetail(
   return {
     selection: {
       access_mode: detail.access_mode,
+      ...(detail.grant_version ? { grant_version: detail.grant_version } : {}),
       client_claims: detail.client_claims || undefined,
       purpose_code: detail.purpose_code as string,
       purpose_description: isNonEmptyString(detail.purpose_description) ? detail.purpose_description : undefined,
@@ -2417,7 +2421,11 @@ function buildUnsupportedLegacyAuthorizationStateError(): AuthError {
 }
 
 function isUnsupportedLegacyGrantShape(grant: DbRow): boolean {
-  if (grant.version !== "0.1.0" || !isRecord(grant.source_declaration) || !Array.isArray(grant.streams)) {
+  if (
+    (grant.version !== "0.1.0" && grant.version !== "0.2.0") ||
+    !isRecord(grant.source_declaration) ||
+    !Array.isArray(grant.streams)
+  ) {
     return true;
   }
   return grant.streams.some(
@@ -2431,7 +2439,7 @@ function requireClosedResolvedGrant(grant: unknown, code: "grant_invalid" | "inv
     throw bindingError(code, `Resolved grant is invalid: ${contractValidationMessage(validateResolvedGrantContract)}`);
   }
   const resolved = candidate as DbRow;
-  if (resolved.version !== "0.1.0") {
+  if (resolved.version !== "0.1.0" && resolved.version !== "0.2.0") {
     throw bindingError(code, "Resolved grant version is unsupported; fresh consent is required");
   }
   const streams = resolved.streams ?? [];
@@ -2440,6 +2448,10 @@ function requireClosedResolvedGrant(grant: unknown, code: "grant_invalid" | "inv
     throw bindingError(code, "Resolved grant stream names must be unique");
   }
   for (const stream of streams) {
+    const fields = new Set(Array.isArray(stream.fields) ? stream.fields : []);
+    if (Object.keys(stream.filter_fields ?? {}).some((field) => !fields.has(field))) {
+      throw bindingError(code, "Filter fields must be granted");
+    }
     const constraint = isRecord(stream.time_constraint) ? stream.time_constraint : null;
     if (
       constraint &&
@@ -7111,6 +7123,7 @@ async function persistApprovedBatchGrantAtomically({
     const expiresAt = resolved.entry.selection.access_mode === "single_use" ? (reviewPayload.expires_at ?? null) : null;
     const grant = materializeCoreResolvedGrant({
       accessMode: resolved.entry.selection.access_mode,
+      grantVersion: resolved.entry.selection.grant_version,
       clientId: registeredClient.client_id,
       expiresAt,
       grantId,
@@ -7778,6 +7791,7 @@ export async function approveGrant(
 
   const grant = materializeCoreResolvedGrant({
     accessMode: selection.access_mode,
+    grantVersion: selection.grant_version,
     clientId: registeredClient.client_id,
     expiresAt,
     grantId,
@@ -8954,6 +8968,7 @@ function prepareChildGrantForPackage({
 
   const grant = materializeCoreResolvedGrant({
     accessMode: selection.access_mode,
+    grantVersion: selection.grant_version,
     clientId: registeredClient.client_id,
     expiresAt,
     grantId,

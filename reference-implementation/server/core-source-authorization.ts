@@ -4,6 +4,7 @@
 import { createRequire } from "node:module";
 import {
   type ResolvedGrant,
+  type FilterField,
   ResolvedGrantSchema,
   type SelectionRequest,
   SelectionRequestSchema,
@@ -32,6 +33,7 @@ export interface CoreStreamSelection {
 }
 
 export interface CoreSelection {
+  grant_version?: "0.1.0" | "0.2.0";
   access_mode: string;
   purpose_code: string;
   purpose_description?: string | undefined;
@@ -515,11 +517,43 @@ export function resolveCoreEligibleInstanceIds({
   return kept;
 }
 
+function freezeClientFilterFields(
+  declaration: SourceDeclaration["streams"][number],
+  fields: readonly string[]
+): Record<string, FilterField> | undefined {
+  const filterEntries: [string, FilterField][] = [];
+  for (const field of fields) {
+    const fieldSchema = (declaration.schema.properties as Record<string, unknown> | undefined)?.[field] as
+      | { type?: string | string[]; format?: string }
+      | undefined;
+    const types = [
+      ...new Set(
+        (Array.isArray(fieldSchema?.type) ? fieldSchema.type : [fieldSchema?.type]).filter((type) => type !== "null")
+      ),
+    ];
+    const [scalar] = types;
+    if (types.length !== 1 || !["string", "integer", "number", "boolean"].includes(scalar ?? "")) {
+      continue;
+    }
+    const filterType =
+      scalar === "string" && (fieldSchema?.format === "date" || fieldSchema?.format === "date-time")
+        ? fieldSchema.format
+        : (scalar as FilterField["type"]);
+    const range = ["integer", "number", "date", "date-time"].includes(filterType)
+      ? ([...new Set(declaration.query?.range_filters?.[field] ?? [])] as FilterField["range"])
+      : [];
+    filterEntries.push([field, { range, type: filterType }]);
+  }
+  const filters = Object.fromEntries(filterEntries);
+  return Object.keys(filters).length ? filters : undefined;
+}
+
 export function materializeCoreResolvedGrant({
   accessMode,
   clientId,
   expiresAt,
   grantId,
+  grantVersion,
   issuedAt,
   purposeCode,
   purposeDescription,
@@ -533,6 +567,7 @@ export function materializeCoreResolvedGrant({
   clientId: string;
   expiresAt: string | null;
   grantId: string;
+  grantVersion?: "0.1.0" | "0.2.0" | undefined;
   issuedAt: string;
   purposeCode: string;
   purposeDescription?: string | undefined;
@@ -556,9 +591,17 @@ export function materializeCoreResolvedGrant({
     ...(selectionPreset ? { selection_preset: selectionPreset } : {}),
     source: cloneJson(snapshot.source),
     source_declaration: { version: snapshot.declaration_version },
-    streams: resolvedStreams.map((stream) => projectResolvedStream(stream, true)),
+    streams: resolvedStreams.map((stream) => {
+      const projected = projectResolvedStream(stream, true);
+      if (grantVersion !== "0.2.0") {
+        return projected;
+      }
+      const declaration = snapshot.declaration.streams.find((entry) => entry.name === stream.name);
+      const filters = declaration ? freezeClientFilterFields(declaration, projected.fields ?? []) : undefined;
+      return filters ? { ...projected, filter_fields: filters } : projected;
+    }),
     subject: { id: subjectId },
-    version: "0.1.0" as const,
+    version: grantVersion === "0.2.0" ? ("0.2.0" as const) : ("0.1.0" as const),
   };
   return parseCoreResolvedGrant(candidate);
 }

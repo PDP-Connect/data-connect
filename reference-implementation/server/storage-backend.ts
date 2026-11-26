@@ -58,7 +58,7 @@ function createPostgresStorageBackend(): StorageBackend {
   return {
     async listRowsForAggregation({ connectorInstanceId, stream }) {
       const result = await postgresQuery<AggregationDatabaseRow>(
-        `SELECT record_key, record_json
+        `SELECT record_key, record_json::text AS record_json
            FROM records
           WHERE connector_instance_id = $1
             AND stream = $2

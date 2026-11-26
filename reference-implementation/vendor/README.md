@@ -61,6 +61,14 @@ semver range (e.g. `^0.1.0`), delete this tarball and its `SHA256SUMS` line, run
 install`. No other code changes are needed — the package's public surface (all 9
 `exports` subpaths) is unchanged from the source it was packed from, only compiled.
 
+**Update (2026-11-24): client request filters.** Rebuilt the compiled snapshot from
+`PDP-Connect/pdpp` commit `e1e53961af` (`spec/client-query-filters`), built in a
+scratch directory from a copy of that source. The exports point to compiled JS and
+declarations; source is retained.
+This adds grant schema 0.2.0 and selection-request `grant_version`.
+The repacked package's `files` allowlist includes `dist`, `src`, `test`, and
+`README.md`, so npm retains compiled output even when `.gitignore` excludes it.
+
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 
 The tarball remains in this repository for host-side conformance tests,

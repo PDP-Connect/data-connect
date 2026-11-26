@@ -11,6 +11,7 @@
  * Spec: openspec/changes/add-postgres-runtime-storage/
  */
 
+import { parseFilterRecordJson, type FilterField } from "./client-request-filters.ts";
 import { createHash } from "node:crypto";
 import {
   buildLimitClampedWarning,
@@ -74,6 +75,12 @@ import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-stor
 import { markSearchIndexDirtyPostgres } from "./stores/search-index-dirty-store.ts";
 
 type JsonObject = Record<string, unknown>;
+function filterRecordData(value: unknown): JsonObject | null {
+  if (typeof value === "string") {
+    return parseFilterRecordJson(value);
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
+}
 
 async function sequentially<T>(items: readonly T[], visit: (item: T) => Promise<void>): Promise<void> {
   const item = items.at(0);
@@ -117,6 +124,7 @@ interface ConnectorManifest {
 }
 
 interface StreamGrant {
+  filter_fields?: Record<string, FilterField>;
   fields?: string[] | null;
   instance_ids?: string[];
   name: string;
@@ -173,6 +181,7 @@ interface PgRow {
   record_count?: number | string;
   record_json: unknown;
   record_json_bytes?: number | string;
+  record_json_text?: string;
   record_key: string;
   reset_generation?: string;
   semantic_time?: string | null;
@@ -841,7 +850,7 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
           [connectorId, connectorInstanceId, stream, chunk]
         );
         const derived = current.rows.map((row) => {
-          const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+          const data = filterRecordData(row.record_json);
           return {
             cursor: cursorValue(data, manifestStream),
             primary: primaryKeyText(data, row.record_key, manifestStream),
@@ -1218,6 +1227,9 @@ function buildFilterClause(
   const clauses: string[] = [];
   for (const filter of compiledFilters) {
     assertNonEmptyJsonField(filter.field, "filter");
+    if (filter.kind === "client") {
+      continue;
+    }
     if (filter.kind === "range") {
       clauses.push(...buildRangeFilterClauses(filter, rawFilter, params));
       continue;
@@ -1296,7 +1308,7 @@ async function getPostgresSnapshotAtVersion(
     return null;
   }
   const result = await client.query(
-    `SELECT version, record_json, emitted_at, deleted, deleted_at
+    `SELECT version, record_json::text AS record_json, emitted_at, deleted, deleted_at
        FROM record_changes
       WHERE connector_instance_id = $1
         AND stream = $2
@@ -1311,7 +1323,7 @@ async function getPostgresSnapshotAtVersion(
     return null;
   }
   return {
-    data: row.record_json && typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json,
+    data: filterRecordData(row.record_json),
     deleted: row.deleted === true,
     deleted_at: row.deleted_at ?? null,
     emitted_at: row.emitted_at,
@@ -1380,7 +1392,7 @@ function childResponseRecord({
   row: PgRow;
   fields: string[] | null;
 }): ResponseRecord {
-  const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+  const rawData = filterRecordData(row.record_json);
   return {
     data: projectFields(rawData, fields),
     emitted_at: row.emitted_at,
@@ -2267,10 +2279,21 @@ async function visiblePostgresChange({
       : null;
   }
   if (!(current && currentVisible && passesRequestFilters(current.data, compiledFilters))) {
+    if (
+      compiledFilters?.some((filter) => filter.kind === "client") &&
+      previous &&
+      previousVisible &&
+      passesRequestFilters(previous.data, compiledFilters)
+    ) {
+      return deletedResponseRecord({ identity, row: { ...row, deleted_at: row.emitted_at }, stream });
+    }
     return null;
   }
   const fields = effective.fields ?? null;
-  const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
+  const previousProjection =
+    previous && previousVisible && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, fields)
+      : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;
@@ -2415,6 +2438,7 @@ async function queryPostgresChangesSince({
 }
 
 async function queryPostgresRecordPage({
+  clientFilter,
   connectorInstanceId,
   countParams,
   countWhere,
@@ -2432,6 +2456,7 @@ async function queryPostgresRecordPage({
   requestWarnings,
   stream,
 }: {
+  clientFilter: ((recordJson: unknown) => boolean) | null;
   connectorInstanceId: string;
   countParams: unknown[];
   countWhere: string;
@@ -2458,48 +2483,102 @@ async function queryPostgresRecordPage({
       throw err;
     }
   }
-  const params: unknown[] = [...countParams];
-  let where = countWhere;
-  // The seek selects rows strictly after the cursor in the ORDER BY below.
+  // The seek selects rows strictly after a position in the ORDER BY below.
   // The null-cursor group comes after present rows in asc and before them in
-  // desc, ordered by primary key. `cursor = NULL` is never true, so a cursor
-  // that ends inside the null group needs its own predicate.
+  // desc, ordered by primary key. `cursor = NULL` is never true, so a
+  // position inside the null group needs its own predicate.
   const cmp = order === "asc" ? ">" : "<";
   const nullGroupFollowsPresent = order === "asc";
-  if (cursorPosition) {
-    const cursorValue = cursorPosition.cursor_value ?? null;
+  function seekAfter(position: OrderPosition, params: unknown[]): string {
+    const cursorValue = position.cursor_value ?? null;
     if (cursorValue === null) {
-      params.push(cursorPosition.primary_key_text);
+      params.push(position.primary_key_text);
       const laterInNullGroup = `(${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length})`;
-      where += nullGroupFollowsPresent
+      return nullGroupFollowsPresent
         ? ` AND ${laterInNullGroup}`
         : ` AND (${laterInNullGroup} OR ${cursorSql} IS NOT NULL)`;
-    } else {
-      params.push(cursorValue, cursorPosition.primary_key_text);
-      const cursorParam = `$${params.length - 1}`;
-      const keyParam = `$${params.length}`;
-      where += ` AND (
+    }
+    params.push(cursorValue, position.primary_key_text);
+    const cursorParam = `$${params.length - 1}`;
+    const keyParam = `$${params.length}`;
+    return ` AND (
         (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
         OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
         ${nullGroupFollowsPresent ? `OR ${cursorSql} IS NULL` : ""}
       )`;
-    }
   }
   const dir = order === "asc" ? "ASC" : "DESC";
   const nulls = order === "asc" ? "NULLS LAST" : "NULLS FIRST";
-  params.push(limit + 1);
-  const result = await postgresQuery(
-    `SELECT record_key, record_json, emitted_at,
-            ${cursorSql} AS cursor_value,
-            ${primarySql} AS primary_key_text
-     FROM records
-     ${where}
-     ORDER BY ${cursorSql} ${dir} ${nulls}, ${primarySql} ${dir}
-     LIMIT $${params.length}`,
-    params
-  );
-  const hasMore = result.rows.length > limit;
-  const pageRows = result.rows.slice(0, limit);
+  function readOrdered(client: PgClient, position: OrderPosition | null, rowLimit: number) {
+    const params: unknown[] = [...countParams];
+    const where = countWhere + (position ? seekAfter(position, params) : "");
+    params.push(rowLimit);
+    return client.query(
+      `SELECT record_key, record_json, emitted_at,
+              ${clientFilter ? "record_json::text AS record_json_text," : ""}
+              ${cursorSql} AS cursor_value,
+              ${primarySql} AS primary_key_text
+       FROM records
+       ${where}
+       ORDER BY ${cursorSql} ${dir} ${nulls}, ${primarySql} ${dir}
+       LIMIT $${params.length}`,
+      params
+    );
+  }
+  // A client filter is tested on the row the page serves. The scan stops once
+  // it holds `limit + 1` matches or reaches the end of the stream, so a sparse
+  // or empty match set still reads every visible row after the cursor.
+  async function readPageRows(client: PgClient): Promise<PgRow[]> {
+    if (!clientFilter) {
+      return (await readOrdered(client, cursorPosition, limit + 1)).rows;
+    }
+    const matches: PgRow[] = [];
+    let position: OrderPosition | null = cursorPosition;
+    for (;;) {
+      // Each batch continues after the last row the previous batch read.
+      const batch = await readOrdered(client, position, CLIENT_FILTER_SCAN_BATCH);
+      for (const row of batch.rows) {
+        if (matches.length <= limit && clientFilter(row.record_json_text)) {
+          matches.push(row);
+        }
+      }
+      position = batch.rows.at(-1) ?? null;
+      if (matches.length > limit || batch.rows.length < CLIENT_FILTER_SCAN_BATCH || !position) {
+        return matches;
+      }
+    }
+  }
+  const wantsCount = typeof requestParams.count === "string" && requestParams.count !== "none";
+  const wantsWindow = typeof requestParams.window === "string" && requestParams.window !== "none";
+  // The page, its count and its window come from one snapshot. A filtered page
+  // takes several batch reads, and a write committed between two of them could
+  // otherwise skip or repeat a row, or make the count disagree with the page.
+  const { countOutcome, rows, windowOutcome } = await withPostgresSnapshotRead(async (client) => {
+    const pageRows = await readPageRows(client);
+    const counted =
+      clientFilter && (wantsCount || wantsWindow)
+        ? await narrowToClientFilterMatches(client, countWhere, countParams, clientFilter)
+        : { params: countParams, where: countWhere };
+    const count = await computePostgresGradedRecordCount({
+      client,
+      connectorInstanceId,
+      countParams: counted.params,
+      countWhere: counted.where,
+      effective,
+      requestParams,
+      stream,
+    });
+    const window = await computePostgresRecordWindow({
+      client,
+      consentTimeField: manifestStream?.consent_time_field || null,
+      countParams: counted.params,
+      countWhere: counted.where,
+      requestParams,
+    });
+    return { countOutcome: count, rows: pageRows, windowOutcome: window };
+  });
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
   const responseRows = pageRows.map((row) => ({
     record_key: row.record_key,
     responseRecord: responseRecord({ fields, identity, row, stream }),
@@ -2522,23 +2601,9 @@ async function queryPostgresRecordPage({
       primary_key_text: last.primary_key_text,
     });
   }
-  const countOutcome = await computePostgresGradedRecordCount({
-    connectorInstanceId,
-    countParams,
-    countWhere,
-    effective,
-    requestParams,
-    stream,
-  });
   if (countOutcome) {
     response.meta = mergeMetaCount(response.meta, countOutcome.count);
   }
-  const windowOutcome = await computePostgresRecordWindow({
-    consentTimeField: manifestStream?.consent_time_field || null,
-    countParams,
-    countWhere,
-    requestParams,
-  });
   if (windowOutcome) {
     response.meta = mergeMetaWindow(response.meta, windowOutcome);
   }
@@ -2624,6 +2689,11 @@ export async function postgresQueryRecords(
   appendGrantVisibilityClauses(whereParts, params, effective);
   let where = `WHERE ${whereParts.join(" AND ")}`;
   where += buildFilterClause(compiledFilters, requestParams.filter, params);
+  // Client filters compare lossless JSON values, so they run in JS on the
+  // row's own text rather than in SQL.
+  const clientFilter = compiledFilters.some((filter) => filter.kind === "client")
+    ? (recordJson: unknown) => passesRequestFilters(filterRecordData(recordJson), compiledFilters)
+    : null;
   // Snapshot the filter-only WHERE clause / params for the graded-count
   // query. The count MUST reflect matching visible rows BEFORE pagination
   // or the cursor — matching the SQLite semantics in
@@ -2633,6 +2703,7 @@ export async function postgresQueryRecords(
   const countParams = [...params];
 
   return queryPostgresRecordPage({
+    clientFilter,
     connectorInstanceId,
     countParams,
     countWhere,
@@ -2652,6 +2723,48 @@ export async function postgresQueryRecords(
   });
 }
 
+/** A row's place in the list order: its sort value and primary key text. */
+type OrderPosition = Pick<PgRow, "cursor_value" | "primary_key_text">;
+
+/** Rows read per query while a client filter fills a page or counts matches. */
+const CLIENT_FILTER_SCAN_BATCH = 500;
+
+/**
+ * Narrow `where` to the client-filter matches, for the count and window
+ * queries only. A count needs every match, so this always reads every
+ * visible row of the stream.
+ */
+async function narrowToClientFilterMatches(
+  client: PgClient,
+  where: string,
+  params: unknown[],
+  clientFilter: (recordJson: unknown) => boolean
+): Promise<{ where: string; params: unknown[] }> {
+  const keys: string[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const batchParams = [...params, after, CLIENT_FILTER_SCAN_BATCH];
+    // Each keyset batch starts after the previous batch's terminal key.
+    const batch = await client.query(
+      `SELECT record_key, record_json::text AS record_json FROM records ${where}
+         AND ($${batchParams.length - 1}::text IS NULL OR record_key > $${batchParams.length - 1})
+       ORDER BY record_key LIMIT $${batchParams.length}`,
+      batchParams
+    );
+    for (const row of batch.rows) {
+      if (clientFilter(row.record_json)) {
+        keys.push(row.record_key);
+      }
+    }
+    const last = batch.rows.at(-1);
+    if (batch.rows.length < CLIENT_FILTER_SCAN_BATCH || !last) {
+      break;
+    }
+    after = last.record_key;
+  }
+  return { params: [...params, keys], where: `${where} AND record_key = ANY($${params.length + 1}::text[])` };
+}
+
 // Compute the bounded `meta.window` aggregate for the Postgres list path,
 // mirroring computeRecordWindow in records.ts: `total` is the count of
 // grant-visible rows under the same WHERE clause as the graded count, and
@@ -2663,11 +2776,13 @@ async function computePostgresRecordWindow({
   countWhere,
   countParams,
   consentTimeField,
+  client,
 }: {
   requestParams: QueryRequestParams;
   countWhere: string;
   countParams: unknown[];
   consentTimeField: string | null;
+  client: PgClient;
 }): Promise<JsonObject | null> {
   const requested = typeof requestParams.window === "string" ? requestParams.window : null;
   if (!requested || requested === "none") {
@@ -2675,7 +2790,7 @@ async function computePostgresRecordWindow({
   }
 
   // total uses the identical grant-visible scope the count query uses.
-  const totalResult = await postgresQuery(`SELECT COUNT(*)::bigint AS total FROM records ${countWhere}`, countParams);
+  const totalResult = await client.query(`SELECT COUNT(*)::bigint AS total FROM records ${countWhere}`, countParams);
   const total = Number(totalResult.rows[0]?.total || 0);
   const window: JsonObject = { total };
 
@@ -2691,7 +2806,7 @@ async function computePostgresRecordWindow({
     // per-row `Number.isNaN(...) ? continue` behavior. timestamptz results come
     // back UTC-normalized, so downstream new Date(...).toISOString() is correct.
     const validTimestamp = `pg_input_is_valid(${ctExpr}, 'timestamp with time zone')`;
-    const boundsResult = await postgresQuery(
+    const boundsResult = await client.query(
       `SELECT MIN((${ctExpr})::timestamptz) AS earliest, MAX((${ctExpr})::timestamptz) AS latest
          FROM records ${countWhere}
         AND ${ctExpr} IS NOT NULL AND ${ctExpr} <> '' AND ${validTimestamp}`,
@@ -2746,11 +2861,13 @@ async function readProjectedRecordCount({
   stream,
   requestParams,
   effective,
+  client,
 }: {
   connectorInstanceId: string;
   stream: string;
   requestParams: QueryRequestParams;
   effective: EffectiveFilter;
+  client: PgClient;
 }): Promise<number | null> {
   if (hasRequestFilters(requestParams)) {
     return null;
@@ -2762,7 +2879,7 @@ async function readProjectedRecordCount({
     return null;
   }
 
-  const result = await postgresQuery(
+  const result = await client.query(
     `SELECT record_count
        FROM retained_size_stream
       WHERE connector_instance_id = $1
@@ -2781,6 +2898,7 @@ async function computePostgresGradedRecordCount({
   connectorInstanceId,
   stream,
   effective,
+  client,
 }: {
   requestParams: QueryRequestParams;
   countWhere: string;
@@ -2788,6 +2906,7 @@ async function computePostgresGradedRecordCount({
   connectorInstanceId: string;
   stream: string;
   effective: EffectiveFilter;
+  client: PgClient;
 }): Promise<{ count: { kind: "exact"; value: number } } | null> {
   const requested = typeof requestParams.count === "string" ? requestParams.count : null;
   if (!requested || requested === "none") {
@@ -2795,6 +2914,7 @@ async function computePostgresGradedRecordCount({
   }
 
   const projectedValue = await readProjectedRecordCount({
+    client,
     connectorInstanceId,
     effective,
     requestParams,
@@ -2804,7 +2924,7 @@ async function computePostgresGradedRecordCount({
     return { count: { kind: "exact", value: projectedValue } };
   }
 
-  const result = await postgresQuery(`SELECT COUNT(*)::bigint AS value FROM records ${countWhere}`, countParams);
+  const result = await client.query(`SELECT COUNT(*)::bigint AS value FROM records ${countWhere}`, countParams);
   const value = Number(result.rows[0]?.value || 0);
 
   if (requested === "exact" || requested === "estimated") {
@@ -2890,7 +3010,7 @@ export async function postgresGetRecord(
     throw err;
   }
   if (effective.timeConstraint) {
-    const rawData = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+    const rawData = filterRecordData(row.record_json);
     if (!passesTimeConstraint(rawData, effective.timeConstraint)) {
       const err: PgQueryError = new Error("Record not found");
       err.code = "not_found";
