@@ -208,3 +208,58 @@ test("buildStreamDiscoveryCapabilities encodes connector_id and omits aggregate_
   assert.equal(caps.aggregate_url, null);
   assert.ok(!caps.range_filters);
 });
+
+const schema = { properties: { amount: { type: "number" } } };
+
+test("discovery does not advertise unavailable query features", () => {
+  const stream = {
+    name: "orders", schema,
+    query: {
+      expand: [{ name: "items" }],
+      aggregations: { count: false, sum: false },
+      range_filters: { amount: [] },
+    },
+  };
+  const result = buildStreamDiscoveryCapabilities({ stream });
+  assert.deepEqual(
+    [result.expand, result.aggregate, result.aggregate_url, result.range_filters],
+    [false, false, null, false],
+  );
+  assert.deepEqual(buildExpandCapabilities(stream), []);
+  assert.deepEqual(buildFieldCapabilities(stream).amount?.range_filter, { declared: false, usable: false });
+});
+
+test("discovery still advertises supported query features", () => {
+  const stream = {
+    name: "orders", schema,
+    relationships: [{ name: "items", stream: "line_items", cardinality: "many" }],
+    query: {
+      expand: [{ name: "items" }],
+      aggregations: { sum: ["amount"] },
+      range_filters: { amount: ["gte"] },
+    },
+  };
+  const result = buildStreamDiscoveryCapabilities({ stream, connectorId: "fixture" });
+  assert.deepEqual(
+    [result.expand, result.aggregate, result.aggregate_url, result.range_filters],
+    [true, true, "/v1/streams/orders/aggregate?connector_id=fixture", true],
+  );
+  assert.deepEqual(buildFieldCapabilities(stream).amount?.range_filter, {
+    declared: true, usable: true, operators: ["gte"],
+  });
+  assert.equal(buildStreamDiscoveryCapabilities({
+    stream: { name: "orders", query: { aggregations: { count: true } } },
+  }).aggregate, true);
+});
+
+test("discovery offers an expand relation only when a read would accept its limits", () => {
+  const stream = (limits: Record<string, number>) => ({
+    name: "orders",
+    relationships: [{ name: "items", stream: "line_items", cardinality: "has_many" }],
+    query: { expand: [{ name: "items", ...limits }] },
+  });
+  assert.deepEqual(buildExpandCapabilities(stream({ default_limit: 5, max_limit: 2 })), []);
+  assert.equal(buildStreamDiscoveryCapabilities({ stream: stream({ default_limit: 5, max_limit: 2 }) }).expand, false);
+  assert.equal(buildExpandCapabilities(stream({ max_limit: 5 }))[0]?.usable, true);
+  assert.equal(buildStreamDiscoveryCapabilities({ stream: stream({ max_limit: 5 }) }).expand, true);
+});

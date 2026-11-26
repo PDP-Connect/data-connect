@@ -17,7 +17,6 @@ import {
   CollectorStateReadError,
   DEFAULT_COLLECTOR_OUTBOX_POLICY,
   drainCollectorOutbox,
-  drainCollectorQueue,
   recoverAndSummarizeOutbox,
   runCollectorConnector,
   transformRecordsToCollectorEnvelopes,
@@ -34,7 +33,6 @@ import {
 } from "./local-device-client.ts";
 import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "./local-device-envelope.ts";
 import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "./local-device-outbox.ts";
-import { LocalDeviceQueue } from "./local-device-queue.ts";
 import {
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
   RuntimeCapabilityMismatchError,
@@ -826,58 +824,6 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
   } finally {
     await harness.close();
   }
-});
-
-test("drainCollectorQueue marks sent and preserves retryable failures", async () => {
-  const queue = new LocalDeviceQueue({
-    path: await tempQueuePath(),
-    retryBackoffMs: () => 60_000,
-  });
-  const records = transformRecordsToCollectorEnvelopes({
-    batchId: "batch-1",
-    batchSeq: 1,
-    connectorId: "codex",
-    deviceId: "device-1",
-    messages: [
-      {
-        data: { id: "m-1" },
-        emitted_at: "2026-04-30T12:00:00.000Z",
-        key: "m-1",
-        stream: "messages",
-        type: "RECORD",
-      },
-    ],
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-1",
-    batchSeq: 1,
-    records,
-    sourceInstanceId: "src-1",
-  });
-  await queue.enqueue({
-    batchId: "batch-2",
-    batchSeq: 2,
-    records,
-    sourceInstanceId: "src-1",
-  });
-
-  const sent: IngestBatchRequest[] = [];
-  const client = {
-    async ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
-      await Promise.resolve();
-      sent.push(request);
-      if (request.batch_id === "batch-2") {
-        throw new Error("temporary 503");
-      }
-      return { ok: true };
-    },
-  };
-
-  assert.equal(await drainCollectorQueue({ client, queue }), 1);
-  const items = await queue.list();
-  assert.equal(items.find((i) => i.batch_id === "batch-1")?.status, "sent");
-  assert.equal(items.find((i) => i.batch_id === "batch-2")?.status, "pending");
 });
 
 test("runCollectorConnector refuses a connector requiring a binding the collector lacks", async () => {

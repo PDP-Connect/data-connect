@@ -32,6 +32,7 @@ import type {
 import { executeAsConsentDecision } from "../../operations/as-consent-decision/index.ts";
 import type { AsConsentExchangeConsumeResult } from "../../operations/as-consent-exchange/index.ts";
 import { executeAsConsentExchange } from "../../operations/as-consent-exchange/index.ts";
+import { buildAuthorizationResponseUrl } from "../authorization-response.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
@@ -147,6 +148,12 @@ export interface MountAsConsentContext {
   pdppError: PdppErrorFn;
   providerName: string;
   resolveBaseUrl: (req: RouteRequest) => string;
+  /**
+   * The RFC 9207 `iss` for authorization responses on this request. Must be
+   * the same value `/.well-known/oauth-authorization-server` reports as
+   * `issuer` for the request.
+   */
+  resolveIssuer: (req: RouteRequest) => string;
   setReferenceTraceId: (res: unknown, traceId: string) => void;
 }
 
@@ -245,15 +252,6 @@ async function renderPackageApproveHtml(
   });
 }
 
-function buildOAuthRedirectUrl(oauthCode: { redirect_uri: string; code: string; state?: string | null }): string {
-  const redirectUrl = new URL(oauthCode.redirect_uri);
-  redirectUrl.searchParams.set("code", oauthCode.code);
-  if (oauthCode.state) {
-    redirectUrl.searchParams.set("state", oauthCode.state);
-  }
-  return redirectUrl.toString();
-}
-
 async function dispatchApproveResponse(
   ctx: MountAsConsentContext,
   req: RouteRequest,
@@ -275,7 +273,13 @@ async function dispatchApproveResponse(
         token,
       });
   if (oauthCode) {
-    res.redirect(302, buildOAuthRedirectUrl(oauthCode));
+    res.redirect(
+      302,
+      buildAuthorizationResponseUrl(oauthCode.redirect_uri, ctx.resolveIssuer(req), {
+        code: oauthCode.code,
+        state: oauthCode.state,
+      })
+    );
     return;
   }
   await ctx.agentConnectAttemptStore.complete(approvedRequestUri, { grant, status: "approved", token });

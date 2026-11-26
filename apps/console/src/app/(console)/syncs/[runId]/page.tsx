@@ -14,6 +14,7 @@ import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/own
 import {
   getRunStatus,
   getRunTimeline,
+  listRunRecordRejectionReceipts,
   getStaticSecretSetup,
   type RunStatusEnvelope,
   type SpineEvent,
@@ -39,6 +40,7 @@ import {
 } from "../../lib/run-gaps.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
+import { RejectedRecordsSection } from "./rejected-records-section.tsx";
 import { projectCredentialInteraction } from "./credential-interaction.ts";
 import {
   describeAssistanceOwnerAction,
@@ -71,10 +73,19 @@ interface LatestProgress {
   total: number | null;
 }
 
-type TimelineSearchParams = Promise<{ cursor?: string | string[] }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[] }>;
 
-function getCursor(searchParams: { cursor?: string | string[] }): string | null {
-  return typeof searchParams.cursor === "string" && searchParams.cursor.length > 0 ? searchParams.cursor : null;
+function getCursor(value: string | string[] | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+// The receipt list pages on its own cursor; keep the timeline page the reader is on.
+function runReceiptsHref(runId: string, timelineCursor: string | null, receiptsCursor: string): string {
+  const query = new URLSearchParams({ receipts_cursor: receiptsCursor });
+  if (timelineCursor) {
+    query.set("cursor", timelineCursor);
+  }
+  return `/syncs/${encodeURIComponent(runId)}?${query.toString()}`;
 }
 
 function runTimelineHref(runId: string, cursor: string): string {
@@ -86,11 +97,13 @@ export default async function RunDetailPage({
   searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: TimelineSearchParams;
+  searchParams: RunPageSearchParams;
 }) {
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
-  const cursor = getCursor(await searchParams);
+  const query = await searchParams;
+  const cursor = getCursor(query.cursor);
+  const receiptsCursor = getCursor(query.receipts_cursor);
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
@@ -140,6 +153,16 @@ export default async function RunDetailPage({
       ? await getStaticSecretSetup(connectorId).catch(() => null)
       : null;
   const latestProgress = getLatestProgress(events);
+  // The server totals the run's rejected and unaccounted records over every
+  // event, so the page only reads them. Receipts are filtered by run on the
+  // server and paged by their own cursor, separate from the timeline's. A run
+  // that reports no rejections has none to list; a failed read renders as an
+  // unavailable list rather than failing the page.
+  const recordOutcomes = runStatus?.record_outcomes ?? null;
+  const rejectionReceipts =
+    connectionId && recordOutcomes?.permanently_rejected !== 0
+      ? await listRunRecordRejectionReceipts(connectionId, runId, receiptsCursor).catch(() => null)
+      : null;
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
   const gapClassification = classifyKnownGaps(terminalKnownGaps.gaps);
@@ -206,6 +229,13 @@ export default async function RunDetailPage({
         protocolViolationCount={gapClassification.protocolViolationGaps.length}
         skipped={summarizeSkippedStreams(events)}
         summary={terminalKnownGaps.summary ?? gapClassification.summary}
+      />
+      <RejectedRecordsSection
+        moreReceiptsHref={
+          rejectionReceipts?.nextCursor ? runReceiptsHref(runId, cursor, rejectionReceipts.nextCursor) : null
+        }
+        outcomes={recordOutcomes}
+        receipts={rejectionReceipts}
       />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />

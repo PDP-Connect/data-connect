@@ -202,6 +202,36 @@ test("static and dynamic n.eko paths expose DPR-1 portrait and landscape phone m
   }
 });
 
+test("n.eko serves and captures the same configured desktop display", async () => {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  const display = '"${DISPLAY_NAME}"';
+  assert.ok(source.includes('DISPLAY_NAME="${NEKO_DESKTOP_DISPLAY:-${DISPLAY:-:99.0}}"'));
+  assert.ok(source.includes(`--desktop.display ${display}`));
+  assert.ok(source.includes(`--capture.video.display ${display}`));
+});
+
+test("the image installs the n.eko wrapper and Supervisor actually uses it", async () => {
+  const source = await readFile(NEKO_DOCKERFILE, "utf8");
+  assert.ok(source.includes("COPY docker/neko/start-neko.sh /usr/local/bin/start-neko.sh"));
+  assert.ok(source.includes("#command=/usr/local/bin/start-neko.sh#' /etc/neko/supervisord.conf"));
+});
+
+test("the n.eko image installs the executable named by the proxy supervisor", async () => {
+  const [dockerfile, supervisor] = await Promise.all([
+    readFile(NEKO_DOCKERFILE, "utf8"),
+    readFile(`${REPO_ROOT}docker/neko/cdp-proxy.conf`, "utf8"),
+  ]);
+  const command = supervisor
+    .split("\n")
+    .find((line) => line.startsWith("command="))
+    ?.slice("command=".length);
+  assert.ok(command, "the supervisor names an executable");
+  const copy = "COPY docker/neko/cdp-proxy.py ";
+  const lines = dockerfile.split("\n");
+  assert.equal(lines.find((line) => line.startsWith(copy))?.slice(copy.length), command);
+  assert.ok(lines.some((line) => line.startsWith("RUN chmod +x ") && line.split(" ").includes(command)));
+});
+
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
 
@@ -235,6 +265,8 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
     },
     { name: "malformed geometry", root: [1440, 900], geometries: ["not-a-size"], resized: [] },
     { name: "missing geometry", root: [1440, 900], geometries: [""], resized: [] },
+    { name: "missing root-screen width", root: ["", 900], geometries: ["200x200"], resized: [] },
+    { name: "unreadable root-screen height", root: [1440, "unknown"], geometries: ["200x200"], resized: [] },
   ];
 
   for (const scenario of cases) {
@@ -298,6 +330,26 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
       }
     });
   }
+});
+
+async function startupDisplay(env: NodeJS.ProcessEnv): Promise<string> {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  const assignment = source.split("\n").find((line) => line.startsWith("DISPLAY_NAME="));
+  assert.ok(assignment, "n.eko defines its desktop display before launching");
+  const result = spawnSync("/bin/sh", ["-eu", "-c", `${assignment}\nprintf '%s\\n' "$DISPLAY_NAME"`],
+    { env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+test("n.eko startup falls back to the container display when both display variables are absent", async () => {
+  assert.equal(await startupDisplay({}), ":99.0");
+  assert.equal(await startupDisplay({ NEKO_DESKTOP_DISPLAY: "", DISPLAY: "" }), ":99.0");
+});
+
+test("n.eko startup uses DISPLAY only when the dedicated desktop display is absent", async () => {
+  assert.equal(await startupDisplay({ DISPLAY: ":7" }), ":7");
+  assert.equal(await startupDisplay({ DISPLAY: ":7", NEKO_DESKTOP_DISPLAY: ":12" }), ":12");
 });
 
 test("ChatGPT large-history guardrails are wired into Docker runtime config", async () => {

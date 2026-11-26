@@ -693,7 +693,7 @@ fn validate_my_devices_only_config(
     config: RemoteAccessConfig,
 ) -> Result<RemoteAccessConfig, String> {
     let lan_host = detect_lan_host()
-        .ok_or_else(|| "My devices only requires a detected LAN network interface".to_string())?;
+        .ok_or_else(|| "Local network (LAN) access requires a detected LAN network interface".to_string())?;
     Ok(my_devices_only_config_for_host(config.console_port, lan_host))
 }
 

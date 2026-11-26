@@ -451,18 +451,64 @@ pub(crate) fn browser_command_with_args(
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
+            // The profile belongs to DataConnect, not to the user's everyday
+            // browser. Keep its keys out of the OS wallet: on Linux the Secret
+            // portal or KWallet can block cookie reads waiting for an unlock
+            // prompt, and on macOS the Keychain can prompt. Playwright,
+            // Puppeteer and ChromeDriver launch Chrome with the same pair.
+            "--password-store=basic",
+            "--use-mock-keychain",
         ])
         .args(additional_args);
     if headless {
         command.arg("--headless=new");
     }
     command.arg("about:blank");
+    #[cfg(target_os = "linux")]
+    if let Some(appdir) = appimage_dir() {
+        remove_appimage_paths(&mut command, std::env::vars_os(), &appdir);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     command
+}
+
+/// The mount directory of the running AppImage, if the app runs from one.
+#[cfg(target_os = "linux")]
+fn appimage_dir() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE")?;
+    let appdir = PathBuf::from(std::env::var_os("APPDIR")?);
+    appdir.is_absolute().then_some(appdir)
+}
+
+/// The AppImage runtime points LD_LIBRARY_PATH, PATH, the GTK module paths and
+/// similar lists at its bundled libraries. The browser is a host program: the
+/// system Chrome launcher is a shell script, and host coreutils fail to load
+/// against the bundled libsystemd. Drop every list entry inside the AppImage,
+/// and the variable when no entry is left.
+#[cfg(target_os = "linux")]
+fn remove_appimage_paths(
+    command: &mut Command,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    appdir: &Path,
+) {
+    for (key, value) in vars {
+        let entries: Vec<PathBuf> = std::env::split_paths(&value).collect();
+        let host: Vec<&PathBuf> = entries
+            .iter()
+            .filter(|entry| !entry.starts_with(appdir))
+            .collect();
+        if host.len() == entries.len() {
+            continue;
+        }
+        match std::env::join_paths(host) {
+            Ok(joined) if !joined.is_empty() => command.env(key, joined),
+            _ => command.env_remove(key),
+        };
+    }
 }
 
 #[cfg(unix)]
@@ -685,6 +731,24 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::process::Command;
+
+    #[test]
+    fn browser_command_keeps_profile_keys_out_of_the_os_wallet() {
+        let command = browser_command(Path::new("chrome"), Path::new("profile"), true);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|arg| arg == "--password-store=basic"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--use-mock-keychain"),
+            "{args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
 
     const LOCK_HOLDER_ROOT: &str = "PDPP_BROWSER_LOCK_HOLDER_ROOT";
     const LOCK_EXPECT_BLOCKED_ROOT: &str = "PDPP_BROWSER_LOCK_EXPECT_BLOCKED_ROOT";
@@ -981,6 +1045,45 @@ mod tests {
         assert!(
             !terminated,
             "a live descendant must prevent cleanup success"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_drops_appimage_library_paths() {
+        use std::ffi::{OsStr, OsString};
+        let appdir = Path::new("/tmp/.mount_DataCo1");
+        let vars = [
+            (
+                "LD_LIBRARY_PATH",
+                "/tmp/.mount_DataCo1/usr/lib/:/tmp/.mount_DataCo1/lib64/",
+            ),
+            (
+                "PATH",
+                "/tmp/.mount_DataCo1/usr/bin/:/usr/local/bin:/usr/bin",
+            ),
+            ("GTK_PATH", "/tmp/.mount_DataCo1//usr/lib/gtk-3.0"),
+            ("XDG_DATA_DIRS", "/tmp/.mount_DataCo1/usr/share:/usr/share"),
+            ("APPIMAGE", "/home/user/DataConnect.AppImage"),
+            ("SIBLING", "/tmp/.mount_DataCo12/usr/lib"),
+            ("HOME", "/home/user"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let mut command = Command::new("browser");
+        remove_appimage_paths(&mut command, vars, appdir);
+        let mut changes: Vec<(&OsStr, Option<&OsStr>)> = command.get_envs().collect();
+        changes.sort();
+        assert_eq!(
+            changes,
+            vec![
+                (OsStr::new("GTK_PATH"), None),
+                (OsStr::new("LD_LIBRARY_PATH"), None),
+                (
+                    OsStr::new("PATH"),
+                    Some(OsStr::new("/usr/local/bin:/usr/bin"))
+                ),
+                (OsStr::new("XDG_DATA_DIRS"), Some(OsStr::new("/usr/share"))),
+            ]
         );
     }
 }

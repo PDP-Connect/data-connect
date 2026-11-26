@@ -31,7 +31,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runScopedConnectorReconciliation } from "../server/connector-summary-evidence-bounded-reconciliation.ts";
+import {
+  runScopedConnectorReconciliation,
+  runBoundedConnectorReconciliation,
+} from "../server/connector-summary-evidence-bounded-reconciliation.ts";
 
 type Reason = "dirty";
 
@@ -140,4 +143,31 @@ test("a dirty backlog LARGER than one pass can drain converges across repeated p
     ids,
     "candidates drain in the order discovery returned them, one guaranteed repair per pass"
   );
+});
+
+function reconcile(deadline: number | null, fail = false) {
+  const result = runBoundedConnectorReconciliation({
+    candidateReasons: undefined,
+    deadline,
+    discover: async (ids) => ({
+      candidates: new Map(ids.map((id) => [id, "fixture"] as const)),
+      instanceRows: ids,
+    }),
+    maxCandidates: undefined,
+    pageSize: 2,
+    prune: async () => 0,
+    pruneComplete: async () => 0,
+    readPage: async () => ["instance"],
+    repair: async () => ({ deferred: false, failed: fail, persisted: false, row: "detail" }),
+  });
+  return { result };
+}
+
+test("an attempted failure is neither repaired nor skipped", async () => {
+  const result = await reconcile(null, true).result;
+  assert.equal(result.repaired, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.skipped, 0);
+  assert.deepEqual(result.attemptedIds, ["instance"]);
+  assert.equal(result.failedRows.get("instance"), "detail");
 });

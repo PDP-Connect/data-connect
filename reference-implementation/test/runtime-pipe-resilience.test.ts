@@ -307,6 +307,7 @@ test("runConnector: connector that exits before reading START does not crash the
     outcome = await runConnector({
       admitRunConnection: fakeAdmitRunConnection(),
       collectionMode: "full_refresh",
+      connectorConfigStore: { getActiveRevision: () => Promise.resolve(null) },
       connectorId: manifest.connector_id,
       connectorPath: stubPath,
       // No server harness; supply an empty detail-gap store so the
@@ -494,6 +495,7 @@ main().catch(err => {
     outcome = await runConnector({
       admitRunConnection: fakeAdmitRunConnection(),
       collectionMode: "full_refresh",
+      connectorConfigStore: { getActiveRevision: () => Promise.resolve(null) },
       connectorId: manifest.connector_id,
       connectorPath: stubPath,
       detailGapStore: {
@@ -603,6 +605,7 @@ reader.once("line", () => {
     outcome = await runConnector({
       admitRunConnection: fakeAdmitRunConnection(),
       collectionMode: "full_refresh",
+      connectorConfigStore: { getActiveRevision: () => Promise.resolve(null) },
       connectorId: manifest.connector_id,
       connectorPath,
       detailGapStore: {

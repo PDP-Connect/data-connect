@@ -144,6 +144,14 @@ export async function handleStreamableHttpRequest(
   request: Request,
   options: CreatePdppMcpServerOptions
 ): Promise<Response> {
+  // A stateless server has no stream to offer on GET. The SDK would answer
+  // 200 text/event-stream and the `finally` below would end it at once, which
+  // clients read as a dropped stream and reopen immediately. The spec's answer
+  // for "no SSE stream at this endpoint" is 405, which the SDK client accepts
+  // as final.
+  if (request.method === "GET") {
+    return methodNotAllowedResponse();
+  }
   const { server } = createPdppMcpServer(options);
   // Explicitly omitting `sessionIdGenerator` (rather than setting it to
   // `undefined`) selects the SDK's stateless mode identically —
@@ -159,6 +167,17 @@ export async function handleStreamableHttpRequest(
   } finally {
     await Promise.allSettled([transport.close(), server.close()]);
   }
+}
+
+function methodNotAllowedResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed: this server offers no SSE stream on GET." },
+      id: null,
+    }),
+    { status: 405, headers: { allow: "POST, DELETE", "content-type": "application/json" } }
+  );
 }
 
 // Kept as a `type` (not `interface`) on purpose — returned from the tool

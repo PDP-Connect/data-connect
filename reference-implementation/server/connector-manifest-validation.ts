@@ -19,6 +19,7 @@ import {
 } from "./polyfill-connectors-runtime.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
+import { resolveConfiguredExpandLimits } from "./record-expand-helpers.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
 // Inline copy — isNonEmptyString is used 30+ times in auth.js so moving it
@@ -1295,6 +1296,13 @@ function validateExpandCapabilityLimits({
   ) {
     throw invalidConnectorManifest(
       `Stream '${streamName}' query.expand entry '${cap?.name as string}' default_limit must be less than or equal to max_limit`,
+      code
+    );
+  }
+  // Reads resolve limits with this resolver; accept only declarations it accepts.
+  if (cap && resolveConfiguredExpandLimits(cap) === null) {
+    throw invalidConnectorManifest(
+      `Stream '${streamName}' query.expand entry '${cap.name as string}' limits must be safe integers`,
       code
     );
   }

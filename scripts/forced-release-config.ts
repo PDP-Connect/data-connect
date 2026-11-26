@@ -42,7 +42,8 @@
 // NOT what this fixes, and still live on `main`: the v2.2.0 tag with no npm
 // release was NOT the scope gate refusing a release. That run resolved and
 // published connector-protocol@2.2.0 correctly, then aborted because
-// scripts/verify-connector-protocol-published.ts does a single `npm view`
+// scripts/verify-connector-protocol-published.ts (now
+// verify-lockstep-dependencies-published.ts) did a single `npm view`
 // with no retry and lost a race with registry propagation (the same lag
 // npm-release.yml's own comment records as ~3 minutes for 2.1.1, and which
 // scripts/verify-npm-provenance.ts already retries around). That is a
@@ -90,8 +91,8 @@ export function loadReleaseConfig(cwd: string = process.cwd()): ReleaseConfig {
 /**
  * Returns the release config with commit analysis replaced by an
  * unconditional `releaseType` bump. Every other plugin — the release-notes
- * generator, the dependency pin, both publish-ordering barriers, all three
- * @semantic-release/npm publishes, and the version outputs — is left exactly
+ * generator, the dependency pin, every publish-ordering barrier, every
+ * @semantic-release/npm publish, and the version outputs — is left exactly
  * as .releaserc.yaml defines it, so a forced release publishes the same
  * artifacts, in the same order, through the same OIDC trusted publishing as
  * an ordinary one.

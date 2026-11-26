@@ -173,3 +173,254 @@ test("clipboard controls use the dedicated authenticated clipboard endpoint", as
     { body: { action: "local_to_remote", text: "manual text", type: "clipboard" }, url: "/clipboard" },
   ]);
 });
+
+test("a clipboard read finishing after disposal cannot reach the replacement viewer", async () => {
+  const { clipboardUrlRef, inputUrlRef, presentationAttachmentReadyRef, transport, viewportUrlRef } = makeTransport();
+  const clipboardRead = Promise.withResolvers<string>();
+  const oldPaste = clipboardRead.promise.then((text) => transport.sendClipboardText(text));
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return new Response("{}", { status: 202 });
+    },
+    async () => {
+      transport.dispose();
+      clipboardUrlRef.current = "/replacement/clipboard";
+      const replacement = createPdppRemoteSurfaceTransport({
+        clipboardUrlRef,
+        inputUrlRef,
+        logDebug: () => undefined,
+        presentationAttachmentReadyRef,
+        viewportUrlRef,
+      });
+      clipboardRead.resolve("old paste");
+      assert.equal(await oldPaste, false, "a disposed transport must refuse the old paste");
+      assert.equal(await replacement.sendClipboardText("new paste"), true);
+      replacement.dispose();
+    }
+  );
+  assert.deepEqual(calls, [
+    {
+      body: { action: "local_to_remote", text: "new paste", type: "clipboard" },
+      url: "/replacement/clipboard",
+    },
+  ]);
+});
+
+test("disposal is terminal for queued viewports, outbound input and inbound subscriptions", async () => {
+  const { messages, presentationAttachmentReadyRef, transport } = makeTransport();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return new Response("{}", { status: 202 });
+    },
+    async () => {
+      transport.send({ height: 600, requestId: 1, type: "viewport", width: 800 });
+      transport.dispose();
+      transport.dispose();
+      transport.subscribe((message) => messages.push(message));
+      transport.setPresentationAttachmentReady(true);
+      transport.send({ text: "late input", type: "text" });
+      transport.send({ requestId: 2, type: "read_remote_selection" });
+      transport.send({ height: 600, requestId: 3, type: "viewport", width: 800 });
+      transport.receiveSseMessage("frame", { data_base64: "AA==" });
+      transport.receiveSseMessage("keyboard_focus", { focused: true });
+      assert.equal(await transport.sendClipboardText("late clipboard"), false);
+      assert.equal(
+        presentationAttachmentReadyRef.current,
+        false,
+        "disposed transport must not change shared readiness"
+      );
+    }
+  );
+  assert.deepEqual(calls, []);
+  assert.deepEqual(messages, []);
+});
+
+test("HTTP replies already in flight cannot notify a disposed viewer", async () => {
+  const { messages, transport } = makeTransport();
+  const viewportResponse = Promise.withResolvers<Response>();
+  const selectionResponse = Promise.withResolvers<Response>();
+  const clipboardResponse = Promise.withResolvers<Response>();
+  await withFetch(
+    (call) => {
+      if (call.url === "/viewport") {
+        return viewportResponse.promise;
+      }
+      return call.body.action === "remote_to_local" ? selectionResponse.promise : clipboardResponse.promise;
+    },
+    async () => {
+      transport.setPresentationAttachmentReady(true);
+      transport.send({ height: 600, requestId: 1, type: "viewport", width: 800 });
+      transport.send({ requestId: 2, type: "read_remote_selection" });
+      const clipboardAck = transport.sendClipboardText("already sent");
+      transport.dispose();
+      transport.subscribe((message) => messages.push(message));
+      viewportResponse.resolve(new Response("{}", { status: 202 }));
+      selectionResponse.resolve(new Response('{"text":"old selection"}', { status: 200 }));
+      clipboardResponse.resolve(new Response("{}", { status: 202 }));
+      assert.equal(await clipboardAck, false, "a late response cannot acknowledge a live clipboard operation");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  );
+  assert.deepEqual(messages, [], "late replies must not reach existing or newly attached subscribers");
+});
+
+test("a live transport still follows endpoint refreshes", async () => {
+  const { clipboardUrlRef, inputUrlRef, transport } = makeTransport();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return new Response("{}", { status: 202 });
+    },
+    async () => {
+      inputUrlRef.current = "/refreshed/input";
+      clipboardUrlRef.current = "/refreshed/clipboard";
+      transport.send({ text: "live input", type: "text" });
+      assert.equal(await transport.sendClipboardText("live paste"), true);
+    }
+  );
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/refreshed/input", "/refreshed/clipboard"]
+  );
+});
+
+// The host logger of the stream page batches events into POST /api/stream-debug.
+// This stand-in sends that POST synchronously so a late log shows up as network use.
+function makeDebugPostingTransport() {
+  const hostLogs: string[] = [];
+  const transport = createPdppRemoteSurfaceTransport({
+    clipboardUrlRef: { current: "/clipboard" },
+    inputUrlRef: { current: "/input" },
+    logDebug: (event) => {
+      hostLogs.push(event);
+      fetch("/api/stream-debug", { body: JSON.stringify({ events: [event] }), method: "POST" }).catch(() => undefined);
+    },
+    presentationAttachmentReadyRef: { current: true },
+    viewportUrlRef: { current: "/viewport" },
+  });
+  return { hostLogs, transport };
+}
+
+const settleMacrotask = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a live transport logs a failed input POST through the host logger", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return call.url === "/input" ? Promise.reject(new Error("offline")) : Promise.resolve(new Response("{}", { status: 202 }));
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.error"]);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input", "/api/stream-debug"]
+  );
+});
+
+test("an input fetch that rejects after disposal does not log or schedule a debug POST", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const pending = Promise.withResolvers<Response>();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return pending.promise;
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      transport.dispose();
+      pending.reject(new Error("socket hang up"));
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, []);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input"]
+  );
+});
+
+test("a non-2xx input reply after disposal does not log or schedule a debug POST", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const pending = Promise.withResolvers<Response>();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return pending.promise;
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      transport.dispose();
+      pending.resolve(new Response('{"error":{"message":"invalid_input"}}', { status: 400 }));
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, []);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input"]
+  );
+});
+
+test("a clipboard request that rejects or fails after disposal does not log or schedule a debug POST", async () => {
+  for (const settle of [
+    (pending: PromiseWithResolvers<Response>) => pending.reject(new Error("socket hang up")),
+    (pending: PromiseWithResolvers<Response>) =>
+      pending.resolve(new Response('{"error":{"message":"clipboard_denied"}}', { status: 403 })),
+  ]) {
+    const { hostLogs, transport } = makeDebugPostingTransport();
+    const pending = Promise.withResolvers<Response>();
+    const calls: FetchCall[] = [];
+    await withFetch(
+      (call) => {
+        calls.push(call);
+        return pending.promise;
+      },
+      async () => {
+        const ack = transport.sendClipboardText("secret");
+        transport.dispose();
+        settle(pending);
+        assert.equal(await ack, false);
+        await settleMacrotask();
+      }
+    );
+    assert.deepEqual(hostLogs, []);
+    assert.deepEqual(
+      calls.map((call) => call.url),
+      ["/clipboard"]
+    );
+  }
+});
+
+test("a disposed transport never calls the host logger from its skip and queue paths", async () => {
+  const hostLogs: string[] = [];
+  const inputUrlRef = { current: null as string | null };
+  const presentationAttachmentReadyRef = { current: false };
+  const transport = createPdppRemoteSurfaceTransport({
+    clipboardUrlRef: { current: "/clipboard" },
+    inputUrlRef,
+    logDebug: (event) => {
+      hostLogs.push(event);
+    },
+    presentationAttachmentReadyRef,
+    viewportUrlRef: { current: "/viewport" },
+  });
+  transport.send({ text: "before", type: "text" });
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.skip"], "a live transport logs a skipped input");
+  transport.dispose();
+  transport.send({ text: "after", type: "text" });
+  transport.send({ height: 600, requestId: 1, type: "viewport", width: 800 });
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.skip"]);
+});

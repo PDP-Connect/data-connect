@@ -47,7 +47,7 @@ export const HEARTBEAT_LEASE_MS = 30 * 60 * 1000;
  *  - `stale`   — a heartbeat exists but is older than the lease. What the
  *                collector last said is retained on `lastObservedStatus` as
  *                evidence, but it no longer describes the present.
- *  - `unknown` — no heartbeat, or one whose timestamp will not parse. There
+ *  - `unknown` — no heartbeat, or one whose timestamp is invalid or in the future. There
  *                is no evidence either way; say so rather than guessing.
  * Otherwise the collector's own status is within lease and passes through.
  */
@@ -80,7 +80,7 @@ export interface HeartbeatPresentation {
 export function presentHeartbeatHealth({
   lastHeartbeatAt,
   lastHeartbeatStatus,
-  leaseMs = HEARTBEAT_LEASE_MS,
+  leaseMs: override = HEARTBEAT_LEASE_MS,
   nowIso,
 }: {
   lastHeartbeatAt: string | null | undefined;
@@ -88,10 +88,11 @@ export function presentHeartbeatHealth({
   leaseMs?: number;
   nowIso: string;
 }): HeartbeatPresentation {
+  const leaseMs = Number.isFinite(override) && override >= 0 ? override : HEARTBEAT_LEASE_MS;
   const lastObservedStatus = lastHeartbeatStatus ?? null;
   const age = heartbeatAgeMs(lastHeartbeatAt, nowIso);
   if (age === null) {
-    // No heartbeat, or an unparseable one. A status with no age behind it
+    // A missing, invalid or future heartbeat has no usable age. Its status
     // cannot be presented as current, however confident it sounds.
     return { ageMs: null, lastObservedStatus, leaseMs, status: "unknown" };
   }
@@ -119,7 +120,7 @@ function withinLeaseStatus(value: string | null): PresentedHeartbeatHealth {
   }
 }
 
-/** Null when either side is absent or unparseable, so callers cannot read a NaN age as fresh. */
+/** Null when a timestamp is absent, unparseable, or later than this projection. */
 function heartbeatAgeMs(iso: string | null | undefined, nowIso: string): number | null {
   if (!iso) {
     return null;
@@ -129,5 +130,6 @@ function heartbeatAgeMs(iso: string | null | undefined, nowIso: string): number 
   if (!(Number.isFinite(observed) && Number.isFinite(now))) {
     return null;
   }
-  return now - observed;
+  const age = now - observed;
+  return age < 0 ? null : age;
 }

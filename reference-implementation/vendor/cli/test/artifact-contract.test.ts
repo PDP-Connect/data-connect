@@ -170,7 +170,7 @@ test("artifact receipt binds revision, content, and tarball identities", () => {
     packageContentSha256: "content",
     tarballSha256: "tarball",
     nodeExecPath: "/node-22.14/bin/node",
-    subprocesses: [{ label: "pnpm build", version: "v22.14.0", execPath: "/node-22.14/bin/node" }],
+    subprocesses: [{ label: "npm run build", version: "v22.14.0", execPath: "/node-22.14/bin/node" }],
   };
 
   assert.doesNotThrow(() =>

@@ -107,6 +107,25 @@ function identityKeyForRow(row: {
   });
 }
 
+test("connection identity keys keep connector namespaces separate", () => {
+  const first = {
+    connector_id: "sample-reader",
+    profile_key: "sample-profile",
+    surface_subject_id: "sample-subject",
+  };
+  const second = { ...first, connector_id: "sample-writer" };
+
+  assert.notEqual(browserSurfaceConnectionIdentityKey(first), browserSurfaceConnectionIdentityKey(second));
+  assert.equal(
+    browserSurfaceConnectionIdentityKey(first),
+    browserSurfaceConnectionIdentityKey({
+      surface_subject_id: "sample-subject",
+      profile_key: "sample-profile",
+      connector_id: "sample-reader",
+    })
+  );
+});
+
 function typedDb(): Database.Database {
   return getDb() as object as Database.Database;
 }
@@ -222,6 +241,33 @@ async function assertNoPriorityBootstrapLocks(admin: Pool) {
   );
   assert.equal(locks.rows[0].count, 0, "public bootstrap leaves no advisory locks behind");
 }
+
+test("a host surface carries its transport without inventing a stream URL", async () => {
+  const { browserSurfaceLeaseEnv } = await import("../runtime/browser-surface-leases.ts");
+  const projected = browserSurfaceLeaseEnv(
+    lease({ lease_id: "synthetic-lease", profile_key: "synthetic-profile" }),
+    surface({ surface_id: "synthetic-surface", cdp_url: "https://transport.invalid", stream_base_url: "" }),
+  );
+  assert.deepEqual(projected, {
+    PDPP_BROWSER_SURFACE_ID: "synthetic-surface",
+    PDPP_BROWSER_SURFACE_LEASE_ID: "synthetic-lease",
+    PDPP_BROWSER_SURFACE_PROFILE_KEY: "synthetic-profile",
+    PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "https://transport.invalid",
+    PDPP_BROWSER_SURFACE_REQUIRED: "host",
+    PDPP_BROWSER_SURFACE_STREAM_BASE_URL: "",
+  });
+});
+
+test("a streamed surface projects distinct transport and owner-interaction URLs", async () => {
+  const { browserSurfaceLeaseEnv } = await import("../runtime/browser-surface-leases.ts");
+  const projected = browserSurfaceLeaseEnv(
+    lease(),
+    surface({ cdp_url: "https://transport.invalid", stream_base_url: "https://stream.invalid" }),
+  );
+  assert.equal(projected.PDPP_BROWSER_SURFACE_REQUIRED, "neko");
+  assert.equal(projected.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, "https://transport.invalid");
+  assert.equal(projected.PDPP_BROWSER_SURFACE_STREAM_BASE_URL, "https://stream.invalid");
+});
 
 test("SQLite surface persistence does not require the obsolete retained column", async () => {
   const store = setup();
@@ -439,6 +485,44 @@ test("Postgres scoped browser-surface reads use two bounded identity queries and
     non_terminal_leases: [lastLease],
     surfaces: [lastSurface],
   });
+});
+
+test("repeated identical connection requests share one query binding even above the raw list cap", async () => {
+  const identity = { connector_id: "synthetic_connector", profile_key: "synthetic_profile", surface_subject_id: null };
+  const queryParams: unknown[][] = [];
+  const store = createPostgresBrowserSurfaceLeaseStore({
+    // biome-ignore lint/suspicious/useAwait: this is an inert Promise-returning database boundary.
+    async query(_sql: string, params: unknown[] = []) {
+      queryParams.push(params);
+      return { rows: [] };
+    },
+  });
+
+  const batch = await store.readForConnectionIdentities(Array.from({ length: 26 }, () => ({ ...identity })));
+  assert.equal(batch.size, 1);
+  assert.deepEqual(queryParams, [
+    [identity.connector_id, identity.profile_key, identity.surface_subject_id],
+    [identity.connector_id, identity.profile_key, identity.surface_subject_id],
+  ]);
+});
+
+test("an empty store still returns an explicit empty result for each requested connection", async () => {
+  const identities = [
+    { connector_id: "synthetic_connector", profile_key: "profile_b", surface_subject_id: "subject_b" },
+    { connector_id: "synthetic_connector", profile_key: "profile_a", surface_subject_id: "subject_a" },
+  ];
+  const store = createPostgresBrowserSurfaceLeaseStore({
+    // biome-ignore lint/suspicious/useAwait: this is an inert Promise-returning database boundary.
+    async query() {
+      return { rows: [] };
+    },
+  });
+
+  const batch = await store.readForConnectionIdentities(identities);
+  assert.deepEqual([...batch.keys()], identities.map(browserSurfaceConnectionIdentityKey));
+  assert.deepEqual([...batch.values()], identities.map((identity) => ({
+    identity, leases: [], non_terminal_leases: [], surfaces: [],
+  })));
 });
 
 interface PostgresScopedFixtureIdentity {

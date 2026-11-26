@@ -456,7 +456,7 @@ describe("production Timeline PDPP data source", () => {
                 message: "The grant is no longer valid",
               },
             },
-            403
+            401
           )
         )
       const consent = await dataSource.requestConsent?.()

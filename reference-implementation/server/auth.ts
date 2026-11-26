@@ -71,6 +71,7 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import { PRODUCT_ICON_SVG, productIconUrl } from "./product-icons.ts";
 import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
 import {
   lockOwnerPasswordVerifierRevision,
@@ -5501,7 +5502,7 @@ export async function registerDynamicClient(
     client_name: registered.metadata.client_name || null,
     client_uri: registered.metadata.client_uri || (asBase ? asBase : undefined),
     grant_types: registered.metadata.grant_types || undefined,
-    logo_uri: registered.metadata.logo_uri || (asBase ? `${asBase}/icon.svg` : undefined),
+    logo_uri: registered.metadata.logo_uri || (asBase ? productIconUrl(asBase, PRODUCT_ICON_SVG) : undefined),
     policy_uri: registered.metadata.policy_uri || (asBase ? asBase : undefined),
     redirect_uris: registered.metadata.redirect_uris || undefined,
     response_types: registered.metadata.response_types || undefined,

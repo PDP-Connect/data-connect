@@ -208,12 +208,12 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function uploadRequestInit(ownerToken: string, upload: HashingUploadBody): StreamingRequestInit {
+function uploadRequestInit(uploadToken: string, upload: HashingUploadBody): StreamingRequestInit {
   return {
     body: upload.body,
     duplex: "half",
     headers: {
-      Authorization: `Bearer ${ownerToken}`,
+      Authorization: `Bearer ${uploadToken}`,
       // The logical blob MIME type travels separately in `mime_type`. A
       // binary payload labelled text/plain would otherwise pass through the
       // host's text parser and lose byte fidelity before blob hashing.
@@ -293,20 +293,20 @@ async function validatedBlobUploadResponse(response: Response, upload: HashingUp
 }
 
 export function runtimeBlobUploadAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean((env.PDPP_RS_URL || env.RS_URL) && env.PDPP_OWNER_TOKEN);
+  return Boolean((env.PDPP_RS_URL || env.RS_URL) && env.PDPP_BLOB_UPLOAD_TOKEN);
 }
 
 export function makeReferenceBlobUploader(args: {
   connectorInstanceId?: string | null;
   fetchFn?: typeof fetch;
-  ownerToken: string;
   rsUrl: string;
+  uploadToken: string;
 }): ReferenceBlobUploadFn {
   return async ({ connectorId, connectorInstanceId, content, jsonPath, mimeType, recordKey, stream }) => {
     const upload = createHashingUploadBody(content);
     const response = await fetchUploadResponse({
       fetchFn: args.fetchFn ?? fetch,
-      requestInit: uploadRequestInit(args.ownerToken, upload),
+      requestInit: uploadRequestInit(args.uploadToken, upload),
       upload,
       url: makeBlobUploadUrl({
         connectorId,

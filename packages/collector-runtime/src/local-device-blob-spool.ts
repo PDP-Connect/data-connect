@@ -14,9 +14,12 @@ import {
   statSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+
+// Multiple spool instances may share a root in this process.
+const activeTempPaths = new Set<string>();
 
 /**
  * Content-addressed local spool for artifact BYTES.
@@ -285,9 +288,19 @@ export class LocalDeviceBlobSpool {
    * restate this as an unqualified durability guarantee.
    */
   async put(content: LocalDeviceBlobSpoolContent): Promise<LocalDeviceBlobSpoolEntry> {
+    const tempPath = join(this.#tempDir(), `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const activePath = resolvePath(tempPath);
+    activeTempPaths.add(activePath);
+    try {
+      return await this.#putAtTempPath(content, tempPath);
+    } finally {
+      activeTempPaths.delete(activePath);
+    }
+  }
+
+  async #putAtTempPath(content: LocalDeviceBlobSpoolContent, tempPath: string): Promise<LocalDeviceBlobSpoolEntry> {
     const hash = createHash("sha256");
     let sizeBytes = 0;
-    const tempPath = join(this.#tempDir(), `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     // flush: true fsyncs the file content before close resolves. Without
     // it the rename can publish a name over bytes still only in cache.
     const sink = createWriteStream(tempPath, { flush: true });
@@ -530,8 +543,8 @@ export class LocalDeviceBlobSpool {
    *
    * A temp file is never referenced by an entry — the rename into `objects/`
    * is what publishes content — so reclaiming one can never destroy a durable
-   * artifact. `olderThanMs` keeps the sweep from racing a concurrent writer in
-   * another process.
+   * artifact. Live writers in this process are excluded; `olderThanMs` is
+   * still a best-effort grace period for writers in other processes.
    */
   async sweepTemp(olderThanMs = 60 * 60_000): Promise<number> {
     let names: string[];
@@ -545,7 +558,8 @@ export class LocalDeviceBlobSpool {
     for (const name of names) {
       const path = join(this.#tempDir(), name);
       try {
-        if (isOlderThan((await stat(path)).mtimeMs, olderThanMs, now)) {
+        const { mtimeMs } = await stat(path);
+        if (!activeTempPaths.has(resolvePath(path)) && isOlderThan(mtimeMs, olderThanMs, now)) {
           rmSync(path, { force: true });
           swept += 1;
         }

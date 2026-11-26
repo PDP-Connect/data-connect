@@ -132,6 +132,41 @@ if (POSTGRES_URL) {
   }
 
   test(
+    "[postgres] file_size_bytes round-trips a size above 2^31 (3_109_689_284 bytes)",
+    withPostgresFixture(async () => {
+      await insertArtifact({
+        artifactId: "mua_pg_large_file",
+        fileSizeBytes: 3_109_689_284,
+      });
+
+      const store = createPostgresManualUploadArtifactStore();
+      const artifact = await store.get("mua_pg_large_file");
+      assert.ok(artifact, "expected the large-file artifact row");
+      assert.equal(artifact.fileSizeBytes, 3109689284);
+    })
+  );
+
+  test(
+    "[postgres] initialization upgrades legacy INTEGER file_size_bytes to BIGINT",
+    withPostgresFixture(async ({ databaseUrl }) => {
+      await postgresQuery(
+        "ALTER TABLE manual_upload_artifacts ALTER COLUMN file_size_bytes TYPE INTEGER"
+      );
+      await closePostgresStorage();
+      await initPostgresStorage({ backend: "postgres", databaseUrl });
+
+      const result = await postgresQuery(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'manual_upload_artifacts'
+            AND column_name = 'file_size_bytes'`
+      );
+      assert.equal(result.rows.length, 1);
+      assert.equal(result.rows[0]?.data_type, "bigint");
+    })
+  );
+
+  test(
     "[postgres] boot-time sweep terminalizes an orphaned 'validating' artifact (parity with the SQLite oracle)",
     withPostgresFixture(async () => {
       await insertArtifact({

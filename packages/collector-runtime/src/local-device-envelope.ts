@@ -81,6 +81,7 @@ export interface TerminalRunCommitEnvelopeInput {
  * identity MUST already be canonical before entry.
  */
 export function canonicalTerminalRunCommitEnvelope(input: TerminalRunCommitEnvelopeInput): unknown {
+  validateSourceInstanceId(input.source_instance_id);
   return toCanonicalValue({
     collection_boundary: input.collection_boundary,
     commit_id: input.commit_id,
@@ -110,7 +111,14 @@ function canonicalRecordKey(key: string | readonly string[]): string {
   return typeof key === "string" ? key : JSON.stringify(key);
 }
 
+function validateSourceInstanceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("sourceInstanceId must be a non-blank string");
+  }
+}
+
 export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnvelopeInput): LocalDeviceRecordEnvelope {
+  validateSourceInstanceId(input.sourceInstanceId);
   const body = {
     connector_id: input.connectorId,
     data: toNormalizedRecordData(input.record.data),
@@ -138,6 +146,24 @@ export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnve
 export function buildLocalDeviceIngestBatchRequest(
   input: BuildLocalDeviceIngestBatchRequestInput
 ): LocalDeviceIngestBatchRequest {
+  validateSourceInstanceId(input.sourceInstanceId);
+  if (input.records.some((record) => record.source_instance_id !== input.sourceInstanceId)) {
+    throw new Error("batch sourceInstanceId must match every record envelope");
+  }
+  for (const record of input.records) {
+    if (record.batch_id !== input.batchId) {
+      throw new Error("batch batchId must match every record envelope");
+    }
+    if (record.batch_seq !== input.batchSeq) {
+      throw new Error("batch batchSeq must match every record envelope");
+    }
+    if (record.connector_id !== input.connectorId) {
+      throw new Error("batch connectorId must match every record envelope");
+    }
+    if (record.device_id !== input.deviceId) {
+      throw new Error("batch deviceId must match every record envelope");
+    }
+  }
   return {
     batch_id: input.batchId,
     batch_seq: input.batchSeq,

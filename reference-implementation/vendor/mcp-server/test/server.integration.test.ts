@@ -1689,6 +1689,25 @@ test("Streamable HTTP helper handles initialize and tools/list statelessly", asy
   assert.ok(listed.result?.tools.some((tool) => tool.name === "search"));
 });
 
+test("hosted GET /mcp answers 405 instead of an SSE stream that closes at once", async () => {
+  let upstreamCalls = 0;
+  const fakeFetch = (async () => {
+    upstreamCalls += 1;
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  const response = await handleStreamableHttpRequest(
+    new Request("https://provider.test/mcp", { method: "GET", headers: { accept: "text/event-stream" } }),
+    { providerUrl: "https://provider.test", accessToken: "scoped-token", fetch: fakeFetch }
+  );
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "POST, DELETE");
+  assert.notEqual(response.headers.get("content-type"), "text/event-stream");
+  const body = (await response.json()) as { jsonrpc: string; error: { code: number } };
+  assert.equal(body.jsonrpc, "2.0");
+  assert.equal(body.error.code, -32000);
+  assert.equal(upstreamCalls, 0);
+});
+
 async function postMcpJson(message: unknown, fakeFetch: typeof fetch, path = "/mcp") {
   return await handleStreamableHttpRequest(
     new Request(`https://provider.test${path}`, {

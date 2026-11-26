@@ -50,11 +50,6 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: async () => "legacy-bootstrap-test",
 }))
 
-vi.mock("@tauri-apps/plugin-deep-link", () => ({
-  getCurrent: async () => null,
-  onOpenUrl: async () => () => {},
-}))
-
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: async () => new Response(JSON.stringify({}), { status: 200 }),
 }))

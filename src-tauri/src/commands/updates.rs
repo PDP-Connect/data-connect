@@ -211,9 +211,12 @@ pub(crate) fn activate_bundled_pdpp_connectors(app: &AppHandle) -> Result<(), St
     let installs = bundled_pdpp_connector_installs(&get_bundled_connectors_dir(&app))?;
     log::info!("Activating {} bundled OCI connector(s)", installs.len());
     for install in installs {
-        let existing_root_path =
-            get_active_connector_install(&install.connector_id).map(|existing| existing.root_path);
         let replaced = activate_bundled_connector_install(install.clone())?;
+        let existing_root_path = if replaced {
+            None
+        } else {
+            get_active_connector_install(&install.connector_id)?.map(|existing| existing.root_path)
+        };
         log::info!(
             "{}",
             bundled_activation_log_message(
@@ -284,8 +287,8 @@ fn get_bundled_connectors_dir(app: &AppHandle) -> PathBuf {
     resource_dir.join("connectors")
 }
 
-fn get_installed_connector_version(connector_id: &str) -> Option<String> {
-    get_active_connector_install(connector_id).map(|install| install.version)
+fn get_installed_connector_version(connector_id: &str) -> Result<Option<String>, String> {
+    Ok(get_active_connector_install(connector_id)?.map(|install| install.version))
 }
 
 fn parse_version(version: &str) -> Option<Version> {
@@ -363,7 +366,7 @@ pub async fn check_connector_updates(app: AppHandle) -> Result<Vec<ConnectorUpda
             let catalog_metadata = CatalogInstallMetadata::from_catalog(connector);
             let required_bindings = catalog_metadata.required_bindings.clone();
             let setup_modality = catalog_metadata.setup_modality.clone();
-            let current_version = get_installed_connector_version(id);
+            let current_version = get_installed_connector_version(id)?;
             let has_update = current_version
                 .as_ref()
                 .is_some_and(|version| is_newer_version(version, &connector.latest.version));

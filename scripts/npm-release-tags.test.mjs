@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { migrationTag } from "./npm-release-tags.mjs"
+import { MIGRATION_PACKAGES, migrationTag } from "./npm-release-tags.mjs"
 
 test("migrates the registry version rather than the highest desktop tag", () => {
   assert.deepEqual(
@@ -41,15 +41,23 @@ import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { load } from "js-yaml"
 
-test("npm keeps all three publishers and no GitHub release publisher", () => {
+test("npm still publishes every migration package and no GitHub release", () => {
   const config = load(
     readFileSync(new URL("../.releaserc.yaml", import.meta.url), "utf8")
   )
   assert.equal(config.tagFormat, "npm-v${version}")
-  assert.equal(
-    config.plugins.filter(p => p[0] === "@semantic-release/npm").length,
-    3
-  )
+  const published = config.plugins
+    .filter(p => Array.isArray(p) && p[0] === "@semantic-release/npm")
+    .map(
+      ([, { pkgRoot }]) =>
+        JSON.parse(
+          readFileSync(
+            new URL(`../${pkgRoot}/package.json`, import.meta.url),
+            "utf8"
+          )
+        ).name
+    )
+  for (const name of MIGRATION_PACKAGES) assert.ok(published.includes(name), name)
   assert.ok(
     !config.plugins.some(
       p =>

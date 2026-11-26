@@ -16,8 +16,9 @@
 //! `NamedTempFile` created IN THE SAME DIRECTORY as `path` (required for
 //! `persist`'s rename to be atomic -- a rename across filesystems cannot
 //! be), `fsync`s that temp file so its bytes are durable before the rename
-//! is attempted, then calls `persist(path)`, which performs the rename. A
-//! `rename(2)` onto an existing path on the same filesystem is atomic at
+//! is attempted, then calls `persist(path)`, which performs the rename.
+//! On Unix the containing directory is synced afterward so the new directory
+//! entry survives a crash. A `rename(2)` onto an existing path on the same filesystem is atomic at
 //! the OS level: any reader (including this same process's next poll tick)
 //! can only ever observe the complete OLD file or the complete NEW file at
 //! `path`, never a partial one.
@@ -27,7 +28,7 @@
 //! `commands::pdpp_collection_state::write_state_file_atomically`,
 //! `commands::developer_connector_sources`'s temp-file writer,
 //! `commands::oci_catalog`'s temp-file writer) -- this is a single shared
-//! extraction of that same three-step dance, not a new pattern, so the
+//! extraction of that same write-and-replace pattern, so the
 //! small JSON files under `UNIFIED_DB_DIRECTORY` stop being the exception.
 
 use std::io::Write;
@@ -58,9 +59,21 @@ pub(crate) fn write_json_atomically<T: serde::Serialize>(
         .as_file()
         .sync_all()
         .map_err(|error| format!("{context}: failed to sync temp file: {error}"))?;
-    temp_file
-        .persist(path)
-        .map_err(|error| format!("{context}: failed to replace {path:?}: {error}"))?;
+    if let Err(error) = temp_file.persist(path) {
+        let failed = format!("{context}: failed to replace {path:?}: {}", error.error);
+        return Err(match error.file.close() {
+            Ok(()) => failed,
+            Err(cleanup) => format!("{failed}; could not remove temporary file: {cleanup}"),
+        });
+    }
+    // The contents are durable before the rename, but a Unix filesystem can
+    // still lose the new directory entry until the parent has been synced.
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!("{context}: replaced {path:?}, but failed to sync parent directory: {error}")
+        })?;
     Ok(())
 }
 
@@ -113,6 +126,8 @@ mod tests {
         write_json_atomically(&path, &Sample { value: 3 }, "sample write")
             .expect("write should succeed");
 
+        let content = fs::read_to_string(&path).expect("read replacement");
+        assert_eq!(content, serde_json::to_string_pretty(&Sample { value: 3 }).unwrap());
         let leftover_temp_files: Vec<_> = fs::read_dir(dir.path())
             .expect("read dir")
             .filter_map(|entry| entry.ok())
@@ -122,6 +137,25 @@ mod tests {
             leftover_temp_files.is_empty(),
             "persist() should rename the temp file onto the target, not leave a sibling: {leftover_temp_files:?}"
         );
+    }
+
+    #[test]
+    fn leaves_no_temp_sibling_when_the_target_cannot_be_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("occupied");
+        fs::create_dir(&path).expect("create a directory at the target");
+        let keep = path.join("keep");
+        fs::write(&keep, b"preserve").expect("make the directory nonempty");
+
+        let error = write_json_atomically(&path, &Sample { value: 8 }, "occupied target")
+            .expect_err("cannot replace a nonempty directory with a regular file");
+        assert!(error.contains("failed to replace"), "{error}");
+        assert_eq!(fs::read(&keep).expect("target contents are unchanged"), b"preserve");
+        let entries = fs::read_dir(dir.path())
+            .expect("read directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path]);
     }
 
     /// The most direct proxy available for "a kill mid-write cannot leave a

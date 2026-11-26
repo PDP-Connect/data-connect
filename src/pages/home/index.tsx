@@ -39,10 +39,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { ROUTES } from "@/config/routes"
-import {
-  buildGrantSearchParams,
-  getGrantParamsFromSearchParams,
-} from "@/lib/grant-params"
 import { getPlatformRegistryEntry } from "@/lib/platform/utils"
 import {
   CONNECTED_SOURCES_UI_DEBUG_SCENARIO_VALUES,
@@ -56,6 +52,7 @@ import {
   isHomeImportSourcesDebugEnabled,
   resolveHomeImportSourcesUiDebugState,
 } from "./home-import-sources-ui-debug"
+import { resolveDebugDeepLinkRoute } from "./debug-deep-link"
 import { useHomeManualUpload } from "./use-home-manual-upload"
 import { useHomeRemoveSource } from "./use-home-remove-source"
 import { RemoveSourceDialog } from "./components/remove-source-dialog"
@@ -526,18 +523,8 @@ export function Home() {
   )
 
   const handleTestDeepLink = useCallback(() => {
-    const trimmed = deepLinkInput.trim()
-    if (!trimmed) return
-    try {
-      const parsed = new URL(trimmed)
-      const params = getGrantParamsFromSearchParams(parsed.searchParams)
-      if (!params.sessionId && !params.appId) return
-      const qs = buildGrantSearchParams(params).toString()
-      const route = params.status === "success" ? ROUTES.grant : ROUTES.connect
-      navigate(`${route}${qs ? `?${qs}` : ""}`)
-    } catch {
-      // invalid URL — ignore
-    }
+    const route = resolveDebugDeepLinkRoute(deepLinkInput)
+    if (route) navigate(route)
   }, [deepLinkInput, navigate])
 
   const setHomeUiDebugScenario = useCallback(
@@ -1074,7 +1061,7 @@ export function Home() {
                   type="text"
                   value={deepLinkInput}
                   onChange={e => setDeepLinkInput(e.target.value)}
-                  placeholder="vana://connect?sessionId=...&secret=..."
+                  placeholder="https://example.test/connect?sessionId=...&secret=..."
                   className="rounded border px-2 py-1 text-xs"
                 />
                 <Button type="submit" size="xs" variant="outline">

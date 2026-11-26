@@ -33,8 +33,9 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
+import { getRunRecordOutcomes } from "../lib/spine.ts";
 import { runConnector } from "../runtime/index.ts";
-import { closeDb, initDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 
 before(() => {
   initDb(":memory:");
@@ -115,7 +116,11 @@ interface StubRs {
  * failed` / ECONNRESET), not a scripted HTTP status. Once a script is
  * exhausted, further requests to that endpoint succeed.
  */
-async function startStubRs(scripts: { ingest?: ScriptedOutcome[]; statePut?: ScriptedOutcome[] }): Promise<StubRs> {
+async function startStubRs(scripts: {
+  ingest?: ScriptedOutcome[];
+  rejectAll?: boolean;
+  statePut?: ScriptedOutcome[];
+}): Promise<StubRs> {
   const ingestScript = [...(scripts.ingest ?? [])];
   const statePutScript = [...(scripts.statePut ?? [])];
   let ingestAttempts = 0;
@@ -140,13 +145,16 @@ async function startStubRs(scripts: { ingest?: ScriptedOutcome[]; statePut?: Scr
         // Mirror the real hosted RS envelope (server/routes/rs-mutation.ts
         // always sets hostedRejectionReceipts: true), which the runtime's
         // strict readIngestResponse (runtime/ingest-failure.ts) requires.
+        const rejections = scripts.rejectAll
+          ? lines.map((_, inputIndex) => ({ code: "schema_violation", input_index: inputIndex, receipt_id: `rcpt_${inputIndex}` }))
+          : [];
         res.end(
           JSON.stringify({
             errors: [],
-            records_accepted: lines.length,
+            records_accepted: lines.length - rejections.length,
             records_attempted: lines.length,
-            records_rejected: 0,
-            rejections: [],
+            records_rejected: rejections.length,
+            rejections,
           })
         );
         return;
@@ -203,7 +211,7 @@ interface RunOutcome {
 }
 
 async function runAgainstScript(
-  scripts: { ingest?: ScriptedOutcome[]; statePut?: ScriptedOutcome[] },
+  scripts: { ingest?: ScriptedOutcome[]; rejectAll?: boolean; statePut?: ScriptedOutcome[] },
   overrides: { maxAttempts?: number; persistState?: boolean } = {}
 ): Promise<RunOutcome> {
   const rs = await startStubRs(scripts);
@@ -262,6 +270,24 @@ test("an ingest POST that hits a raw connection reset is retried and the run sti
     [100],
     "the network-error retry must back off using the same injected policy as the status-code retry path"
   );
+});
+
+// The run page's whole-run totals sum `run.batch_ingested` events. A retried
+// POST is still one logical batch, so it must produce one event, and the
+// rejected total must count its rejections once, not once per attempt.
+test("a retried ingest POST records one batch event and counts its rejections once", async () => {
+  const outcome = await runAgainstScript({ ingest: ["reset"], rejectAll: true });
+
+  assert.equal(outcome.thrown, null);
+  assert.equal(outcome.ingestAttempts, 2, "the batch was POSTed twice");
+  const runId = outcome.result?.run_id;
+  assert.ok(runId, "the run has an id");
+  const batchEvents = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM spine_events WHERE run_id = ? AND event_type = 'run.batch_ingested'")
+    .get(runId) as { n: number };
+  assert.equal(batchEvents.n, 1, "one logical batch, one event");
+  const totals = await getRunRecordOutcomes(runId);
+  assert.equal(totals.rejected_in_batches, 1, "the one rejected record is counted once");
 });
 
 // ─── (b) ingest path: resets exceeding the retry budget stay terminal ───────

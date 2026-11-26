@@ -21,7 +21,7 @@ import {
 } from "../src/package-info.ts";
 
 // The bin facade (bin/pdpp.js) imports the emitted `dist/src/index.js`, so
-// subprocess smoke tests must exercise the built artifact — pnpm test builds
+// subprocess smoke tests must exercise the built artifact — npm test builds
 // before running tests (see package.json), so dist/ is guaranteed present.
 const binPath = fileURLToPath(new URL("../dist/bin/pdpp.js", import.meta.url));
 

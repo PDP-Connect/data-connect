@@ -1317,6 +1317,7 @@ export interface AuthorizationServerPublicClient {
 export interface AuthorizationServerMetadata {
   agent_connect_endpoint?: string;
   authorization_endpoint?: string;
+  authorization_response_iss_parameter_supported?: true;
   client_id_metadata_document_supported?: true;
   code_challenge_methods_supported?: readonly string[];
   device_authorization_endpoint?: string;
@@ -1388,6 +1389,10 @@ export function buildAuthorizationServerMetadata({
 
   if (authorizationEndpoint) {
     metadata.authorization_endpoint = authorizationEndpoint;
+    // RFC 9207: every authorization response redirect carries `iss`
+    // (server/authorization-response.ts), so say so wherever the
+    // authorization endpoint is advertised.
+    metadata.authorization_response_iss_parameter_supported = true;
   }
   if (responseTypesSupported?.length) {
     metadata.response_types_supported = responseTypesSupported;

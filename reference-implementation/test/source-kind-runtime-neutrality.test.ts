@@ -7,10 +7,7 @@ import test from "node:test";
 
 import { emitSpineEvent } from "../lib/spine.ts";
 import { configureNativeManifest, registerConnector } from "../server/auth.ts";
-import {
-  type ConnectorSchemaManifestStream,
-  getConnectorFreshnessEvidence as getSchemaBuilderFreshnessEvidence,
-} from "../server/connector-schema-builder.ts";
+import { getConnectorFreshnessEvidence as getSchemaBuilderFreshnessEvidence } from "../server/connector-schema-builder.ts";
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage } from "../server/postgres-storage.ts";
@@ -176,7 +173,7 @@ async function runConsentGrantRead(backend: Backend, kind: SourceKind): Promise<
       status: "succeeded",
     });
     const schemaBuilderEvidence = await getSchemaBuilderFreshnessEvidence({
-      manifest: runtimeManifest(connectorKey) as { capabilities?: unknown; streams: ConnectorSchemaManifestStream[] },
+      manifest: runtimeManifest(connectorKey),
       storageBinding: { connector_id: connectorKey },
     });
     assert.deepEqual(

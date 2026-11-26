@@ -16,5 +16,6 @@ JOIN record_rejection_quota ON record_rejection_quota.owner_subject_id = record_
 WHERE record_rejections.owner_subject_id = ?
   AND connector_instance_id = ?
   AND (created_at, receipt_id) > (?, ?)
+  AND (? IS NULL OR first_run_id = ? OR latest_run_id = ?)
 ORDER BY created_at ASC, receipt_id ASC
 LIMIT ?

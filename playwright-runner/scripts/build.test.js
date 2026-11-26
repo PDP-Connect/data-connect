@@ -15,11 +15,25 @@ import { describe, expect, it } from "vitest"
 import {
   copyBrowserDirectory,
   getBrowserDirectoryName,
+  getPlaywrightBrowserPath,
   parseBuildOptions,
+  reportBuildCompletion,
   supportsBrowserProvisioning,
 } from "./build.js"
 
 describe("playwright-runner build options", () => {
+  it("resolves the hermetic browser selector relative to Playwright's own core dependency", () => {
+    const coreRoot = join("fixture", "nested", "node_modules", "playwright-core")
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "0" },
+      resolveCoreManifest: () => join(coreRoot, "package.json"),
+    })).toBe(join(coreRoot, ".local-browsers"))
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "fixture-custom-cache" },
+      resolveCoreManifest: () => { throw new Error("unexpected package lookup") },
+    })).toBe("fixture-custom-cache")
+  })
+
   it("does not download a browser during npm install", () => {
     const packageDocument = JSON.parse(
       readFileSync(resolve("playwright-runner/package.json"), "utf8")
@@ -49,6 +63,37 @@ describe("playwright-runner build options", () => {
     expect(options.outputPath).toMatch(
       /playwright-runner\/dist\/release-runner$/
     )
+
+    const failure = new Error("synthetic required finalization failure")
+    const rejectFinalization = () => {
+      throw failure
+    }
+    const reported = []
+    expect(() =>
+      reportBuildCompletion("darwin", rejectFinalization, message =>
+        reported.push(message)
+      )
+    ).toThrow(failure)
+    expect(reported).toEqual(["Signing binary for macOS..."])
+
+    const completed = []
+    reportBuildCompletion(
+      "darwin",
+      () => completed.push("sign callback"),
+      message => completed.push(message)
+    )
+    expect(completed).toEqual([
+      "Signing binary for macOS...",
+      "sign callback",
+      "Binary signed successfully",
+      "Build complete!",
+    ])
+
+    const otherPlatform = []
+    reportBuildCompletion("linux", rejectFinalization, message =>
+      otherPlatform.push(message)
+    )
+    expect(otherPlatform).toEqual(["Build complete!"])
   })
 
   it("keeps lean builds incompatible with browser provisioning", () => {

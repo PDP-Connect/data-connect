@@ -25,7 +25,17 @@ import {
   startWatcher,
   TARGET_VARIABLES,
 } from "./harness-safety.mjs"
-import { cleanEnvironment, main, runOwnedHarness } from "./harness.mjs"
+import { cleanEnvironment, main, runOwnedHarness, signalExitCode } from "./harness.mjs"
+
+test("shutdown signal labels map to conventional process result codes", () => {
+  assert.equal(signalExitCode("SIGINT"), 130)
+  assert.equal(signalExitCode("SIGTERM"), 143)
+})
+
+test("unknown and missing shutdown labels remain generic failures", () => {
+  assert.equal(signalExitCode("synthetic-label"), 1)
+  assert.equal(signalExitCode(undefined), 1)
+})
 
 const loopback = { lo: [{ internal: true }] }
 const harness = fileURLToPath(new URL("harness.mjs", import.meta.url))

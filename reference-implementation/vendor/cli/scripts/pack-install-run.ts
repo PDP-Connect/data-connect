@@ -17,8 +17,8 @@ import { promisify } from "node:util";
 // script runs via tsx inside the monorepo, never from the packed tarball
 // itself. Only the CLI command under test executes from the installed
 // tarball via npx.
-import { startServer } from "../../../reference-implementation/server/index.ts";
-import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../../../reference-implementation/server/stores/credential-encryption.ts";
+import { startServer } from "../../../server/index.ts";
+import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../../../server/stores/credential-encryption.ts";
 import {
   addNodeProbeToEnvironment,
   assertArtifactReceipt,
@@ -217,7 +217,11 @@ const packageEnv = {
   npm_config_offline: "true",
   npm_config_update_notifier: "false",
 };
-const env = addNodeProbeToEnvironment(bindNodeEnvironment(packageEnv, process.execPath), probe);
+// The Node the installed CLI runs on. The floor gate sets it to the oldest
+// supported Node; this harness hosts the reference server in-process, and the
+// server needs a newer Node, so the two can differ.
+const artifactNode = process.env.PDPP_ARTIFACT_NODE_EXEC_PATH ?? process.execPath;
+const env = addNodeProbeToEnvironment(bindNodeEnvironment(packageEnv, artifactNode), probe);
 
 interface ExecFileOptions {
   cwd?: string;
@@ -305,7 +309,7 @@ try {
     subpath === "." ? manifest.name : `${manifest.name}/${subpath.slice(2)}`
   );
   run(
-    process.execPath,
+    artifactNode,
     [
       "--input-type=module",
       "--eval",
@@ -315,7 +319,7 @@ try {
   );
 
   const resolvedRoot = run(
-    process.execPath,
+    artifactNode,
     ["--input-type=module", "--eval", `console.log(import.meta.resolve(${JSON.stringify(manifest.name)}));`],
     { cwd: consumerRoot }
   ).trim();
@@ -368,7 +372,7 @@ try {
         identity: context?.setupFields?.account_email ?? "owner@example.com",
         ok: true,
       }),
-    trustedMetadataHosts: ["127.0.0.1"],
+    trustedMetadataHosts: "127.0.0.1",
   })) as unknown as FixtureServer;
   try {
     const sessionCookie = await loginAsFixtureOwner(asUrl);
@@ -447,8 +451,8 @@ try {
   }
 
   const receipt: Receipt = {
-    nodeVersion: process.version,
-    nodeExecPath: process.execPath,
+    nodeVersion: execFileSync(artifactNode, ["--version"], { encoding: "utf8" }).trim(),
+    nodeExecPath: artifactNode,
     environment: {
       path: env.PATH || "",
       npmConfig: {

@@ -150,6 +150,39 @@ describe("deriveTimeline", () => {
     expect(timeline.isTruncated).toBe(true)
   })
 
+  it("projects zoned sub-millisecond timestamps at millisecond precision", () => {
+    const stream = read.streams[0]!.stream
+    const timeline = deriveTimeline(
+      {
+        streams: [
+          {
+            stream,
+            records: [
+              {
+                id: "microseconds",
+                data: { createdAt: "2026-07-30T00:30:00.123456+01:00" },
+              },
+              {
+                id: "unqualified",
+                data: { createdAt: "2026-07-30T00:30:00.123456" },
+              },
+            ],
+            hasMore: false,
+          },
+        ],
+      },
+      { maxRecords: 100, maxStreams: 24 }
+    )
+
+    expect(timeline.dayGroups[0]?.dayKey).toBe("2026-07-29")
+    expect(timeline.dayGroups[0]?.events[0]?.timestampMs).toBe(
+      Date.UTC(2026, 6, 29, 23, 30, 0, 123)
+    )
+    expect(timeline.undatedRecords.map(record => record.recordId)).toEqual([
+      "unqualified",
+    ])
+  })
+
   it("uses UTC day groups at a midnight boundary", () => {
     const timeline = deriveTimeline(
       {
