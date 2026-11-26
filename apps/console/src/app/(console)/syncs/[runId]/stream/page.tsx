@@ -6,6 +6,7 @@ import type { Viewport } from "next";
 import { notFound, redirect } from "next/navigation";
 import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
+  getStaticSecretSetup,
   getRunStatus,
   getRunTimeline,
   listConnectorSummaries,
@@ -34,9 +35,10 @@ import { ResolvedSurface, StreamSurface } from "./stream-viewer.tsx";
 
 import { flowPreviewState } from "../../../connect/flow-preview.ts";
 
-import { ExternalApprovalSurface, PreparingBrowserSurface, SignInFrame } from "./sign-in-parts.tsx";
+import { ExternalApprovalSurface, PreparingBrowserSurface, SignInDetailsSurface, SignInFrame } from "./sign-in-parts.tsx";
 import { setupStatusHref, signInDestination } from "./sign-in-flow.ts";
 
+import { projectCredentialInteraction } from "../credential-interaction.ts";
 import { SignInPreview } from "./sign-in-preview.tsx";
 
 export const dynamic = "force-dynamic";
@@ -110,7 +112,9 @@ function renderNoAssistanceSurface({
   connectorInstanceId,
   runId,
   runStatus,
+  credentialFields,
 }: {
+  credentialFields: ReturnType<typeof projectCredentialInteraction>["fields"];
   connector: ConnectorContext | null;
   currentAssistance: ReturnType<typeof getCurrentRunAssistance>;
   connectorInstanceId: string | null;
@@ -122,7 +126,7 @@ function renderNoAssistanceSurface({
   const state = selectNoAssistanceStreamState({ runHandleStatus: runStatus?.status ?? null, terminalStatus: envelope.terminal_status });
   if (state === "ended") redirect(statusHref);
   if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") return <ExternalApprovalSurface connector={connector} message={currentAssistance.message} runId={runId} />;
-  if (currentAssistance?.kind === "credentials") return <StreamSurface connector={connector} interactionId={currentAssistance.id} interactionKind="credentials" interactionMessage={currentAssistance.message} runId={runId} />;
+  if (currentAssistance?.kind === "credentials") return <SignInDetailsSurface connector={connector} fields={credentialFields} interactionId={currentAssistance.id} message={currentAssistance.message} runId={runId} />;
   if (state === "resolved" || hasResolvedBrowserSurfaceAssistance(envelope.events)) return <ResolvedSurface connector={connector} runId={runId} statusHref={statusHref} />;
   if ((currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) || hasActiveBrowserSurface(envelope.events)) return <PreparingBrowserSurface connector={connector} runId={runId} />;
   const destination = signInDestination(state, statusHref);
@@ -196,9 +200,13 @@ export default async function RunInteractionStreamPage({
       }
     : null;
 
+  const credentialFields = currentAssistance?.kind === "credentials"
+    ? projectCredentialInteraction(currentAssistance.fields, connectorId ? await getStaticSecretSetup(connectorId).catch(() => null) : null).fields
+    : [];
   if (!streamableAssistance) {
     return renderNoAssistanceSurface({
       connector: connectorWithIcon,
+      credentialFields,
       connectorInstanceId,
       currentAssistance,
       envelope,

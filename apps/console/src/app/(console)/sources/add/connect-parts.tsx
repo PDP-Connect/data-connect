@@ -21,12 +21,14 @@ export function ConnectHeader({
   icon,
   name,
   title,
+  step,
 }: {
   connectorKey: string;
   description?: ReactNode;
   icon: ConnectorIconLike | null | undefined;
   name: string;
   title?: string;
+  step?: string;
 }) {
   return (
     <PageHeader
@@ -35,7 +37,7 @@ export function ConnectHeader({
         { href: dashboardRoutes.section.records, label: "Data sources" },
         { href: "/sources/add", label: "Add a data source" },
       ]}
-      description={description}
+      description={step ? <><span className="pdpp-caption">{step}</span>{description}</> : description}
       title={
         <span className="inline-flex items-center gap-2">
           <ConnectorMark connectorId={connectorKey} icon={icon} name={name} />

@@ -158,8 +158,7 @@ export function BrowserSessionLaunchPanel({
 export function LaunchPresentation({ connectorId, displayName, icon, onRetry, state }: { connectorId: string; displayName: string; icon?: ConnectorIconLike | null; onRetry: () => void; state: LaunchState }) {
   const title = state.starting ? `Opening ${displayName}…` : state.networkLost ? "This page lost contact with DataConnect." : `${displayName}'s sign-in page couldn't be opened.`;
   return <>
-    <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
-    <ConnectHeader connectorKey={connectorId} icon={icon} name={displayName} title={title} />
+    <ConnectHeader connectorKey={connectorId} icon={icon} name={displayName} title={title} step="Step 1 of 2: sign in" />
     <section className="grid max-w-xl gap-4">
       {state.starting ? <p className="text-muted-foreground">This can take a minute. Keep this page open.</p> : null}
       {!state.starting && !state.networkLost && /busy|queued|deferred/i.test(state.error ?? "") ? <p className="text-muted-foreground">DataConnect is signing in to another service right now. Try again in a moment.</p> : null}

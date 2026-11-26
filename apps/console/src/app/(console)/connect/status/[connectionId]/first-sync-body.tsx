@@ -230,16 +230,12 @@ export function FirstSyncBody({
 }) {
 	return (
 		<div className="[&>header]:mb-0" data-testid={`first-sync-${outcome.kind}`}>
-			{outcome.kind === "running" && outcome.signIn ? (
-				<p className="pdpp-caption text-muted-foreground">
-					Step 2 of 2: copy your data
-				</p>
-			) : null}
 			<ConnectHeader
 				connectorKey={connectorId}
 				icon={icon}
 				name={name}
 				title={headlineFor(outcome, name)}
+                step={outcome.kind === "running" && outcome.signIn ? "Step 2 of 2: copy your data" : undefined}
 			/>
 			<div className="grid max-w-xl gap-4 pb-4">
 				<Body

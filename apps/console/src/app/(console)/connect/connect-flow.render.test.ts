@@ -30,3 +30,12 @@ test("opening and provider states use the shared heading, one logo, and plain co
     assert.doesNotMatch(visibleText(html), /Back to Data sources/);
   }
 });
+
+
+test("opening keeps its step line inside the shared header, below the heading", async () => {
+  const { LaunchPresentation } = await launchModule;
+  const html = renderToStaticMarkup(React.createElement(LaunchPresentation, { connectorId: "northwind", displayName: "Northwind", onRetry() {}, state: { starting: true, networkLost: false, error: null } }));
+  const header = html.slice(html.indexOf("<header"), html.indexOf("</header>"));
+  assert.ok(header.indexOf("</h1>") < header.indexOf("Step 1 of 2: sign in"));
+  assert.match(header, /Step 1 of 2: sign in/);
+});

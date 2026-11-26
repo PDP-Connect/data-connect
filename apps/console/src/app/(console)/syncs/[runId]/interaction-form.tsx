@@ -27,11 +27,12 @@ interface Props {
   preview?: boolean;
   serviceName?: string;
   returnHref?: string;
+  heading?: boolean;
 }
 
 const INITIAL: RunInteractionActionState = { error: null, status: null };
 
-export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel, previewError, preview, serviceName, returnHref }: Props) {
+export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel, previewError, preview, serviceName, returnHref, heading = true }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [state, setState] = useState<RunInteractionActionState>({ ...INITIAL, error: previewError ?? null });
@@ -89,7 +90,7 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
       className="mt-3 flex flex-col gap-3"
       onSubmit={handleSubmit}
     >
-      {kind === "credentials" && serviceName ? <h2 className="pdpp-heading">{serviceName} needs your sign-in details</h2> : null}
+      {kind === "credentials" && serviceName && heading ? <h2 className="pdpp-heading">{serviceName} needs your sign-in details</h2> : null}
       <p className="pdpp-caption text-muted-foreground">{message}</p>
       {showFields ? (
         <div className="grid gap-2">
@@ -115,7 +116,7 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
         </div>
       ) : null}
       <p className="pdpp-caption text-muted-foreground">
-        {kind === "credentials" ? "These sign-in details are used only for this copy. DataConnect does not save them with the data source." : "Your answer is used only for this sync. DataConnect does not save it with the data source."}
+        {kind === "credentials" ? `DataConnect passes these to ${serviceName ?? "the service"} for this sign-in only. It does not keep them.` : "Your answer is used only for this sync. DataConnect does not save it with the data source."}
       </p>
       {state.error ? (
         <p className="pdpp-caption text-destructive" role="alert">

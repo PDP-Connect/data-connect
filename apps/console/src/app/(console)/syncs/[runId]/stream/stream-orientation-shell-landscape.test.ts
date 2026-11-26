@@ -34,24 +34,14 @@ const STREAM_VIEWER_FILE = `${HERE}stream-viewer.tsx`;
  * shared dialog/backdrop CSS (17dbf438f's fix) is not touched at all.
  */
 
-const ORIENTATION_SHELL_CLASS_RE = /className="pdpp-stream-orientation-shell[^"]*"/;
-const ORIENTATION_SHELL_PY16_RE = /className="pdpp-stream-orientation-shell[^"]*\bpy-16\b[^"]*"/;
 const LANDSCAPE_MEDIA_QUERY_RE =
   /@media \(orientation:\s*landscape\)\s*and\s*\(max-height:\s*30rem\)\s*\{\s*\.pdpp-stream-orientation-shell\s*\{\s*padding-block:\s*3rem;/;
 const DIALOG_COMPOUND_RULE_STILL_PRESENT_RE = /\.pdpp-dialog\.pdpp-stream-dialog\s*\{[\s\S]*?position:\s*fixed;/;
 
-test("the pre-open orientation shell wrapper carries the landscape-scoped class alongside its default py-16 padding", async () => {
+test("the pre-open page uses the normal frame without the old viewport-height padded wrapper", async () => {
   const src = await readFile(STREAM_VIEWER_FILE, "utf8");
-  assert.match(
-    src,
-    ORIENTATION_SHELL_CLASS_RE,
-    "StreamSurface's pre-mint wrapper must carry pdpp-stream-orientation-shell so the landscape-scoped override in stream.css can target it"
-  );
-  assert.match(
-    src,
-    ORIENTATION_SHELL_PY16_RE,
-    "the default py-16 (128px total) padding must remain the BASE case — only short landscape should override it, never remove the Tailwind utility outright"
-  );
+  assert.match(src, /<SignInFrame connector=\{connector\} title=\{`Sign in to/);
+  assert.doesNotMatch(src, /className="pdpp-stream-orientation-shell/);
 });
 
 test("stream.css scopes the padding reduction to short landscape only, via unlayered CSS that beats the py-16 utility", async () => {

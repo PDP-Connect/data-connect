@@ -96,7 +96,7 @@ import {
   useState,
   useTransition,
 } from "react";
-import { SignInFrame, SignInMark } from "./sign-in-parts.tsx";
+import { SignInFrame } from "./sign-in-parts.tsx";
 import { scheduleSignInContinuation } from "./sign-in-flow.ts";
 import { ConnectorMark } from "../../../components/connector-mark.tsx";
 import type { ConnectorContext } from "./connector-context-resolution.ts";
@@ -1470,8 +1470,7 @@ function streamEventData(event: Event): string {
 }
 
 export function StreamSurface(props: StreamSurfaceProps) {
-  if (process.env.NODE_ENV !== "production" && props.previewState) return <PreviewStreamSurface {...props} />;
-  return <LiveStreamSurface {...props} />;
+  return <LiveStreamSurface {...props} previewState={process.env.NODE_ENV !== "production" ? props.previewState : undefined} />;
 }
 
 function LiveStreamSurface({
@@ -1482,11 +1481,12 @@ function LiveStreamSurface({
   interactionMessage,
   interactionRequiresResponse = true,
   pollForResolution = true,
+  previewState,
   runId,
 }: StreamSurfaceProps) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<ConnectionStatus>(CONNECTING);
+  const [open, setOpen] = useState(Boolean(previewState && !previewState.startsWith("card")));
+  const [status, setStatus] = useState<ConnectionStatus>(previewState === "card-error" || previewState === "browser-trouble" ? classifyMintError(new Error("Couldn't reach the browser.")) : previewState ? LIVE : CONNECTING);
   // Held minted session passed down to <StreamStage>. The modal effect
   // consumes this for first attach instead of minting itself — moving the
   // mint out of `useEffect` is the architectural fix for React StrictMode's
@@ -1509,9 +1509,10 @@ function LiveStreamSurface({
     if (!pollForResolution) {
       return;
     }
+    if (previewState) return;
     const id = setInterval(() => router.refresh(), RESOLUTION_POLL_MS);
     return () => clearInterval(id);
-  }, [pollForResolution, router]);
+  }, [pollForResolution, previewState, router]);
 
   // ─── Open-browser click handler ────────────────────────────────────────────
   //
@@ -1522,6 +1523,7 @@ function LiveStreamSurface({
   // The minted session is then handed down to the modal as a prop; the
   // modal's effect just consumes it.
   const openBrowser = useCallback(async () => {
+    if (previewState) { setOpen(true); return; }
     if (isMintingRef.current) {
       return; // re-entrancy guard for double-tap
     }
@@ -1546,7 +1548,7 @@ function LiveStreamSurface({
       isMintingRef.current = false;
       setIsMinting(false);
     }
-  }, [interactionId, runId]);
+  }, [interactionId, previewState, runId]);
 
   // Preview mode (`?_preview=1&_state=task`) used to open the modal on mount.
   // After fix 3a, "open" requires a minted session; reproduce the preview
@@ -1579,22 +1581,14 @@ function LiveStreamSurface({
   const connectorName = connector?.displayName ?? "the data source";
 
   return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-
-      <div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
+    <SignInFrame connector={connector} title={`Sign in to ${connectorName}`}>
         <OrientationCard
           buttonLabel={`Open ${connectorName}`}
-          connectorId={connector?.connectorId}
-          connectorIcon={connector?.icon}
-          connectorName={connector?.displayName}
           isMinting={isMinting}
           message={interactionMessage}
           onAction={openBrowser}
           troubleMessage={status.display === "trouble" ? status.troubleMessage : null}
         />
-      </div>
-
       <StreamOverlay
         connector={connector}
         connectorName={connectorName}
@@ -1612,24 +1606,18 @@ function LiveStreamSurface({
         }}
         onStatus={setStatus}
         open={open}
+        previewState={previewState}
         runId={runId}
         status={status}
       />
-    </main>
+    </SignInFrame>
   );
 }
 
 // ─── Wordmark and orientation card ───────────────────────────────────────────
 
-function WordmarkCorner() {
-  return <SignInMark />;
-}
-
 interface OrientationCardProps {
   buttonLabel: string;
-  connectorId?: ConnectorContext["connectorId"];
-  connectorIcon?: ConnectorContext["icon"];
-  connectorName?: string;
   /** While the click handler is awaiting the mint POST. Disables the button + flips the label. */
   isMinting: boolean;
   message: string;
@@ -1639,9 +1627,6 @@ interface OrientationCardProps {
 
 function OrientationCard({
   buttonLabel,
-  connectorId,
-  connectorIcon,
-  connectorName,
   isMinting,
   message,
   onAction,
@@ -1662,16 +1647,9 @@ function OrientationCard({
   return (
     <section
       aria-labelledby="stream-orientation-title"
-      className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
+      className="flex flex-col gap-5"
       data-surface="human"
     >
-      <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
-      {connectorName && connectorId ? (
-        <h1 className="pdpp-heading flex items-center gap-2 text-foreground">
-          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={connectorName} />
-          Sign in to {connectorName}
-        </h1>
-      ) : null}
       <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
         {message}
       </p>
@@ -1714,6 +1692,7 @@ interface StreamOverlayProps {
   onClose: () => void;
   onStatus: (status: ConnectionStatus) => void;
   open: boolean;
+  previewState?: string;
   runId: string;
   status: ConnectionStatus;
 }
@@ -1729,6 +1708,7 @@ function StreamOverlay({
   onClose,
   onStatus,
   open,
+  previewState,
   runId,
   status,
 }: StreamOverlayProps) {
@@ -1754,10 +1734,10 @@ function StreamOverlay({
             and scroll-lock machinery behave. */}
         <IcDialogBackdrop className="pdpp-stream-dialog-backdrop" />
         <IcDialogPopup aria-label={`${connectorName} live browser`} className="pdpp-stream-dialog">
-          <WordmarkCorner />
-          <div className="pointer-events-none absolute top-12 left-3 z-10 max-w-[60%] rounded-lg bg-background/90 p-3"><p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p><h1 className="pdpp-heading flex items-center gap-2">{connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connectorName} /> : null}Sign in to {connectorName}</h1></div>
-          {open && initialSession ? (
+          {open && (initialSession || previewState) ? (
             <StreamStage
+              connector={connector}
+              previewState={previewState}
               connectorName={connectorName}
               initialSession={initialSession}
               interactionId={interactionId}
@@ -1777,6 +1757,8 @@ function StreamOverlay({
 }
 
 interface StreamStageProps {
+  connector: ConnectorContext | null;
+  previewState?: string;
   connectorName: string;
   /**
    * Pre-minted session handed down from the orientation card click. The
@@ -1784,7 +1766,7 @@ interface StreamStageProps {
    * minting — that's the architectural fix for React StrictMode's dev
    * effect double-invoke producing duplicate mints + superseding tokens.
    */
-  initialSession: MintedStreamSession;
+  initialSession: MintedStreamSession | null;
   interactionId: string;
   interactionKind: string;
   interactionMessage: string;
@@ -1808,6 +1790,8 @@ interface StreamStageProps {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This existing stage owns the stream/session state machine; the explicit backend gate is part of that same lifecycle boundary.
 function StreamStage({
+  connector,
+  previewState,
   connectorName,
   initialSession,
   interactionId,
@@ -1849,7 +1833,7 @@ function StreamStage({
   // Armed when the corner X is pressed while a manual/browser interaction is
   // pending; renders the inline close-confirmation bubble instead of ending
   // the session outright. See `handleCloseRequest`.
-  const [closeConfirmArmed, setCloseConfirmArmed] = useState(false);
+  const [closeConfirmArmed, setCloseConfirmArmed] = useState(previewState === "stop-question");
   const eventSourceRef = useRef<EventSource | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -1888,7 +1872,7 @@ function StreamStage({
   const clipboardPolicy = decideClipboardPolicy({
     capabilities: clipboardCapabilities,
     directionPolicy: DEFAULT_CLIPBOARD_DIRECTION_POLICY,
-    hasStreamSession: Boolean(initialSession.input_url) && readyBackend !== "unknown",
+    hasStreamSession: Boolean(initialSession?.input_url) && readyBackend !== "unknown",
     helperMode: normalizeClipboardHelperMode(nekoSession?.stealthMode),
     sessionBackend: readyBackend,
   });
@@ -2479,6 +2463,7 @@ function StreamStage({
   //     terminal trouble — no reconnect, no re-mint. The server has told
   //     us the companion is dead.
   useEffect(() => {
+    if (!initialSessionRef.current) return;
     mountedRef.current = true;
     let cancelled = false;
     let attached = false;
@@ -3554,7 +3539,7 @@ function StreamStage({
           ref={setStreamSurfaceNode}
         >
           <div className="pdpp-stream-frame relative flex h-full w-full items-center justify-center">
-            <SurfacePlaceholder display={status.display} />
+            {previewState ? <p className="text-white">Sample page, not a real sign-in</p> : <SurfacePlaceholder display={status.display} />}
           </div>
         </div>
       )}
@@ -3586,14 +3571,17 @@ function StreamStage({
       {closeConfirmArmed ? (
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
-      <StreamInteractionDock
+      {!closeConfirmArmed ? <StreamInteractionDock
+        connector={connector}
+        preview={Boolean(previewState)}
+        previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined}
         connectorName={connectorName}
         interactionId={interactionId}
         interactionKind={interactionKind}
         interactionRequiresResponse={interactionRequiresResponse}
         message={interactionMessage}
         runId={runId}
-      />
+      /> : null}
       {status.display === "trouble" ? <TroubleToast message={status.troubleMessage} /> : null}
       {popup ? <PopupToast message={popup.message} /> : null}
       {readyBackend !== "unknown" &&
@@ -5744,6 +5732,7 @@ function CloseConfirmBubble({
 // ─── Interaction response dock ───────────────────────────────────────────────
 
 function StreamInteractionDock({
+  connector,
   connectorName,
   previewError,
   preview = false,
@@ -5753,6 +5742,7 @@ function StreamInteractionDock({
   message,
   runId,
 }: {
+  connector: ConnectorContext | null;
   connectorName: string;
   previewError?: string;
   preview?: boolean;
@@ -5841,7 +5831,7 @@ function StreamInteractionDock({
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-3">
-          <p className="pdpp-caption font-medium text-foreground">{message}</p>
+          <h1 className="pdpp-heading flex items-center gap-2">{connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connectorName} /> : null}Sign in to {connectorName}</h1>
           <IcButton
             aria-expanded="true"
             aria-label="Hide sign-in instructions"
@@ -5854,6 +5844,8 @@ function StreamInteractionDock({
             Hide instructions
           </IcButton>
         </div>
+        <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
+        <p className="pdpp-caption text-foreground">{message}</p>
         {interactionKind === "otp" ? (
           <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
             id={`code-${interactionId}`}
@@ -5943,13 +5935,4 @@ export function ResolvedSurface({ connector, statusHref = "/sources", preview = 
  */
 function UnsupportedSurface({ connector, interactionMessage, runHref }: { connector: ConnectorContext | null; interactionMessage: string; runHref: string }) {
   return <SignInFrame connector={connector} title={`${connector?.displayName ?? "The data source"} needs your sign-in details`}><p className="text-muted-foreground">{interactionMessage}</p><Link className={buttonVariants({ size: "sm", variant: "default" })} href={runHref}>Continue</Link></SignInFrame>;
-}
-
-function PreviewStreamSurface({ connector, interactionId, interactionKind, interactionMessage, interactionRequiresResponse = true, previewState, runId }: StreamSurfaceProps) {
-  const name = connector?.displayName ?? "the data source";
-  const [open, setOpen] = useState(previewState !== "card" && previewState !== "card-error");
-  const [confirming, setConfirming] = useState(previewState === "stop-question");
-  if (interactionKind === "credentials") return <UnsupportedSurface connector={connector} interactionMessage={interactionMessage} runHref={`/syncs/${encodeURIComponent(runId)}?return_to=browser#sign-in-details`} />;
-  if (!open) return <main className="relative min-h-dvh"><WordmarkCorner /><div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-16"><OrientationCard buttonLabel={`Open ${name}`} connectorId={connector?.connectorId} connectorIcon={connector?.icon} connectorName={name} isMinting={false} message={interactionMessage} onAction={() => setOpen(true)} troubleMessage={previewState === "card-error" ? "Couldn't reach the browser." : null} /></div></main>;
-  return <main className="relative min-h-dvh"><WordmarkCorner /><div className="absolute top-12 left-3"><p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p><h1 className="pdpp-heading">Sign in to {name}</h1></div><div className="flex min-h-dvh items-center justify-center bg-muted"><p>Sample page, not a real sign-in</p></div><button aria-label="Stop signing in" className="absolute top-4 right-4" onClick={() => setConfirming(true)} type="button">×</button>{confirming ? <CloseConfirmBubble connectorName={name} onCancel={() => setConfirming(false)} onConfirm={() => setOpen(false)} /> : previewState === "browser-trouble" ? <TroubleToast message="Couldn't reach the browser." /> : <StreamInteractionDock connectorName={name} preview interactionId={interactionId} interactionKind={interactionKind} interactionRequiresResponse={interactionRequiresResponse} message={interactionMessage} previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined} runId={runId} />}</main>;
 }

@@ -18,6 +18,7 @@ mock.module("next/navigation", {
   namedExports: { ...navigation, useRouter: () => ({ refresh() {}, replace() {}, push() {} }) },
 });
 
+mock.module("../../components/recordroom-shell-with-palette.tsx", { namedExports: { RecordroomShellWithPalette: ({ children }: { children: React.ReactNode }) => React.createElement("main", { "data-testid": "normal-frame" }, children) } });
 const listModule = import("./add-source-list.tsx");
 
 const lifecycles = {
