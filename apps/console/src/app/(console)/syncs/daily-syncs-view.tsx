@@ -37,9 +37,9 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
     const fine=older ? all.filter(row=>!syncDayProblem(row)) : [];
     const shown=older ? all.filter(syncDayProblem) : all;
     return <Section key={day} title={dayLabel(day,offset)}>
-      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,...(demo?{demo:"all-sources"}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
+      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
       <ul className="divide-y divide-border">{shown.map(row=><li key={row.connection_id} className="py-4">
-        <Link className="flex items-center justify-between gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"three"}:{})})}>
+        <Link className="flex items-center justify-between gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"history-day",fixture:demo}:{})})}>
           <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
           <span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(row.last_at,offset)}</span>
         </Link>

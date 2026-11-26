@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { listRuns, listSyncHistory, type RunSummary } from "../lib/ref-client.ts";
-import { historyRange } from "../history/day-cut.ts";
+import { visibleDays, historyRange } from "../history/day-cut.ts";
 import { loadHistorySources } from "../history/load-sources.ts";
 import { readPersonOffset } from "../history/server-day.ts";
 import { practiceEnabled, syncPractice } from "../history/practice.ts";
@@ -13,6 +13,11 @@ export async function loadSyncHistory(params: Record<string,string | undefined>)
   if (practiceEnabled(params.demo)) {
     const model = syncPractice(params.demo as string,offset);
     if (model.history.mode === "days") model.history.data = model.history.data.filter(row => (!params.connection_id || row.connection_id === params.connection_id) && (params.only_problems !== "true" || row.failed+row.stopped+row.interrupted > 0 || Boolean(row.missing?.length)));
+    if(model.history.mode==="days") {
+      const days=visibleDays(model.history.data,10000);const selected=days.filter(day=>(!params.before || day<params.before) && (!params.date || day<=params.date));const shown=selected.slice(0,7);
+      model.history.first_day=days.at(-1) ?? null;model.history.before_day=selected.length>7?shown.at(-1) ?? null:null;
+      model.history.data=model.history.data.filter(row=>shown.includes(row.day));
+    }
     if (params.connection_id) model.now = [];
     return { ...model, offset };
   }

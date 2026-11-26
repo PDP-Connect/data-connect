@@ -1,14 +1,16 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import {CONSOLE_OWNER_CLIENT_ID} from "pdpp-reference-implementation/reference-local-defaults";
 import type { AppReadDay } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp, type AppAccess } from "../grants/app-access.ts";
 import { buildAppPractice } from "../grants/app-practice.ts";
+import {historyPracticeSources} from "./practice.ts";
 import { appPractice } from "./practice.ts";
 export function practiceHistoryApps(state: string): AppAccess[] {
   if (state === "empty") return [];
   const base = buildAppPractice("mixed").registrations[0];
   if (!base) return [];
-  return groupGrantAccessByApp(Array.from({ length: state === "thirty" ? 30 : 2 }, (_,index) => ({ ...structuredClone(base), client_id: `practice-app-${index}`, client_name: index === 0 ? "ChatGPT" : index === 1 ? "Claude" : `Northwind Notes ${index}`, return_host: index === 0 ? "chatgpt.com" : index === 1 ? "claude.ai" : "notes.northwind.example", sources: base.sources.map(source => ({ ...structuredClone(source), grant_ids: [`practice-access-${index}`], active_grant_ids: [`practice-access-${index}`] })) })));
+  return groupGrantAccessByApp(Array.from({ length: state === "thirty" ? 30 : state === "fifty-nine" ? 59 : 3 }, (_,index) => ({ ...structuredClone(base), client_id: `practice-app-${index}`, client_name: index === 0 ? "ChatGPT" : index === 1 ? "Claude" : `Northwind Notes ${index}`, return_host: index === 0 ? "chatgpt.com" : index === 1 ? "claude.ai" : "notes.northwind.example", sources: (index===2 && !["thirty","fifty-nine"].includes(state)?[]:historyPracticeSources().slice(0,4)).map((item) => ({ ...structuredClone(base.sources[0]!), source:{kind:"connector",id:item.connector,connector_id:item.connector,connection_id:item.id}, grant_ids: [`practice-access-${index}`], active_grant_ids: [`practice-access-${index}`] })) })));
 }
 export interface NamedAppDay extends AppReadDay { app: AppAccess }
 export function groupAppHistory(rows: AppReadDay[], apps: AppAccess[]): NamedAppDay[] {
@@ -35,6 +37,7 @@ export function groupAppHistory(rows: AppReadDay[], apps: AppAccess[]): NamedApp
 export function practiceAppHistory(state: string, offset: number) {
   const history = appPractice(state,offset);
   const apps = practiceHistoryApps(state);
+  if(history.mode==="days"){history.data=history.data.filter(row=>row.client_id!==CONSOLE_OWNER_CLIENT_ID);history.changes=history.changes.filter(row=>row.client_id!==CONSOLE_OWNER_CLIENT_ID);}
   if (history.mode === "days" && state === "thirty") history.changes = [];
   return { history, apps };
 }

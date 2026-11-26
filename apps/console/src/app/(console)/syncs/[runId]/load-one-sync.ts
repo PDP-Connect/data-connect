@@ -7,7 +7,7 @@ import { readPersonOffset } from "../../history/server-day.ts";
 import { historyRange } from "../../history/day-cut.ts";
 import { loadHistorySources, sourceName } from "../../history/load-sources.ts";
 import { historyKindName } from "../../history/source-names.ts";
-import { practiceEnabled } from "../../history/practice.ts";
+import { syncDayPractice,historyPracticeSources,practiceNow,practiceEnabled } from "../../history/practice.ts";
 import { setupHref } from "../../connect/status/[connectionId]/connect-status-links.ts";
 import { resolveRunConnectionId } from "./run-detail-labels.ts";
 import { getCollectedKinds, getCollectionTerminalEvent } from "./collected-kinds.ts";
@@ -15,7 +15,15 @@ import { isRunHandleActive } from "./run-terminal-status.ts";
 import { oneSyncPractice, recordKindName, type OneSyncModel } from "./one-sync-model.ts";
 export async function loadOneSync(id: string, params: Record<string,string | undefined>): Promise<{ model: OneSyncModel | null; offset: number }> {
   const offset = await readPersonOffset();
-  if (practiceEnabled(params.demo)) return { model: oneSyncPractice(params.demo as string), offset };
+  if (practiceEnabled(params.demo)) {
+    const model=oneSyncPractice(params.demo as string);
+    if(params.demo==="history-sync") {
+      const history=syncDayPractice("history-day",offset,practiceNow(params.day,offset),params.connection_id,params.fixture);
+      const row=history.mode==="syncs" ? history.data.find(row=>row.id===id) : null;
+      if(row){const sources=historyPracticeSources();Object.assign(model,{id,name:sourceName(sources,row.connection_id,row.connector_id),connector:row.connector_id,connection:row.connection_id,at:row.at,started:row.started_at,completed:row.completed_at,outcome:row.outcome,total:row.records,kinds:null,cause:row.cause,evidence:row.evidence,missing:row.missing?.map(gap=>({name:historyKindName(sources,row.connection_id,gap.stream),canRetry:gap.retryable})) ?? []});}
+    }
+    return {model,offset};
+  }
   const [status,timeline,history,sources] = await Promise.all([
     getRunStatus(id), getRunTimeline(id),
     listSyncHistory({ ...historyRange(offset), run_id: id, ...(params.connection_id ? { connection_id: params.connection_id } : {}) }),

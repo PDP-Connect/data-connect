@@ -53,3 +53,36 @@ test("consecutive discovery lines roll into one, with record reads first",async(
   const rolled=groupReadLines(Array.from({length:35},(_,index)=>({...schema,id:`discovery-${index}`})));
   assert.equal(rolled.length,1);assert.equal(rolled[0]?.occurrences,35);
 });
+
+
+test("practice summary and day use the same copied counts and outcome totals",async()=>{
+  const {syncDayPractice}=await import("./practice.ts");
+  for(const state of ["mixed","recopied","expired-sign-in","missing-kind"]) {
+    const summary=syncPractice(state,0);if(summary.history.mode!=="days")throw Error("mode");
+    for(const row of summary.history.data) {
+      const day=syncDayPractice("history-day",0,Date.now(),row.connection_id,state);if(day.mode!=="syncs")throw Error("mode");
+      assert.equal(day.data.length,row.ran);assert.equal(day.data.reduce((n,sync)=>n+sync.records,0),row.records);
+      assert.equal(day.data.filter(sync=>sync.outcome==="failed").length,row.failed);
+    }
+  }
+});
+test("practice app reads agree with activity and denied apps have no reads that day",async()=>{
+  const {appPractice,readPractice}=await import("./practice.ts");
+  for(const state of ["mixed","seven-fifty"]) {
+    const summary=appPractice(state,0);const day=readPractice(state==="mixed"?"history-reads":"seven-fifty");
+    if(summary.mode!=="days"||day.mode!=="reads")throw Error("mode");
+    const row=summary.data.find(row=>row.client_id==="practice-app-0")!;
+    const reads=day.data.filter(read=>!["schema","stream_list"].includes(read.shape ?? ""));
+    assert.equal(reads.length,row.reads);
+    for(const source of row.sources)assert.equal(reads.filter(read=>read.connection_id===source.connection_id).length,source.reads);
+    for(const denied of summary.changes.filter(row=>row.change==="not_allowed"))assert.equal(summary.data.some(row=>row.client_id===denied.client_id && row.day===denied.day),false);
+  }
+});
+test("practice has 110 dates, 59 reading apps and a real console sign-in that is excluded",async()=>{
+  const {appPractice}=await import("./practice.ts");const {practiceAppHistory,practiceHistoryApps}=await import("./history-apps.ts");
+  const sync=syncPractice("hundred-ten",0);assert.equal(new Set(sync.history.data.map(row=>"day" in row?row.day:"")).size,110);
+  assert.equal(practiceHistoryApps("fifty-nine").filter(app=>app.state==="reading").length,59);
+  const raw=appPractice("console-sign-ins",0);const shown=practiceAppHistory("console-sign-ins",0).history;
+  if(raw.mode!=="days"||shown.mode!=="days")throw Error("mode");
+  assert.equal(raw.changes.length,shown.changes.length+1);
+});
