@@ -965,7 +965,7 @@ export function RemoteAccessSetting({
   };
   const desktopControlsAbsent = !host.known && host.reason === "host-supervisor-unavailable";
   const hostReasonShown = !host.known && host.reason !== "loading" && !desktopControlsAbsent;
-  const localOnly = !desktopControlsAbsent && !(state.lifecycle?.confinement.known && state.lifecycle.confinement.value === false);
+  const localOnly = !desktopControlsAbsent && !(state.lifecycle?.confinement?.known && state.lifecycle.confinement.value === false);
   const journalWarning = state.recovery?.pending
     ? "Checking addresses from before the restart. An earlier address may still work."
     : state.recovery?.blockedBy
