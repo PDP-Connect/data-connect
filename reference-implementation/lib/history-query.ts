@@ -27,13 +27,25 @@ export function decodeHistoryCursor(value: string): unknown {
     throw new HistoryInputError("Invalid cursor");
   }
 }
+function validHistoryDay(day: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const date = new Date(`${day}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day;
+}
+export function decodeHistoryPageCursor(value: string, idPattern: RegExp): [string, string] {
+  const cursor = decodeHistoryCursor(value);
+  if (!Array.isArray(cursor) || cursor.length !== 2 ||
+    typeof cursor[0] !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(cursor[0]) ||
+    !Number.isFinite(Date.parse(cursor[0])) || !validHistoryDay(cursor[0].slice(0, 10)) ||
+    typeof cursor[1] !== "string" || !idPattern.test(cursor[1])) throw new HistoryInputError("Invalid cursor");
+  return [cursor[0], cursor[1]];
+}
 export type HistoryBackend = "sqlite" | "postgres";
 export function historyBackend(): HistoryBackend {
   return isPostgresStorageBackend() ? "postgres" : "sqlite";
 }
 export function historyBounds(input: HistoryInput): [string, string] {
-  const validDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day) && new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
-  if (!validDay(input.first) || !validDay(input.last) || (input.day && !validDay(input.day)) || (input.before && !validDay(input.before)) ||
+  if (!validHistoryDay(input.first) || !validHistoryDay(input.last) || (input.day && !validHistoryDay(input.day)) || (input.before && !validHistoryDay(input.before)) ||
       (input.days !== undefined && (!Number.isInteger(input.days) || input.days < 1 || input.days > 366)) ||
       !Number.isInteger(input.offset) || Math.abs(input.offset) > 840 || input.first > input.last ||
       (input.day && (input.day < input.first || input.day > input.last))) {

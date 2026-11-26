@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { decodeHistoryCursor, HistoryInputError, historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { decodeHistoryPageCursor, HistoryInputError, historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export type SyncOutcome = "finished" | "failed" | "stopped" | "interrupted" | "could_not_start" | "syncing";
 export interface SyncHistoryInput extends HistoryInput { only_problems?: boolean; run_id?: string }
 export interface SyncEvidence { reason: string | null; error: string | null; connector_error: unknown }
@@ -44,6 +44,8 @@ const ran = "status IN ('succeeded','failed','cancelled','abandoned')";
 const outcome = `CASE status WHEN 'succeeded' THEN 'finished' WHEN 'cancelled' THEN 'stopped' WHEN 'abandoned' THEN 'interrupted' WHEN 'skipped' THEN 'could_not_start' WHEN 'surface_failed' THEN 'could_not_start' WHEN 'running' THEN 'syncing' ELSE 'failed' END`;
 export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<SyncHistory> {
   historyBounds(input);
+  const cursor = input.cursor ? decodeHistoryPageCursor(input.cursor, /^\d{1,19}$/) : null;
+  if (cursor && BigInt(cursor[1]) > BigInt("9223372036854775807")) throw new HistoryInputError("Invalid cursor");
   const page = !input.day && !input.run_id && input.days ? await historyDates(input, backend, query, "FROM run_history", time,
     `status IN ('succeeded','failed','cancelled','abandoned','skipped','surface_failed')${input.connection_id ? " AND connector_instance_id = ?" : ""}`, input.connection_id ? [input.connection_id] : []) : null;
   if (page?.empty) return {mode:"days",data:[],has_more:false,next_cursor:null,...page.dates};
@@ -57,9 +59,7 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
     if (input.run_id) { where += " AND run_id = ?"; values.push(input.run_id); }
     if (!input.connection_id && !input.run_id) throw new HistoryInputError("A single day requires a connection");
     const limit = historyLimit(input);
-    if (input.cursor) {
-      const cursor = decodeHistoryCursor(input.cursor) as [string, string];
-      if (!Array.isArray(cursor) || cursor.length !== 2 || !/^\d+$/.test(cursor[1])) throw new HistoryInputError("Invalid cursor");
+    if (cursor) {
       where += ` AND (${time} < ? OR (${time} = ? AND id < ?))`;
       values.push(cursor[0], cursor[0], cursor[1]);
     }

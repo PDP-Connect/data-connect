@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CONSOLE_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import { jsonObject, type AppAccess } from "./app-access.ts";
-import { decodeHistoryCursor, HistoryInputError, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { decodeHistoryPageCursor, HistoryInputError, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
 export interface AppReadSource { last_at?: string | null; source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
@@ -52,6 +52,7 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
   return { client, source, sourceKind, connection, shape, reason, records, values, where, from };
 }
 export async function readAppHistory(subjectId: string, input: AppHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<AppHistory> {
+  const cursor = input.cursor ? decodeHistoryPageCursor(input.cursor, /^\S+$/) : null;
   const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
   if (input.day) {
     if (!input.client_ids?.length) throw new HistoryInputError("A single day requires an app");
@@ -70,9 +71,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     const discovery = discoveryRows.map((row,index)=>({...row,id:`discovery-${index}`,trace_id:"",client_id:input.client_ids?.[0] ?? "",records:null,metric:null,refused:false,reason:null,occurrences:Number(row.occurrences)}));
     const limit = historyLimit(input);
     let pageWhere = where;
-    if (input.cursor) {
-      const cursor = decodeHistoryCursor(input.cursor) as [string, string];
-      if (!Array.isArray(cursor) || cursor.length !== 2 || typeof cursor[0] !== "string" || typeof cursor[1] !== "string") throw new HistoryInputError("Invalid cursor");
+    if (cursor) {
       pageWhere += " AND (e.occurred_at < ? OR (e.occurred_at = ? AND e.event_id < ?))";
       values.push(cursor[0], cursor[0], cursor[1]);
     }
