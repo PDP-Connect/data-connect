@@ -17,7 +17,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -169,15 +169,46 @@ test("a connection with no active revision omits connector_options entirely", as
   assert.ok(!Object.hasOwn(start, "connector_options"));
 });
 
-test("an unreadable config store FAILS CLOSED: the run still starts, with no connector_options", async () => {
-  const start = await captureStart({
-    getActiveRevision: () => Promise.reject(new Error("database is locked")),
-  });
-
-  // Fail-closed must not mean fail-stop: an unreadable config store degrades
-  // to manifest defaults rather than killing an otherwise-valid run.
-  assert.equal(start.type, "START");
-  assert.ok(!Object.hasOwn(start, "connector_options"));
+test("an unreadable config store BLOCKS the run: it rejects before any connector is spawned", async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-config-blocked-"));
+  const capturePath = join(tmpDir, "start.json");
+  const { cleanup, connectorPath } = createStartCaptureConnector(capturePath);
+  initDb(":memory:");
+  try {
+    await assert.rejects(
+      runConnector({
+        admitRunConnection: () =>
+          Promise.resolve({
+            connectorId: "test",
+            connectorInstanceId: CONNECTION_ID,
+            ownerSubjectId: "owner-1",
+          }),
+        connectorConfigStore: { getActiveRevision: () => Promise.reject(new Error("database is locked")) },
+        connectorId: "test",
+        connectorInstanceId: CONNECTION_ID,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST as unknown as RuntimeRunConnectorOptions["manifest"],
+        onInteraction: null,
+        // A diagnostic sink that throws must not replace the typed refusal.
+        onProgress: () => {
+          throw new Error("progress sink failed");
+        },
+        ownerSubjectId: "owner-1",
+        ownerToken: "test-token",
+        persistState: false,
+        state: null,
+      } as RuntimeRunConnectorOptions),
+      { code: "connector_run_config_blocked", reason: "store_unreadable" }
+    );
+    // Manifest defaults can be wider than the owner-confirmed boundary, so a
+    // run must not start on them; the controller's launch-failure path records
+    // the rejection as a terminal run.failed (see controller-run-launch-failure).
+    assert.equal(existsSync(capturePath), false, "no connector may receive a START");
+  } finally {
+    cleanup();
+    rmSync(tmpDir, { force: true, recursive: true });
+    closeDb();
+  }
 });
 
 test("connector_options does not disturb the rest of the START contract", async () => {
