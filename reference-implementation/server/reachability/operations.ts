@@ -98,10 +98,12 @@ export class ReachabilityOperations {
     return run;
   }
   /**
-   * Resolves once no journal write is in flight: every write chain queued so far, and any
-   * queued behind one while waiting, has settled. It never rejects. A failed settlement is
-   * recorded by the failure path in start(), so a failed chain only counts as finished here.
-   * A start whose effect has not returned has not queued its settlement, so it is not covered.
+   * Resolves once every serialized() write chain has settled: those queued so far, and any
+   * queued behind one while waiting. It never rejects. A failed settlement is recorded by
+   * the failure path in start(), so a failed chain only counts as finished here.
+   * Not covered: writes outside serialized() (start()'s initial intent write and the stop
+   * tombstone, both awaited by their callers), and a start whose effect has not returned,
+   * because it has not queued its settlement yet.
    */
   async idle(): Promise<void> {
     while (this.tails.size > 0) await Promise.all(this.tails.values());
