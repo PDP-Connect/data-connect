@@ -148,6 +148,7 @@ test("policiesForConnector matches claude-code (hyphen) connector id", () => {
     "sessions",
     "skills",
     "slash_commands",
+    "usage",
   ]);
   for (const scope of cc) {
     assert.equal(scope.connectorInstanceId, "cin_cc");
