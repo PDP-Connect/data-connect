@@ -212,7 +212,7 @@ function lifecycleRow(
       ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send ${devicePending.toLocaleString()} record${devicePending === 1 ? "" : "s"}.`
       : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${name}.`;
     const sentence = isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
-    const words = isDevice ? deviceText.replace(FINAL_STOP, "") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
+    const words = isDevice ? (typeof devicePending === "number" && devicePending > 0 ? deviceText.replace(FINAL_STOP, "") : "Needs attention on your device") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
