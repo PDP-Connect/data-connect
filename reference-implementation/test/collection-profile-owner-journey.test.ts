@@ -75,7 +75,7 @@ test("owner can discover profile support and read diagnostics through the real s
         compatible_protocol_versions: ["0.1.0", "0.2.0"],
         conformance: { outstanding: ["binding_authority"], status: "partial" },
         object: "collection_profile_support",
-        protocol_capabilities: ["OBSERVATION", "STREAM_EVIDENCE"],
+        protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"],
         protocol_version: "0.2.0",
       },
       "profile support is discoverable before a connector starts"

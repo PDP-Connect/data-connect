@@ -1,6 +1,7 @@
 {
   "protocol_version": "0.1.0",
   "connector_id": "https://registry.pdpp.dev/connectors/reddit",
+  "source": { "id": "https://registry.pdpp.dev/connectors/reddit" },
   "connector_key": "reddit",
   "manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
   "version": "1.0.0",
