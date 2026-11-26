@@ -360,7 +360,7 @@ for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
   { abortReason: undefined, expectedStatus: "cancelled", expectedTerminalEvent: "run.cancelled" },
   { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
 ]) {
-  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 5000 }, async (t) => {
+  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 10_000 }, async (t) => {
     freshDb(t);
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
     t.after(() => rmSync(tmpDir, { force: true, recursive: true }));
@@ -381,6 +381,15 @@ setInterval(() => {}, 1000);
     const runId = `run_cancel_blocked_interaction_${abortReason ?? "owner"}`;
     const controller = new AbortController();
     let releaseHandler: () => void = () => undefined;
+    // The cancellation budget is measured from the observed interaction, not
+    // from server setup: freshDb, the stub write and the child spawn cannot
+    // eat into it. The test timeout above stays as the ceiling for a run
+    // that never even requests the interaction.
+    let resolveDeadline: (value: "deadline") => void = () => undefined;
+    const deadline = new Promise<"deadline">((resolve) => {
+      resolveDeadline = resolve;
+    });
+    let deadlineTimer: NodeJS.Timeout | undefined;
     const outcome = runConnector({
       admitRunConnection: async ({ connectorId }) => {
         await Promise.resolve();
@@ -395,6 +404,7 @@ setInterval(() => {}, 1000);
       // An owner who never answers: the handler settles only when the test
       // releases it after the assertions.
       onInteraction: (interaction) => {
+        deadlineTimer ??= setTimeout(() => resolveDeadline("deadline"), 5_000);
         setImmediate(() => controller.abort(abortReason));
         return new Promise((resolve) => {
           releaseHandler = () =>
@@ -411,9 +421,22 @@ setInterval(() => {}, 1000);
       (value) => value,
       (err: unknown) => err
     );
-    // The test timeout is the deadline: a run held for the 600 s interaction timeout fails it.
-    const settled = await outcome;
+    // Unconditional release-and-abort teardown: whether this test passes,
+    // fails its deadline assertion or hits the test timeout, the pending
+    // handler is released and the cancellation is re-requested, so the run
+    // settles and the child is torn down instead of leaking the handler,
+    // runtime and child process into the rest of the suite.
+    t.after(() => {
+      releaseHandler();
+      controller.abort(abortReason);
+    });
+    const settled = await Promise.race([outcome, deadline]);
+    clearTimeout(deadlineTimer);
     releaseHandler();
+    // Before the final await: on a run that outlives the grace this fails
+    // with the reason, instead of waiting for the ceiling to time out.
+    assert.notEqual(settled, "deadline", "the run must end within the kill grace, not the 600 s interaction timeout");
+    await outcome;
 
     assert.equal((settled as { status?: unknown }).status, expectedStatus);
     const events = spineEventsForRun(runId);
