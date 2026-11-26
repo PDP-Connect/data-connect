@@ -43,7 +43,22 @@ const PROFILE_SHA256 = /^sha256:[a-f0-9]{64}$/;
 export type PinnedLocalCollectorManifestResult =
   | { readonly kind: "not_local" }
   | { readonly kind: "verified"; readonly manifest: Record<string, unknown> }
-  | { readonly kind: "invalid_pin"; readonly reason: string };
+  | {
+      readonly kind: "invalid_pin";
+      readonly reason: string;
+      readonly reasonCategory: PinnedProfileFailureCategory;
+      readonly expectedDigest: string | null;
+      readonly observedDigest: string | null;
+    };
+
+export type PinnedProfileFailureCategory =
+  | "pin_unreadable"
+  | "pin_unparseable"
+  | "pin_inconsistent"
+  | "profile_missing"
+  | "profile_unreadable"
+  | "profile_digest_mismatch"
+  | "profile_unparseable";
 
 const releaseOverrides = new Map<string, LocalCollectorRelease>();
 let localCollectorProfilesDirectoryForTest: string | null = null;
@@ -88,18 +103,9 @@ export function readLocalCollectorProfile(connectorKey: string): Record<string, 
  * with a catalog release the device does not run.
  */
 export function pinnedLocalCollectorManifest(connectorId: string): Record<string, unknown> | null {
-  const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
-  const profile = readLocalCollectorProfile(connectorKey);
-  if (!profile) {
-    return null;
-  }
-  return {
-    ...profile,
-    connector_id: connectorKey,
-    // The manifest is the only source of the owner-facing name; there is no
-    // RI-side fallback string to disagree with it.
-    display_name: profile.display_name || connectorKey,
-  };
+  const result = readPinnedLocalCollectorManifest(connectorId);
+  if (result.kind === "invalid_pin") throw new Error(result.reason);
+  return result.kind === "verified" ? result.manifest : null;
 }
 
 /** Resolve pin state from the same record and profile read used by other callers. */
@@ -142,7 +148,13 @@ export function readLocalCollectorRelease(connectorKey: string): LocalCollectorR
 type PinnedProfileResult =
   | { readonly kind: "not_local" }
   | { readonly kind: "verified"; readonly digest: string; readonly profile: Record<string, unknown> }
-  | { readonly kind: "invalid_pin"; readonly reason: string };
+  | {
+      readonly kind: "invalid_pin";
+      readonly reason: string;
+      readonly reasonCategory: PinnedProfileFailureCategory;
+      readonly expectedDigest: string | null;
+      readonly observedDigest: string | null;
+    };
 
 function readPinnedProfile(connectorKey: string): PinnedProfileResult {
   if (!CONNECTOR_KEY.test(connectorKey)) {
@@ -155,13 +167,13 @@ function readPinnedProfile(connectorKey: string): PinnedProfileResult {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { kind: "not_local" };
     }
-    return invalidPin();
+    return invalidPin("pin_unreadable");
   }
   let pin: LocalCollectorProfilePin;
   try {
     pin = JSON.parse(pinBytes.toString("utf8")) as LocalCollectorProfilePin;
   } catch {
-    return invalidPin();
+    return invalidPin("pin_unparseable");
   }
   if (
     !pin ||
@@ -171,26 +183,33 @@ function readPinnedProfile(connectorKey: string): PinnedProfileResult {
     !PROFILE_SHA256.test(pin.profile_sha256) ||
     typeof pin.version !== "string"
   ) {
-    return invalidPin();
+    return invalidPin("pin_inconsistent");
   }
   let bytes: Buffer;
   try {
     bytes = readLocalCollectorProfileFile(connectorKey, ".json");
-  } catch {
-    return invalidPin("The installed local connector profile is missing and could not be verified. Reinstall the local collector to repair it.");
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    return invalidPin(
+      missing ? "profile_missing" : "profile_unreadable",
+      missing
+        ? "The installed local connector profile is missing and could not be verified. Reinstall the local collector to repair it."
+        : undefined,
+      pin.profile_sha256
+    );
   }
   const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   if (actual !== pin.profile_sha256) {
-    return invalidPin();
+    return invalidPin("profile_digest_mismatch", undefined, pin.profile_sha256, actual);
   }
   let profile: unknown;
   try {
     profile = JSON.parse(bytes.toString("utf8"));
   } catch {
-    return invalidPin();
+    return invalidPin("profile_unparseable", undefined, pin.profile_sha256, actual);
   }
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
-    return invalidPin();
+    return invalidPin("profile_unparseable", undefined, pin.profile_sha256, actual);
   }
   return { kind: "verified", digest: pin.digest, profile: profile as Record<string, unknown> };
 }
@@ -203,7 +222,10 @@ function readLocalCollectorProfileFile(connectorKey: string, suffix: ".json" | "
 }
 
 function invalidPin(
-  reason = "The installed local connector profile failed verification. Reinstall the local collector to repair it."
+  reasonCategory: PinnedProfileFailureCategory,
+  reason = "The installed local connector profile failed verification. Reinstall the local collector to repair it.",
+  expectedDigest: string | null = null,
+  observedDigest: string | null = null
 ): PinnedProfileResult {
-  return { kind: "invalid_pin", reason };
+  return { kind: "invalid_pin", reason, reasonCategory, expectedDigest, observedDigest };
 }

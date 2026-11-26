@@ -38,6 +38,7 @@ import { type DeviceAttemptContext, fingerprintDeviceAttemptManifest } from "../
 import { parseDeviceScopeRequest, resolveEnrollmentScope } from "../enrollment-scope-narrowing.ts";
 import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
+import type { PinnedLocalCollectorManifestResult } from "../local-collector-profiles.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
 import {
@@ -582,7 +583,13 @@ export interface MountRefDeviceExportersContext {
   // `null` for connectors not in the local-collector catalog. Mirrors the
   // intent route so the enroll path classifies a local-collector connector even
   // before any registered connector manifest exists.
-  readReferenceLocalConnectorCatalogManifest: (connectorId: string) => SourceKindManifestLike | null;
+  readReferenceLocalConnectorCatalogManifestResult: (connectorId: string) => PinnedLocalCollectorManifestResult;
+  logInvalidPinnedLocalConnectorProfile: (diagnostic: {
+    connectorKey: string;
+    expectedDigest: string | null;
+    observedDigest: string | null;
+    reasonCategory: string;
+  }) => void;
   requireDeviceExporterCredential: MiddlewareHandler;
   // Auth middleware
   requireOwnerSession: MiddlewareHandler;
@@ -655,8 +662,11 @@ async function resolveEnrollmentSourceKind(
   connectorKey: string,
   requestedSourceKind?: string | null
 ): Promise<EnrolledSourceKind> {
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  const manifest = localManifest ?? (await ctx.getConnectorManifest(connectorKey));
+  const localResult = ctx.readReferenceLocalConnectorCatalogManifestResult(connectorKey);
+  if (localResult.kind === "invalid_pin") {
+    throw Object.assign(new Error(localResult.reason), { code: "local_collector_profile_repair_required" });
+  }
+  const manifest = localResult.kind === "verified" ? localResult.manifest : await ctx.getConnectorManifest(connectorKey);
   return resolveEnrolledSourceKind({ connectorId: connectorKey, manifest, requestedSourceKind });
 }
 
@@ -779,6 +789,10 @@ async function handleIdempotentReEnroll(
 // enroll path should not reach the writer fence at all; this is defense-in-depth.
 // See decouple-device-enrollment-from-ingest-writer-admission design D3.
 function respondEnrollError(ctx: MountRefDeviceExportersContext, res: RouteResponse, err: unknown): void {
+  if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+    ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+    return;
+  }
   if ((err as { code?: unknown } | null)?.code === "connector_instance_busy") {
     res.setHeader("Retry-After", "2");
     ctx.pdppError(
@@ -1073,9 +1087,18 @@ async function resolveConnectorMaximumStalenessSeconds(
   connectorId: string
 ): Promise<number | null> {
   const connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  if (localManifest) {
-    return extractManifestMaximumStalenessSeconds(localManifest);
+  const localResult = ctx.readReferenceLocalConnectorCatalogManifestResult(connectorKey);
+  if (localResult.kind === "verified") {
+    return extractManifestMaximumStalenessSeconds(localResult.manifest);
+  }
+  if (localResult.kind === "invalid_pin") {
+    ctx.logInvalidPinnedLocalConnectorProfile({
+      connectorKey,
+      expectedDigest: localResult.expectedDigest,
+      observedDigest: localResult.observedDigest,
+      reasonCategory: localResult.reasonCategory,
+    });
+    return null;
   }
   try {
     const manifest = await ctx.getConnectorManifest(connectorKey);
@@ -2064,6 +2087,10 @@ export function mountRefDeviceExporterEnrollmentCodes(app: AppLike, ctx: MountRe
           object: "device_exporter_enrollment_code",
         });
       } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+          ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+          return;
+        }
         ctx.handleError(res, err);
       }
     }

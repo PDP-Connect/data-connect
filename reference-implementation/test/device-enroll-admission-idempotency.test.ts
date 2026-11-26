@@ -428,7 +428,11 @@ test("D3: transient connector_instance_busy on the enroll path becomes a typed 5
     // D7: sourceKind is resolved BEFORE resolveOrCreateEnrollmentDevice is
     // called, so the mock must resolve `codex` to `local_device` (a
     // filesystem-bound manifest) for the flow to reach the write path at all.
-    readReferenceLocalConnectorCatalogManifest: () => ({ runtime_requirements: { bindings: { filesystem: {} } } }),
+    readReferenceLocalConnectorCatalogManifestResult: () => ({
+      kind: "verified",
+      manifest: { runtime_requirements: { bindings: { filesystem: {} } } },
+    }),
+    logInvalidPinnedLocalConnectorProfile: () => {},
   };
   mountRefDeviceExporterEnroll(app as never, ctx as never);
 
