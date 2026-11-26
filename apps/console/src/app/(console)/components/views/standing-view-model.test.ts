@@ -1071,3 +1071,11 @@ test("Home counts the same Sources inventory as its All link", () => {
   assert.match(data.subtitle ?? "", /^13 data sources/);
   assert.equal(data.sourceTotalLink, "All 13 data sources");
 });
+
+test("a needs-you row does not repeat 'last synced' when the status words already say it", () => {
+  const off = statusSource(10, "Steam", { status: "active", owner_state: { ...HEALTHY_STATE, owner_of_state: "owner", resolver: "owner_paused" }, rendered_verdict: verdict("Healthy", [requiredAction({ cta: "Resume schedule", kind: "reattach_schedule", satisfied_when: { kind: "schedule_attached_and_enabled" }, surface: { kind: "schedule" }, target: undefined })]) });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [off] } }));
+  const row = data.needs.find((need) => need.name === "Steam");
+  assert.match(row?.status?.words ?? "", /last synced /);
+  assert.equal(row?.syncNote, null);
+});

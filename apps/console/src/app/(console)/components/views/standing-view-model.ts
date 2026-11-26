@@ -224,8 +224,9 @@ function sourceNeedRow(source: PreparedSource, now: Date, waitingSync: boolean):
     source.source.last_run?.status === "started" ? relativeWhen(source.source.last_run.started_at, now) : null;
   // Lead decision (home-pictures 1, 2): the second line carries the status words,
   // then a sync time only when a sync succeeded or started.
+  const wordsSayLastSynced = source.status.words.includes("last synced");
   const syncNote =
-    waitingSync && syncStarted ? `sync started ${syncStarted}` : lastSynced ? `last synced ${lastSynced}` : null;
+    waitingSync && syncStarted ? `sync started ${syncStarted}` : lastSynced && !wordsSayLastSynced ? `last synced ${lastSynced}` : null;
   return {
     actionHref: source.href,
     actionLabel: source.status.action?.label ?? null,
