@@ -18,7 +18,7 @@ test("paused prints one sentence; local devices have no schedule choice", () => 
 test("choices respect recommendation and retain unusual present intervals", () => {
   const row = buildSchedulePractice("mixed")![2]!;
   const choices = scheduleChoices(row);
-  assert.ok(choices.some((choice) => choice.seconds === 2700 && choice.label.endsWith("(now)")));
+  assert.ok(choices.some((choice) => choice.seconds === 2700 && choice.label.endsWith(" · now")));
   assert.ok(!choices.some((choice) => choice.seconds === 3600));
   assert.ok(choices.some((choice) => choice.label.includes("recommended")));
 });
@@ -53,4 +53,10 @@ test("paused sources without a schedule explain how to resume", async () => {
 test("a known next sync is shown in the schedule sentence", () => {
   const source = buildSchedulePractice("mixed")![0]!;
   assert.match(scheduleSentence(source), /next sync in about 3 hours/);
+});
+
+test("choice labels use dots, not nested brackets", () => {
+  const choices = scheduleChoices(buildSchedulePractice("mixed")![2]!);
+  for (const choice of choices) { assert.doesNotMatch(choice.label, /[()]/); }
+  assert.ok(choices.some((choice) => /^.+ · recommended/.test(choice.label)));
 });

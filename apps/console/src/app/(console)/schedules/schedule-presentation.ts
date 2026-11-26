@@ -23,7 +23,7 @@ export function scheduleChoices(source: RefConnectorSummary) {
   const current = source.schedule?.interval_seconds;
   const seconds = [...new Set([3600, 21_600, 86_400, 604_800, ...(current ? [current] : []), ...(recommended ? [recommended] : [])])]
     .filter((value) => value >= recommended || value === current).sort((a, b) => a - b);
-  return [...seconds.map((value) => ({ seconds: value, label: `${formatIntervalWords(value)}${value === recommended ? " (recommended)" : ""}${value === current ? " (now)" : ""}` })), { seconds: null, label: "Only when I press Sync now" }];
+  return [...seconds.map((value) => ({ seconds: value, label: [formatIntervalWords(value), value === recommended ? "recommended" : null, value === current ? "now" : null].filter(Boolean).join(" · ") })), { seconds: null, label: "Only when I press Sync now" }];
 }
 export function buildSchedulePractice(state: string): RefConnectorSummary[] | null {
   if (state === "none") return [];
