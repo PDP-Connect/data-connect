@@ -7,7 +7,7 @@ export function sourceName(sources: HistorySource[], id: string | null, connecto
   const known = sources.find(source => source.id === id)?.name;
   if (known) return known;
   const service = connector ?? sources.find(source=>source.connector===id)?.connector;
-  if (service) return connectionDisplayName(null,sources.find(source=>source.connector===service)?.serviceName ?? formatConnectorKeyForDisplay(service),service);
+  if (service) return connectionDisplayName(null,sources.find(source=>formatConnectorKeyForDisplay(source.connector).toLowerCase()===formatConnectorKeyForDisplay(service).toLowerCase())?.serviceName ?? formatConnectorKeyForDisplay(service),service);
   return "Data source";
 }
 

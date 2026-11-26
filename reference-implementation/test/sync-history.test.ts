@@ -30,6 +30,7 @@ async function check(backend: "sqlite" | "postgres") {
   await write("UPDATE run_history SET connector_error_json=? WHERE run_id='two'", [JSON.stringify({ code: "session_expired", message: "The authenticated session is no longer active." })]);
   await write("UPDATE run_history SET known_gaps_json=? WHERE run_id='one'", [JSON.stringify([{kind:"coverage",reason:"unavailable",stream:"messages",recovery_hint:{retryable:true}},{kind:"informational",reason:"empty",stream:"empty"}])]);
   const input = { first: "2026-11-25", last: "2026-11-25", offset: 120 };
+  await assert.rejects(()=>readSyncHistory({...input,days:0},backend),RangeError);
   const east = await readSyncHistory(input, backend);
   assert.equal(east.mode, "days");
   if (east.mode !== "days") throw new Error("wrong response");
