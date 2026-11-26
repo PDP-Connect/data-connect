@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -31,6 +31,7 @@ import {
   compactOutbox,
   doctorExitCode,
   findLocalCollectorProfiles,
+  migrateLegacyProfileFiles,
   getBundledConnector,
   HELP_TEXT,
   inspectLocalOutboxStatus,
@@ -1187,6 +1188,90 @@ test("an underscore-named profile that differs from the hyphen-named one is kept
   assert.equal(matches[0]?.source_instance_id, "dsrc_new");
   assert.equal(existsSync(legacyPath), true, "a differing file may hold another device's token, so it is not deleted");
   assert.match(readFileSync(legacyPath, "utf8"), /token-old/);
+});
+
+function captureStderrSync<T>(callback: () => T): { result: T; stderr: string } {
+  const original = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: callback(), stderr };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+// Two collectors that start together can both see a legacy profile and no
+// current one. The hooks run at those points: after the checks, before the
+// read, and before the install.
+test("a profile another collector already renamed is not an error for the collector that lost the race", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = join(profileDir, "claude-code.env");
+  const body = readFileSync(legacyPath, "utf8");
+
+  migrateLegacyProfileFiles(profileDir, { beforeRead: () => renameSync(legacyPath, currentPath) });
+
+  assert.equal(existsSync(legacyPath), false);
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+});
+
+test("a profile renamed by another collector before this one installs keeps the other's file; this one's differing copy is kept and reported", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = join(profileDir, "claude-code.env");
+  const legacyBody = readFileSync(legacyPath, "utf8");
+  let otherBody = "";
+
+  const run = captureStderrSync(() =>
+    migrateLegacyProfileFiles(profileDir, {
+      beforeInstall: () => {
+        const other = writeProfile(tempDirSync(), "claude-code", "token-new", "dsrc_new");
+        otherBody = readFileSync(other, "utf8");
+        writeFileSync(currentPath, otherBody, { mode: 0o600 });
+      },
+    })
+  );
+
+  assert.equal(readFileSync(currentPath, "utf8"), otherBody, "the current profile is not overwritten");
+  assert.equal(readFileSync(legacyPath, "utf8"), legacyBody, "the differing legacy profile is not deleted");
+  assert.match(run.stderr, /differs from/);
+});
+
+test("a legacy profile that disappears with no matching current profile is an error, not a success", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+
+  assert.throws(() => migrateLegacyProfileFiles(profileDir, { beforeRead: () => rmSync(legacyPath) }), /disappeared/);
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
+});
+
+test("a legacy profile that names no connector is left in place and reported, not renamed", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = join(profileDir, "claude_code.env");
+  const body = 'PDPP_REFERENCE_BASE_URL="https://pdpp.example.com"\nPDPP_LOCAL_DEVICE_TOKEN="token-unknown"\n';
+  writeFileSync(legacyPath, body, { mode: 0o600 });
+
+  const run = captureStderrSync(() => migrateLegacyProfileFiles(profileDir));
+
+  assert.equal(readFileSync(legacyPath, "utf8"), body);
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
+  assert.ok(run.stderr.includes(legacyPath), "the report names the file");
+  assert.match(run.stderr, /PDPP_COLLECTOR_CONNECTOR/);
+});
+
+test("a second collector that finds the profile migration in progress stops with a named error and leaves the profile alone", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  // This test process is a live owner of the migration lock.
+  writeFileSync(join(profileDir, ".profile-migration.lock"), `${process.pid}\n`);
+
+  assert.throws(() => migrateLegacyProfileFiles(profileDir), /another process is migrating/);
+  assert.equal(existsSync(legacyPath), true);
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
 });
 
 test("an operator profile named like a connector but for another connector is not renamed or deleted", () => {

@@ -28,12 +28,14 @@
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -53,7 +55,13 @@ import {
   normalizeSourceRoots,
   validateSinceLocally,
 } from "../src/connect-scope.ts";
-import { collectorStateDirectory, defaultCollectorStateRoot, resolveCollectorQueuePath } from "../src/durable-state.ts";
+import {
+  acquireMigrationLock,
+  collectorStateDirectory,
+  defaultCollectorStateRoot,
+  releaseMigrationLock,
+  resolveCollectorQueuePath,
+} from "../src/durable-state.ts";
 import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, CollectorUsageError } from "../src/errors.ts";
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
@@ -2364,34 +2372,136 @@ function safeProfileFileName(name: string): string {
  * all see only the hyphen name. The rename keeps the file's contents and
  * mode, so a stored device token keeps working. Operator-chosen profile names
  * are never touched.
+ *
+ * A profile that names no connector is not renamed either: the filename alone
+ * does not say which connector's credential it holds, so it stays in place and
+ * every run reports it for the owner to confirm.
+ *
+ * Two collectors can start together and both see a legacy profile and no
+ * current one, so the checks alone do not make the rename safe. One process
+ * owns the migration through the same lock helper as the queue handoff; a
+ * second one stops with a named error. The rename is also safe without the
+ * lock, because an older collector does not take it: the current name is
+ * installed with a hard link, which fails when the name exists instead of
+ * replacing that file, and a legacy file that has already gone is a finished
+ * migration only once the current profile is there and names this connector.
+ * `hooks` lets tests stop at those points.
  */
-function migrateLegacyProfileFiles(profileDir: string): void {
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+export function migrateLegacyProfileFiles(
+  profileDir: string,
+  hooks: { beforeInstall?: () => void; beforeRead?: () => void } = {}
+): void {
+  const pending = LOCAL_COLLECTOR_DEFINITIONS.flatMap((definition) => {
     const current = definition.connector_id.replaceAll("_", "-");
     const legacy = current.replaceAll("-", "_");
-    if (legacy === current) {
-      continue;
-    }
     const legacyPath = join(profileDir, `${legacy}.env`);
-    if (!existsSync(legacyPath)) {
-      continue;
+    return legacy !== current && existsSync(legacyPath)
+      ? [{ current, currentPath: join(profileDir, `${current}.env`), legacyPath }]
+      : [];
+  });
+  if (pending.length === 0) {
+    return;
+  }
+  const lockPath = join(profileDir, ".profile-migration.lock");
+  try {
+    acquireMigrationLock(lockPath);
+  } catch (error) {
+    throw new Error(`another process is migrating the legacy profiles in ${profileDir}; run again when it finishes`, {
+      cause: error,
+    });
+  }
+  try {
+    for (const entry of pending) {
+      migrateLegacyProfileFile(entry, hooks);
     }
-    const legacyContents = readFileSync(legacyPath, "utf8");
-    const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
-    if (namedConnector && namedConnector.replaceAll("_", "-") !== current) {
-      continue;
+  } finally {
+    releaseMigrationLock(lockPath);
+  }
+}
+
+function migrateLegacyProfileFile(
+  entry: { current: string; currentPath: string; legacyPath: string },
+  hooks: { beforeInstall?: () => void; beforeRead?: () => void }
+): void {
+  const { current, currentPath, legacyPath } = entry;
+  hooks.beforeRead?.();
+  let legacyContents: string;
+  try {
+    legacyContents = readFileSync(legacyPath, "utf8");
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
     }
-    const currentPath = join(profileDir, `${current}.env`);
-    if (!existsSync(currentPath)) {
-      renameSync(legacyPath, currentPath);
-    } else if (readFileSync(currentPath, "utf8") === legacyContents) {
+    requireMigratedProfile(entry);
+    return;
+  }
+  const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
+  if (!namedConnector) {
+    process.stderr.write(
+      `Profile ${legacyPath} does not name its connector (PDPP_COLLECTOR_CONNECTOR), so it was not renamed to ${currentPath}. If it holds a ${current} credential, rename it yourself; otherwise leave it.\n`
+    );
+    return;
+  }
+  if (namedConnector.replaceAll("_", "-") !== current) {
+    return;
+  }
+  hooks.beforeInstall?.();
+  try {
+    linkSync(legacyPath, currentPath);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      requireMigratedProfile(entry);
+      return;
+    }
+    if (!isFileExistsError(error)) {
+      throw error;
+    }
+    if (readFileSync(currentPath, "utf8") === legacyContents) {
       rmSync(legacyPath);
     } else {
       process.stderr.write(
         `Profile ${legacyPath} differs from ${currentPath}; leaving it in place. Remove it if it is stale.\n`
       );
     }
+    return;
   }
+  const linked = statSync(currentPath);
+  const original = statSync(legacyPath);
+  if (linked.dev !== original.dev || linked.ino !== original.ino) {
+    throw new Error(
+      `${currentPath} is not the profile ${legacyPath} that was renamed to it; the legacy profile was left in place`
+    );
+  }
+  unlinkSync(legacyPath);
+}
+
+/**
+ * The legacy profile is gone. That is a finished migration only when the
+ * current profile exists and names this connector: another collector renamed
+ * it. Anything else means the credential is not where it should be.
+ */
+function requireMigratedProfile(entry: { current: string; currentPath: string; legacyPath: string }): void {
+  let named: string | undefined;
+  try {
+    named = parseCollectorProfileEnv(readFileSync(entry.currentPath, "utf8")).PDPP_COLLECTOR_CONNECTOR?.trim();
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+  }
+  if (named?.replaceAll("_", "-") !== entry.current) {
+    throw new Error(
+      `the legacy profile ${entry.legacyPath} disappeared while it was being renamed, and ${entry.currentPath} is not a ${entry.current} profile`
+    );
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
 /** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */

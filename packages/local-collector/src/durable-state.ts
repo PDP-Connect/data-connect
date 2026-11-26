@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -15,13 +16,14 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome's Node module registry does not yet recognize node:sqlite; Node and tsc resolve the built-in module.
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SQLITE_HEADER = "SQLite format 3\u0000";
 const MAX_LEGACY_ENTRIES_PER_ROOT = 64;
@@ -33,6 +35,8 @@ export interface CollectorStatePathInput {
   afterMigrationInstall?: (() => void) | undefined;
   /** Test hook that simulates a crash after the legacy retirement fence commits. */
   afterRetirementFence?: (() => void) | undefined;
+  /** Test hook that simulates another collector acting on an underscore-named queue just before this run folds it. */
+  beforeUnderscoreQueueFold?: (() => void) | undefined;
   /** Test hook that simulates a legacy collector write after the first snapshot. */
   beforeMigrationReconcile?: (() => void) | undefined;
   /** A queue path supplied by an operator or profile. */
@@ -117,28 +121,31 @@ const QUEUE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
 
 /**
  * Fold a queue's write-ahead log into the main database file so the main file
- * alone holds every committed row. Returns false when that cannot be proven:
- * the file is not a readable database, another process holds it (a running
- * collector), or a sidecar still has content afterwards. Callers then leave
- * the file where it is.
+ * alone holds every committed row. The file must already exist: the open uses
+ * SQLite's `mode=rw`, which never creates it, so a source another process has
+ * just moved away is reported as `missing` instead of being recreated empty.
+ * `unprovable` means the fold cannot be proven: the file is not a readable
+ * database, another process holds it (a running collector), or a sidecar still
+ * has content afterwards. Callers then leave the file where it is.
  */
-function foldQueueIntoMainFile(path: string): boolean {
+function foldQueueIntoMainFile(path: string): "folded" | "missing" | "unprovable" {
   let db: DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(path);
+    db = new DatabaseSync(`${pathToFileURL(path).href}?mode=rw`);
     const row = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy?: number } | undefined;
     if (row?.busy) {
-      return false;
+      return "unprovable";
     }
   } catch {
-    return false;
+    return existsSync(path) ? "unprovable" : "missing";
   } finally {
     db?.close();
   }
-  return QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
+  const sidecarsEmpty = QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
     const sidecar = `${path}${suffix}`;
     return !existsSync(sidecar) || statSync(sidecar).size === 0;
   });
+  return sidecarsEmpty ? "folded" : "unprovable";
 }
 
 /**
@@ -155,12 +162,21 @@ function foldQueueIntoMainFile(path: string): boolean {
  * rows for the source, every run warns with the path to deliver them from.
  * A second run finds nothing to do, and nothing reads the old spelling
  * anywhere else.
+ *
+ * Two collectors can start together and both see the legacy file and no
+ * canonical one, so the checks alone do not make the move safe. One process
+ * owns the move through the same handoff lock as {@link migrateLegacyStore};
+ * a second one stops with a named error. The move itself is also safe without
+ * the lock, because an older collector does not take it: the legacy file is
+ * opened without creating it, and the canonical name is installed with a hard
+ * link, which fails when the name exists instead of replacing the file there.
  */
 function migrateUnderscoreSpelledQueue(
   canonicalPath: string,
   connectorId: string | null | undefined,
   sourceInstanceId: string,
-  stateRoot: string
+  stateRoot: string,
+  beforeFold?: (() => void) | undefined
 ): void {
   const trimmed = connectorId?.trim();
   if (!trimmed?.includes("-")) {
@@ -175,23 +191,133 @@ function migrateUnderscoreSpelledQueue(
     return;
   }
   if (existsSync(canonicalPath)) {
-    warnLegacyQueuePending({
-      canonicalPath,
-      legacyPath,
-      situation: `the legacy queue ${legacyPath} exists beside the canonical local collector queue ${canonicalPath}`,
-      sourceInstanceId,
-    });
+    settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
     return;
   }
-  if (!foldQueueIntoMainFile(legacyPath)) {
+  const lockPath = `${canonicalPath}.handoff.lock`;
+  try {
+    acquireMigrationLock(lockPath);
+  } catch (error) {
+    // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+    throw new CollectorStateResolutionError(
+      "legacy_state_migration_failed",
+      `another process is moving the legacy queue ${legacyPath} to ${canonicalPath}; run again when it finishes`,
+      { cause: error }
+    );
+  }
+  try {
+    moveUnderscoreSpelledQueue(canonicalPath, legacyPath, sourceInstanceId, beforeFold);
+  } finally {
+    releaseMigrationLock(lockPath);
+  }
+}
+
+function moveUnderscoreSpelledQueue(
+  canonicalPath: string,
+  legacyPath: string,
+  sourceInstanceId: string,
+  beforeFold: (() => void) | undefined
+): void {
+  // The state the caller checked may have changed before the lock was taken.
+  if (!existsSync(legacyPath)) {
+    requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+    return;
+  }
+  if (existsSync(canonicalPath)) {
+    settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
+    return;
+  }
+  beforeFold?.();
+  const fold = foldQueueIntoMainFile(legacyPath);
+  if (fold === "missing") {
+    requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+    return;
+  }
+  if (fold === "unprovable") {
     return;
   }
   for (const suffix of QUEUE_SIDECAR_SUFFIXES) {
-    if (existsSync(`${legacyPath}${suffix}`)) {
-      rmSync(`${legacyPath}${suffix}`);
-    }
+    rmSync(`${legacyPath}${suffix}`, { force: true });
   }
-  renameSync(legacyPath, canonicalPath);
+  try {
+    linkSync(legacyPath, canonicalPath);
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      settleLegacyQueueBesideCanonical(canonicalPath, legacyPath, sourceInstanceId);
+      return;
+    }
+    if (isNotFoundError(error)) {
+      requireQueueAtCanonicalPath(canonicalPath, legacyPath);
+      return;
+    }
+    throw error;
+  }
+  if (!isSameFile(canonicalPath, legacyPath)) {
+    throw new CollectorStateResolutionError(
+      "legacy_state_migration_failed",
+      `the canonical queue ${canonicalPath} is not the legacy queue ${legacyPath} that was moved to it; the legacy queue was left in place`
+    );
+  }
+  unlinkSync(legacyPath);
+}
+
+/**
+ * A legacy queue beside the canonical one is left alone and reported, with one
+ * exception: when both names are the same file, a move that linked the new
+ * name was interrupted before it dropped the old one. Dropping it finishes
+ * that move and loses nothing.
+ */
+function settleLegacyQueueBesideCanonical(canonicalPath: string, legacyPath: string, sourceInstanceId: string): void {
+  if (isSameFile(canonicalPath, legacyPath)) {
+    rmSync(legacyPath, { force: true });
+    return;
+  }
+  warnLegacyQueuePending({
+    canonicalPath,
+    legacyPath,
+    situation: `the legacy queue ${legacyPath} exists beside the canonical local collector queue ${canonicalPath}`,
+    sourceInstanceId,
+  });
+}
+
+/**
+ * The legacy queue is gone. That is a finished move only when a usable queue now
+ * sits at the canonical path: another collector moved it there. Anything else
+ * means the rows are not where they should be, and the run must say so.
+ */
+function requireQueueAtCanonicalPath(canonicalPath: string, legacyPath: string): void {
+  if (existsSync(canonicalPath) && isSqliteDatabase(canonicalPath) && hasOutboxTable(canonicalPath)) {
+    return;
+  }
+  throw new CollectorStateResolutionError(
+    "legacy_state_migration_failed",
+    `the legacy queue ${legacyPath} disappeared while it was being moved, and there is no usable queue at ${canonicalPath}`
+  );
+}
+
+function isSameFile(first: string, second: string): boolean {
+  try {
+    const a = statSync(first);
+    const b = statSync(second);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+function hasOutboxTable(path: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    return Boolean(
+      db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'local_device_outbox'").get()
+    );
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
 }
 
 /**
@@ -229,7 +355,13 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     return canonicalPath;
   }
 
-  migrateUnderscoreSpelledQueue(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
+  migrateUnderscoreSpelledQueue(
+    canonicalPath,
+    input.connectorId,
+    sourceInstanceId,
+    stateRoot,
+    input.beforeUnderscoreQueueFold
+  );
 
   if (existsSync(canonicalPath)) {
     // A fully installed canonical copy is authoritative. If it is an empty
@@ -646,7 +778,8 @@ function reconcileLegacyWrites(
   }
 }
 
-function acquireMigrationLock(path: string): void {
+/** Take the single-owner lock for a migration; throws when a live process holds it. */
+export function acquireMigrationLock(path: string): void {
   try {
     const fd = openSync(path, "wx", 0o600);
     try {
@@ -680,7 +813,7 @@ function acquireMigrationLock(path: string): void {
   }
 }
 
-function releaseMigrationLock(path: string): void {
+export function releaseMigrationLock(path: string): void {
   rmSync(path, { force: true });
 }
 
