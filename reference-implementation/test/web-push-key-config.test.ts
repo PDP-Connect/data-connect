@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import test from "node:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { closeDb, initDb } from "../server/db.ts"
@@ -10,7 +10,9 @@ import { createSqliteProviderAppConfigStore } from "../server/stores/provider-ap
 import { resolvePersistentWebPushConfig } from "../server/web-push-key-config.ts"
 
 test("notification key pair persists across store recreation and environment wins", async () => {
-  const directory = mkdtempSync(join(homedir(), ".tmp/notification-key-test-"))
+  const tempRoot = join(homedir(), ".tmp")
+  mkdirSync(tempRoot, { recursive: true })
+  const directory = mkdtempSync(join(tempRoot, "notification-key-test-"))
   const path = join(directory, "test.db")
   initDb(path)
   const env = { PDPP_CREDENTIAL_ENCRYPTION_KEY: "practice-encryption-key" }
