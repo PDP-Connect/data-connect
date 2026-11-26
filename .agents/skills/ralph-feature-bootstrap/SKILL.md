@@ -14,7 +14,7 @@ Create a new Ralph feature pack from a source document with minimal scaffolding:
 
 ## Inputs
 
-- **Required**: source document path (e.g. `docs/260130-react-audit-storage-and-vercel-review.md`)
+- **Required**: source document path (e.g. `docs/<source-doc>.md`)
 - **Optional**: feature slug (e.g. `react-audit-storage`)
 - **Optional**: feature title (human‑readable)
 
