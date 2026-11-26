@@ -17,9 +17,11 @@ function fail(message: string): never {
 }
 
 export async function main(): Promise<void> {
-  const [tag, missing, newVersion] = process.argv.slice(2)
-  if (!tag || !missing || !newVersion) {
-    fail("Usage: report-superseded-release.ts <tag> <comma-separated-missing> <new-version>")
+  const [tag, missing, published, newVersion] = process.argv.slice(2)
+  if (!tag || !missing || !published || !newVersion) {
+    fail(
+      "Usage: report-superseded-release.ts <tag> <comma-separated-missing> <comma-separated-published> <new-version>"
+    )
   }
 
   const version = tag.replace(/^v/, "")
@@ -28,7 +30,10 @@ export async function main(): Promise<void> {
     fail(`no missing packages supplied for ${tag}; nothing to report`)
   }
 
-  process.stdout.write(`${supersededMessage({ tag, version, missing: missingPackages }, newVersion)}\n`)
+  const publishedPackages = published.split(",").filter(Boolean)
+  process.stdout.write(
+    `${supersededMessage({ tag, version, published: publishedPackages, missing: missingPackages }, newVersion)}\n`
+  )
 }
 
 if (process.argv[1] && process.argv[1].endsWith("report-superseded-release.ts")) {

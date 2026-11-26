@@ -140,9 +140,9 @@ function checkConfinedFile(
 
 /**
  * Reads at most `limit + 1` bytes from one descriptor, which must be the
- * regular file that passed confinement. A path replaced after the check opens
- * another inode and is refused, and a file that grows mid-read cannot allocate
- * past the limit.
+ * regular file that passed confinement. A file or parent directory replaced
+ * after the check opens another inode and is refused, and a file that grows
+ * mid-read cannot allocate past the limit.
  */
 export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
   const fd = openSync(file.path, "r")

@@ -81,7 +81,8 @@ export class HostBrowserSurfaceAllocatorError extends Error {
 }
 
 interface HostLeaseRecord {
-	readonly hostSurfaceId: string;
+	/** Null while a lease POST for the run has had no answer. */
+	readonly hostSurfaceId: string | null;
 	readonly runId: string;
 	readonly surface: BrowserSurface;
 }
@@ -102,6 +103,21 @@ type FetchImpl = (
 	init: RequestInit,
 ) => Promise<FetchResponseLike>;
 
+/** Settle with `work`, or reject as soon as `signal` aborts. */
+function beforeAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) {
+		work.catch(() => undefined);
+		return Promise.reject(signal.reason);
+	}
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		work.then(resolve, reject).finally(() =>
+			signal.removeEventListener("abort", onAbort),
+		);
+	});
+}
+
 export function createHostBrowserSurfaceAllocator(
 	options: HostBrowserSurfaceAllocatorOptions,
 ): HostBrowserSurfaceAllocator {
@@ -119,6 +135,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #pendingRunIdsBySurfaceId = new Map<string, string>();
 	readonly #migrateProfileBySurfaceId = new Map<string, boolean>();
 	readonly #surfaceIdsByRunId = new Map<string, string>();
+	readonly #ensuresInFlightBySurfaceId = new Map<
+		string,
+		{ readonly ensure: Promise<BrowserSurface>; readonly runId: string | undefined }
+	>();
 	readonly #lastStartFailureByRunId = new Map<
 		string,
 		HostBrowserSurfaceStartFailure
@@ -152,14 +172,43 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		return this.#lastStartFailureByRunId.get(runId);
 	}
 
-	async ensureSurface(
+	/**
+	 * One host request per surface and run at a time. A second caller for the
+	 * same run joins the first one's request: two requests could finish in
+	 * either order, and a timed-out one finishing last would record the
+	 * surface as starting over the ready lease the other one got. A surface
+	 * is reused by the next run once its lease is released, so a caller for a
+	 * newly bound run never joins an older run's request.
+	 */
+	ensureSurface(request: EnsureBrowserSurfaceRequest): Promise<BrowserSurface> {
+		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
+		const inFlight = this.#ensuresInFlightBySurfaceId.get(request.surfaceId);
+		if (inFlight && inFlight.runId === runId) {
+			return inFlight.ensure;
+		}
+		const ensure: Promise<BrowserSurface> = this.#ensureSurfaceOnce(
+			request,
+			runId,
+		).finally(() => {
+			if (this.#ensuresInFlightBySurfaceId.get(request.surfaceId)?.ensure === ensure) {
+				this.#ensuresInFlightBySurfaceId.delete(request.surfaceId);
+			}
+		});
+		this.#ensuresInFlightBySurfaceId.set(request.surfaceId, { ensure, runId });
+		return ensure;
+	}
+
+	async #ensureSurfaceOnce(
 		request: EnsureBrowserSurfaceRequest,
+		runId: string | undefined,
 	): Promise<BrowserSurface> {
 		const existing = this.#leasesBySurfaceId.get(request.surfaceId);
-		if (existing) {
+		// The binding is consumed when a start succeeds, so an unbound surface
+		// with a ready lease is that run's surface. A newly bound run never
+		// reuses another run's lease.
+		if (existing?.hostSurfaceId && (runId === undefined || existing.runId === runId)) {
 			return existing.surface;
 		}
-		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
 		if (!runId) {
 			throw new HostBrowserSurfaceAllocatorError(
 				"host_browser_surface_missing_lease_context",
@@ -195,19 +244,123 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 					code: error.hostError ?? error.code,
 					message: error.hostMessage ?? error.message,
 				});
+				if (error.code === "host_browser_surface_timeout") {
+					// No answer does not mean no browser: the host can still be
+					// starting one for this run. Report the surface as starting. The
+					// lease manager asks again within its readiness budget, and the
+					// host answers a repeated run_id with the start it already has.
+					return this.#recordSurfaceIfStillBound(request, runId, null);
+				}
 			}
 			throw error;
 		}
 		this.#lastStartFailureByRunId.delete(runId);
-		const hostLease = parseHostSurfaceLeaseResponse(response);
+		const surface = this.#recordSurfaceIfStillBound(
+			request,
+			runId,
+			parseHostSurfaceLeaseResponse(response),
+		);
+		this.#forgetBinding(request.surfaceId, runId);
+		return surface;
+	}
+
+	#isBound(surfaceId: string, runId: string): boolean {
+		return this.#pendingRunIdsBySurfaceId.get(surfaceId) === runId;
+	}
+
+	// The helpers below run after an awaited host request. While it ran,
+	// the surface may have been bound to, or started for, another run, so each
+	// removes only state that still belongs to `runId`.
+
+	/** Drop `runId`'s pending binding of `surfaceId`. */
+	#forgetBinding(surfaceId: string, runId: string): void {
+		if (this.#isBound(surfaceId, runId)) {
+			this.#pendingRunIdsBySurfaceId.delete(surfaceId);
+			this.#migrateProfileBySurfaceId.delete(surfaceId);
+		}
+	}
+
+	/** Drop `record`, the lease `runId` held on `surfaceId`, and the run's index entry. */
+	#forgetLease(
+		surfaceId: string,
+		runId: string,
+		record: HostLeaseRecord | undefined,
+	): void {
+		if (
+			record?.runId === runId &&
+			this.#leasesBySurfaceId.get(surfaceId) === record
+		) {
+			this.#leasesBySurfaceId.delete(surfaceId);
+		}
+		if (
+			this.#surfaceIdsByRunId.get(runId) === surfaceId &&
+			this.#leasesBySurfaceId.get(surfaceId)?.runId !== runId
+		) {
+			this.#surfaceIdsByRunId.delete(runId);
+		}
+	}
+
+	/**
+	 * Drop everything still held for `runId` once the host has released it. A
+	 * start answered while the release ran recorded its lease after the
+	 * release began, so this reads the run's state now instead of before the
+	 * request.
+	 */
+	#forgetRun(runId: string): void {
+		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		if (surfaceId) {
+			this.#forgetLease(
+				surfaceId,
+				runId,
+				this.#leasesBySurfaceId.get(surfaceId),
+			);
+		}
+		for (const [boundSurfaceId, boundRunId] of this.#pendingRunIdsBySurfaceId) {
+			if (boundRunId === runId) {
+				this.#forgetBinding(boundSurfaceId, runId);
+			}
+		}
+	}
+
+	/**
+	 * Record a start's answer, unless the surface was released or bound to
+	 * another run while the request ran. That answer belongs to a run that no
+	 * longer owns the surface, so it is returned to its caller and not stored
+	 * over the current run's state. Releasing a run makes the host drop any
+	 * browser it still starts for it.
+	 */
+	#recordSurfaceIfStillBound(
+		request: EnsureBrowserSurfaceRequest,
+		runId: string,
+		hostLease: HostSurfaceLeaseResponse | null,
+	): BrowserSurface {
+		const surface = this.#describeSurface(request, hostLease);
+		if (!this.#isBound(request.surfaceId, runId)) {
+			return surface;
+		}
+		this.#leasesBySurfaceId.set(request.surfaceId, {
+			hostSurfaceId: hostLease?.surface_id ?? null,
+			runId,
+			surface,
+		});
+		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
+		return surface;
+	}
+
+	#describeSurface(
+		request: EnsureBrowserSurfaceRequest,
+		hostLease: HostSurfaceLeaseResponse | null,
+	): BrowserSurface {
 		const now = this.#now().toISOString();
-		const surface: BrowserSurface = {
-			allocator_metadata: { host_surface_id: hostLease.surface_id },
+		return {
+			...(hostLease
+				? { allocator_metadata: { host_surface_id: hostLease.surface_id } }
+				: {}),
 			backend: "neko",
-			cdp_url: hostLease.cdp_url,
+			cdp_url: hostLease?.cdp_url ?? "",
 			connector_id: request.connectorId,
 			created_at: now,
-			health: "ready",
+			health: hostLease ? "ready" : "starting",
 			last_used_at: now,
 			profile_key: request.profileKey,
 			// The host contract supplies CDP only. The legacy field is required by
@@ -216,12 +369,6 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			stream_base_url: "",
 			surface_id: request.surfaceId,
 		};
-		const record = { hostSurfaceId: hostLease.surface_id, runId, surface };
-		this.#leasesBySurfaceId.set(request.surfaceId, record);
-		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
-		return surface;
 	}
 
 	async getSurfaceStatus(surfaceId: string): Promise<BrowserSurface | null> {
@@ -235,19 +382,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async releaseRun(runId: string): Promise<void> {
-		const surfaceId = this.#surfaceIdsByRunId.get(runId);
-		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
-			([, pendingRunId]) => pendingRunId === runId,
-		)?.[0];
 		await this.#requestNoContent("DELETE", this.#runUrl(runId));
-		if (surfaceId) {
-			this.#leasesBySurfaceId.delete(surfaceId);
-			this.#surfaceIdsByRunId.delete(runId);
-		}
-		if (pendingSurfaceId) {
-			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
-			this.#migrateProfileBySurfaceId.delete(pendingSurfaceId);
-		}
+		this.#forgetRun(runId);
 		this.#lastStartFailureByRunId.delete(runId);
 	}
 
@@ -258,12 +394,20 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		if (!record) {
 			return null;
 		}
-		await this.#requestNoContent(
-			"DELETE",
-			this.#leaseUrl(record.hostSurfaceId),
-		);
-		this.#leasesBySurfaceId.delete(request.surfaceId);
-		this.#surfaceIdsByRunId.delete(record.runId);
+		// An unanswered start has no host surface id. Releasing its run makes
+		// the host tear down that browser when the start completes, and refuse
+		// the run from then on.
+		if (record.hostSurfaceId === null) {
+			await this.#requestNoContent("DELETE", this.#runUrl(record.runId));
+			this.#forgetRun(record.runId);
+		} else {
+			await this.#requestNoContent(
+				"DELETE",
+				this.#leaseUrl(record.hostSurfaceId),
+			);
+			this.#forgetLease(request.surfaceId, record.runId, record);
+			this.#forgetBinding(request.surfaceId, record.runId);
+		}
 		return { ...record.surface, health: "stopping" };
 	}
 
@@ -279,36 +423,45 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		return `${this.#endpoint}/browser-surface/leases`;
 	}
 
-	async #requestJson(
+	#requestJson(
 		method: "POST",
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body));
-		try {
-			return await response.json();
-		} catch (error) {
-			throw new HostBrowserSurfaceAllocatorError(
-				"host_browser_surface_malformed_response",
-				`host browser surface ${method} ${url} returned invalid JSON`,
-				{ cause: error },
-			);
-		}
+		return this.#request(method, url, JSON.stringify(body), async (response) => {
+			try {
+				return await response.json();
+			} catch (error) {
+				throw new HostBrowserSurfaceAllocatorError(
+					"host_browser_surface_malformed_response",
+					`host browser surface ${method} ${url} returned invalid JSON`,
+					{ cause: error },
+				);
+			}
+		});
 	}
 
 	async #requestNoContent(method: "DELETE", url: string): Promise<void> {
 		// A 404 means the host no longer holds the lease (for example after a
 		// host restart), so the release already happened. Treating it as an
 		// error would leave the surface ready here and retry the DELETE forever.
-		await this.#request(method, url, undefined, { notFoundIsSuccess: true });
+		await this.#request(method, url, undefined, async () => undefined, {
+			notFoundIsSuccess: true,
+		});
 	}
 
-	async #request(
+	/**
+	 * Send one request and read its body within one deadline. Headers alone do
+	 * not finish a request: a host that sends them and then stalls the body
+	 * times out the same way as one that never answers.
+	 */
+	async #request<T>(
 		method: "DELETE" | "POST",
 		url: string,
-		body?: string,
+		body: string | undefined,
+		read: (response: FetchResponseLike) => Promise<T>,
 		{ notFoundIsSuccess = false }: { notFoundIsSuccess?: boolean } = {},
-	): Promise<FetchResponseLike> {
+	): Promise<T> {
 		const controller = new AbortController();
 		const timeout = setTimeout(
 			() => controller.abort(),
@@ -325,9 +478,12 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				signal: controller.signal,
 			});
 			if (!response.ok && !(notFoundIsSuccess && response.status === 404)) {
-				throw await this.#buildHttpError(method, url, response);
+				throw await beforeAbort(
+					this.#buildHttpError(method, url, response),
+					controller.signal,
+				);
 			}
-			return response;
+			return await beforeAbort(read(response), controller.signal);
 		} catch (error) {
 			if (error instanceof HostBrowserSurfaceAllocatorError) {
 				throw error;
