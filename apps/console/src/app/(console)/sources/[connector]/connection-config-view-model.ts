@@ -779,3 +779,8 @@ export function parseStaleConflict(message: string): StaleConflict {
     message: "Configuration changed while you were editing.",
   };
 }
+
+/** Choice values remain unchanged when their owner-facing labels differ. */
+export function configChoiceLabel(optionKey:string,choice:string):string {
+  return optionKey.toLowerCase() === "channel_types" ? ({public:"Public channels",private:"Private channels",im:"Direct messages",mpim:"Group messages"} as Record<string,string>)[choice] ?? choice : choice;
+}

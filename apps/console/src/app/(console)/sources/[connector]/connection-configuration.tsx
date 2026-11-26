@@ -26,6 +26,7 @@ import {
   diffDraft,
   findPendingProposal,
   optionLabel,
+  configChoiceLabel,
   parseStaleConflict,
   reasonError,
   resolveAvailability,
@@ -461,7 +462,7 @@ function ChoiceControl({ controlId, onChange, option, value }: ControlProps) {
     >
       {(option.enum ?? []).map((choice) => (
         <option key={choice} value={choice}>
-          {choice}
+          {configChoiceLabel(option.option_key,choice)}
         </option>
       ))}
     </select>
@@ -481,7 +482,7 @@ function MultiChoiceControl({ onChange, option, value }: ControlProps) {
             }
             type="checkbox"
           />
-          <span>{choice}</span>
+          <span>{configChoiceLabel(option.option_key,choice)}</span>
         </label>
       ))}
     </span>

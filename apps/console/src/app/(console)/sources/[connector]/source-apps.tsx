@@ -1,5 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { personDate } from "../../history/day-cut.ts";
+import { readPersonOffset } from "../../history/server-day.ts";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import type { AppAccess } from "../../grants/app-access.ts";
@@ -12,9 +14,9 @@ export async function SourceApps({ connectionId }: { connectionId: string }) {
   } catch {
     return null;
   }
-  return <SourceAppsList apps={apps} connectionId={connectionId} />;
+  return <SourceAppsList apps={apps} connectionId={connectionId} offset={await readPersonOffset()} />;
 }
-export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; connectionId: string }) {
+export function SourceAppsList({ apps, connectionId,offset=0 }: { apps: AppAccess[]; connectionId: string;offset?:number }) {
   const allowed = apps.flatMap((app) => {
     const sources = app.sourceAccess.filter(
       (row) => row.in_force && (row.source.connection_id === connectionId || row.connection_ids?.includes(connectionId))
@@ -29,9 +31,9 @@ export function SourceAppsList({ apps, connectionId }: { apps: AppAccess[]; conn
             <li className="py-3" key={app.hrefId}>
               <Link href={`/grants/${encodeURIComponent(app.hrefId)}`}>{app.name}</Link>
               <span className="ml-3 text-[13px] text-muted-foreground">
-                {app.place}
+                {app.place && app.place !== "no address given" && app.place !== app.name ? app.place : ""}
                 {since
-                  ? ` · since ${new Date(since).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}`
+                  ? ` · since ${personDate(since,offset)}`
                   : ""}
               </span>
             </li>
