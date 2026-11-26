@@ -90,6 +90,36 @@ function readManifest(name: string): Manifest {
   return structuredClone(manifest);
 }
 
+function redditScoreRangeManifest(): Manifest {
+  return {
+    connector_id: "https://registry.pdpp.dev/connectors/reddit",
+    connector_key: "reddit",
+    display_name: "Synthetic Reddit",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "submitted",
+        primary_key: ["id"],
+        query: { range_filters: { score: ["gte", "gt", "lte", "lt"] } },
+        schema: {
+          properties: {
+            created_utc: { format: "date-time", type: "string" },
+            id: { type: "string" },
+            score: { type: "integer" },
+          },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
+const REDDIT_SCORE_RANGE_MANIFEST = redditScoreRangeManifest();
+
 function hasQueryRangeFilters(manifest: Manifest): boolean {
   return manifest.streams.some((stream) => Object.keys(stream.query?.range_filters || {}).length > 0);
 }
@@ -570,11 +600,15 @@ test("first-party polyfill range filters execute against synthetic records", asy
   await withHarness(async ({ asUrl, rsUrl }) => {
     for (const manifestName of RANGE_FILTERED_CONNECTORS) {
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-      await registerManifest(asUrl, readManifest(manifestName));
+      await registerManifest(
+        asUrl,
+        manifestName === "reddit" ? REDDIT_SCORE_RANGE_MANIFEST : readManifest(manifestName)
+      );
     }
     const ownerToken = await issueOwnerToken(asUrl, "polyfill_range_owner");
     for (const queryCase of rangeQueryCases) {
-      const manifest = readManifest(queryCase.manifestName);
+      const manifest =
+        queryCase.manifestName === "reddit" ? REDDIT_SCORE_RANGE_MANIFEST : readManifest(queryCase.manifestName);
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
       await seedStream(rsUrl, ownerToken, manifest.connector_id, queryCase.stream, queryCase.records);
       const url =

@@ -205,6 +205,85 @@ function loadManifest(name: string): Record<string, unknown> {
   return entry.manifest as Record<string, unknown>;
 }
 
+function staticSecretManifest(connectorKey: string, tier: string, browserBound = false): Record<string, unknown> {
+  return {
+    capabilities: {
+      public_listing: { tier },
+    },
+    connector_id: `https://registry.pdpp.dev/connectors/${connectorKey}`,
+    connector_key: connectorKey,
+    display_name: `Synthetic ${connectorKey}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: {
+      bindings: {
+        ...(browserBound ? { browser: { required: true } } : {}),
+        network: { required: true },
+      },
+    },
+    setup: {
+      credential_capture: {
+        fields: [
+          {
+            env: [`${connectorKey.toUpperCase()}_SECRET`],
+            label: "Provider secret",
+            name: "secret",
+            required: true,
+            secret: true,
+            type: "password",
+          },
+        ],
+        kind: "api_key",
+        label: "Synthetic provider credentials",
+      },
+      modality: "static_secret",
+    },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
+function browserRunbookFixture(connectorKey: string): Record<string, unknown> {
+  return {
+    capabilities: { public_listing: { tier: "supported" } },
+    connector_id: `https://registry.pdpp.dev/connectors/${connectorKey}`,
+    connector_key: connectorKey,
+    display_name: `Synthetic ${connectorKey}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: {
+      bindings: {
+        browser: { required: true },
+        network: { required: true },
+      },
+    },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
 let fixtures: ReturnType<typeof createBrowserArtifactFixtures> | null = null;
 
 async function registerConnector(
@@ -344,15 +423,11 @@ test("owner-agent bearer lists connector templates with related connection summa
 
 test("owner-template projection separates browser owner-session setup from owner-agent REST support", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
-    await registerConnector(asUrl, loadManifest("chatgpt"));
+    await registerConnector(asUrl, staticSecretManifest("chatgpt", "supported", true));
     const browserManualManifest = loadManifest("chase");
     browserManualManifest.setup = undefined;
     await registerConnector(asUrl, browserManualManifest);
-    const browserRunbookManifest = loadManifest("doordash");
-    browserRunbookManifest.capabilities = {
-      ...asRecord(browserRunbookManifest.capabilities),
-      public_listing: { tier: "supported" },
-    };
+    const browserRunbookManifest = browserRunbookFixture("doordash");
     await registerConnector(asUrl, browserRunbookManifest, { publish: false });
 
     const ownerToken = await issueOwnerToken(asUrl);
@@ -733,19 +808,13 @@ test("without PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT flag set, unproven connectors 
 });
 
 test("Development-tier connector stays unavailable even when legacy UAT exposure is enabled", async () => {
-  // Uses spotify (publicTier "development": hidden pending a credentialed
-  // proof run) as the development-tier fixture for this legacy-UAT-exposure
-  // gate. Venmo previously served this role, but it has since been promoted
-  // to publicTier "preview" -- see packages/polyfill-connectors/manifests/
-  // venmo.json's public_listing.rationale and source-setup-presentation.
-  // test.ts's "preview + browser_collector_manual (Venmo) is offered on
-  // /sources/add" -- so it no longer exercises the development-tier path
-  // this test targets.
+  // A synthetic development-tier static-secret manifest keeps this branch
+  // independent of the shipped connector catalog.
   const previous = process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT;
   try {
     delete process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT;
     await withServer(async ({ asUrl, rsUrl }) => {
-      await registerConnector(asUrl, loadManifest("spotify"));
+      await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
       const ownerToken = await issueOwnerToken(asUrl);
       const hidden = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
@@ -756,7 +825,7 @@ test("Development-tier connector stays unavailable even when legacy UAT exposure
 
     process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT = "1";
     await withServer(async ({ asUrl, rsUrl }) => {
-      await registerConnector(asUrl, loadManifest("spotify"));
+      await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
       const ownerToken = await issueOwnerToken(asUrl);
       const exposed = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
@@ -860,13 +929,8 @@ test("UAT allowlist: development connector exposed only when flag+key+valid-setu
   try {
     // Scenario table: all combinations of flag, allowlist, setup validity
     const scenarios = [
-      // spotify is the development-tier fixture (publicTier "development",
-      // setup modality static_secret — hidden pending a credentialed proof
-      // run). Venmo previously filled this role but is now publicTier
-      // "preview", so it is offered on its own merits and can no longer
-      // exercise the development-tier gate. This mirrors the same swap already
-      // made in "Development-tier connector stays unavailable even when legacy
-      // UAT exposure is enabled" above.
+      // Spotify is a stable connector key for a synthetic development-tier
+      // static-secret fixture. Its shipped listing tier can change independently.
       { connectorKey: "spotify", expectedExposed: false, label: "no flag, with allowlist", list: "", uat: false },
       { connectorKey: "spotify", expectedExposed: false, label: "flag ON, empty allowlist", list: "", uat: true },
       {
@@ -902,7 +966,7 @@ test("UAT allowlist: development connector exposed only when flag+key+valid-setu
       await withServer(async ({ asUrl, rsUrl }) => {
         // Register the connector to test
         if (scenario.connectorKey === "spotify") {
-          await registerConnector(asUrl, loadManifest("spotify"));
+          await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
         }
         if (scenario.connectorKey === "doordash") {
           const m = loadManifest("doordash");
