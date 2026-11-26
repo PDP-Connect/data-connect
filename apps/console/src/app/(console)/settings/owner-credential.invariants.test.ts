@@ -9,12 +9,12 @@ import { fileURLToPath } from "node:url"
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 const SETTING_FILE = `${HERE}owner-credential-setting.tsx`
 const ACTIONS_FILE = `${HERE}owner-credential-actions.ts`
-const PAGE_FILE = `${HERE}page.tsx`
+const PAGE_FILE = `${HERE}sign-in/page.tsx`
 
-test("the settings page places one Password row inside Password and sign-in", async () => {
+test("the sign-in page places one Password row under Password and sign-in", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
   const passwordSetting = await readFile(`${HERE}owner-password-setting.tsx`, "utf8")
-  assert.match(page, /export default async function SettingsPage/)
+  assert.match(page, /export default async function SignInPage/)
   // Brief settings-pages, decision 1: Owner password is a row under Sign-in.
   assert.equal(page.match(/<h3[^>]*>Password<\/h3>/g)?.length, 1)
   assert.match(page, /title="Password and sign-in"[\s\S]*?id="owner-password"/)

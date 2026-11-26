@@ -24,7 +24,7 @@ mock.module(new URL("./desktop-settings-actions.ts", import.meta.url).href, { na
 mock.module(new URL("./desktop-pairing-actions.ts", import.meta.url).href, { namedExports: { createDesktopPairingAction: live } });
 mock.module(new URL("./owner-sessions-actions.ts", import.meta.url).href, { namedExports: { revokeAllOwnerSessionsAction: live, revokeOtherOwnerSessionsAction: live, revokeOwnerSessionAction: live } });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, { namedExports: { requestReachability: live } });
-for (const demo of settingsPracticeNames) test(`Settings ${demo}: plain page, no raw diagnostics, five rows before Show all`, async () => {
+for (const demo of settingsPracticeNames) test(`Settings ${demo}: plain page, no raw diagnostics, a short list of rows`, async () => {
   liveCalls = 0;
   const dom = new JSDOM('<div id="root"></div>', { url: `http://localhost/settings?demo=${demo}` });
   Object.assign(globalThis, { React, window: dom.window, self: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
@@ -40,20 +40,12 @@ for (const demo of settingsPracticeNames) test(`Settings ${demo}: plain page, no
     assert.equal(container.querySelectorAll('main').length, 1);
     assert.doesNotMatch(container.querySelector('main > div')?.className ?? '', /min-w-\[/);
     if (demo === 'browser-desktop') assert.doesNotMatch(text, /Recovery code|Start at login/);
-    if (['off', 'choose'].includes(demo)) {
-      assert.doesNotMatch(text, /can't work|Try again/);
-      assert.ok([...container.querySelectorAll('button')].some(button => button.textContent?.startsWith('Turn on')));
-    }
-    if (demo === 'desktop-fresh') { assert.doesNotMatch(text, /Step 1/); assert.match(text, /DataConnect made a password for you/); assert.match(text, /To turn on remote access, choose your own password first/); }
-    if (demo === 'on-private') { assert.match(text, /Works on your devices/); assert.doesNotMatch(text, /Next: connect ChatGPT/); }
-    if (demo === 'on-public') assert.doesNotMatch(text, /Copy details for support/);
-    if (demo === 'off-unconfirmed') { assert.equal((text.match(/couldn.t confirm/g) ?? []).length, 1); assert.doesNotMatch(text, /Works from the internet/); }
 
     assert.doesNotMatch(text, /\b(?:exporter|heartbeat|stale|bearer|enrollment|revoked|VAPID|jitter|PDPP|Personal Server|keychain|connector|readiness|deployment|origin)\b/i);
     assert.doesNotMatch(text, /\b(?:PDPP_|DATACONNECT_)|Code:|\b[a-z]+_[a-z]+_[a-z]+\b/);
     assert.equal([...container.querySelectorAll('button')].filter(row => row.textContent === 'Revoke access token').length, 0);
-    assert.ok((text.match(/Chrome on Linux/g)?.length ?? 0) <= 5);
-    if (demo === 'sessions-thirteen') assert.match(text, /Show all 13/);
+    assert.doesNotMatch(text, /Chrome on Linux/);  // sign-ins live on /settings/sign-in
+    assert.ok(container.querySelector('a[href="/settings/remote-access"]') && container.querySelector('a[href="/settings/sign-in"]'));
     if (demo.startsWith('server')) assert.doesNotMatch(text, /Quit and reopen/);
     // Practice controls may explain their simulated action but must never call the live actions above.
     for (const label of ['Show password', 'Choose a password', 'Change password', 'Show recovery code']) {

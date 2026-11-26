@@ -11,8 +11,10 @@ import { renderToStaticMarkup } from "react-dom/server"
 Object.assign(globalThis, { React })
 
 type Page = typeof import("./page.tsx")
+type RemoteAccessPage = typeof import("./remote-access/page.tsx")
 
 let loaded: Promise<Page> | null = null
+let loadedRemoteAccess: Promise<RemoteAccessPage> | null = null
 // Whether the request carries the desktop window's reveal proof cookie.
 let revealProof = false
 
@@ -62,6 +64,21 @@ function loadPage(): Promise<Page> {
   return loaded
 }
 
+// Remote access has its own page; the same stubs apply (loadPage installs them).
+async function renderRemoteAccess(managedDesktopHost: boolean): Promise<string> {
+  await loadPage()
+  loadedRemoteAccess ??= import("./remote-access/page.tsx")
+  const { default: RemoteAccessPage } = await loadedRemoteAccess
+  const previous = process.env.PDPP_MANAGED_DESKTOP_HOST
+  process.env.PDPP_MANAGED_DESKTOP_HOST = managedDesktopHost ? "1" : "0"
+  try {
+    return renderToStaticMarkup(await RemoteAccessPage({}))
+  } finally {
+    if (previous === undefined) delete process.env.PDPP_MANAGED_DESKTOP_HOST
+    else process.env.PDPP_MANAGED_DESKTOP_HOST = previous
+  }
+}
+
 async function render(managedDesktopHost: boolean, inDesktopWindow = managedDesktopHost): Promise<string> {
   const { default: SettingsPage } = await loadPage()
   const previous = process.env.PDPP_MANAGED_DESKTOP_HOST
@@ -78,8 +95,8 @@ async function render(managedDesktopHost: boolean, inDesktopWindow = managedDesk
 
 test("an unmanaged server host renders Remote access and Connect a DataConnect app on another computer but not Desktop or Vault recovery", async () => {
   const html = await render(false)
-  assert.match(html, /Remote access/)
-  assert.match(html, /Remote access/)
+  assert.match(html, /href="\/settings\/remote-access"[\s\S]*?Remote access/)
+  assert.match(await renderRemoteAccess(false), /set up where DataConnect is installed/)
   assert.match(html, /data-widget="desktop-pairing"/)
   assert.match(html, /data-widget="desktop-pairing"/)
   assert.doesNotMatch(html, /data-widget="desktop-settings"/, "Desktop widget must not render on a server")
@@ -90,7 +107,7 @@ test("an unmanaged server host renders Remote access and Connect a DataConnect a
 
 test("in the desktop app window a managed desktop host renders the Desktop and Vault recovery sections alongside Remote access", async () => {
   const html = await render(true)
-  assert.match(html, /data-widget="remote-access"/)
+  assert.match(await renderRemoteAccess(true), /data-widget="remote-access"/)
   assert.match(html, /Control how DataConnect starts on the computer that runs it/)
   assert.match(html, /data-widget="desktop-settings"/)
   assert.match(html, /Recovery code/)
@@ -101,7 +118,7 @@ test("a remote browser hides controls for this computer", async () => {
   // Owner-password sign-in only, no desktop reveal proof: the case
   // e2e/live-settings.spec.ts drives from a second device.
   const html = await render(true, false)
-  assert.match(html, /data-widget="remote-access"/)
+  assert.match(await renderRemoteAccess(true), /data-widget="remote-access"/)
   assert.doesNotMatch(html, /data-widget="desktop-settings"/)
   // cc963a0ef8: "this computer" is false from a phone; keep "the computer that runs it".
   assert.doesNotMatch(html, /Control how DataConnect starts on the computer that runs it/)
@@ -110,7 +127,7 @@ test("a remote browser hides controls for this computer", async () => {
 
 test("settings keeps the required section order and links to access tokens", async () => {
   const html = await render(true)
-  const order = ["Remote access", "Password and sign-in", "Notifications", "Updates", "Advanced", "This computer", "About"]
+  const order = ["Remote access", "Password and sign-in", "Tokens for scripts and tools", "Notifications", "Updates", "Advanced", "This computer", "About"]
   // Brief settings-pages, decision 1: these sections stay in this order; Desktop remains host-gated.
   const positions = order.map((label) => html.indexOf(label))
   assert.ok(positions.every((position) => position >= 0))

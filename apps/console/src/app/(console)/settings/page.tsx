@@ -8,23 +8,19 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { OpenExternalLink } from "../components/open-external-link.tsx"
+import { RemoteAccessRow } from "./remote-access-row.tsx"
+import { isManagedDesktopHost, settingsPracticeFor } from "./settings-host.ts"
 import { NotificationsRow } from "./notifications-row.tsx"
 import { SettingsRow } from "./settings-row.tsx"
 import { loadSettingsSummary } from "./settings-summary-data.ts"
-import { ServerRemoteAccess } from "./server-remote-access.tsx"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsPractice } from "./desktop-settings-practice.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
-import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
-import { SignedInSessions } from "./signed-in-sessions.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
-import { RemoteAccessPractice } from "./remote-access-practice.tsx"
-import { buildSettingsPractice } from "./settings-practice.ts"
-import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -32,11 +28,9 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> }) {
   const demo = (await searchParams)?.demo
-  const practice = process.env.NODE_ENV !== "production" && demo ? buildSettingsPractice(demo) : null
+  const practice = settingsPracticeFor(demo)
   const identity = getProductIdentity()
-  // Desktop and vault-recovery settings write command files only the managed
-  // desktop host answers; on a server they would do nothing.
-  const managedDesktopHost = practice?.managedDesktop ?? (process.env.PDPP_MANAGED_DESKTOP_HOST === "1")
+  const managedDesktopHost = isManagedDesktopHost(practice)
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
     practice ? [practice.revealProof, practice.inventory, practice.passwordSource, practice.passwordSet] as const : await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
@@ -45,37 +39,18 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
       loadOwnerPasswordSet(),
     ])
 
+  const signedIn = ownerSessions.enabled ? `${ownerSessions.sessions.length} signed in` : null
+  const signInWords = [ownerPasswordSource ? (ownerPasswordSet ? "Password set" : "No password yet") : null, signedIn].filter(Boolean).join(" · ") || undefined
+
   const summary = practice ? { tokens: 2, collectors: 4, webhooks: 0, updates: 0, publicAddress: practice.publicAddress } : await loadSettingsSummary()
 
   return (
     <RecordroomShellWithPalette>
       <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6 px-4 py-6">
         <PageHeader title="Settings" />
-        <Section
-          id="remote-access"
-          title="Remote access"
-        >
-          {!managedDesktopHost ? <ServerRemoteAccess address={summary.publicAddress} /> : practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}
-        </Section>
-        <Section title="Password and sign-in">
-          {ownerPasswordSource ? (
-            <div className="border-b border-border/70 pb-5" id="owner-password">
-              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Password</h3>
-              <OwnerPasswordSetting
-                canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-                managedDesktop={managedDesktopHost}
-                passwordSet={ownerPasswordSet}
-                practice={!!practice}
-                source={ownerPasswordSource}
-              />
-            </div>
-          ) : null}
-          {ownerSessions.enabled ? (
-            <div className="border-b border-border/70 py-5">
-              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Where you’re signed in</h3>
-              <SignedInSessions practice={!!practice} sessions={ownerSessions.sessions} />
-            </div>
-          ) : null}
+        <Section>
+          {managedDesktopHost ? <RemoteAccessRow practiceName={practice?.name} /> : <SettingsRow href="/settings/remote-access" title="Remote access" />}
+          <SettingsRow href="/settings/sign-in" title="Password and sign-in" state={signInWords} />
           <SettingsRow href="/deployment/tokens" title="Tokens for scripts and tools" state={summary.tokens === null ? "Could not check" : summary.tokens ? String(summary.tokens) : "None"} />
         </Section>
         <NotificationsRow practice={!!practice} />
