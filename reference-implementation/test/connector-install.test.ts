@@ -33,6 +33,7 @@ import {
   createConnectorInstallService,
   createFileConnectorInstallStore,
   inspectActiveConnector,
+  isRegistryUnreachable,
   normalizeCoreInstallLayout,
   reconcileConnectorUninstalls,
   resolveActiveConnectorPath,
@@ -2314,6 +2315,35 @@ test("a kept catalog is served as not fresh when the registry cannot be reached"
     assert.deepEqual(second?.entries, [entry]);
     assert.equal(contexts[1]?.bounded, true);
     assert.deepEqual(await service.catalog(), [entry]);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a kept catalog cannot authorize install, update or manifest resolution", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    let online = true;
+    let installs = 0;
+    let activations = 0;
+    const service = createConnectorInstallService({
+      dataDir,
+      store: createFileConnectorInstallStore(dataDir),
+      catalogLoader: async () => {
+        if (!online) throw new TypeError("fetch failed");
+        return [entry];
+      },
+      installArtifact: async () => { installs += 1; throw new Error("install reached"); },
+      registerManifest: async () => { activations += 1; },
+    });
+    await service.catalogView?.();
+    online = false;
+    assert.equal((await service.catalogView?.())?.fresh, false);
+    await assert.rejects(() => service.install(entry.connector_id, entry.digest), isRegistryUnreachable);
+    await assert.rejects(() => service.update(entry.connector_id), isRegistryUnreachable);
+    await assert.rejects(() => service.resolveManifestFromCatalog!(entry.connector_id), isRegistryUnreachable);
+    assert.equal(installs, 0);
+    assert.equal(activations, 0);
   } finally {
     rmSync(dataDir, { force: true, recursive: true });
   }

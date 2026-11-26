@@ -1063,6 +1063,7 @@ export function createConnectorInstallService(options: {
   const fallbackWaitMs = options.catalogFallbackWaitMs ?? CATALOG_FALLBACK_WAIT_MS;
   const retryQuietMs = options.catalogRetryQuietMs ?? CATALOG_RETRY_QUIET_MS;
   let quietUntil = 0;
+  let registryReachFailure: unknown;
   const loadCatalog = async (): Promise<ConnectorCatalogView> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
@@ -1084,6 +1085,7 @@ export function createConnectorInstallService(options: {
         // Only "could not reach the registry" falls back. A verification
         // failure (signature, rollback, shape) must still fail.
         if (kept && isRegistryUnreachable(error)) {
+          registryReachFailure = error;
           quietUntil = Date.now() + retryQuietMs;
           return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
         }
@@ -1141,6 +1143,11 @@ export function createConnectorInstallService(options: {
     }
   };
   const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => (await catalogView()).entries;
+  const freshCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+    const view = await catalogView();
+    if (!view.fresh) throw registryReachFailure;
+    return view.entries;
+  };
   const installEntryCore = async (
     connectorId: string,
     entry: ConnectorCatalogEntry,
@@ -1275,7 +1282,7 @@ export function createConnectorInstallService(options: {
     });
   };
   const install = async (connectorId: string, digest: string): Promise<ConnectorInstallRecord> => {
-    const entry = (await catalog()).find(
+    const entry = (await freshCatalog()).find(
       (candidate) => candidate.connector_id === connectorId && candidate.digest === digest
     );
     if (!entry) {
@@ -1387,7 +1394,7 @@ export function createConnectorInstallService(options: {
     }
   };
   const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
-    const entry = (await catalog()).find(
+    const entry = (await freshCatalog()).find(
       (candidate) => candidate.connector_id === connectorId && candidate.latest === true
     );
     if (!entry) {
@@ -1443,7 +1450,7 @@ export function createConnectorInstallService(options: {
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {
-      const entries = await catalog();
+      const entries = await freshCatalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);
       const candidate = candidates.find((entry) => entry.latest === true);
       if (!candidate) {
