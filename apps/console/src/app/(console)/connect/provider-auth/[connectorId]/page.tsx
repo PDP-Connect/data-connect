@@ -40,13 +40,13 @@ export default async function ProviderAuthPage({
         ]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
             <span>Authorize this account in the provider's browser. The connection activates after authorization and account inventory succeed.</span>
           </span>
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
             Authorize {displayName}
           </span>
         }
