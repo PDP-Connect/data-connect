@@ -38,7 +38,7 @@ export function plainServerChecks(
           ? "No password is set. Anyone who can open this address can open DataConnect."
           : "A password protects DataConnect.",
       ...(inputs.ownerPasswordProvenance === "absent"
-        ? { action: "Set a password", href: "/settings" }
+        ? { action: "Set a password", href: "/settings/sign-in" }
         : {}),
     },
     {
@@ -50,7 +50,7 @@ export function plainServerChecks(
           ? `DataConnect is at ${expected || address}.`
           : "Checking the address…",
       ...(mismatch
-        ? { action: desktop ? "Open remote access" : "Change the address where DataConnect is installed.", ...(desktop ? { href: "/settings" } : {}) }
+        ? { action: desktop ? "Open remote access" : "Change the address where DataConnect is installed.", ...(desktop ? { href: "/settings/remote-access" } : {}) }
         : {}),
     },
     {

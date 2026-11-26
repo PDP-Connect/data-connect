@@ -37,7 +37,13 @@ test("address repair matches desktop and server capabilities", () => {
   const model = buildServerPractice("fine")!;
   const desktop = plainServerChecks(model.inputs, "https://another.example", model.probe, true)[1]!;
   const server = plainServerChecks(model.inputs, "https://another.example", model.probe, false)[1]!;
-  assert.equal(desktop.href, "/settings");
+  assert.equal(desktop.href, "/settings/remote-access");
   assert.equal(server.href, undefined);
   assert.match(server.action!, /where DataConnect is installed/);
+});
+
+test("the missing-password repair opens the sign-in page", () => {
+  const model = buildServerPractice("blocked")!;
+  const password = plainServerChecks(model.inputs, null, model.probe, true)[0]!;
+  assert.equal(password.href, "/settings/sign-in");
 });

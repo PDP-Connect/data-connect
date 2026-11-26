@@ -847,7 +847,7 @@ export function WebPushSettings({
         <IcButton variant="ghost" disabled={Boolean(practice)} onClick={() => window.location.reload()}>Check again</IcButton>
       </> : unsupported ? <>
         <p>This browser can’t receive notifications.</p>
-        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings">Turn on remote access</a> to get one.</p> : <p>Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.</p>}
+        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings/remote-access">Turn on remote access</a> to get one.</p> : <p>Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.</p>}
       </> : !practice && checking ? <p role="status">Checking this device…</p> : on ? <>
         <p>On for this browser.</p>
         <div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={sendTest} variant="ghost">Send a test</IcButton><IcButton disabled={busy || Boolean(practice)} onClick={() => endpoint && setConfirmingEndpoint(endpoint)} variant="ghost">Turn off</IcButton></div>

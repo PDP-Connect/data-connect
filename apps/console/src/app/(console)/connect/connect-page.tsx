@@ -21,7 +21,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
           <p className="mt-2">
             Remote access gives this DataConnect an address on the internet that only apps you approve can use.
           </p>
-          <Link className={buttonVariants()} href="/settings#remote-access">
+          <Link className={buttonVariants()} href="/settings/remote-access">
             Set up remote access
           </Link>
           <p className="mt-2 text-[13px] text-muted-foreground">

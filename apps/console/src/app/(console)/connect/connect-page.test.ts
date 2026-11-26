@@ -12,7 +12,7 @@ import { claudeCodeCommand } from "./assistant-instructions.ts";
 import { ConnectView } from "./connect-page.tsx";
 
 const REMOTE_ACCESS_GIVES_THIS_DATACONNECT_AN_RE = /Remote access gives this DataConnect an address on the internet/;
-const PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE = /pdpp-btn[^>]*href="\/settings#remote-access"/;
+const PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE = /pdpp-btn[^>]*href="\/settings\/remote-access"/;
 const WHITESPACE_PRE_WRAP_BREAK_ALL_RE = /whitespace-pre-wrap break-all/;
 const COPY_COMMAND_RE = /Copy command/;
 const NOW_ASK_IT_ANOTHER_APP_X27_RE = /Now ask it|Another app&#x27;s help/;

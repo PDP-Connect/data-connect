@@ -101,6 +101,8 @@ const EXPECTED_SECTION_BY_ROUTE: Record<string, "data-sources" | "apps" | "setti
   "/search": null,
   "/settings": "settings",
   "/settings/packages": "settings",
+  "/settings/remote-access": "settings",
+  "/settings/sign-in": "settings",
   "/settings/technical": "settings",
   "/sources": "data-sources",
   "/sources/[connector]": "data-sources",

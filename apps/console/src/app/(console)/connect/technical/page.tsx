@@ -345,7 +345,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
         {needsRemoteAccess(origin) ? (
           <p className="text-[13px] text-muted-foreground">
             This address is only available on this network. Set up{" "}
-            <Link className="text-primary underline-offset-2 hover:underline" href="/settings#remote-access">
+            <Link className="text-primary underline-offset-2 hover:underline" href="/settings/remote-access">
               Remote access
             </Link>{" "}
             to use it elsewhere.
