@@ -46,6 +46,10 @@ export function webhookNotice(scope: WebhookScope | undefined): string {
   if (!streams.length) return "No record changes are selected.";
   return streams.includes("*") ? "Told when your records change" : "Told when the selected records change";
 }
+/** Practice rows differ in scope, so the notice line is checked on a narrower one. */
+export function practiceWebhookScope(index: number): NonNullable<WebhookScope> {
+  return index === 1 ? { streams: [{ name: "messages" }] } : { streams: [{ name: "*" }] };
+}
 export function webhookHost(host: string) {
   return /^(?:localhost|127\.\d+\.\d+\.\d+|\[::1\])(?::\d+)?$/i.test(host) ? "An address on this computer" : host;
 }

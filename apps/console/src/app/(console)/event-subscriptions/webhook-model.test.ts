@@ -26,3 +26,11 @@ test("webhook notices describe the subscription scope rather than assuming every
   )
   assert.equal(webhookHost("127.0.0.1:9"), "An address on this computer")
 })
+
+test("practice rows print a different notice when their scope is narrower", async () => {
+  const { practiceWebhookScope, webhookNotice } = await import("./webhook-model.ts")
+  const notices = [0, 1, 2, 3].map(index => webhookNotice(practiceWebhookScope(index)))
+  assert.equal(notices[0], "Told when your records change")
+  assert.equal(notices[1], "Told when the selected records change")
+  assert.ok(new Set(notices).size > 1)
+})

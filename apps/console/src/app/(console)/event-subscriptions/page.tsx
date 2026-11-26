@@ -14,7 +14,7 @@ import {
   type ClientEventSubscriptionDetail,
 } from "../lib/ref-client.ts"
 import { WebhookList } from "./webhook-view.tsx"
-import { type WebhookScope, buildWebhookPractice } from "./webhook-model.ts"
+import { type WebhookScope, buildWebhookPractice, practiceWebhookScope } from "./webhook-model.ts"
 export const dynamic = "force-dynamic"
 export const metadata = { title: "Webhooks" }
 export default async function WebhooksPage({
@@ -40,7 +40,7 @@ export default async function WebhooksPage({
   let failed = false
   let loadError = "Webhooks could not be loaded"
   if (practice) {
-    rows = practice.map(row => ({ ...row, scope: { streams: [{ name: "*" }] } }))
+    rows = practice.map((row, index) => ({ ...row, scope: practiceWebhookScope(index) }))
     names = Object.fromEntries(
       practice.map((row, index) => [
         row.client_id,
@@ -54,7 +54,7 @@ export default async function WebhooksPage({
           ...row,
           callback_url: "https://updates.example/changes",
           recent_attempts: [],
-          scope: { streams: [{ name: "*" }] },
+          scope: practiceWebhookScope(practice.indexOf(row)),
           subject_id: "practice",
         }
     }
