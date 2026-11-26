@@ -10,12 +10,17 @@
  */
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -437,11 +442,33 @@ function assertStoredRecordMetadata(active: ConnectorInstallRecord): void {
   }
 }
 
-function readVerifiedStoredFile(root: string, path: string, expected: string): Buffer {
+function readBoundedFile(file: string, limit: number, refusal: string): Buffer {
+  // Nonblocking open lets the handle check reject a substituted FIFO without waiting for a writer.
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) throw new Error(refusal);
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const received = readSync(fd, bytes, length, bytes.length - length, null);
+      if (received === 0) break;
+      length += received;
+    }
+    if (length > limit) throw new Error(refusal);
+    return bytes.subarray(0, length);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readVerifiedStoredFile(root: string, path: string, expected: string, maxBytes?: number): Buffer {
   const file = confinedFile(root, path);
-  const bytes = file && DIGEST.test(expected) ? readFileSync(file) : null;
-  if (bytes === null || sha256(bytes) !== expected) {
-    throw new Error("Active connector bytes failed integrity verification.");
+  const refusal = "Active connector bytes failed integrity verification.";
+  if (!(file && DIGEST.test(expected))) throw new Error(refusal);
+  const bytes = maxBytes === undefined ? readFileSync(file) : readBoundedFile(file, maxBytes, refusal);
+  if (sha256(bytes) !== expected) {
+    throw new Error(refusal);
   }
   return bytes;
 }
@@ -657,7 +684,9 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
     throw new Error("Active connector root is outside the connector data directory.");
   }
   assertNoSymlinkComponents(normalizedRoot);
-  const manifestBytes = readVerifiedStoredFile(normalizedRoot, active.manifestPath, active.manifestSha256);
+  const manifestBytes = readVerifiedStoredFile(
+    normalizedRoot, active.manifestPath, active.manifestSha256, MAX_CONFIG_BYTES
+  );
   readVerifiedStoredFile(normalizedRoot, active.entrypointPath, active.entrypointSha256);
   readVerifiedStoredFile(normalizedRoot, active.provenancePath, active.provenanceSha256);
   const manifest = parseProfileText(manifestBytes.toString("utf8")) as Record<string, unknown>;
@@ -686,11 +715,13 @@ function withVerifiedSourceDeclaration(
     return manifest;
   }
   const file = confinedFile(root, SOURCE_DECLARATION_PATH);
-  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES) {
+  if (!file) {
     throw new Error("Active source declaration bytes failed integrity verification.");
   }
-  const bytes = readFileSync(file);
-  if (bytes.length > MAX_CONFIG_BYTES || sha256(bytes) !== active.sourceDeclarationSha256) {
+  const bytes = readBoundedFile(
+    file, MAX_CONFIG_BYTES, "Active source declaration bytes failed integrity verification."
+  );
+  if (sha256(bytes) !== active.sourceDeclarationSha256) {
     throw new Error("Active source declaration bytes failed integrity verification.");
   }
   const declaration = snapshotSourceDeclaration(JSON.parse(bytes.toString("utf8")));
@@ -717,13 +748,10 @@ function sourceDeclarationDigestOf(root: string): string | undefined {
     throw error;
   }
   const file = confinedFile(root, SOURCE_DECLARATION_PATH);
-  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES) {
+  if (!file) {
     throw new Error("Verified source declaration is invalid.");
   }
-  const bytes = readFileSync(file);
-  if (bytes.length > MAX_CONFIG_BYTES) {
-    throw new Error("Verified source declaration is invalid.");
-  }
+  const bytes = readBoundedFile(file, MAX_CONFIG_BYTES, "Verified source declaration is invalid.");
   return sha256(bytes);
 }
 
@@ -786,13 +814,9 @@ function readVerifiedRecord(
   if (!(manifestFile && entrypointFile && provenanceFile)) {
     throw new Error("Verified connector layout is incomplete.");
   }
-  if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
-    throw new Error("Connector profile exceeds the 1 MiB RI limit.");
-  }
-  const manifestBytes = readFileSync(manifestFile);
-  if (manifestBytes.length > MAX_CONFIG_BYTES) {
-    throw new Error("Connector profile exceeds the 1 MiB RI limit.");
-  }
+  const manifestBytes = readBoundedFile(
+    manifestFile, MAX_CONFIG_BYTES, "Connector profile exceeds the 1 MiB RI limit."
+  );
   const manifest: unknown = parseProfileText(manifestBytes.toString("utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
@@ -1701,11 +1725,14 @@ export function normalizeCoreInstallLayout(
   verifiedSourceDeclaration: Uint8Array
 ): void {
   const coreRoot = join(root, "collection-profiles", connectorId);
-  const sourceDeclarationPath = join(coreRoot, "source-declaration.json");
-  if (!existsSync(sourceDeclarationPath)) {
+  const sourceDeclarationPath = confinedFile(coreRoot, SOURCE_DECLARATION_PATH);
+  if (!sourceDeclarationPath) {
     throw new Error("Pinned installer core produced an incomplete collection-profile layout.");
   }
-  if (!readFileSync(sourceDeclarationPath).equals(Buffer.from(verifiedSourceDeclaration))) {
+  const sidecar = readBoundedFile(
+    sourceDeclarationPath, MAX_CONFIG_BYTES, "Staged source declaration exceeds the 1 MiB RI limit."
+  );
+  if (!sidecar.equals(Buffer.from(verifiedSourceDeclaration))) {
     throw new Error("Staged source declaration does not match installer-core verification.");
   }
 
