@@ -76,6 +76,7 @@ import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-mode
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
+import { validateReadQueryKeys } from "./read-query-params.ts";
 import {
   postgresDeleteAllRecords,
   postgresDeleteRecord,
@@ -3001,33 +3002,6 @@ function projectFields(data: RecordData, fields: string[] | undefined): RecordDa
   return result;
 }
 
-// Canonical public read query-param allowlist. `connection_id` is the
-// canonical public connection identifier; `connector_instance_id` is the
-// deprecated wire alias accepted during the migration window defined by
-// `openspec/changes/expose-connection-identity-on-public-read`. Both are
-// optional filters today; when storage enumerates multiple connections per
-// owner they will narrow the result set. `subject_id` is forwarded by some
-// MCP / dashboard clients for diagnostic context and is allowlisted alongside
-// `connector_id` for parity with `/v1/streams` and `/v1/schema`.
-const SUPPORTED_RECORD_QUERY_PARAMS = new Set([
-  "changes_since",
-  "connection_id",
-  "connector_id",
-  "connector_instance_id",
-  "count",
-  "cursor",
-  "expand",
-  "expand_limit",
-  "fields",
-  "filter",
-  "limit",
-  "order",
-  "sort",
-  "subject_id",
-  "view",
-  "window",
-]);
-
 // Canonical graded-count vocabulary. Spec:
 //   openspec/changes/canonicalize-public-read-contract design.md ("Counts")
 //   reference-contract `CountKindSchema`
@@ -3042,20 +3016,6 @@ const SUPPORTED_COUNT_KINDS = new Set(["none", "estimated", "exact"]);
 //   reference-implementation-architecture/spec.md
 //   (#"The record-list read MAY expose bounded window aggregate metadata")
 const SUPPORTED_WINDOW_KINDS = new Set(["none", "exact"]);
-const SUPPORTED_AGGREGATE_QUERY_PARAMS = new Set([
-  "connection_id",
-  "connector_id",
-  "connector_instance_id",
-  "field",
-  "filter",
-  "granularity",
-  "group_by",
-  "group_by_time",
-  "limit",
-  "metric",
-  "subject_id",
-  "time_zone",
-]);
 
 /**
  * Re-export the canonical alias contract helpers so existing imports from
@@ -3476,10 +3436,7 @@ function validateTopLevelQueryParams(
   requestParams: RequestParams,
   manifestStream: ManifestStream | null = null
 ): { direction: PageOrder; field: string } | null {
-  const unsupported = Object.keys(requestParams).filter((key) => !SUPPORTED_RECORD_QUERY_PARAMS.has(key));
-  if (unsupported.length) {
-    throw invalidQueryError(`Unsupported query parameter: ${unsupported.join(", ")}`);
-  }
+  validateReadQueryKeys("records", requestParams);
   validateConnectionAlias(requestParams);
   validateCountKind(requestParams.count);
   validateWindowKind(requestParams.window);
@@ -3616,10 +3573,7 @@ function resolveSortEntry(entry: string, sortableFields: Set<string>): { directi
 }
 
 function validateTopLevelAggregateParams(requestParams: RequestParams): void {
-  const unsupported = Object.keys(requestParams).filter((key) => !SUPPORTED_AGGREGATE_QUERY_PARAMS.has(key));
-  if (unsupported.length) {
-    throw invalidQueryError(`Unsupported query parameter: ${unsupported.join(", ")}`);
-  }
+  validateReadQueryKeys("aggregate", requestParams);
   validateConnectionAlias(requestParams);
 }
 
