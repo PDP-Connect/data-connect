@@ -151,7 +151,7 @@ async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot>
     fetchInstallCatalog().catch((err: unknown) => {
       if (isTransientConnectorInstallCatalogError(err)) {
         catalogUnavailableReason = "transient_busy";
-        return { entries: [], fetchedAt: null, fresh: true, skipped: 0 };
+        return { entries: [], fetchedAt: null, fresh: false, skipped: 0 };
       }
       // Offline with no kept list: the services already on this computer
       // still list, so this leg does not decide the page.

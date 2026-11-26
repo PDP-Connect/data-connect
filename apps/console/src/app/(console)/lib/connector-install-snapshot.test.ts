@@ -9,6 +9,7 @@ let catalogPayload: unknown = connectorInstallCatalogFixture;
 let statusPayload: unknown = connectorInstallStatusFixture;
 /** HTTP status the fake server answers for a route suffix; unlisted routes answer 200. */
 let failingRoutes: Record<string, number> = {};
+let failureBody = "not served";
 /** Milliseconds the fake server waits before answering a route suffix. */
 let routeDelays: Record<string, number> = {};
 
@@ -38,7 +39,7 @@ globalThis.fetch = (async (url: string | URL | Request) => {
   }
   const failing = Object.entries(failingRoutes).find(([suffix]) => path.endsWith(suffix));
   if (failing) {
-    return new Response("not served", { status: failing[1] });
+    return new Response(failureBody, { status: failing[1] });
   }
   const body = path.endsWith("/status")
     ? statusPayload
@@ -179,3 +180,24 @@ for (const order of ["status first", "catalog first"]) {
     }
   });
 }
+
+
+test("a busy catalog with successful status marks the list not fresh", async () => {
+  const { getConnectorInstallSnapshot } = await client;
+  statusPayload = connectorInstallStatusFixture;
+  catalogPayload = connectorInstallCatalogFixture;
+  failureBody = "Another connector catalog refresh is in progress.";
+  failingRoutes = { "/catalog": 500 };
+  try {
+    const snapshot = await getConnectorInstallSnapshot();
+    assert.ok(snapshot);
+    assert.equal(snapshot.catalogUnavailableReason, "transient_busy");
+    assert.deepEqual(snapshot.catalogNotFresh, { fetchedAt: null });
+    assert.equal(snapshot.status.length, STATUS_ROWS.length);
+  } finally {
+    failingRoutes = {};
+    failureBody = "not served";
+  }
+  const fresh = await getConnectorInstallSnapshot();
+  assert.equal(fresh?.catalogNotFresh, undefined);
+});
