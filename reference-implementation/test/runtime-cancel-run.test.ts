@@ -155,9 +155,15 @@ main();
   return { stubPath, tmpDir };
 }
 
-function freshDb(t: TestContext): void {
+// Opens the DB without registering its teardown, for a test that must close it
+// only after something else has finished using it.
+function openFreshDb(): void {
   closeDb();
   initDb(join(mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-")), "pdpp.sqlite"));
+}
+
+function freshDb(t: TestContext): void {
+  openFreshDb();
   t.after(() => closeDb());
 }
 
@@ -361,9 +367,29 @@ for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
   { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
 ]) {
   test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 10_000 }, async (t) => {
-    freshDb(t);
+    openFreshDb();
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
-    t.after(() => rmSync(tmpDir, { force: true, recursive: true }));
+    const controller = new AbortController();
+    let releaseHandler: () => void = () => undefined;
+    let outcome: Promise<unknown> | undefined;
+    // One ordered teardown, registered before anything can fail. Node runs
+    // after hooks in registration order, so separate hooks for the DB, the
+    // directory and the release would close the DB and delete the stub before
+    // the run had ended. Whether the test passes, fails or times out: release
+    // the pending handler, re-request cancellation, wait for the run to settle
+    // (its terminal write and child cleanup), then close the DB and remove the
+    // directory. The hook timeout bounds a run that never settles; it is
+    // Node's own, not a timer in this file.
+    t.after(
+      async () => {
+        releaseHandler();
+        controller.abort(abortReason);
+        await outcome;
+        closeDb();
+        rmSync(tmpDir, { force: true, recursive: true });
+      },
+      { timeout: 10_000 }
+    );
     const stubPath = join(tmpDir, "stub.mjs");
     writeFileSync(
       stubPath,
@@ -379,15 +405,13 @@ setInterval(() => {}, 1000);
       "utf8"
     );
     const runId = `run_cancel_blocked_interaction_${abortReason ?? "owner"}`;
-    const controller = new AbortController();
-    let releaseHandler: () => void = () => undefined;
     // The cancellation budget is measured from the observed interaction, not
     // from server setup: freshDb, the stub write and the child spawn cannot
     // eat into it. No timer (the real-wait ratchet counts one): the elapsed
     // check after the run ends catches a late settle, and the test timeout
     // above stays as the ceiling for a run that never ends.
     let interactionObservedAt: number | undefined;
-    const outcome = runConnector({
+    outcome = runConnector({
       admitRunConnection: async ({ connectorId }) => {
         await Promise.resolve();
         const exactId = makeDefaultAccountConnectorInstanceId(OWNER_AUTH_DEFAULT_SUBJECT_ID, connectorId);
@@ -418,15 +442,6 @@ setInterval(() => {}, 1000);
       (value) => value,
       (err: unknown) => err
     );
-    // Unconditional release-and-abort teardown: whether this test passes,
-    // fails its deadline assertion or hits the test timeout, the pending
-    // handler is released and the cancellation is re-requested, so the run
-    // settles and the child is torn down instead of leaking the handler,
-    // runtime and child process into the rest of the suite.
-    t.after(() => {
-      releaseHandler();
-      controller.abort(abortReason);
-    });
     const settled = await outcome;
     releaseHandler();
     // The guard first, so the elapsed check cannot pass vacuously on a run
