@@ -36,42 +36,6 @@ async function describeOrUnavailable(locator) {
   return (await locator.innerText({ timeout: 2_000 }).catch(() => "<unavailable>")).replace(/\s+/gu, " ");
 }
 
-// Waits for the install row's durable end state after the install action:
-// the catalog refresh shows the package as Active and removes the Install
-// button, or the row keeps a role=alert error. The "Install complete" status
-// line is not a usable signal: it renders only while the row still has an
-// action, and the refreshed tree that removes the action can arrive in the
-// same commit.
-async function waitForInstallSettled(page, installRow, connector, timeout) {
-  const rowSelector = `[data-testid="source-setup-${connector}"] [data-testid="connector-install-row"]`;
-  let settled;
-  try {
-    const handle = await page.waitForFunction(
-      (selector) => {
-        const row = document.querySelector(selector);
-        const alert = row?.querySelector('[role="alert"]');
-        if (alert) {
-          return { error: alert.textContent };
-        }
-        const status = row?.querySelector('[data-testid="connector-package-status"]')?.textContent?.trim();
-        const hasAction = [...(row?.querySelectorAll("button") ?? [])].some((button) =>
-          /^(Install|Installing…|Update|Updating…)$/u.test(button.textContent.trim())
-        );
-        return status === "Active" && !hasAction ? { status } : null;
-      },
-      rowSelector,
-      { timeout }
-    );
-    settled = await handle.jsonValue();
-  } catch (err) {
-    throw new Error(
-      `${connector} install did not reach Active within ${timeout}ms; last row text=${await describeOrUnavailable(installRow)}`,
-      { cause: err }
-    );
-  }
-  assert.ok(!settled.error, `${connector} install failed: ${settled.error}`);
-}
-
 function pkceChallenge(verifier) {
   return createHash("sha256").update(verifier).digest("base64url");
 }
@@ -112,45 +76,37 @@ try {
   assert.ok(login.status() < 400, `owner sign-in returned ${login.status()}`);
   await page.waitForURL(`${origin}/`, { timeout: 45_000 });
 
-  await page.getByRole("link", { name: "Sources", exact: true }).click();
+  await page.getByRole("link", { name: "Data sources", exact: true }).click();
   await page.waitForURL("**/sources");
-  await page.getByRole("link", { name: /Add a source/ }).click();
+  await page.getByRole("link", { name: /Add a data source/ }).click();
   await page.waitForURL("**/sources/add");
-  await page.getByTestId("source-setup-list").first().waitFor({ state: "visible" });
+  await page.getByTestId("add-source-list").first().waitFor({ state: "visible" });
   const documentId = await page.evaluate(() => {
     window.__coreSmokeDocumentId = crypto.randomUUID();
     return window.__coreSmokeDocumentId;
   });
 
   const sourceRowIds = await page
-    .locator('[data-testid^="source-setup-"]')
+    .locator('[data-testid^="add-source-row-"]')
     .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
   for (const connector of ["claude-code", "codex"]) {
-    const sourceRow = page.getByTestId(`source-setup-${connector}`);
+    const sourceRow = page.getByTestId(`add-source-row-${connector}`);
     assert.equal(
       await sourceRow.count(),
       1,
       `runtime source catalog is missing ${connector}; rows=${JSON.stringify(sourceRowIds)}; page=${(await page.locator("main").innerText()).slice(0, 900)}`
     );
-    await sourceRow.waitFor({ state: "visible" });
-    const installRow = sourceRow.getByTestId("connector-install-row");
-    const install = installRow.getByRole("button", { name: "Install", exact: true });
-    await install.waitFor({ state: "visible" });
-    // installConnectorAction is a Next.js server action: it POSTs to this same
-    // page (/sources/add) and the row's status text only re-renders after that
-    // response lands. Waiting on the DOM node alone (the prior approach) races
-    // the server action's own completion; tie the wait to the response itself.
-    let installResponse;
-    try {
-      installResponse = await waitForResponse(page, "/sources/add", "POST", () => install.click());
-    } catch (err) {
-      throw new Error(
-        `${connector} install action never completed within its bound; last row text=${await describeOrUnavailable(installRow)}`,
-        { cause: err }
-      );
-    }
-    assert.ok(installResponse.ok(), `${connector} install action returned ${installResponse.status()}`);
-    await waitForInstallSettled(page, installRow, connector, 60_000);
+    // Opening the service installs it automatically, then shows its command.
+    // Observe the ready form and verify the durable install, not an Install
+    // button that no longer exists in the owner flow.
+    await sourceRow.getByRole("link").click();
+    await page.waitForURL(`**/sources/add/${connector}`);
+    await page.getByTestId("program-command").waitFor({ state: "visible", timeout: 60_000 });
+    const installed = await inspectActiveConnector(createConnectorInstallStore(), connector);
+    assert.equal(installed.status, "active", `${connector} must have a verified active install`);
+    await page.getByRole("link", { name: "Add a data source", exact: true }).click();
+    await page.waitForURL("**/sources/add");
+    await page.getByTestId("add-source-list").waitFor({ state: "visible" });
   }
 
   // Installing a connector package does not create an owner connection. Seed
@@ -180,11 +136,11 @@ try {
   });
 
   const documentIdAfterInstalls = await page.evaluate(() => window.__coreSmokeDocumentId);
-  assert.equal(documentIdAfterInstalls, documentId, "/sources/add must remain on the loaded app document after installs");
+  assert.equal(documentIdAfterInstalls, documentId, "adding services must preserve the loaded app document");
 
   const whatsapp = await page.goto(`${origin}/connect/manual-upload/whatsapp`, { waitUntil: "domcontentloaded" });
   assert.equal(whatsapp?.status(), 200, "WhatsApp manual-upload route must render");
-  await page.getByLabel("Export files").waitFor({ state: "visible" });
+  await page.getByLabel("Choose the file").waitFor({ state: "visible" });
   assert.ok(
     (await page.locator("main").innerText()).match(/WhatsApp|export/i),
     "manual-upload route must render WhatsApp export instructions"
@@ -216,13 +172,13 @@ try {
   await page.getByRole("heading", { name: /wants to read your data/ }).waitFor({ state: "visible" });
   // A toggle before hydration flips only the DOM checkbox; React then keeps
   // that DOM value without an onChange, so the selection stays empty and
-  // Allow access stays disabled. The consent screen sets data-hydrated from
+  // Allow stays disabled. The consent screen sets data-hydrated from
   // an effect, which runs only after its handlers are live.
   await page.locator('[data-hydrated="true"]').waitFor({ state: "attached" });
   const shareClaudeCode = page.getByLabel("Share data from Claude Code");
-  const allowAccess = page.getByRole("button", { name: "Allow access", exact: true });
+  const allowAccess = page.getByRole("button", { name: "Allow", exact: true });
   await shareClaudeCode.check();
-  // Allow access enables only when React state holds the selection. If a
+  // Allow enables only when React state holds the selection. If a
   // toggle still did not register, re-toggle from the observed checkbox state.
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -231,7 +187,7 @@ try {
     } catch (err) {
       if (attempt === 3) {
         throw new Error(
-          `consent Allow access stayed disabled after ${attempt} toggles; checkbox checked=${await shareClaudeCode.isChecked()}`,
+          `consent Allow stayed disabled after ${attempt} toggles; checkbox checked=${await shareClaudeCode.isChecked()}`,
           { cause: err }
         );
       }
