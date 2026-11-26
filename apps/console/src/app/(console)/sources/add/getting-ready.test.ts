@@ -131,3 +131,19 @@ test("getting ready: failed view has the sentence, 'Try again', and the server m
   assert.match(html, /<summary[^>]*>\s*What went wrong\s*<\/summary>\s*<p[^>]*>registry unreachable<\/p>/);
   assert.deepEqual(bannedCopyProblems(html), []);
 });
+
+test("getting ready: an unavailable catalog stops polling and offers retry", async () => {
+  let checks = 0;
+  const outcome = await getServiceReady(deps({
+    check: async () => {
+      checks += 1;
+      return { state: "retry" };
+    },
+    needsInstall: false,
+    sleep: async () => assert.fail("retry must not wait"),
+  }));
+  assert.equal(checks, 1);
+  assert.equal(outcome.kind, "failed");
+  assert.ok(outcome.kind === "failed");
+  assert.match(outcome.detail, /Couldn't check/);
+});

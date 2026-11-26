@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { notFreshCopy } from "./add-source-list-model.ts";
+
 /**
  * "Getting <Name> ready" (design "Page 2"): the person never sees an install
  * step. The page calls the install action itself, then waits until the server
@@ -11,7 +13,7 @@ export type GettingReadyOutcome =
   | { readonly href: string; readonly kind: "ready" }
   | { readonly detail: string; readonly kind: "failed" };
 
-export type ReadinessCheck = { readonly href: string; readonly state: "ready" } | { readonly state: "waiting" };
+export type ReadinessCheck = { readonly href: string; readonly state: "ready" } | { readonly state: "waiting" } | { readonly state: "retry" };
 
 export interface GettingReadyDeps {
   /** Reads the server again. Resolves "ready" once the service can be connected. */
@@ -43,6 +45,7 @@ export async function getServiceReady(deps: GettingReadyDeps): Promise<GettingRe
     const startedAt = now();
     for (;;) {
       const result = await deps.check();
+      if (result.state === "retry") return { detail: notFreshCopy(null), kind: "failed" };
       if (result.state === "ready") return { href: result.href, kind: "ready" };
       if (now() - startedAt >= maxWaitMs) {
         return { detail: "The server did not report this service ready within two minutes.", kind: "failed" };

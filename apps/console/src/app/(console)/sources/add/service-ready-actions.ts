@@ -20,6 +20,7 @@ export async function serviceReadinessAction(connectorKey: string): Promise<Read
   const entry = findCatalogEntry(read, connectorKey);
   if (!entry) return { state: "waiting" };
   const card = sourceSetupCardModel(entry, read.lifecycleFor(entry), read.catalogTransientlyUnavailable);
+  if (card.packageAvailabilityUnknown) return { state: "retry" };
   if (!card.setupAction) return { state: "waiting" };
   return { href: connectPageHref(entry, card.setupAction.href), state: "ready" };
 }

@@ -113,12 +113,12 @@ export function AddSourceList({
   );
 }
 
-export function AddSourceLoadFailed() {
+export function AddSourceLoadFailed({ message = ADD_SOURCE_COPY.loadFailed, href = "/sources/add" }: { message?: string; href?: string }) {
   return (
     <div className="grid gap-2 py-3" data-testid="add-source-load-failed">
-      <p className="pdpp-caption text-muted-foreground" role="alert">{ADD_SOURCE_COPY.loadFailed}</p>
+      <p className="pdpp-caption text-muted-foreground" role="alert">{message}</p>
       <div>
-        <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">
+        <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={href}>
           {ADD_SOURCE_COPY.retry}
         </Link>
       </div>

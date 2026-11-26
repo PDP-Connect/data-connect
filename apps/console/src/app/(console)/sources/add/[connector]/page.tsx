@@ -9,7 +9,7 @@ import { sourceSetupCardModel } from "../../../lib/source-setup-presentation.ts"
 import { isDeterministicSourcesReadError } from "../../read-error-classification.ts";
 import { findCatalogEntry, readAddSourceCatalog } from "../add-source-catalog-read.ts";
 import { existingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
-import { existingSourceHref, isConnectableEntry } from "../add-source-list-model.ts";
+import { addSourceHref, existingSourceHref, isConnectableEntry, notFreshCopy } from "../add-source-list-model.ts";
 import { AddSourceLoadFailed } from "../add-source-list.tsx";
 import { CannotBeAddedHere, ConnectHeader, NewServiceNote } from "../connect-parts.tsx";
 import { GettingReady } from "../getting-ready.tsx";
@@ -62,6 +62,14 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
     );
   }
   const card = sourceSetupCardModel(entry, lifecycle, read.catalogTransientlyUnavailable);
+  if (card.packageAvailabilityUnknown) {
+    return (
+      <RecordroomShellWithPalette>
+        <ConnectHeader connectorKey={entry.connectorKey} icon={entry.icon} name={entry.displayName} />
+        <AddSourceLoadFailed href={addSourceHref(entry.connectorKey)} message={notFreshCopy(null)} />
+      </RecordroomShellWithPalette>
+    );
+  }
   if (card.setupAction && !isProgramService(entry)) {
     redirect(connectPageHref(entry, card.setupAction.href));
   }
