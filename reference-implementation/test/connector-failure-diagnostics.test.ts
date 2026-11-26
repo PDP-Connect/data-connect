@@ -227,6 +227,7 @@ async function runStub({
   const runOptions: RunStubOptions = {
     admitRunConnection: fakeAdmitRunConnection(),
     collectionMode: "full_refresh",
+    connectorConfigStore: { getActiveRevision: () => Promise.resolve(null) },
     connectorId: TEST_MANIFEST.connector_id,
     connectorPath: stubPath,
     // No server harness; runConnector reads pending detail gaps at
