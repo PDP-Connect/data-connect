@@ -11,6 +11,7 @@ import test from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
 import { handleLocalDeviceTerminalRunCommit } from "../operations/local-device-terminal-collection.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
@@ -20,6 +21,10 @@ const CONNECTOR_ID = "terminal_restart_fixture";
 const CONNECTOR_INSTANCE_ID = "cin_terminal_restart_fixture";
 const DEVICE_ID = "dev-terminal-restart";
 const SOURCE_INSTANCE_ID = "src-terminal-restart";
+// Typed DONE coverage is what makes the collector commit a terminal run; the server checks it against this manifest and digest.
+const CONNECTOR_MANIFEST = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+const MANIFEST_FINGERPRINT = fingerprintDeviceAttemptManifest(CONNECTOR_MANIFEST);
+const ARTIFACT_DIGEST = `sha256:${"b".repeat(64)}`;
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
 type Backend = "postgres" | "sqlite";
@@ -110,15 +115,16 @@ async function connectorFixture(): Promise<string> {
       await new Promise((resolve) => process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); }));
       const start = JSON.parse(input.split("\\n")[0]);
       const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+      const coverage = { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
       if (start.state?.messages?.cursor) {
-        emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+        // Re-emit the unchanged cursor so the retried terminal commit matches the lost one.
+        emit({ type: "STATE", stream: "messages", cursor: { cursor: "c1" } });
+        emit({ type: "DONE", status: "succeeded", records_emitted: 0, coverage });
         return;
       }
       emit({ type: "RECORD", stream: "messages", key: "message-1", data: { id: "message-1" }, emitted_at: "2026-08-12T12:00:00.000Z" });
       emit({ type: "STATE", stream: "messages", cursor: { cursor: "c1" } });
-      emit({ type: "RECORD", stream: "coverage_diagnostics", key: "coverage:messages", data: { id: "coverage:messages", store: "messages", stream: "messages", status: "collected" }, emitted_at: "2026-08-12T12:00:00.000Z" });
-      emit({ type: "STATE", stream: "coverage_diagnostics", cursor: { cursor: "coverage-c1" } });
-      emit({ type: "DONE", status: "succeeded", records_emitted: 2 });
+      emit({ type: "DONE", status: "succeeded", records_emitted: 1, coverage });
     })().catch((error) => { process.stderr.write(String(error)); process.exit(1); });\n`
   );
   return path;
@@ -168,6 +174,8 @@ async function startHarness(backend: Backend) {
           canonicalConnectorKey: () => CONNECTOR_ID,
           commitTerminalRun,
           emitSpineEvent: () => Promise.resolve(),
+          getConnectorManifest: () => CONNECTOR_MANIFEST,
+          getExpectedArtifactDigest: () => ARTIFACT_DIGEST,
           handleError: (_response, error) => {
             throw error;
           },
@@ -227,11 +235,18 @@ for (const backend of ["sqlite", "postgres"] as const) {
       baseUrl: harness.url,
       connector: {
         args: [fixture],
+        artifactDigest: ARTIFACT_DIGEST,
+        // The runtime requests store evidence only for a manifest that declares RUN_COVERAGE_V1 and an inventory.
+        collectionProfileVersion: "0.2.0",
         command: process.execPath,
         connector_id: CONNECTOR_ID,
-        protocol_capabilities: [],
+        coverageStoreStreams: ["messages"],
+        declaresCoverageStores: true,
+        manifestFingerprint: MANIFEST_FINGERPRINT,
+        protocol_capabilities: ["RUN_COVERAGE_V1"],
+        runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
+        streams: ["messages"],
       },
       deviceId: DEVICE_ID,
       deviceToken: "device-token",
@@ -244,12 +259,13 @@ for (const backend of ["sqlite", "postgres"] as const) {
     try {
       const first = await runCollectorConnector(config);
       assert.equal(first.statePutFailed, true, "lost response leaves the terminal item unacknowledged");
-      assert.equal(harness.ingestCount(), 2, "first pass sends one data record plus its coverage diagnostic");
+      // coverage_diagnostics is retired and no longer emitted: one data record, not two.
+      assert.equal(harness.ingestCount(), 1, "first pass sends one data record");
       assert.deepEqual(await counts(backend), { events: 1, runs: 1 });
 
       const second = await runCollectorConnector(config);
       assert.equal(second.statePutFailed, false);
-      assert.equal(harness.ingestCount(), 2, "cursor-aware restart emits no duplicate record or coverage batch");
+      assert.equal(harness.ingestCount(), 1, "cursor-aware restart emits no duplicate record batch");
       assert.deepEqual(await counts(backend), { events: 1, runs: 1 });
       assert.equal(harness.terminalResponses.length, 2);
       assert.deepEqual(harness.terminalResponses[1], harness.terminalResponses[0], "retry returns the stored response");

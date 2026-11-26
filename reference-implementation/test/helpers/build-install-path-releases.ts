@@ -6,15 +6,23 @@
  *
  * Both releases are built by data-connectors' own OCI builder, taken from the
  * revision the managed-connector pin names (`git show <sha>:<path>`), so this
- * never runs an unpinned copy. The builder packages only a connector that lives
- * in its own `packages/polyfill-connectors` tree. So the connector here lives in
- * a fixture tree with the same layout: the real builder, the real host-runtime
- * contract, the real LICENSE, NOTICE and package.json, and the install-path
- * manifest and connector.
+ * never runs an unpinned copy. The builder reads a connector from
+ * `connectors/<dir>/` at the repository root, and it reads every publishable
+ * connector's manifest to compute the source declaration. So the connector here
+ * lives in a fixture tree with the same layout: the real builder and the files
+ * it imports or reads, the real host-runtime contract, the real LICENSE, NOTICE
+ * and package.json, the manifests of the publishable connectors, and the
+ * install-path manifest and connector.
  *
  * Release B differs from A only in one constant in the connector. Their code
  * layers differ, so their digests differ, while the manifest stays byte-identical.
  * Both are pushed under the same repository and version.
+ *
+ * The source declaration is the builder's own file. The publish workflow pushes it as an OCI referrer
+ * of each release, not as an image layer, so an installer that reads only the layers it knows still
+ * installs the release. This job does the same. Each release gets the declaration as a referrer, and
+ * the referrer gets a signature stand-in of its own, because the installer checks the declaration's
+ * signature before it trusts the bytes.
  *
  * Two more files go into the --work directory, and the journey reads them:
  *
@@ -41,6 +49,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import type { CollectionProfilePin } from "../../../packages/local-collector/src/managed/collection-profiles.ts";
@@ -53,14 +62,31 @@ import {
   INSTALL_PATH_VERSION,
 } from "./install-path-fixture.ts";
 
-/** The files the builder and its gates read from the producer, at the pinned revision. */
+/**
+ * The files the builder reads from the producer, at the pinned revision. Derived from the builder's
+ * import graph and its runtime reads at bd6f94a113:
+ *
+ *  - scripts/build-connector-oci-artifact.mjs imports connector-host-runtime-contract.mjs,
+ *    source-declaration.mjs (which imports pdpp-source-contract.mjs) and
+ *    source-declaration-members.mjs (which imports connector-publish-allowlist.mjs).
+ *  - It reads packages/polyfill-connectors/package.json, LICENSE and NOTICE.
+ *  - source-declaration-members.mjs reads the manifest of every publishable connector. See
+ *    publishableManifests.
+ */
 const PRODUCER_FILES = [
   "scripts/build-connector-oci-artifact.mjs",
   "scripts/connector-host-runtime-contract.mjs",
+  "scripts/connector-publish-allowlist.mjs",
+  "scripts/source-declaration-members.mjs",
+  "packages/connector-installer-core/pdpp-source-contract.mjs",
+  "packages/connector-installer-core/source-declaration.mjs",
+  "packages/polyfill-connectors/package.json",
   "LICENSE",
   "NOTICE",
-  "packages/polyfill-connectors/package.json",
 ] as const;
+
+/** The producer's directory for the fixture connector: `connectors/<dir>`, and the builder's `--connector`. */
+const CONNECTOR_DIRECTORY = "claude_code";
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
@@ -126,21 +152,44 @@ function commit(root: string, message: string): void {
   git(root, [...IDENTITY, "commit", "-q", "--allow-empty-message", "-m", message]);
 }
 
+/**
+ * The manifest names of every publishable connector, read from the publish inventory the builder
+ * imports. source-declaration-members.mjs reads each of these manifests while it computes a
+ * source's members, before it filters them, so the fixture tree must hold all of them.
+ */
+function publishableManifests(root: string): string[] {
+  const inventory = pathToFileURL(join(root, "scripts/connector-publish-allowlist.mjs")).href;
+  const script = [
+    `const { PUBLISHABLE_CONNECTORS } = await import(${JSON.stringify(inventory)});`,
+    "process.stdout.write(JSON.stringify(PUBLISHABLE_CONNECTORS.map(({ manifest }) => manifest)));",
+  ].join("\n");
+  return JSON.parse(
+    execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" })
+  ) as string[];
+}
+
 function writeFixtureTree(root: string): void {
   for (const path of PRODUCER_FILES) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), gitShow(path));
   }
-  mkdirSync(join(root, "packages/polyfill-connectors/manifests"), { recursive: true });
+  for (const manifest of publishableManifests(root)) {
+    // The install-path profile below replaces this connector's producer manifest.
+    if (manifest === CONNECTOR_DIRECTORY) {
+      continue;
+    }
+    mkdirSync(join(root, "connectors", manifest), { recursive: true });
+    writeFileSync(
+      join(root, "connectors", manifest, "manifest.json"),
+      gitShow(`connectors/${manifest}/manifest.json`)
+    );
+  }
+  mkdirSync(join(root, "connectors", CONNECTOR_DIRECTORY), { recursive: true });
   writeFileSync(
-    join(root, "packages/polyfill-connectors/manifests/claude_code.json"),
+    join(root, "connectors", CONNECTOR_DIRECTORY, "manifest.json"),
     `${JSON.stringify(INSTALL_PATH_PROFILE, null, 2)}\n`
   );
-  mkdirSync(join(root, "packages/polyfill-connectors/connectors/claude_code"), { recursive: true });
-  writeFileSync(
-    join(root, "packages/polyfill-connectors/connectors/claude_code/index.ts"),
-    fixtureConnectorSource("release-a")
-  );
+  writeFileSync(join(root, "connectors", CONNECTOR_DIRECTORY, "index.ts"), fixtureConnectorSource("release-a"));
   writeFileSync(join(root, ".gitignore"), "node_modules\n");
   // The builder imports esbuild from scripts/, so node_modules must resolve it.
   symlinkSync(modules, join(root, "node_modules"), "dir");
@@ -152,7 +201,7 @@ function writeFixtureTree(root: string): void {
 function build(root: string, out: string): LayerSpec {
   execFileSync(
     process.execPath,
-    [join(root, "scripts/build-connector-oci-artifact.mjs"), "--connector", "claude_code", "--out", out],
+    [join(root, "scripts/build-connector-oci-artifact.mjs"), "--connector", CONNECTOR_DIRECTORY, "--out", out],
     {
       cwd: root,
       // The builder logs to stdout. Stdout here carries only the digests, so the builder's log goes to stderr.
@@ -250,7 +299,7 @@ function fabricatedBundle(digest: string): string {
   )}\n`;
 }
 
-/** Attach the signature stand-in to a pushed release, by digest, under the referrers tag the installer reads. */
+/** Attach the signature stand-in to a pushed artifact, by digest, under the referrers tag the installer reads. */
 function attachSignature(out: string, digest: string): void {
   writeFileSync(join(out, "signature.bundle.json"), fabricatedBundle(digest));
   execFileSync(
@@ -267,6 +316,39 @@ function attachSignature(out: string, digest: string): void {
     ],
     { cwd: out, stdio: ["ignore", 2, 2] },
   );
+}
+
+const SOURCE_DECLARATION_MEDIA_TYPE = "application/vnd.pdpp.connector.source-declaration.v1+json";
+
+/**
+ * Attach the source declaration to a pushed release as an OCI referrer, with the same `oras attach` the
+ * publish workflow runs, then sign that referrer. The installer checks the referrer's own signature before
+ * it accepts the declaration, so the referrer gets a stand-in of its own.
+ */
+function attachSourceDeclaration(out: string, digest: string): void {
+  const stdout = execFileSync(
+    oras,
+    [
+      "attach",
+      "--plain-http",
+      "--artifact-type",
+      SOURCE_DECLARATION_MEDIA_TYPE,
+      "--format",
+      "json",
+      `${registry}/${INSTALL_PATH_REPOSITORY}@${digest}`,
+      `source-declaration.json:${SOURCE_DECLARATION_MEDIA_TYPE}`,
+    ],
+    { cwd: out, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }
+  );
+  // The referrer's manifest digest, from oras's own output. The installer looks this digest up, and the
+  // signature covers it.
+  const { digest: referrerDigest } = JSON.parse(stdout) as { digest?: unknown };
+  if (typeof referrerDigest !== "string" || !DIGEST.test(referrerDigest)) {
+    throw new Error(
+      `oras attach of the source declaration to ${digest} did not report a usable digest: ${JSON.stringify(referrerDigest)}`
+    );
+  }
+  attachSignature(out, referrerDigest);
 }
 
 function pinFor(digest: string, out: string): CollectionProfilePin {
@@ -288,7 +370,7 @@ const outA = join(work, "release-a");
 const specA = build(fixtureRoot, outA);
 
 writeFileSync(
-  join(fixtureRoot, "packages/polyfill-connectors/connectors/claude_code/index.ts"),
+  join(fixtureRoot, "connectors", CONNECTOR_DIRECTORY, "index.ts"),
   fixtureConnectorSource("release-b")
 );
 git(fixtureRoot, ["add", "-A"]);
@@ -307,6 +389,8 @@ if (digestA === digestB) {
 
 attachSignature(outA, digestA);
 attachSignature(outB, digestB);
+attachSourceDeclaration(outA, digestA);
+attachSourceDeclaration(outB, digestB);
 const pinsPath = join(work, "pins.json");
 writeFileSync(
   pinsPath,

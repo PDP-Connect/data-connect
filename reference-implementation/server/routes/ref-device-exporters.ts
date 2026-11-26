@@ -40,7 +40,6 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
-import type { LocalCoverageAsOf } from "../ref-control.ts";
 import {
   type CollectionRevisionEventInput,
   isCollectionRevisionUnavailable,
@@ -558,14 +557,6 @@ export interface MountRefDeviceExportersContext {
   ingestRecord: (storageTarget: StorageTarget, record: unknown, options?: unknown) => Promise<unknown>;
   isDeviceSemanticAttemptSupported: () => boolean;
 
-  // Safe local-collector coverage read (Section 5.3). Returns only the
-  // `{ store, stream, status }` triple per store — never paths, payloads,
-  // the coverage `reason` text, or secrets.
-  listLocalCoverageDiagnostics: (storageTarget: StorageTarget) => Promise<LocalCoverageRow[]>;
-  // The owner projection's fenced local coverage verdict for one connection
-  // (the connector summary's coverage axis and `coverage_as_of`), or `null`
-  // when the connection does not resolve.
-  readCurrentLocalCoverage: (connectorInstanceId: string) => Promise<CurrentLocalCoverage | null>;
   maintainRecordIndexes: (
     storageTarget: StorageTarget,
     record: unknown,
@@ -1379,6 +1370,18 @@ async function compileDeviceAttemptContext(
     throw attemptContextError("connector manifest is unavailable for device ingest");
   }
   const streams = attemptStreamFacts(rawStreams);
+  // Older signed profiles can still send this retired protocol stream beside
+  // data. Accept its old identity shape without treating it as coverage proof.
+  const retiredCoverageDiagnostic = !streams.coverage_diagnostics;
+  if (retiredCoverageDiagnostic) {
+    streams.coverage_diagnostics = {
+      consentTimeField: null,
+      cursorField: null,
+      lexicalFields: [],
+      primaryKey: ["id"],
+      semanticFields: [],
+    };
+  }
   validateAttemptRecords(records, streams);
   const requiresSemanticWork = records.some((record) => {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
@@ -1390,6 +1393,7 @@ async function compileDeviceAttemptContext(
   }
   return {
     manifestFingerprint: fingerprintDeviceAttemptManifest(rawManifest),
+    retiredCoverageDiagnostic,
     semanticCapabilityIdentity: ctx.getSemanticCapabilityIdentity(),
     streams,
   };
@@ -1530,87 +1534,6 @@ function deviceBatchIdentityMatches(
 type GapStatMap = Map<string, { pending: number; lastUpdatedAt: string | null; reasons: Set<string> }>;
 type OutcomeStatMap = Map<string, { accepted: number; rejected: number; lastIngestAt: string | null }>;
 
-/** Safe per-store coverage triple read from `coverage_diagnostics` records. */
-export interface LocalCoverageRow {
-  status: string;
-  store: string;
-  stream: string | null;
-}
-
-/**
- * Per-source-instance local-completeness projection surfaced in the
- * device-exporter diagnostics (Section 5.3). Carries only safe coverage
- * statuses and counts; never raw paths, payloads, reasons, or secrets.
- *
- * `by_store`, `counts_by_status`, `store_count` and `unaccounted_stores` are
- * historical inventory: the latest live `coverage_diagnostics` records, with
- * no run, release, generation, revision or scope behind them. They never
- * claim current completeness. `observed` is false when the instance has no
- * such records, so absence reads as absence.
- *
- * `fully_accounted` and `coverage_as_of` are the owner projection's fenced
- * verdict for the connection: true only while a v2 terminal proof is current
- * and the coverage axis is `complete`, with the as-of that proof carries.
- */
-interface LocalCoverageProjection {
-  by_store: Record<string, string>;
-  counts_by_status: Record<string, number>;
-  coverage_as_of: LocalCoverageAsOf | null;
-  fully_accounted: boolean;
-  observed: boolean;
-  store_count: number;
-  unaccounted_stores: string[];
-}
-
-/** The owner projection's coverage verdict for one connection. */
-export interface CurrentLocalCoverage {
-  readonly asOf: LocalCoverageAsOf | null;
-  readonly axis: string;
-}
-
-const COVERAGE_STATUSES = [
-  "collected",
-  "inventory_only",
-  "excluded",
-  "deferred",
-  "missing",
-  "unsupported",
-  "unaccounted",
-] as const;
-
-function summarizeLocalCoverage(
-  rows: readonly LocalCoverageRow[],
-  current: CurrentLocalCoverage | null
-): LocalCoverageProjection {
-  const fullyAccounted = current?.axis === "complete" && current.asOf !== null;
-  const countsByStatus: Record<string, number> = {};
-  for (const status of COVERAGE_STATUSES) {
-    countsByStatus[status] = 0;
-  }
-  const byStore: Record<string, string> = {};
-  const unaccountedStores: string[] = [];
-  for (const row of rows) {
-    const status = (COVERAGE_STATUSES as readonly string[]).includes(row.status) ? row.status : "unaccounted";
-    countsByStatus[status] = (countsByStatus[status] ?? 0) + 1;
-    byStore[row.store] = status;
-    if (status === "unaccounted") {
-      unaccountedStores.push(row.store);
-    }
-  }
-  return {
-    by_store: byStore,
-    counts_by_status: countsByStatus,
-    coverage_as_of: fullyAccounted ? (current?.asOf ?? null) : null,
-    // Never derived from the inventory above: those rows can outlive the
-    // owner coverage a later refused or failed run retired.
-    fully_accounted: fullyAccounted,
-    observed: rows.length > 0,
-    store_count: rows.length,
-    // biome-ignore lint/suspicious/useArraySortCompare: Input ordering is intentionally the runtime’s established default string order.
-    unaccounted_stores: unaccountedStores.sort(),
-  };
-}
-
 function accumulateGapRow(stats: GapStatMap, gap: GapRow): void {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (gap?.status !== "pending") {
@@ -1662,88 +1585,6 @@ async function aggregateLocalCollectorGapStats(
   return { stats, unreliableIds };
 }
 
-/**
- * Resolve the connector instance for a source instance using the same
- * binding fallback as the projection, so coverage attaches to exactly the
- * instance whose storage holds the records.
- */
-function resolveConnectorInstanceForSource(
-  ctx: MountRefDeviceExportersContext,
-  source: SourceInstanceRow,
-  devicesById: Map<string, DeviceRow>,
-  connectorInstancesById: Map<string, ConnectorInstanceRow>,
-  connectorInstancesByBinding: Map<string, ConnectorInstanceRow>
-): ConnectorInstanceRow | undefined {
-  if (source.connectorInstanceId) {
-    return connectorInstancesById.get(source.connectorInstanceId);
-  }
-  if (!devicesById.get(source.deviceId)) {
-    return;
-  }
-  const identityKey = ctx.makeConnectorInstanceSourceBindingKey(
-    deviceExporterSourceBindingIdentity(source.localBindingId)
-  );
-  return connectorInstancesByBinding.get(`${source.connectorId}\nlocal_device\n${identityKey}`);
-}
-
-/**
- * Read safe local coverage diagnostics once per distinct connector instance
- * referenced by the owner's source instances. Failures to read one
- * instance must not break the whole diagnostics response, so a read error
- * yields no coverage for that instance (observed=false) rather than
- * throwing.
- */
-async function aggregateLocalCoverage(
-  ctx: MountRefDeviceExportersContext,
-  sourceInstances: readonly SourceInstanceRow[],
-  maps: {
-    connectorInstancesById: Map<string, ConnectorInstanceRow>;
-    connectorInstancesByBinding: Map<string, ConnectorInstanceRow>;
-  }
-): Promise<Map<string, LocalCoverageProjection>> {
-  const devicesById = new Map<string, DeviceRow>();
-  // projectSourceInstance only checks for device presence via the same
-  // map; build a presence-only view from the source rows themselves.
-  for (const source of sourceInstances) {
-    if (!devicesById.has(source.deviceId)) {
-      devicesById.set(source.deviceId, { deviceId: source.deviceId } as DeviceRow);
-    }
-  }
-
-  const targets = new Map<string, { connectorId: string; connectorInstanceId: string }>();
-  for (const source of sourceInstances) {
-    const instance = resolveConnectorInstanceForSource(
-      ctx,
-      source,
-      devicesById,
-      maps.connectorInstancesById,
-      maps.connectorInstancesByBinding
-    );
-    if (instance?.connectorInstanceId && !targets.has(instance.connectorInstanceId)) {
-      targets.set(instance.connectorInstanceId, {
-        connectorId: source.connectorId,
-        connectorInstanceId: instance.connectorInstanceId,
-      });
-    }
-  }
-
-  const coverage = new Map<string, LocalCoverageProjection>();
-  for (const { connectorId, connectorInstanceId } of targets.values()) {
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const rows = await ctx.listLocalCoverageDiagnostics(
-        referenceLocalDeviceStorageTarget(ctx, connectorId, connectorInstanceId)
-      );
-      // A failed verdict read shows no positive; the inventory still shows.
-      const current = await ctx.readCurrentLocalCoverage(connectorInstanceId).catch(() => null);
-      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows, current));
-    } catch {
-      // Leave unset → EMPTY_LOCAL_COVERAGE (observed=false) in projection.
-    }
-  }
-  return coverage;
-}
-
 function aggregateOutcomeStats(outcomes: BatchOutcomeRow[]): OutcomeStatMap {
   const map: OutcomeStatMap = new Map();
   for (const outcome of outcomes) {
@@ -1775,7 +1616,6 @@ function projectSourceInstance(
   outcomeStats: OutcomeStatMap,
   gapStats: GapStatMap,
   unreliableIds: Set<string>,
-  coverageByConnectorInstance: Map<string, LocalCoverageProjection>,
   now: number
 ): unknown {
   const stats = outcomeStats.get(source.sourceInstanceId) ?? { accepted: 0, lastIngestAt: null, rejected: 0 };
@@ -1821,10 +1661,6 @@ function projectSourceInstance(
     last_heartbeat_status: source.lastHeartbeatStatus ?? null,
     last_ingest_at: stats.lastIngestAt,
     local_binding_name: source.localBindingId,
-    local_collector_coverage:
-      (connectorInstance?.connectorInstanceId
-        ? coverageByConnectorInstance.get(connectorInstance.connectorInstanceId)
-        : null) ?? EMPTY_LOCAL_COVERAGE,
     local_collector_gaps: {
       last_updated_at: gap ? gap.lastUpdatedAt : null,
       pending_count: gap ? gap.pending : 0,
@@ -1839,24 +1675,6 @@ function projectSourceInstance(
     source_instance_id: source.sourceInstanceId,
   };
 }
-
-/**
- * Coverage projection for a source instance that has no coverage records
- * yet (or whose connector instance could not be resolved). `observed`
- * false is the honest "no completeness signal seen" state.
- */
-const EMPTY_LOCAL_COVERAGE: LocalCoverageProjection = Object.freeze({
-  by_store: Object.freeze({}) as Record<string, string>,
-  counts_by_status: Object.freeze(Object.fromEntries(COVERAGE_STATUSES.map((status) => [status, 0]))) as Record<
-    string,
-    number
-  >,
-  coverage_as_of: null,
-  fully_accounted: false,
-  observed: false,
-  store_count: 0,
-  unaccounted_stores: Object.freeze([]) as unknown as string[],
-});
 
 function projectDeviceExporter(
   device: DeviceRow,
@@ -1926,10 +1744,6 @@ async function buildDeviceExporterDiagnostics(
   const { stats: gapStats, unreliableIds } = await aggregateLocalCollectorGapStats(ctx, connectorIds);
   const outcomeStats = aggregateOutcomeStats(outcomes);
   const stalenessWindowsByConnector = await resolveStalenessWindowsByConnector(ctx, connectorIds);
-  const coverageByConnectorInstance = await aggregateLocalCoverage(ctx, sourceInstances, {
-    connectorInstancesByBinding,
-    connectorInstancesById,
-  });
 
   const sourcesByDevice = new Map<string, unknown[]>();
   for (const source of sourceInstances) {
@@ -1942,7 +1756,6 @@ async function buildDeviceExporterDiagnostics(
       outcomeStats,
       gapStats,
       unreliableIds,
-      coverageByConnectorInstance,
       now
     );
     const list = sourcesByDevice.get(source.deviceId) ?? [];
@@ -2994,6 +2807,12 @@ async function processDeviceIngestBatch(
             authoritativeFinalPlan,
             finalIndexPlanConcurrency(),
             async ({ record, inputIndex, version }) => {
+              const { stream } = record as { stream?: unknown };
+              if (attemptContext.retiredCoverageDiagnostic && stream === "coverage_diagnostics") {
+                // The current signed manifest no longer declares this stream.
+                // The dirty-scope reconciler removes any old index entries.
+                return;
+              }
               if (typeof version !== "number") {
                 // No durable version could be resolved for this key (e.g. it was
                 // never actually written this attempt and has no repair reread

@@ -237,7 +237,6 @@ const KNOWN_CONDITION_REASONS = new Set([
   "coverage_complete_unfillable_accounted",
   "coverage_reported_collected",
   "coverage_unknown",
-  "coverage_unknown_stale_collector",
   "credential_continuity_not_applicable",
   "credential_continuity_proven",
   "credential_continuity_unproven",

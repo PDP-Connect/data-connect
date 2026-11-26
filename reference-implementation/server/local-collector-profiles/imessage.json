@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/imessage",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/imessage",
+		"display": {
+			"name": "iMessage"
+		}
+	},
 	"connector_key": "imessage",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-	"version": "0.1.0",
+	"version": "0.1.21",
 	"display_name": "iMessage (macOS)",
 	"brand": {
-		"icon": "icons/imessage.svg",
+		"icon": "icon.svg",
 		"background_color": "#30D158"
 	},
 	"runtime_requirements": {

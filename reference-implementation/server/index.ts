@@ -216,8 +216,8 @@ import {
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
 import {
+  pinnedLocalCollectorManifest,
   readLocalCollectorArtifactDigest,
-  readLocalCollectorProfile,
   readLocalCollectorRelease,
 } from "./local-collector-profiles.ts";
 import {
@@ -330,7 +330,6 @@ import {
   listAllStreams,
   listDatasetSummaryStreamProjectionSeeds,
   listDatasetTopConnectorCandidates,
-  listLocalCoverageDiagnostics,
   listStreamsAcrossBindings,
   listStreamsByResolvedBindings,
   maintainRecordIndexes,
@@ -943,6 +942,8 @@ interface ServerOpts {
     max?: number;
   } | null;
   quiet?: boolean;
+  /** Optional catalog directory for boot reconciliation; unset uses the installed catalog. */
+  polyfillManifestsDir?: string;
   reconcilePolyfillManifests?: boolean;
   reconcilePolyfillManifestsImpl?: typeof reconcilePolyfillManifests;
   recoveryOnly?: boolean;
@@ -1394,10 +1395,12 @@ function scheduleRetrievalStartupBackfill({
 function schedulePolyfillManifestReconciliation({
   enabled,
   logger,
+  manifestsDir,
   reconcile = reconcilePolyfillManifests,
 }: {
   enabled: boolean;
   logger: LoggerLike;
+  manifestsDir?: string;
   reconcile?: typeof reconcilePolyfillManifests;
 }): Promise<void> {
   logger.info({ enabled }, "polyfill manifest reconciliation scheduled after AS/RS listen");
@@ -1407,6 +1410,7 @@ function schedulePolyfillManifestReconciliation({
         enabled,
         includeUnlisted: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
         log: (msg) => logger.info(msg),
+        ...(manifestsDir === undefined ? {} : { manifestsDir }),
       });
       if (summary.scanned > 0) {
         logger.info(summary, "polyfill manifest reconcile summary");
@@ -1564,17 +1568,7 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
   try {
-    const manifest = readLocalCollectorProfile(connectorKey);
-    if (!manifest) {
-      return null;
-    }
-    return {
-      ...manifest,
-      connector_id: connectorKey,
-      // The manifest is the only source of the owner-facing name; there is no
-      // RI-side fallback string to disagree with it.
-      display_name: manifest.display_name || connectorKey,
-    };
+    return pinnedLocalCollectorManifest(connectorId);
   } catch {
     return {
       connector_id: connectorKey,
@@ -7113,22 +7107,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     hashDeviceSecret,
     ingestRecord,
     isDeviceSemanticAttemptSupported: supportsDeviceSemanticAttemptDeadline,
-    listLocalCoverageDiagnostics,
-    maintainRecordIndexes,
+      maintainRecordIndexes,
     makeConnectorInstanceSourceBindingKey,
     pdppError,
     prepareDeviceFinalRecords,
     putSyncState,
     readCollectorProtocolHeader,
-    // The same fenced verdict the connector summary shows, so device
-    // diagnostics never claim coverage the owner projection has retired.
-    readCurrentLocalCoverage: async (connectorInstanceId: string) => {
-      const summary = await getConnectorSummaryForRoute(connectorInstanceId, controller);
-      if (!(summary && "coverage_as_of" in summary && summary.connection_health)) {
-        return null;
-      }
-      return { asOf: summary.coverage_as_of, axis: summary.connection_health.axes.coverage };
-    },
     readReferenceLocalConnectorCatalogManifest,
     requireDeviceExporterCredential,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -9680,6 +9664,7 @@ export async function startServer(opts: ServerOpts = {}) {
     : schedulePolyfillManifestReconciliation({
         enabled: reconcilePolyfillManifestsEnabled,
         logger,
+        ...(opts.polyfillManifestsDir === undefined ? {} : { manifestsDir: opts.polyfillManifestsDir }),
         ...(opts.reconcilePolyfillManifestsImpl === undefined
           ? {}
           : { reconcile: opts.reconcilePolyfillManifestsImpl }),

@@ -137,6 +137,7 @@ async function seedTerminalCoverage(
   accountingOverrides: Record<string, unknown> = {},
   artifactDigest = readLocalCollectorArtifactDigest(connectorId),
   sourceConnectorId = connectorId,
+  runId = "run_terminal_coverage",
   claimedManifestFingerprint?: string
 ): Promise<void> {
   const manifest = JSON.parse(
@@ -167,7 +168,7 @@ async function seedTerminalCoverage(
   };
   await commitRegisteredTerminalRun({
     collectionBoundary: "unscoped",
-    commitId: "commit_terminal_coverage",
+    commitId: runId === "run_terminal_coverage" ? "commit_terminal_coverage" : `commit_${runId}`,
     connectorId: sourceConnectorId,
     connectorInstanceId,
     deviceId,
@@ -200,7 +201,7 @@ async function seedTerminalCoverage(
         stream: "messages",
       },
     ],
-    runId: "run_terminal_coverage",
+    runId,
     sourceInstanceId,
     stateDelta: {},
     version,
@@ -218,6 +219,7 @@ test("registered release fingerprint survives catalog connector-key normalizatio
       {},
       release.artifactDigest,
       connectorId,
+      "run_terminal_coverage",
       fingerprintDeviceAttemptManifest(release.manifest)
     );
     const result = await projectedCoverage();
@@ -356,6 +358,18 @@ test("legacy terminal commit without v2 proof stays unknown", async () => {
   });
 });
 
+test("a newer successful run without typed proof replaces an earlier reported-collected verdict", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).reason, "coverage_reported_collected");
+    const runId = "run_terminal_without_coverage";
+    await seedTerminalCoverage("collected", false, 1, {}, undefined, connectorId, runId);
+    const later = new Date(Date.now() + 60_000).toISOString();
+    getDb().prepare("UPDATE run_history SET completed_at = ? WHERE run_id = ?").run(later, runId);
+    assert.equal((await projectedCoverage()).axis, "unknown");
+  });
+});
+
 test("a v1 terminal commit's connector `collected` claim never becomes a per-stream complete", async () => {
   await withLocalConnection(async () => {
     // The facts a v1 collector posts: the raw per-stream status set, with the
@@ -414,6 +428,54 @@ test("selected-stream v2 proof cannot cover omitted manifest streams", async () 
     assert.equal(selected.conditions.messages, "unknown");
     assert.deepEqual(selected.reportedStreams, { messages: false, sessions: true });
     assert.notEqual(selected.reason, "coverage_reported_collected", "an omitted stream is not reported collected");
+  });
+});
+
+async function rewriteSeededFacts(
+  mutate: (facts: Record<string, unknown> & { collection_facts: Record<string, any> }) => void
+) {
+  const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get("run_terminal_coverage") as {
+    facts_json: string;
+  };
+  const facts = JSON.parse(row.facts_json);
+  mutate(facts);
+  getDb()
+    .prepare("UPDATE run_history SET facts_json = ? WHERE run_id = ?")
+    .run(JSON.stringify(facts), "run_terminal_coverage");
+}
+
+test("a terminal stamped as not from a local-device connection never projects complete", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).reason, "coverage_reported_collected");
+    await rewriteSeededFacts((facts) => {
+      facts.collection_facts.coverage_eligibility_reason = "connection_source_kind_not_local_device";
+    });
+    const result = await projectedCoverage();
+    assert.notEqual(result.axis, "complete");
+    assert.equal(result.asOf, null);
+    assert.deepEqual(result.conditions, {
+      messages: "unknown",
+      sessions: "unknown",
+    });
+  });
+});
+
+test("an unscoped run with a stream that lost its scope assertion proves nothing", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).reason, "coverage_reported_collected");
+    await rewriteSeededFacts((facts) => {
+      for (const fact of facts.collection_facts.streams) {
+        if (fact.stream === "messages") {
+          fact.scoped = false;
+        }
+      }
+    });
+    const result = await projectedCoverage();
+    assert.notEqual(result.axis, "complete");
+    assert.equal(result.asOf, null);
+    assert.equal(result.conditions.messages, "unknown");
   });
 });
 
