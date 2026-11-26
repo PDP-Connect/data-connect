@@ -801,7 +801,7 @@ describe("hdiutil mount retries", () => {
     const fake = fakeHdiutil(2, () => `couldn't eject "disk9" - Resource busy`)
 
     expect(() =>
-      detachDmg(mountRoot, fake.runCommand, fake.pause)
+      detachDmg(mountRoot, fake.runCommand, fake.pause, () => true)
     ).not.toThrow()
     expect(fake.calls.map(([, args]) => args)).toEqual([
       detachArgs,
@@ -810,11 +810,27 @@ describe("hdiutil mount retries", () => {
     ])
   })
 
+  it("stops after a detach error when the mount has already disappeared", () => {
+    const fake = fakeHdiutil(Infinity, attempt =>
+      attempt === 1 ? "Resource busy" : "No such file or directory"
+    )
+    const probes = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        probes.push(path)
+        return false
+      })
+    ).not.toThrow()
+    expect(probes).toEqual([mountRoot])
+    expect(fake.calls).toEqual([["hdiutil", detachArgs]])
+    expect(fake.pauses).toEqual([])
+  })
+
   it("tries detach -force last and lists every attempt if the volume stays busy", () => {
     const fake = fakeHdiutil(Infinity, attempt => `detach stderr ${attempt}`)
 
     const error = errorFrom(() =>
-      detachDmg(mountRoot, fake.runCommand, fake.pause)
+      detachDmg(mountRoot, fake.runCommand, fake.pause, () => true)
     )
     expect(fake.calls.map(([, args]) => args)).toEqual([
       detachArgs,
