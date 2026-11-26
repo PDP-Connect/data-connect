@@ -727,7 +727,7 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
 }
 
-function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
+function runHdiutil(args, lastAttemptArgs, runCommand, pause, isDone) {
   const failures = []
   for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt += 1) {
     const attemptArgs = attempt === HDIUTIL_ATTEMPTS ? lastAttemptArgs : args
@@ -735,6 +735,7 @@ function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
       return runCommand("hdiutil", attemptArgs)
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error))
+      if (isDone?.()) return
       if (attempt < HDIUTIL_ATTEMPTS) pause(attempt * HDIUTIL_RETRY_DELAY_MS)
     }
   }
@@ -763,12 +764,31 @@ export function attachDmg(
   runHdiutil(args, args, runCommand, pause)
 }
 
-export function detachDmg(mountRoot, runCommand = run, pause = sleepSync) {
+function isDmgMounted(mountRoot) {
+  try {
+    const mount = statSync(mountRoot, { throwIfNoEntry: false })
+    if (!mount) return false
+    // A detached mount's directory can remain. A mounted DMG is a distinct
+    // filesystem from its parent, unlike the original empty directory.
+    return mount.dev !== statSync(dirname(mountRoot)).dev
+  } catch {
+    // If we cannot tell, retain the detach failure and do not remove the path.
+    return true
+  }
+}
+
+export function detachDmg(
+  mountRoot,
+  runCommand = run,
+  pause = sleepSync,
+  isMounted = isDmgMounted
+) {
   runHdiutil(
     ["detach", mountRoot],
     ["detach", "-force", mountRoot],
     runCommand,
-    pause
+    pause,
+    () => !isMounted(mountRoot)
   )
 }
 
