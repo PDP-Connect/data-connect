@@ -13,7 +13,7 @@ const PAGE_FILE = `${HERE}page.tsx`
 
 test("the settings page mounts the Vault recovery code section with the recovery key component", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
-  assert.match(page, /<RecoveryKeySetting \/>/)
+  assert.match(page, /<RecoveryKeySetting passwordSource=\{ownerPasswordSource\} \/>/)
   assert.match(page, />Recovery code<\/Text>/)
 })
 
@@ -57,5 +57,5 @@ test("the action calls the recovery-kit client and requires dashboard access, ma
   const actions = await readFile(ACTIONS_FILE, "utf8")
   assert.match(actions, /"use server"/)
   assert.match(actions, /await requireDashboardAccess\("\/settings"\)/)
-  assert.match(actions, /exportRecoveryKitCode\(\)/)
+  assert.match(actions, /exportRecoveryKitCode\(password\)/)
 })

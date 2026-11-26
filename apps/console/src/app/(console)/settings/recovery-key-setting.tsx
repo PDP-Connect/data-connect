@@ -21,31 +21,73 @@ import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
  * the physical/digital copy ends up, since it is never routinely typed into
  * any UI during normal use.
  */
+type Notice = "wrong" | "not-set" | "too-many" | "failed"
+
+const NOTICE_WORDS: Record<Exclude<Notice, "failed">, string> = {
+  "not-set": "Choose a password first.",
+  "too-many": "Too many tries. Wait a little, then try again.",
+  wrong: "That password isn't right.",
+}
+
+/** Fixed inputs for the development-only practice states (`?demo=recovery-*`). */
+export type RecoveryPracticeState = "asking" | "wrong" | "no-password" | "shown"
+
+const PRACTICE_CODE = "0200-0000-036B-6579-E5EA"
+
 export function RecoveryKeySetting({
   exportKit: suppliedExportKit,
+  passwordSource,
   practice = false,
+  practiceState,
 }: {
   exportKit?: typeof exportRecoveryKitAction
+  /** "desktop" means DataConnect made the password, so the owner may not know it. */
+  passwordSource?: "app" | "env" | "desktop" | null
   practice?: boolean
+  practiceState?: RecoveryPracticeState
 } = {}) {
   const exportKit = suppliedExportKit ?? exportRecoveryKitAction
-  const [code, setCode] = useState<string | null>(null)
+  const [code, setCode] = useState<string | null>(practiceState === "shown" ? PRACTICE_CODE : null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(
+    practiceState === "wrong" ? "wrong" : practiceState === "no-password" ? "not-set" : null
+  )
+  const [asking, setAsking] = useState(practiceState !== undefined && practiceState !== "shown")
+  const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
 
-  const runExport = () => {
-    if (practice) { setError("This is a practice state. Your recovery code is unchanged."); return }
+  const cancel = () => {
+    setAsking(false)
+    setPassword("")
+    setNotice(null)
+    setError(null)
+  }
+
+  const runExport = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    // The typed password lives only in this local for the one call; the field
+    // is cleared before the request starts, so it is never in state afterwards.
+    const typed = password
+    setPassword("")
+    if (practice) {
+      setNotice(null)
+      setError("This is a practice state. Your recovery code is unchanged.")
+      return
+    }
     setBusy(true)
     setError(null)
+    setNotice(null)
     setCopyState("idle")
-    void exportKit()
+    void exportKit(typed)
       .then(result => {
         if (!result.ok) {
-          setError(result.message)
+          if (result.reason === "failed") setError(result.message)
+          else setNotice(result.reason)
           return
         }
         setCode(result.code)
+        setAsking(false)
       })
       .catch(reason => setError(String(reason)))
       .finally(() => setBusy(false))
@@ -67,6 +109,21 @@ export function RecoveryKeySetting({
       <p className="pdpp-caption text-muted-foreground">
         DataConnect locks your saved sign-ins with a key that this computer keeps. If the computer ever loses that key, this code unlocks them again. If your DataConnect database is encrypted, it also restores the key that unlocks your data. Keep it somewhere safe, such as a password manager. It does not hold your data: keep a backup of your DataConnect files as well. Anyone who has both can read everything.
       </p>
+
+      {notice ? (
+        <p
+          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          role="alert"
+        >
+          {NOTICE_WORDS[notice === "failed" ? "wrong" : notice]}
+          {notice === "not-set" ? (
+            <>
+              {" "}
+              <a className="underline" href="/settings/sign-in">Password and sign-in</a>
+            </>
+          ) : null}
+        </p>
+      ) : null}
 
       {error ? (
         <>
@@ -101,14 +158,54 @@ export function RecoveryKeySetting({
         </div>
       ) : null}
 
-      <Button
-        className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-        disabled={busy}
-        onClick={runExport}
-        type="button"
-      >
-        {busy ? "Opening…" : code ? "Show recovery code again" : "Show recovery code"}
-      </Button>
+      {asking ? (
+        <form className="grid max-w-xl gap-3" onSubmit={runExport}>
+          <label className="grid gap-1 text-sm">
+            Enter your password to show your recovery code
+            <input
+              autoComplete="current-password"
+              className="rounded-md border border-border bg-background px-3 py-2"
+              onChange={event => setPassword(event.target.value)}
+              required
+              type="password"
+              value={password}
+            />
+          </label>
+          {passwordSource === "desktop" ? (
+            <p className="pdpp-caption text-muted-foreground">
+              You can see it under <a className="underline" href="/settings/sign-in">Password and sign-in</a>.
+            </p>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              disabled={busy}
+              type="submit"
+            >
+              {busy ? "Checking…" : "Show recovery code"}
+            </Button>
+            <Button
+              className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              disabled={busy}
+              onClick={cancel}
+              type="button"
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <Button
+          className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          onClick={() => {
+            setCode(null)
+            setAsking(true)
+          }}
+          type="button"
+        >
+          {code ? "Show recovery code again" : "Show recovery code"}
+        </Button>
+      )}
     </div>
   )
 }

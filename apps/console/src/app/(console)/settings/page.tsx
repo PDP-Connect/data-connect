@@ -76,7 +76,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
             {practice ? <DesktopSettingsPractice /> : <DesktopSettingsSetting />}
             <div className="grid gap-3 py-5">
               <Text as="h3">Recovery code</Text>
-              {practice ? <RecoveryKeySetting practice /> : <RecoveryKeySetting />}
+              {practice ? <RecoveryKeySetting passwordSource={ownerPasswordSource} practice practiceState={practice.recoveryState} /> : <RecoveryKeySetting passwordSource={ownerPasswordSource} />}
             </div>
           </Section>
         ) : null}

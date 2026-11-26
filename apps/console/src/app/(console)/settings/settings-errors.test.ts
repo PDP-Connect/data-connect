@@ -7,7 +7,7 @@ import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { copySupport } from "./support-copy.fixture.ts";
-const fail = async () => ({ ok: false as const, message: 'internal_failure_code /private/host/path' });
+const fail = async () => ({ ok: false as const, reason: 'failed' as const, message: 'internal_failure_code /private/host/path' });
 mock.module(new URL('./owner-credential-actions.ts', import.meta.url).href, { namedExports: { revealOwnerCredentialAction: fail } });
 mock.module(new URL('./recovery-key-actions.ts', import.meta.url).href, { namedExports: { exportRecoveryKitAction: fail } });
 mock.module(new URL('./desktop-pairing-actions.ts', import.meta.url).href, { namedExports: { createDesktopPairingAction: fail } });
@@ -19,7 +19,7 @@ for (const kind of ['password','recovery','pairing'] as const) test(`${kind} fai
   const press = async (label: string) => { const button = [...container.querySelectorAll('button')].find(row => row.textContent?.startsWith(label)); assert.ok(button); await act(async () => button.click()); };
   try {
     if (kind === 'password') { const { OwnerCredentialSetting } = await import('./owner-credential-setting.tsx'); await act(async () => root.render(createElement(OwnerCredentialSetting))); await press('Show password'); }
-    if (kind === 'recovery') { const { RecoveryKeySetting } = await import('./recovery-key-setting.tsx'); await act(async () => root.render(createElement(RecoveryKeySetting))); await press('Show recovery code'); }
+    if (kind === 'recovery') { const { RecoveryKeySetting } = await import('./recovery-key-setting.tsx'); await act(async () => root.render(createElement(RecoveryKeySetting))); await press('Show recovery code'); const input = container.querySelector('input'); assert.ok(input); await act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')?.set?.call(input, 'typed-password-for-test'); input.dispatchEvent(new dom.window.Event('input', { bubbles: true })) }); await act(async () => { container.querySelector('form')?.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })) }); }
     if (kind === 'pairing') { const { DesktopPairingSetting } = await import('./desktop-pairing-setting.tsx'); await act(async () => root.render(createElement(DesktopPairingSetting))); await press('Connect a DataConnect app on another computer'); await press('Create pairing code'); }
     assert.doesNotMatch(container.textContent ?? '', /internal_failure_code|\/private\/host/);
     assert.equal(container.querySelector('details'), null);

@@ -23,6 +23,10 @@ export const settingsPracticeNames = [
 	"off-unconfirmed",
 	"sessions-two",
 	"sessions-thirteen",
+	"recovery-asking",
+	"recovery-wrong",
+	"recovery-no-password",
+	"recovery-shown",
 ] as const;
 export type SettingsPracticeName = (typeof settingsPracticeNames)[number];
 
@@ -255,6 +259,9 @@ export function buildSettingsPractice(
 		inventory,
 		managedDesktop: !name.startsWith("server"),
 		revealProof: name !== "browser-desktop",
+		recoveryState: name.startsWith("recovery-")
+			? (name.slice("recovery-".length) as "asking" | "wrong" | "no-password" | "shown")
+			: undefined,
 		passwordSource: name.startsWith("server")
 			? ("env" as const)
 			: ("desktop" as const),
