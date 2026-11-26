@@ -9,13 +9,10 @@
 import type { PendingPressureGap } from "../runtime/scheduler-source-pressure-cooldown.ts";
 import type { PendingDetailGapSummary } from "./ref-control.ts";
 
-/** The most recent pressure timestamp on a gap — last attempt, else last update. */
+/** The most recent pressure timestamp on a gap — from a recorded attempt only. */
 export function readPendingGapLastPressureAt(gap: PendingDetailGapSummary): string | null {
   if (typeof gap.last_attempt_at === "string") {
     return gap.last_attempt_at;
-  }
-  if (typeof gap.updated_at === "string") {
-    return gap.updated_at;
   }
   return null;
 }

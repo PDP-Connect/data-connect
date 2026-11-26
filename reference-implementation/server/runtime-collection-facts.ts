@@ -41,6 +41,14 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
   if (typeof entry.stream !== "string" || !entry.stream) {
     return null;
   }
+  // A present-but-invalid count is unknown, not zero: dropping the stream reads
+  // as "no facts" downstream instead of as "no pending gaps".
+  const pending = Object.hasOwn(entry, "pending_detail_gaps")
+    ? readSafeNonNegativeInteger(entry.pending_detail_gaps)
+    : 0;
+  if (pending === null) {
+    return null;
+  }
   const coverageStatuses = readCoverageStatuses(entry.coverage_statuses);
   const fact: RuntimeCollectionFact = {
     checkpoint: typeof entry.checkpoint === "string" ? entry.checkpoint : null,
@@ -50,7 +58,7 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
     // never as a fabricated denominator or numerator.
     considered: readSafeNonNegativeInteger(entry.considered),
     covered: readSafeNonNegativeInteger(entry.covered),
-    pending_detail_gaps: readFiniteNumber(entry.pending_detail_gaps, 0),
+    pending_detail_gaps: pending,
     ...permanentDetailGapsField(entry.permanent_detail_gaps),
     ...(coverageStatuses ? { coverage_statuses: coverageStatuses } : {}),
     skipped: readRuntimeSkipFact(entry.skipped),

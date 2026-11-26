@@ -358,7 +358,15 @@ function reconcileFleetScope(
   inventory: readonly FleetConfiguredConnection[],
   summaries: readonly FleetSummary[]
 ): ReconciledFleetScope {
-  const summariesByConnectionId = new Map(summaries.map((summary) => [summary.connection_id, summary]));
+  const summariesByConnectionId = new Map<string, FleetSummary>();
+  const ambiguousSummaryIds = new Set<string>();
+  for (const summary of summaries) {
+    if (summariesByConnectionId.has(summary.connection_id)) {
+      ambiguousSummaryIds.add(summary.connection_id);
+    } else {
+      summariesByConnectionId.set(summary.connection_id, summary);
+    }
+  }
   const inventoryByConnectionId = new Map(inventory.map((connection) => [connection.connectorInstanceId, connection]));
   const assessed: FleetConnectionReference[] = [];
   const pausedLifecycle: FleetConnectionReference[] = [];
@@ -381,8 +389,20 @@ function reconcileFleetScope(
       setupPending.push(ref);
       continue;
     }
-    const summary = summariesByConnectionId.get(connection.connectorInstanceId);
-    if (scope !== "operational" || !summary) {
+    // Do not let input order decide which report represents an ambiguous connection.
+    // Every candidate is surfaced as unassessed in the summary pass below.
+    if (ambiguousSummaryIds.has(ref.connection_id)) {
+      continue;
+    }
+    // A summary assesses a connection only when it names the same connector
+    // and instance, not just the same connection id.
+    const summary = summariesByConnectionId.get(ref.connection_id);
+    if (
+      scope !== "operational" ||
+      !summary ||
+      summary.connector_instance_id !== ref.connector_instance_id ||
+      summary.connector_id !== ref.connector_id
+    ) {
       unassessed.push(ref);
       continue;
     }
@@ -391,7 +411,15 @@ function reconcileFleetScope(
   }
 
   for (const summary of summaries) {
-    if (!inventoryByConnectionId.has(summary.connection_id)) {
+    const connection = inventoryByConnectionId.get(summary.connection_id);
+    if (!connection) {
+      unassessed.push(summaryReference(summary));
+      continue;
+    }
+    // Duplicates make a connection unassessable only where it would be assessed;
+    // an excluded or setup-pending connection is reported by its lifecycle.
+    const scope = inventoryScope(connection);
+    if (ambiguousSummaryIds.has(summary.connection_id) && scope !== "excluded" && scope !== "setup_pending") {
       unassessed.push(summaryReference(summary));
     }
   }

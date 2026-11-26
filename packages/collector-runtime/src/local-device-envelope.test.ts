@@ -141,6 +141,30 @@ test("canonicalTerminalRunCommitEnvelope has a stable cross-runtime golden hash 
   assert.equal(hashCanonicalJson(canonical), "147b0baeb81e66a5dfb3f0862596d50aeb87fe8a6723306740e9446dddb72648");
 });
 
+test("terminal fixture requires a source identity before canonicalization", () => {
+  const input = {
+    collection_boundary: "unscoped",
+    commit_id: "commit-fixture",
+    connector_id: "connector-fixture",
+    connector_instance_id: "instance-fixture",
+    device_id: "device-fixture",
+    run_id: "run-fixture",
+    state_delta: {},
+    terminal_facts: [],
+    version: 1,
+  } as const;
+  for (const invalid of ["", 7]) {
+    assert.throws(
+      () =>
+        canonicalTerminalRunCommitEnvelope({
+          ...input,
+          source_instance_id: invalid as string,
+        }),
+      /sourceInstanceId must be a non-blank string/
+    );
+  }
+});
+
 const envelopeFixture = {
   batchId: "fixture-batch",
   batchSeq: 1,
@@ -182,6 +206,16 @@ test("local-device batch identity agrees with every envelope", () => {
   const batch = { ...envelopeFixture, records: [first], sourceInstanceId: fixtureSource };
   const valid = buildLocalDeviceIngestBatchRequest(batch);
   assert.equal(valid.source_instance_id, fixtureSource);
+  assert.equal(valid.batch_id, envelopeFixture.batchId);
+  assert.equal(valid.batch_seq, envelopeFixture.batchSeq);
+  assert.equal(valid.connector_id, envelopeFixture.connectorId);
+  assert.equal(valid.device_id, envelopeFixture.deviceId);
+  for (const mismatch of [{ batchId: "different-batch" }, { batchSeq: 2 }]) {
+    assert.throws(
+      () => buildLocalDeviceIngestBatchRequest({ ...batch, ...mismatch }),
+      /batch (batchId|batchSeq) must match every record envelope/
+    );
+  }
   assert.equal(valid.body_hash, hashCanonicalJson([first]));
   assert.throws(
     () =>

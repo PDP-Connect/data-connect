@@ -28,7 +28,12 @@ type BuildExpandCapabilities = (
 
 type BuildStreamDiscoveryCapabilities = (args: {
   connectorId?: string | null;
-  stream: { name: string; query?: Record<string, unknown> };
+  stream: {
+    name: string;
+    schema?: { properties?: Record<string, unknown> };
+    relationships?: { name: string; stream: string; cardinality: string }[];
+    query?: Record<string, unknown>;
+  };
 }) => Record<string, unknown>;
 
 const buildExpandCapabilities = buildExpandCapabilitiesUntyped as BuildExpandCapabilities;
@@ -112,7 +117,9 @@ test("buildStreamDiscoveryCapabilities encodes the stream, scopes URLs by connec
     connectorId: "c1",
     stream: {
       name: "ord ers",
-      query: { aggregations: { count: ["x"] }, expand: [{ name: "r" }], range_filters: { amount: ["gte"] } },
+      schema: { properties: { amount: { type: "number" } } },
+      relationships: [{ name: "r", stream: "lines", cardinality: "many" }],
+      query: { aggregations: { count: true }, expand: [{ name: "r" }], range_filters: { amount: ["gte"] } },
     },
   });
   assert.equal(caps.metadata_url, "/v1/streams/ord%20ers?connector_id=c1");
