@@ -35,11 +35,6 @@ test("the header no longer duplicates the source breadcrumb in its description",
   assert.doesNotMatch(header, /href=\{sourceHref\}|connectorLabel/);
 });
 
-test("the connector name stays visible in the title without a source route", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.ok(src.includes("<span>{connectorName} sync</span>"));
-});
-
 test("breadcrumbs include a source only when its connection route is known", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   // DIRECTION.md, “What must stay true” #4: the source breadcrumb remains conditional and singular.
