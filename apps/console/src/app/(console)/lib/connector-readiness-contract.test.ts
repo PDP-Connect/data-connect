@@ -1,0 +1,178 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from "node:assert/strict";
+import test from "node:test";
+import { browserConnectSupportFromReadiness } from "./browser-connect-readiness.ts";
+import { canonicalConnectorKey } from "./connection-modality.ts";
+import {
+  type ConnectorReadiness,
+  parseConnectorReadiness,
+  parseConnectorReadinessResponse,
+  READINESS_ACTIONS,
+  READINESS_REASONS,
+  readinessConnectorKey,
+  selectConnectorReadiness,
+} from "./connector-readiness-contract.ts";
+import { readinessBlockNote } from "./connector-readiness-copy.ts";
+
+const wire = (overrides: Record<string, unknown> = {}) => ({
+  action: "connect",
+  artifact: { digest: null, source: null, state: "verified", version: "1.0.0" },
+  browser_bound: true,
+  catalog: "not_consulted",
+  connector_key: "linkedin",
+  detail: null,
+  host: "ready",
+  reason: "runnable",
+  ...overrides,
+});
+
+const readiness = (action: ConnectorReadiness["action"], reason: ConnectorReadiness["reason"], detail: string | null = null) =>
+  ({ action, browserBound: true, connectorKey: "linkedin", detail, reason }) satisfies ConnectorReadiness;
+
+test("a well-formed verdict parses; extra server fields are ignored", () => {
+  assert.deepEqual(parseConnectorReadiness(wire()), readiness("connect", "runnable"));
+});
+
+test("every server action and reason the contract names parses", () => {
+  for (const action of READINESS_ACTIONS) {
+    assert.equal(parseConnectorReadiness(wire({ action }))?.action, action);
+  }
+  for (const reason of READINESS_REASONS) {
+    assert.equal(parseConnectorReadiness(wire({ reason }))?.reason, reason);
+  }
+});
+
+test("a malformed verdict reads as no verdict", () => {
+  for (const bad of [
+    null,
+    "connect",
+    [],
+    wire({ action: "launch" }),
+    wire({ reason: "because" }),
+    wire({ browser_bound: "yes" }),
+    wire({ connector_key: "" }),
+    wire({ connector_key: undefined }),
+  ]) {
+    assert.equal(parseConnectorReadiness(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("detail is trimmed and blank detail becomes null", () => {
+  assert.equal(parseConnectorReadiness(wire({ detail: "  no display  " }))?.detail, "no display");
+  assert.equal(parseConnectorReadiness(wire({ detail: "   " }))?.detail, null);
+  assert.equal(parseConnectorReadiness(wire({ detail: 5 }))?.detail, null);
+});
+
+test("the response parser keeps well-formed records and drops others", () => {
+  const parsed = parseConnectorReadinessResponse({
+    data: [wire(), { action: "nope" }, wire({ connector_key: "goodreads", action: "install", reason: "not_installed" })],
+    object: "connector_browser_enrollment_readiness",
+  });
+  assert.deepEqual(
+    parsed.map((item) => item.connectorKey),
+    ["linkedin", "goodreads"]
+  );
+  assert.deepEqual(parseConnectorReadinessResponse({ data: [wire()], object: "something_else" }), []);
+  assert.deepEqual(parseConnectorReadinessResponse(null), []);
+});
+
+test("only a connect verdict lets the browser-session routes add an account", () => {
+  for (const action of READINESS_ACTIONS) {
+    const support = browserConnectSupportFromReadiness("linkedin", { ...readiness(action, "runnable") });
+    assert.equal(support.canAddAccount, action === "connect", action);
+  }
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null).canAddAccount, false, "no verdict fails closed");
+});
+
+test("a server that predates the readiness endpoint is deferred to; any other missing verdict is not", () => {
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).canAddAccount, true);
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, false).canAddAccount, false);
+  assert.equal(
+    browserConnectSupportFromReadiness("linkedin", readiness("configure", "host_requirement_unmet"), true).canAddAccount,
+    false,
+    "a verdict always wins over the legacy deferral"
+  );
+});
+
+test("the routes stay reachable for a browser-bound connector so an existing connection can be repaired", () => {
+  assert.equal(browserConnectSupportFromReadiness("some-new-connector", readiness("repair", "artifact_invalid")).browserBound, true);
+  assert.equal(
+    browserConnectSupportFromReadiness("some-new-connector", { ...readiness("unavailable", "not_browser_bound"), browserBound: false })
+      .browserBound,
+    false
+  );
+});
+
+test("the verdict alone decides browserBound; the bundled manifest is consulted only for a server that predates the endpoint", () => {
+  // `linkedin` is browser-bound in the bundled manifest.
+  assert.equal(
+    browserConnectSupportFromReadiness("linkedin", { ...readiness("unavailable", "not_browser_bound"), browserBound: false })
+      .browserBound,
+    false,
+    "the server's verdict is not overridden by the bundled manifest"
+  );
+  assert.equal(
+    browserConnectSupportFromReadiness("linkedin", null, false).browserBound,
+    false,
+    "no verdict and no 404 gives no guess from the bundled manifest"
+  );
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).browserBound, true);
+  assert.equal(
+    browserConnectSupportFromReadiness("github", null, true).canAddAccount,
+    false,
+    "a pre-readiness server is deferred to only for a connector the bundled manifest marks browser-bound"
+  );
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).canAddAccount, true);
+  assert.equal(browserConnectSupportFromReadiness("some-new-connector", null, true).browserBound, false);
+});
+
+/** The owner copy for a verdict that must have some. */
+function blockNote(verdict: ReturnType<typeof readiness>): string {
+  const note = readinessBlockNote(verdict);
+  assert.ok(note !== null, "expected owner copy for a blocking verdict");
+  return note;
+}
+
+test("blocking reasons have fixed owner copy that never carries the server's detail; others have none", () => {
+  const configure = blockNote(readiness("configure", "host_requirement_unmet", "No display at /srv/run."));
+  assert.match(configure, /not set up to run this connector yet\./);
+  assert.doesNotMatch(configure, /No display|\/srv/);
+  assert.match(blockNote(readiness("repair", "artifact_invalid")), /failed verification/);
+  assert.match(blockNote(readiness("retry", "inspection_unavailable")), /Retry/);
+  assert.match(blockNote(readiness("retry", "catalog_unavailable")), /catalog could not be reached/);
+  assert.match(blockNote(readiness("unavailable", "not_published")), /not published/);
+  assert.match(blockNote(readiness("unavailable", "not_implemented")), /placeholder and does not collect data yet/);
+  for (const quiet of [
+    readiness("connect", "runnable"),
+    readiness("install", "not_installed"),
+    readiness("unavailable", "not_browser_bound"),
+  ]) {
+    assert.equal(readinessBlockNote(quiet), null, quiet.reason);
+  }
+  assert.equal(readinessBlockNote(null), null);
+});
+
+test("the readiness key rule answers the same as the console's canonical connector key", () => {
+  for (const id of [
+    "linkedin",
+    "https://registry.pdpp.dev/connectors/linkedin",
+    "https://registry.pdpp.dev/connectors/linkedin/",
+    "  https://registry.pdpp.dev/connectors/linkedin ",
+    " goodreads ",
+    "https://example.test/connectors/custom",
+    "",
+  ]) {
+    assert.equal(readinessConnectorKey(id), canonicalConnectorKey(id), JSON.stringify(id));
+  }
+});
+
+test("a verdict is chosen by connector key, in any position, and none matches to null", () => {
+  const first = readiness("connect", "runnable");
+  const second = { ...readiness("install", "not_installed"), connectorKey: "goodreads" };
+  assert.equal(selectConnectorReadiness([first, second], "https://registry.pdpp.dev/connectors/goodreads"), second);
+  assert.equal(selectConnectorReadiness([first, second], first.connectorKey), first);
+  assert.equal(selectConnectorReadiness([first, second], "missing"), null);
+  assert.equal(selectConnectorReadiness([], first.connectorKey), null);
+});
