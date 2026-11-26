@@ -1004,7 +1004,7 @@ export function toSourcesView(
 export function orderSourcesForList(instances: readonly SourceInstanceView[]): SourceInstanceView[] {
   return [...instances].sort((a, b) => {
     const priority = (instance: SourceInstanceView) =>
-      instance.statusWords.needsYou ? 0 : instance.statusWords.row === 11 ? 1 : 2;
+      instance.statusWords.row >= 4 && instance.statusWords.row <= 9 ? 0 : instance.statusWords.row === 11 ? 1 : 2;
     return priority(a) - priority(b) || a.displayName.localeCompare(b.displayName);
   });
 }

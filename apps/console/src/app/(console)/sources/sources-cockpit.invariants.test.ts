@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const CSS_FILE = `${HERE}sources-view.css`;
 const VIEW_FILE = `${HERE}sources-view.tsx`;
-const SOURCE_PAGE_FILE = `${HERE}[connector]/page.tsx`;
+const SOURCE_PAGE_FILE = `${HERE}[connector]/source-page.tsx`;
 const STREAM_FACTS_FILE = `${HERE}[connector]/stream-collection-facts.tsx`;
 
 // DIRECTION.md, “Data sources /sources”: every screen uses one list, and each row opens its data source page.
@@ -65,8 +65,8 @@ test("the source page keeps the moved per-kind list and its collection facts", a
   ]);
   // detail-page-2 decision 6: the title alone; coverage facts are a plain line inside folded Details, not a chip.
   assert.match(page, /title="What is here"/);
-  assert.match(page, /streamCountLabel\(s\)/);
-  assert.match(page, /<StreamCollectionFactsLine\s+facts=\{facts\}/);
+  assert.match(page, /knownStreamRecordCount\(stream\)/);
+  assert.match(page, /coverage_condition/);
   assert.match(facts, /data-testid="stream-coverage-fact"/);
   assert.match(facts, /data-testid="stream-collected-counts"/);
   assert.match(facts, /data-testid="stream-forward-disposition"/);
