@@ -24,6 +24,10 @@ function loadSetting(): Promise<Setting> {
       },
     })
     mock.module(
+      new URL("./owner-password-first-setup-actions.ts", import.meta.url).href,
+      { namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) } }
+    )
+    mock.module(
       new URL("./owner-credential-actions.ts", import.meta.url).href,
       {
         namedExports: {
@@ -88,4 +92,15 @@ test("a desktop started with an owner password env var names both variables and 
   assert.match(html, /DATACONNECT_OWNER_PASSWORD/)
   assert.match(html, /restart DataConnect/)
   assert.doesNotMatch(html, /restart the server/)
+})
+
+test("the desktop button says Set password until the owner has set one, then Change password", async () => {
+  const unset = await render({ canReveal: true, passwordSet: false, source: "desktop" })
+  assert.match(unset, /<button[^>]*type="button"[^>]*>Set password</)
+  assert.doesNotMatch(unset, /Change password/)
+  const set = await render({ canReveal: true, passwordSet: true, source: "desktop" })
+  assert.match(set, /<button[^>]*type="button"[^>]*>Change password</)
+  assert.doesNotMatch(set, /Set password/)
+  const unspecified = await render({ canReveal: true, source: "desktop" })
+  assert.match(unspecified, />Change password</)
 })

@@ -1177,3 +1177,17 @@ docker() {
     }
   })
 })
+
+describe("Windows sccache pin", () => {
+  it("pins sccache on Windows only, because 0.19.0 overruns the CreateProcess limit", () => {
+    const workflow = readReleaseWorkflow()
+    const windows = readWorkflowStep(workflow, "Setup sccache (Windows, pinned)")
+    expect(windows).toContain("if: matrix.os_family == 'windows'")
+    expect(windows).toContain("version: v0.16.0")
+    const others = readWorkflowStep(workflow, "Setup sccache")
+    expect(others).toContain("if: matrix.os_family != 'windows'")
+    expect(others).not.toContain("version:")
+    // Caching stays on for every leg.
+    expect(workflow).toContain("RUSTC_WRAPPER: sccache")
+  })
+})

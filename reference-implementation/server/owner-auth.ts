@@ -60,6 +60,7 @@ import {
   type OwnerSessionStore,
   type OwnerSessionSameSite,
 } from "./owner-session.ts";
+import { isBlockedOwnerPassword, OWNER_PASSWORD_TOO_COMMON_MESSAGE } from "./owner-password-blocklist.ts";
 import {
   createOwnerPasswordVerifier,
   OWNER_PASSWORD_MIN_LENGTH,
@@ -1336,6 +1337,12 @@ export function createOwnerAuthPlaceholder({
             code: "owner_password_too_short",
             message: `New passwords must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters long.`,
           },
+        });
+        return;
+      }
+      if (isBlockedOwnerPassword(newPassword)) {
+        res.status(400).json({
+          error: { code: "owner_password_too_common", message: OWNER_PASSWORD_TOO_COMMON_MESSAGE },
         });
         return;
       }

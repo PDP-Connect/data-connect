@@ -14,13 +14,15 @@ PLAYWRIGHT_EXECUTABLE_PATH=/path/to/existing/chromium \
 node scripts/reachability/run-release.mjs
 ```
 
-The installer checks integrity before installing into an isolated dependency prefix. It does not change dependency manifests or lockfiles. It requires headroom above the 100 GB disk floor. The runner checks disk before each step, keeps every registered provider/usage pair in the matrix and fails on missing coverage. Browser steps require 110 GB free. They use the existing cache and never download a browser.
+The installer checks integrity before installing into an isolated dependency prefix. It does not change dependency manifests or lockfiles. It requires headroom above the 100 GB disk floor. The runner checks disk before each step, keeps every registered provider/usage pair in the matrix and fails on missing coverage. Browser steps require 110 GB free. They use the existing cache and never download a browser. The browser steps also need the `e2e` dependencies: run `npm --prefix e2e ci` once, as CI does.
 
 `testing-effects.mjs` is the only effects-harness seam. `effect-fixtures.ts` imports the published request/result unions. Its handlers match exact kind/operation pairs. Fixture outputs live in neutral fixture assets; network proof requests reach the actual owned local gate. Long-running spawn fixtures create harmless children and retain their own resource ledger. Credentials are transient and excluded from arguments, environment, diagnostics and browser responses.
 
 `release-journey.test.mjs` exercises the real owner HTTP service. Separate suites cover draft rotation, locked custody, public recovery, runtime consent, pending initial streaming proof and installer refusals. `contract-preflight.test.mjs` checks export availability only. It cannot certify a lifecycle result.
 
-Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-stream reachability-stream.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability.
+`provider-independence.test.mjs` is not part of this gate. It checks that DataConnect's source and built console name no provider, which is a DataConnect property, not a property of the package archive. Run it on its own with `node --import tsx --test scripts/reachability/provider-independence.test.mjs`. It fails until the console stops naming provider ids.
+
+Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-setup reachability-setup.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability. Pending initial stream proof remains covered at the owner HTTP boundary by `initial-proof.test.mjs`; the browser journeys do not assert that state’s wording.
 
 The controller suites use the resource governor. Reachability browser journeys add a constructed namespace root whose ancestors have mapped owners, retaining private network/PID isolation and Gozar's unmodified home-safety checks. `owned-root-sandbox.test.mjs` checks public inventory and loopback-only networking inside that namespace. A forced test-process exit handles the missing factory shutdown API only after public route cleanup attempts; retained cleanup uncertainty remains a failure.
 

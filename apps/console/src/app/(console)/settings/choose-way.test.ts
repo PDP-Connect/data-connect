@@ -1,0 +1,456 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+// The recommended way and the Other ways list: a projection of the catalog.
+import assert from "node:assert/strict";
+import test, { mock } from "node:test";
+import { JSDOM } from "jsdom";
+import * as React from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { otherWays, recommendedWay } from "./choose-way.ts";
+import { tailscaleFacts } from "./real-gozar-shapes.fixture.ts";
+import type { requestReachability } from "./reachability-client.ts";
+import { publicError } from "./reachability-errors.ts";
+
+mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
+  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+});
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
+  namedExports: {
+    requestReachability: async () => {
+      throw new Error("Use the test transport");
+    },
+  },
+});
+
+type Result = Awaited<ReturnType<typeof requestReachability>>;
+type Call = { url: string; body?: Record<string, unknown> };
+const ok = (data: unknown): Result => ({ ok: true, data });
+const fail = (code: string): Result => ({ ok: false, ...publicError(code, "server words") });
+
+// The closed-vocabulary scan of remote-access-copy.test.ts, plus raw status words.
+const bannedPatterns = [/reachability/i, /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/i, /\b(?:installer|privilege|secrets|runtime|host)\.[a-z]/i, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, /detect-only|deferred|admitted|action-required/i];
+const bannedIn = (text: string) => bannedPatterns.filter((pattern) => pattern.test(text)).map(String);
+
+const available = { reason: "admitted", state: "available" };
+// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in real-gozar-shapes.fixture.ts.
+const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: state === "present" ? { known: true, value: "1.80.0" } : { known: false, reason: "n" } });
+const way = (providerId: string, over: Record<string, unknown> = {}) => ({
+  providerId,
+  label: `Label ${providerId}`,
+  reach: providerId === "lan" ? "lan" : "public",
+  transport: "https",
+  availability: { session: available, durable: available },
+  configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
+  facts: [],
+  prerequisites: [],
+  ...over,
+});
+const tailscale = (setup: string, extra: string[] = []) => [
+  prerequisite("local-setup", setup),
+  ...extra.map((state) => prerequisite("funnel", state)),
+];
+const ids = [
+  "localhost-run",
+  "tailscale-funnel",
+  "cloudflare-named",
+  "ngrok-https-edge",
+  "tailscale-private",
+  "lan",
+  "own-address",
+  "ngrok-tls-passthrough",
+  "tunnl-gg",
+];
+const detectOnly = way("ngrok-tcp-passthrough", {
+  availability: { session: { reason: "deferred by Lead", state: "detect-only" } },
+});
+function catalogWith(tailscaleState: { setup: string; extra?: string[] }) {
+  const providers = ids.map((id) =>
+    id.startsWith("tailscale-") ? way(id, { prerequisites: tailscale(tailscaleState.setup, tailscaleState.extra) }) : way(id)
+  );
+  return { catalogRevision: "c1", observedAt: "x", schemaVersion: 1, providers: [...providers, detectOnly] };
+}
+const noTailscale = catalogWith({ setup: "missing" });
+const tailscaleReady = catalogWith({ setup: "present" });
+const funnelBlocked = catalogWith({ setup: "present", extra: ["denied"] });
+const caps = {};
+type Inv = Parameters<typeof recommendedWay>[0];
+const inv = (value: unknown) => value as Inv;
+
+test("without Tailscale the temporary address is recommended", () => {
+  assert.equal(recommendedWay(inv(noTailscale), caps)?.providerId, "localhost-run");
+});
+
+test("Tailscale installed, signed in and not blocked is recommended", () => {
+  assert.equal(recommendedWay(inv(tailscaleReady), caps)?.providerId, "tailscale-funnel");
+});
+
+// The real catalog cannot tell a signed-out daemon from a signed-in one, so only a way the owner already set up is recommended.
+function withTailscaleFacts(prerequisites: unknown[]) {
+  const providers = ids.map((id) => (id.startsWith("tailscale-") ? way(id, { prerequisites }) : way(id)));
+  return inv({ catalogRevision: "c1", observedAt: "x", schemaVersion: 1, providers });
+}
+test("with real Tailscale facts, a way that needs a sign-in is not recommended over one that needs none", () => {
+  for (const [name, facts] of [
+    ["not running", tailscaleFacts.notRunning],
+    ["not installed", tailscaleFacts.notInstalled],
+    ["running, signed out", tailscaleFacts.signedOut],
+  ] as const) {
+    assert.equal(recommendedWay(withTailscaleFacts([...facts]), caps)?.providerId, "localhost-run", name);
+  }
+});
+
+test("with real Tailscale facts, a Tailscale the owner already set up is recommended", () => {
+  const signedIn = withTailscaleFacts([...tailscaleFacts.signedIn]);
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set(["tailscale-funnel"]))?.providerId, "tailscale-funnel");
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set())?.providerId, "localhost-run");
+});
+
+test("Tailscale with Funnel blocked is not recommended and its row shows the missing step", () => {
+  assert.equal(recommendedWay(inv(funnelBlocked), caps)?.providerId, "localhost-run");
+  const lasting = otherWays(inv(funnelBlocked), caps, "localhost-run").find((group) => group.id === "lasting")!;
+  const row = lasting.rows.find((item) => item.providerId === "tailscale-funnel")!;
+  assert.equal(row.usable, false);
+  assert.match(row.missing!.text, /Funnel isn't allowed/);
+  assert.equal(lasting.rows.at(-1)!.providerId, "tailscale-funnel", "a way that cannot run comes last");
+});
+
+test("a missing Tailscale app shows Get Tailscale", () => {
+  const row = otherWays(inv(noTailscale), caps, "localhost-run")
+    .flatMap((group) => group.rows)
+    .find((item) => item.providerId === "tailscale-funnel")!;
+  assert.match(row.missing!.text, /Needs the Tailscale app/);
+  assert.equal(row.missing!.link!.label, "Get Tailscale");
+});
+
+test("Other ways has three groups, no development row, and no code in any text", () => {
+  const groups = otherWays(inv(tailscaleReady), caps, "tailscale-funnel");
+  assert.deepEqual(groups.map((group) => group.title), ["Lasting address for AI apps", "Only my own devices", "Advanced"]);
+  const rows = groups.flatMap((group) => group.rows);
+  assert.ok(!rows.some((row) => row.providerId === "ngrok-tcp-passthrough"), "detect-only row hidden");
+  assert.ok(!rows.some((row) => row.providerId === "tailscale-funnel"), "the recommended way is not repeated");
+  for (const row of rows) {
+    const text = [row.title, row.line, row.missing?.text ?? ""].join(" ");
+    assert.deepEqual(bannedIn(text), [], text);
+    assert.doesNotMatch(text, /detect-only|deferred|admitted|action-required|unsupported|[a-z]+-[a-z]+-[a-z]+/);
+  }
+});
+
+test("a missing prerequisite the owner can supply during setup does not block the way", () => {
+  // Real 0.5.1 shape for managed Cloudflare with the connector installed: the
+  // saved credential is missing, with a remedy (the token the setup asks for).
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy }],
+  });
+  const noRemedy = way("ngrok-https-edge", { availability: attached, prerequisites: [prerequisite("binary", "missing")] });
+  const rows = otherWays(inv({ ...noTailscale, providers: [managed, noRemedy] }), caps, null).flatMap((group) => group.rows);
+  const cloudflare = rows.find((row) => row.providerId === "cloudflare-named")!;
+  assert.equal(cloudflare.usable, true);
+  assert.equal(cloudflare.missing, null);
+  const blocked = rows.find((row) => row.providerId === "ngrok-https-edge")!;
+  assert.equal(blocked.usable, false, "a missing program with no remedy still blocks");
+  const link = { ...remedy, kind: "open-url", href: "https://example.invalid/" };
+  const viaLink = way("cloudflare-named", { availability: attached, prerequisites: [{ ...prerequisite("credential", "missing"), remedy: link }] });
+  const linkRow = otherWays(inv({ ...noTailscale, providers: [viaLink] }), caps, null).flatMap((group) => group.rows)[0]!;
+  assert.equal(linkRow.usable, false, "a remedy the owner cannot type here still blocks");
+  assert.equal(
+    recommendedWay(inv({ ...noTailscale, providers: [managed] }), caps, {}, new Set())?.providerId,
+    "cloudflare-named",
+    "still the fallback when nothing else can run"
+  );
+});
+
+test("a way that still needs setup is not recommended over one that needs none", () => {
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managed = way("cloudflare-named", { availability: attached, prerequisites: [{ ...prerequisite("credential", "missing"), remedy }] });
+  const providers = [managed, way("own-address")];
+  assert.equal(recommendedWay(inv({ ...noTailscale, providers }), caps)?.providerId, "own-address");
+});
+
+test("a way the host cannot run says so in plain words", () => {
+  const broken = way("ngrok-https-edge", { availability: { session: { reason: "usage-not-supported", state: "unsupported" } } });
+  const row = otherWays(inv({ ...noTailscale, providers: [broken] }), caps, null)[0]!.rows[0]!;
+  assert.equal(row.usable, false);
+  assert.equal(row.missing!.text, "Can't run on this computer.");
+});
+
+// ---------- the screen ----------
+
+const draft = (id: string) => ({ draftId: id, configuration: { revision: "r2", actions: [], inputRequirements: [], values: {}, credentials: {} } });
+async function withScreen<T>(
+  catalog: unknown,
+  run: (screen: {
+    calls: Call[];
+    container: Element;
+    press: (label: RegExp) => Promise<void>;
+    text: () => string;
+    settle: () => Promise<void>;
+  }) => Promise<T>,
+  draftFor: (providerId: string) => unknown = (providerId) => draft(`d-${providerId}`),
+  route: (path: string, body?: Record<string, unknown>) => Result | undefined = () => undefined
+): Promise<T> {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
+  const { RemoteAccessSetting } = await import("./remote-access-setting.tsx");
+  const container = dom.window.document.querySelector("#root")!;
+  const root = createRoot(container);
+  const calls: Call[] = [];
+  const candidate = (providerId: string) => ({
+    providerId,
+    display: { label: providerId, description: "", needs: "" },
+    consentFactsDigest: "d",
+    expiresAt: "2999-01-01T00:00:00.000Z",
+    eligible: true,
+    facts: [],
+    consent: {
+      consentFactsDigest: "d",
+      scope: { kind: "route", query: { target: "127.0.0.1:1", expectedOrigin: null, usage: { kind: "session", lifetimeMs: 3_600_000 } } },
+      facts: [],
+      disclosures: { traffic: { providerCanReadPayload: true }, cost: { kind: "free", summary: "Free" }, address: { stability: "ephemeral" } },
+    },
+  });
+  const request = (async (url: string, body?: Record<string, unknown>) => {
+    calls.push({ url, ...(body ? { body } : {}) });
+    const path = url.split("?")[0]!;
+    const routed = route(path, body);
+    if (routed) return routed;
+    if (path === "/catalog") return ok(catalog);
+    if (path === "/state") return ok({ routes: [], reasons: {}, starting: false, services: [] });
+    if (path === "/host-settings") return ok({ known: false, reason: "unavailable" });
+    if (path === "/host-capabilities") return ok({});
+    if (path === "/drafts") return ok(draftFor(String(body?.providerId)));
+    if (path.endsWith("/commit")) return ok(draft("x").configuration);
+    if (path.endsWith("/review")) {
+      const providerId = path.split("/")[2]!.slice(2);
+      return ok({ id: `rev-${providerId}`, kind: "route", candidate: candidate(providerId) });
+    }
+    return fail("route_not_found");
+  }) as typeof requestReachability;
+  const settle = () => act(async () => {});
+  try {
+    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
+    await settle();
+    return await run({
+      calls,
+      container,
+      settle,
+      text: () => container.textContent ?? "",
+      press: async (label) => {
+        const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
+        assert.ok(button, `no button matching ${label}`);
+        await act(async () => button.click());
+        await settle();
+      },
+    });
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+}
+const mutating = (calls: Call[]) => calls.filter((call) => call.url.startsWith("/operations") || call.url.includes("/approve"));
+// Every request that changes the host for one way: its draft, actions, commit and setup.
+const changesHostFor = (calls: Call[], providerId: string) =>
+  calls.filter(
+    (call) =>
+      /^\/(setups|drafts)$|\/(actions|commit)\b/.test(call.url.split("?")[0]!) &&
+      (call.body?.providerId === providerId || call.url.includes(`d-${providerId}/`))
+  );
+
+test("the card recommends the temporary address and Other ways opens in three groups", async () => {
+  await withScreen(noTailscale, async ({ container, press, text }) => {
+    const card = container.querySelector("[aria-label='Recommended way']")!;
+    assert.match(card.textContent!, /Temporary address/);
+    assert.match(card.textContent!, /Recommended/);
+    assert.match(card.textContent!, /Free, no account, ready in seconds\. Good for a quick test\./);
+    assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
+    await press(/^Other ways$/);
+    const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
+    assert.deepEqual(headings.slice(0, 2), ["Lasting address for AI apps", "Only my own devices"]);
+    // The advanced row lists its ways inline, next to the group title.
+    assert.match(headings[2] ?? "", /^Advanced · Your own address, ngrok \(advanced, TLS\), tunnl\.gg›$/, headings[2] ?? "no advanced row");
+    assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
+    assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Advanced starts closed");
+    const shown = container.querySelector("fieldset")!.textContent!;
+    assert.doesNotMatch(shown, /Label |ngrok-tcp|detect-only|deferred|admitted/);
+    assert.deepEqual(bannedIn(shown), []);
+  });
+});
+
+test("choosing another way prepares that way and never approves without the click", async () => {
+  await withScreen(tailscaleReady, async ({ calls, container, press, text, settle }) => {
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
+    await press(/^Other ways$/);
+    const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
+    const before = calls.filter((call) => call.url === "/drafts").length;
+    await act(async () => radio.click());
+    await settle();
+    const drafts = calls.filter((call) => call.url === "/drafts");
+    assert.equal(drafts.length, before + 1, "one new draft for the chosen way");
+    assert.equal(drafts.at(-1)!.body?.providerId, "cloudflare-named");
+    assert.deepEqual(mutating(calls), []);
+    // After the click, nothing positive goes to the way that was left.
+    const afterClick = calls.slice(calls.findIndex((call) => call.body?.providerId === "cloudflare-named"));
+    assert.deepEqual(changesHostFor(afterClick, "tailscale-funnel"), []);
+    assert.match(text(), /Turn on remote access/);
+    await act(async () => radio.click());
+    await settle();
+    assert.deepEqual(mutating(calls), []);
+  });
+});
+
+test("choosing a way that needs a token shows an empty token field and sends no value", async () => {
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const token = {
+    id: "token",
+    kind: "provide-secret",
+    label: "Tunnel token",
+    secretLabel: "Tunnel token",
+    digest: "token-digest",
+    disclosure: { revision: "1", text: "", links: [] },
+    consent: {
+      consentFactsDigest: "token-facts",
+      facts: [],
+      disclosures: { action: {} },
+      scope: { kind: "setup", actionId: "token", actionDigest: "token-digest", disclosureRevision: "1" },
+    },
+  };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy: token }],
+  });
+  const catalog = { ...noTailscale, providers: noTailscale.providers.map((item) => (item.providerId === "cloudflare-named" ? managed : item)) };
+  const needsToken = (providerId: string) =>
+    providerId === "cloudflare-named"
+      ? {
+          draftId: `d-${providerId}`,
+          configuration: {
+            revision: "r2",
+            actions: [token],
+            inputRequirements: [{ actionId: "token", id: "token", label: "Tunnel token", secret: true }],
+            values: {},
+            credentials: {},
+          },
+        }
+      : draft(`d-${providerId}`);
+  await withScreen(
+    catalog,
+    async ({ calls, container, press, settle }) => {
+      await press(/^Other ways$/);
+      const label = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!;
+      const radio = label.querySelector("input")!;
+      assert.equal(radio.disabled, false, "the way can be chosen");
+      await act(async () => radio.click());
+      await settle();
+      const field = container.querySelector<HTMLInputElement>("input[type='password'], input[autocomplete='off'][type='text']");
+      assert.ok(field, `no token field: ${container.textContent}`);
+      assert.equal(field.value, "");
+      assert.ok(!calls.some((call) => JSON.stringify(call.body ?? {}).includes("secret")), "no value was sent");
+      assert.deepEqual(mutating(calls), []);
+    },
+    needsToken
+  );
+});
+
+test("choosing managed Cloudflare reserves its sign-in step and shows an empty token field", async () => {
+  // Real 0.5.1 shape: the first action is a provide-secret with a step, so the console reserves a
+  // setup operation for it, and the token is typed into that operation's card.
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managedToken = {
+    id: "managed-api-token",
+    kind: "provide-secret",
+    label: "Authorize managed Cloudflare setup",
+    secretLabel: "Scoped Cloudflare API token",
+    required: true,
+    digest: "managed-digest",
+    disclosure: { revision: "1", text: "Managed setup uses separate approvals.", links: [] },
+    step: { actor: "owner", verification: "provider", purpose: "authorize", permission: { id: "managed-api-token", label: "Authorize managed Cloudflare setup" } },
+    consent: {
+      consentFactsDigest: "managed-facts",
+      facts: [],
+      disclosures: { action: {} },
+      scope: { kind: "setup", actionId: "managed-api-token", actionDigest: "managed-digest", disclosureRevision: "1" },
+    },
+  };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy }],
+  });
+  const catalog = { ...noTailscale, providers: noTailscale.providers.map((item) => (item.providerId === "cloudflare-named" ? managed : item)) };
+  const needsAuthorization = (providerId: string) =>
+    providerId === "cloudflare-named"
+      ? {
+          draftId: "d-cloudflare-named",
+          configuration: {
+            revision: "r2",
+            actions: [managedToken],
+            inputRequirements: [{ actionId: "token", id: "token", label: "Tunnel token", secret: true }],
+            values: {},
+            credentials: {},
+          },
+        }
+      : draft(`d-${providerId}`);
+  let reserved = false;
+  const setupView = {
+    operationId: "op-cf",
+    revision: 1,
+    state: "authorization-required",
+    resources: [],
+    evidence: { known: false },
+    scope: { providerId: "cloudflare-named", draftId: "d-cloudflare-named", configurationRevision: "r2" },
+    nextAction: managedToken,
+  };
+  const route = (path: string): Result | undefined => {
+    if (path === "/setups") {
+      reserved = true;
+      return ok({ operationId: "op-cf" });
+    }
+    if (path === "/state" && reserved) {
+      const setup = { operationId: "op-cf", actionId: "managed-api-token", expectedConfigurationRevision: "r2" };
+      const service = { providerId: "cloudflare-named", providerLabel: "Cloudflare Tunnel", draftId: "d-cloudflare-named", usage: "attached", committed: false, setup };
+      return ok({ routes: [], reasons: {}, starting: false, services: [service] });
+    }
+    if (path === "/setup-operations/op-cf") return ok(setupView);
+    return undefined;
+  };
+  await withScreen(
+    catalog,
+    async ({ calls, container, press, settle }) => {
+      await press(/^Other ways$/);
+      const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
+      assert.equal(radio.disabled, false, "the way can be chosen");
+      await act(async () => radio.click());
+      await settle();
+      await settle();
+      const setups = calls.filter((call) => call.url === "/setups");
+      assert.equal(setups.length, 1, "one setup reserved");
+      assert.deepEqual(setups[0]!.body, {
+        providerId: "cloudflare-named",
+        draftId: "d-cloudflare-named",
+        actionId: "managed-api-token",
+        expectedConfigurationRevision: "r2",
+        usage: "attached",
+      });
+      const card = container.querySelector("section[aria-label='Details for Cloudflare']");
+      assert.ok(card, `no token card: ${container.textContent}`);
+      const field = card.querySelector<HTMLInputElement>("label input[type='password']");
+      assert.ok(field, "the card asks for the token in a hidden field");
+      assert.match(field.closest("label")!.textContent!, /Scoped Cloudflare API token/);
+      assert.equal(field.value, "");
+      const save = [...card.querySelectorAll("button")].find((node) => node.textContent === "Save token");
+      assert.equal(save?.disabled, true, "nothing can be sent while the field is empty");
+      // Only reads and the reservation went out: no value, no approval, no start.
+      const sent = calls.filter((call) => call.body !== undefined && ("secret" in call.body || "value" in call.body));
+      assert.deepEqual(sent, []);
+      assert.deepEqual(mutating(calls), []);
+      const setupWrites = calls.filter((call) => /^\/setup-operations\/op-cf\/./.test(call.url.split("?")[0]!));
+      assert.deepEqual(setupWrites, [], "no action was taken on the setup");
+    },
+    needsAuthorization,
+    route
+  );
+});

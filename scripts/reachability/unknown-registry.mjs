@@ -50,18 +50,36 @@ export async function createUnknownRegistry(
 			),
 			"utf8",
 		);
+		const runtimePath = join(registry.root, "providers", specification.id, "runtime.mjs");
+		await writeFile(runtimePath, module);
 		await writeFile(
-			join(registry.root, "providers", specification.id, "runtime.mjs"),
-			module,
+			join(registry.root, "providers", specification.id, "runtime-cost.mjs"),
+			await readFile(
+				new URL(
+					"../../reference-implementation/test/fixtures/reachability/runtime-cost.mjs",
+					import.meta.url,
+				),
+				"utf8",
+			),
 		);
 		registry.manifest.providers[0].module = `providers/${specification.id}/runtime.mjs`;
 		await writeFile(observationFile, JSON.stringify({ costKind: "free" }));
+		// The route's creation-time recheck reads the static definition before
+		// runtime facts exist, so the definition must state the same initial
+		// cost that properties() reports for the observation.
+		const { cost } = await import(
+			"../../reference-implementation/test/fixtures/reachability/runtime-cost.mjs"
+		);
+		const definitionPath = join(registry.root, registry.manifest.providers[0].definition);
+		const definition = JSON.parse(await readFile(definitionPath, "utf8"));
+		definition.adapter.capabilities.cost = cost("free");
+		await writeFile(definitionPath, JSON.stringify(definition));
 	}
 	return {
 		...registry,
 		specification,
 		addedFact,
-		setRuntimeCost: async (costKind) =>
-			writeFile(observationFile, JSON.stringify({ costKind })),
+		setRuntimeCost: async (costKind, amount) =>
+			writeFile(observationFile, JSON.stringify({ costKind, amount })),
 	};
 }

@@ -91,6 +91,7 @@ export async function prepareDraft(api, provider, canary, events, backend) {
 		const action = config.actions.find(
 			(action) =>
 				!attempted.has(action.id) &&
+				!action.step && // This fixture drives the legacy draft endpoint.
 				[
 					"provide-secret",
 					"provide-value",

@@ -122,6 +122,37 @@ function writePackagedConsoleStack(consoleRoot, bundleOptions) {
 }
 
 describe("bundled personal-server verifier", () => {
+  it("hashes a nested manifest.json that the stager recorded; only the root manifest is excluded", () => {
+    const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
+    try {
+      const riRoot = join(root, "usr", "lib", "DataConnect", "reference-stack", "ri")
+      const consoleRoot = join(root, "usr", "lib", "DataConnect", "reference-stack", "console")
+      mkdirSync(join(riRoot, "node_modules", "pkg", "adapters"), { recursive: true })
+      mkdirSync(consoleRoot, { recursive: true })
+      const launch = "#!/usr/bin/env node\n"
+      const nested = '{"adapters":[]}'
+      writeFileSync(join(riRoot, "launch.mjs"), launch)
+      writeFileSync(join(riRoot, "node_modules", "pkg", "adapters", "manifest.json"), nested)
+      writeFileSync(
+        join(riRoot, "manifest.json"),
+        JSON.stringify({
+          files: [
+            { path: "launch.mjs", sha256: hashFile(launch, false), size: Buffer.byteLength(launch) },
+            {
+              path: "node_modules/pkg/adapters/manifest.json",
+              sha256: hashFile(nested, false),
+              size: Buffer.byteLength(nested),
+            },
+          ],
+        })
+      )
+      writePackagedConsoleStack(consoleRoot)
+      expect(() => assertPackagedReferenceStacks(root, "DataConnect.deb")).not.toThrow()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("requires both packaged reference stacks and verifies their manifests", () => {
     const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
     try {

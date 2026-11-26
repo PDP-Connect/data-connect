@@ -7,6 +7,7 @@ import type {
   Configuration as ProviderConfiguration,
   ProviderInventory,
   RouteView as Route,
+  SetupOperation,
   Candidate as RouteCandidate,
   Action as SetupAction,
 } from "@tnunamak/gozar";
@@ -31,9 +32,12 @@ function consentValue(value: ConsentDisclosures): unknown {
       scope: value.address.scope,
       stability: value.address.stability,
     },
-    cost: { kind: value.cost.kind },
+    cost: value.cost.kind === "paid"
+      ? { kind: value.cost.kind, summary: value.cost.summary, amount: value.cost.amount, currency: value.cost.currency, period: value.cost.period }
+      : { kind: value.cost.kind, summary: value.cost.summary },
     disclosure: disclosure(value.disclosure),
     lifetimes: value.lifetimes,
+    ownership: value.ownership,
     protocols: {
       oauthDcr: value.protocols.oauthDcr,
       sse: value.protocols.sse,
@@ -98,6 +102,7 @@ export function projectAction(action: SetupAction) {
               disclosureRevision: scope.disclosureRevision,
               draftId: scope.draftId,
               kind: scope.kind,
+              ...(scope.operation ? { operation: { id: scope.operation.id, revision: scope.operation.revision } } : {}),
               providerId: scope.providerId,
               registryId: scope.registryId,
               scopeId: scope.scopeId,
@@ -115,7 +120,7 @@ export function projectAction(action: SetupAction) {
         }
       : undefined,
     help: action.help,
-    href: action.href,
+    href: action.step?.browser ? undefined : action.href,
     id: action.id,
     inputId: action.inputId,
     instructions: action.instructions,
@@ -124,6 +129,18 @@ export function projectAction(action: SetupAction) {
     obtainUrl: action.obtainUrl,
     required: action.required,
     secretLabel: action.secretLabel,
+    step: action.step ? {
+      actor: action.step.actor,
+      permission: { id: action.step.permission.id, label: action.step.permission.label },
+      verification: action.step.verification,
+      purpose: action.step.purpose,
+      prerequisites: action.step.prerequisites,
+      options: action.step.options?.map(({ value, label }) => ({ value, label })),
+      browser: action.step.browser ? {
+        expiresAt: action.step.browser.expiresAt, pollAfterMs: action.step.browser.pollAfterMs,
+      } : undefined,
+      resourceHandle: action.step.resourceHandle,
+    } : undefined,
     valueFormat: action.valueFormat,
     valueLabel: action.valueLabel,
     valuePlaceholder: action.valuePlaceholder,
@@ -131,6 +148,27 @@ export function projectAction(action: SetupAction) {
 }
 function observation<T>(input: { known: true; value: T } | { known: false; reason: string }) {
   return input.known ? { known: true as const, value: input.value } : { known: false as const, reason: input.reason };
+}
+export function projectSetupOperation(operation: SetupOperation) {
+  const { scope, evidence } = operation;
+  return {
+    operationId: operation.operationId,
+    revision: operation.revision,
+    state: operation.state,
+    scope: {
+      registryId: scope.registryId, scopeId: scope.scopeId, providerId: scope.providerId,
+      configurationRevision: scope.configurationRevision, draftId: scope.draftId,
+    },
+    evidence: evidence.known ? { known: true as const, value: {
+      stepId: evidence.value.stepId, source: evidence.value.source,
+      observedAt: evidence.value.observedAt, summary: evidence.value.summary,
+    } } : { known: false as const, reason: evidence.reason },
+    nextAction: operation.nextAction ? projectAction(operation.nextAction) : null,
+    resources: operation.resources.map((resource) => ({
+      handle: resource.handle, kind: resource.kind, label: resource.label, ownership: resource.ownership,
+      presence: observation(resource.presence), removal: resource.removal,
+    })),
+  };
 }
 export function projectConfiguration(config: ProviderConfiguration) {
   const allowed = new Set(config.inputRequirements.filter((field) => !field.secret).map((field) => field.id));
@@ -157,6 +195,7 @@ export function projectConfiguration(config: ProviderConfiguration) {
 }
 export function projectDraft(draft: Draft) {
   return {
+    ...(draft.detection ? { detection: { checkedAt: draft.detection.checkedAt, fresh: draft.detection.fresh, refreshing: draft.detection.refreshing } } : {}),
     baseRevision: draft.baseRevision,
     configuration: projectConfiguration(draft.configuration),
     draftId: draft.draftId,
@@ -207,11 +246,13 @@ export function projectCandidate(candidate: RouteCandidate) {
     eligible: candidate.eligible,
     expiresAt: candidate.expiresAt,
     facts: candidate.facts.map(projectFact),
+    ownership: candidate.ownership,
     providerId: candidate.providerId,
   };
 }
-export function projectInventory(list: ProviderList) {
+export function projectInventory(list: ProviderList & { earlierSetup?: import("./configuration-compatibility.ts").EarlierSetup }) {
   return {
+    earlierSetup: list.earlierSetup ?? null,
     catalogRevision: list.catalogRevision,
     observedAt: list.observedAt,
     providers: list.providers.map((provider: ProviderInventory) => ({
@@ -222,6 +263,7 @@ export function projectInventory(list: ProviderList) {
       ),
       configuration: projectConfiguration(provider.configuration as ProviderConfiguration),
       facts: (provider.facts as Fact[]).map(projectFact),
+      ...(provider.detection ? { detection: { checkedAt: provider.detection.checkedAt, fresh: provider.detection.fresh, refreshing: provider.detection.refreshing } } : {}),
       label: provider.label,
       prerequisites: (provider.prerequisites as import("@tnunamak/gozar").Prerequisite[]).map((item) => ({
         id: item.id,
@@ -238,9 +280,27 @@ export function projectInventory(list: ProviderList) {
     schemaVersion: list.schemaVersion,
   };
 }
-export function projectRoute(route: Route) {
+// A route cleanup action is the library's advice to its caller (for example "call closeRoute
+// again with the retained handle"), not text for the owner. The card offers the app's own retry,
+// and an action this app does not know keeps only its id, as a support code.
+function projectCleanupAction(action: SetupAction) {
+  return {
+    id: "retry-route-cleanup",
+    label: "Turn off again",
+    ...(action.id === "retry-close" ? {} : { supportCode: action.id }),
+  };
+}
+
+// `journaled` is what the host's own start record says about this exact route: the provider that
+// created it and the digest of the facts the owner approved. Null when no verified record exists.
+export function projectRoute(
+  route: Route,
+  journaled?: { providerId: string | null; approvedConsentFactsDigest: string | null } | null,
+  presentation?: ReturnType<typeof import("./presentation.ts").routePresentation>
+) {
   const proof = route.verification;
   return {
+    presentation,
     actions: route.actions,
     binding: {
       authority: route.binding.authority,
@@ -248,7 +308,7 @@ export function projectRoute(route: Route) {
       target: observation(route.binding.target),
     },
     cleanup: {
-      nextAction: route.cleanup.nextAction ? projectAction(route.cleanup.nextAction) : null,
+      nextAction: route.cleanup.nextAction ? projectCleanupAction(route.cleanup.nextAction) : null,
       state: route.cleanup.state,
     },
     expiresAt: observation(route.expiresAt),
@@ -261,7 +321,10 @@ export function projectRoute(route: Route) {
       origin: observation(route.hostConfiguration.origin),
     },
     operationId: route.operationId,
+    providerId: journaled?.providerId ?? null,
+    approvedConsentFactsDigest: journaled?.approvedConsentFactsDigest ?? null,
     origin: route.origin,
+    ownership: route.ownership,
     published: route.published,
     routeState: route.routeState,
     state: route.state,

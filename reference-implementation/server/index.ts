@@ -391,8 +391,15 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { type StartedReachability, startHostReachability } from "./reachability/host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
-import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
+import { mountServiceChallenge } from "./reachability/service-challenge.ts";
+import {
+  REACHABILITY_RESTART_RECONCILE_DEADLINE_MS,
+  REACHABILITY_SHUTDOWN_DEADLINE_MS,
+} from "./reachability/service.ts";
+import { ReachabilitySetups } from "./reachability/setups.ts";
+import { mountOwnerReachability } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
@@ -530,6 +537,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
+import { createRunBlobUploadCredentialRegistry } from "./run-blob-upload-credentials.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
@@ -813,7 +821,11 @@ interface MutationContext {
 
 interface ServerOpts {
   /** Trusted host injects one long-lived reachability service and its usage policy. */
-  reachability?: Pick<OwnerReachabilityContext, "service" | "usage">;
+  reachability?: StartedReachability;
+  /** Which host row to start when no desktop supervisor is present. The CLI asks for "server". */
+  reachabilityProfile?: "server";
+  /** The operation journal shared by the owner routes and the shutdown path. */
+  reachabilityOperations?: ReachabilityOperations;
   acceptedCollectorProtocolVersions?: readonly string[];
   /** Internal onboarding handoff. This value is never accepted from the PAR request. */
   acceptedProviderNativeRevision?: {
@@ -948,6 +960,12 @@ interface ServerOpts {
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
+  /**
+   * Run-scoped blob upload credentials shared with the controller. The blob
+   * upload route accepts these as an alternative to the owner bearer; no other
+   * route consults them. Standalone RS apps without it accept only owner tokens.
+   */
+  blobUploadCredentials?: import("./run-blob-upload-credentials.ts").RunBlobUploadCredentialRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
   semanticRetrievalCapability?: unknown;
@@ -7464,6 +7482,17 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
   const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  // The service challenge arrives with the public Host, which the host check
+  // below does not know, so it is registered first and gates on the owner's
+  // approval itself. Only a host row that answers on this listener supplies a verifier.
+  if (opts.reachability?.serviceVerifier) {
+    const { service } = opts.reachability;
+    mountServiceChallenge(
+      app as unknown as Parameters<typeof mountServiceChallenge>[0],
+      opts.reachability.serviceVerifier,
+      (authority) => service?.approvesChallengeAuthority(authority) ?? false
+    );
+  }
   app.use(((req: ReqLike, res: ResLike, next: () => void) => {
     const decision = evaluateReachabilityRequest(req, reachabilityContract, {
       hosted,
@@ -7515,6 +7544,38 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
+  // POST /v1/blobs auth: a live run-scoped upload credential, bound to one
+  // connector instance, or else the ordinary owner bearer. The credential is
+  // recognised only here; every other route authenticates through
+  // `requireToken`, where it is an unknown bearer and gets 401.
+  const requireBlobUploadAuth = (req: ReqLike, res: ResLike, next: () => void) => {
+    const auth = req.headers?.authorization;
+    const presented = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const binding = presented ? (opts.blobUploadCredentials?.verify(presented) ?? null) : null;
+    if (!binding) {
+      return requireToken(req, res, () => requireOwner(req, res, next));
+    }
+    const requestedConnectorId = resolveSingleConnectorIdQueryValue(req.query?.connector_id);
+    const requestedInstanceId = resolveSingleConnectorIdQueryValue(req.query?.connector_instance_id);
+    const connectorMatches =
+      requestedConnectorId !== null &&
+      (canonicalConnectorKey(requestedConnectorId) ?? requestedConnectorId) ===
+        (canonicalConnectorKey(binding.connectorId) ?? binding.connectorId);
+    if (!(connectorMatches && requestedInstanceId === binding.connectorInstanceId)) {
+      return pdppError(
+        res,
+        403,
+        "permission_error",
+        "Run upload credential is bound to a different connector instance"
+      );
+    }
+    req.tokenInfo = {
+      active: true,
+      pdpp_token_kind: "run_blob_upload",
+      subject_id: binding.ownerSubjectId,
+    };
+    next();
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7679,6 +7740,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectState,
     requireClient,
     requireCoreEndpointToken,
+    requireBlobUploadAuth,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -8520,7 +8582,10 @@ function buildRsApp(opts: ServerOpts = {}) {
   // One long-lived service is injected by the trusted host supervisor.
   mountOwnerReachability(app, {
     service: opts.reachability?.service ?? null,
-    operations: new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    passwordSet: opts.reachability?.passwordSet,
+    statePaths: opts.reachability?.statePaths,
+    operations: opts.reachabilityOperations ?? new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    setups: new ReachabilitySetups(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-setups")),
     usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),
     requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
   } as unknown as Parameters<typeof mountOwnerReachability>[1]);
@@ -9069,6 +9134,7 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  const blobUploadCredentials = opts.blobUploadCredentials ?? createRunBlobUploadCredentialRegistry();
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9146,6 +9212,7 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
     runtimeContext,
+    blobUploadCredentialHooks: blobUploadCredentials,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
       registerNonce: (args) => runTargetRegistry.registerNonce(args),
@@ -9509,12 +9576,40 @@ export async function startServer(opts: ServerOpts = {}) {
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
+  const reachability = opts.reachability ?? await startHostReachability({
+    dataDir: runtimeDataDir, bindHost, env: process.env, owner: ownerAuthSubjectId,
+    passwordConfigured: Boolean(earlyOwnerAuthConfig.password),
+    profile: opts.reachabilityProfile, rsPort: requestedRsPort,
+  }).catch((err) => {
+    logger.warn({ code: (err as { code?: string }).code }, "Remote access host is unavailable");
+    return undefined;
+  });
+  const reachabilityOperations = new ReachabilityOperations(
+    path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"),
+    !!reachability?.service
+  );
+  // A crash or SIGKILL leaves the last owner's route behind. Close it with its
+  // retained handle before any start is accepted. The call raises the start
+  // fence synchronously and returns at once; readiness does not wait for the
+  // close, only a Turn on does (refused until the pass settles).
+  void reachability?.service
+    ?.reconcileAfterRestart(REACHABILITY_RESTART_RECONCILE_DEADLINE_MS, reachabilityOperations)
+    .then((restart) => {
+      if (restart.confirmed.length || restart.unconfirmed.length) {
+        logger.info(
+          { confirmed: restart.confirmed.length, unconfirmed: restart.unconfirmed.length },
+          "reachability restart reconcile finished"
+        );
+      }
+    })
+    .catch(() => logger.warn("reachability restart reconcile failed"));
   const rsApp = buildRsApp({
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    blobUploadCredentials,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9541,7 +9636,8 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
-    reachability: opts.reachability,
+    reachability,
+    reachabilityOperations,
     reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
@@ -9571,6 +9667,9 @@ export async function startServer(opts: ServerOpts = {}) {
   runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
   logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
+  if (!opts.reachability) {
+    void reachability?.service?.recoverFromLibrary().catch(() => logger.warn("reachability library recovery remains unknown"));
+  }
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
 
   // HNSW is a derived acceleration structure. Its durable builder is bounded,
@@ -9880,6 +9979,7 @@ export async function startServer(opts: ServerOpts = {}) {
     releaseDeliveryWorkerLease(0);
   });
   rsServer.once("close", () => {
+    if (!opts.reachability) reachability?.service?.closeObservers();
     releaseDeliveryWorkerLease(1);
   });
   return {
@@ -9916,6 +10016,13 @@ export async function startServer(opts: ServerOpts = {}) {
     // evidence-sweep round — see connector-maintenance-sweep.ts).
     stopConnectorMaintenanceSweep,
     stopPostgresDerivedIndexMaintenance,
+    // Closes the routes this host owns. The CLI shutdown path awaits it before
+    // storage closes; it is bounded and idempotent.
+    stopReachability: async () => {
+      if (!opts.reachability && reachability?.service) {
+        await reachability.service.shutdown(REACHABILITY_SHUTDOWN_DEADLINE_MS, reachabilityOperations);
+      }
+    },
   };
 }
 
@@ -10456,6 +10563,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {
@@ -10979,6 +11087,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: StartServerResult["stopClientEventDeliveryWorker"] | null;
     stopConnectorMaintenanceSweep: StartServerResult["stopConnectorMaintenanceSweep"] | null;
     stopPostgresDerivedIndexMaintenance: StartServerResult["stopPostgresDerivedIndexMaintenance"] | null;
+    stopReachability: StartServerResult["stopReachability"] | null;
   } = {
     abortStartupBackfill: null,
     asServer: null,
@@ -10992,6 +11101,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: null,
     stopConnectorMaintenanceSweep: null,
     stopPostgresDerivedIndexMaintenance: null,
+    stopReachability: null,
   };
   const exitOnSignal = (signal: string) => async () => {
     if (shuttingDown) {
@@ -11049,6 +11159,12 @@ if (isMainModule(import.meta.url, process.argv[1])) {
           finish();
         }
       });
+    // Close the remote-access route this process owns. It runs beside the HTTP
+    // drain, is bounded by REACHABILITY_SHUTDOWN_DEADLINE_MS, and must settle
+    // before storage closes so its journal writes land.
+    const reachabilityClosed = (server.stopReachability?.() ?? Promise.resolve()).catch((err) => {
+      cliLogger.warn({ err }, "remote access route close failed during shutdown");
+    });
     const httpDrains = [closeTimeout(server.asServer), closeTimeout(server.rsServer)];
     // Signal the startup retrieval backfill to wind down ALONGSIDE the
     // HTTP drain. Without this, a backfill mid-`upsertMany` keeps the
@@ -11105,7 +11221,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     // rely on. Sidekiq draws the same line between *quiet* and *drain*.
     // Chromium residue is still cleaned on next boot by
     // polyfill-connectors/src/profile-lock.ts (Layer C).
-    await Promise.allSettled([...httpDrains, Promise.race([awaitStartupTasks, backfillDeadline])]);
+    await Promise.allSettled([...httpDrains, reachabilityClosed, Promise.race([awaitStartupTasks, backfillDeadline])]);
     // See shutdownStorageClose's own doc comment for the drain-gates-close
     // invariant and why exit(1) here does not mean the in-flight job
     // finishes safely -- only that this process is not the one that raced
@@ -11129,6 +11245,8 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   startServer({
     ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
     logger: cliLogger,
+    // A standalone server process hosts remote access itself; a desktop supervisor, when present, takes precedence.
+    reachabilityProfile: "server",
   })
     .then((result) => {
       server.asServer = result.asServer;
@@ -11143,6 +11261,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
       server.stopClientEventDeliveryWorker = result.stopClientEventDeliveryWorker;
       server.stopConnectorMaintenanceSweep = result.stopConnectorMaintenanceSweep;
       server.stopPostgresDerivedIndexMaintenance = result.stopPostgresDerivedIndexMaintenance;
+      server.stopReachability = result.stopReachability;
     })
     .catch((err) => {
       closePostgresStorage().finally(() => closeDb());

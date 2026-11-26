@@ -4,11 +4,21 @@ import type { Approval as RouteApproval, Candidate as RouteCandidate, Action as 
 
 type SetupApproval = import("@tnunamak/gozar").RunSetupActionRequest["approval"];
 
+export type UnsupportedReason = "reach_unknown" | "provider_properties_unsupported";
+
 export class ReachabilityError extends Error {
   readonly code: string;
-  constructor(code: string) {
-    super(code);
+  readonly reason: UnsupportedReason | null;
+  /**
+   * The route a failed start allocated and still owes a close for. The operation
+   * journal records its exact handle, the same way it records a library error's partial route.
+   */
+  readonly route?: import("@tnunamak/gozar").RouteView;
+  constructor(code: string, route?: import("@tnunamak/gozar").RouteView, cause?: unknown, reason: UnsupportedReason | null = null) {
+    super(code, cause === undefined ? undefined : { cause });
     this.code = code;
+    this.reason = reason;
+    if (route) this.route = route;
   }
 }
 
