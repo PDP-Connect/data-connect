@@ -66,15 +66,10 @@ export default async function DeviceExportersPage({
       requestedConnector
     ) ?? undefined
   // A deep-link to an unsupported *browser-bound* connector is an intentful
-  // request this page cannot generate commands for yet. Detect that case from the
-  // connector's own browser binding and surface an honest notice that names the
-  // connector and points at the owner-run runbook — never a faked enroll flow.
-  const browserBoundRequest =
-    !defaultConnectorId &&
-    requestedConnector &&
-    (await loadBrowserBoundVerdict(requestedConnector)) === true
-      ? requestedConnector
-      : undefined
+  // request this page cannot generate commands for yet. Only the server's
+  // verdict that the connector is browser-bound shows the notice; without a
+  // verdict the page shows no notice and keeps its diagnostics. The verdict is
+  // read inside the try below so a failed read cannot reject the page.
 
   // When the owner arrives here from the "Add source" picker (a validated
   // `?connector=` deep-link), frame the page as finishing the connector they
@@ -95,6 +90,7 @@ export default async function DeviceExportersPage({
       listDeviceExporterDiagnostics(),
       getReferencePublicOrigin(),
       listConnectorManifests().catch(() => []),
+      !defaultConnectorId && requestedConnector ? loadBrowserBoundVerdict(requestedConnector) : null,
     ])
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
@@ -111,7 +107,8 @@ export default async function DeviceExportersPage({
     }
     throw err
   }
-  const [diagnostics, referenceBaseUrl, connectorManifests] = loaded
+  const [diagnostics, referenceBaseUrl, connectorManifests, requestIsBrowserBound] = loaded
+  const browserBoundRequest = requestIsBrowserBound === true ? requestedConnector : undefined;
   const connectorIcons = Object.fromEntries(
     connectorManifests.flatMap(manifest => [
       [manifest.connector_id, manifest.icon] as const,
