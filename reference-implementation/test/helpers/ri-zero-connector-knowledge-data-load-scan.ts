@@ -263,16 +263,18 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
   // readConfinedFile(file, limit) in local-source.ts: readSync on the
-  // descriptor of file.path. Its only caller, readManifest(root), passes
-  // checkConfinedFile(root, MANIFEST_PATH, ...) --
-  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
-  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
-  // developer-supplied absolute directory path given to the public
-  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
-  // already allowlisted above (cache.ts:125, common.ts:35): the path is
-  // caller-supplied, the filename component is an RI-owned generic literal,
-  // and this feature is explicitly unsigned/unregistered developer tooling
-  // (see this file's own module doc comment), not connector catalog data.
+  // descriptor of file.path after checkConfinedFile and a dev/ino check.
+  // readManifest(root) uses the fixed "profile/collection-profile.json"
+  // under canonicalRoot(sourcePath), the developer-supplied directory.
+  // The installed-connector callers in index.ts (readVerifiedStoredFile,
+  // withVerifiedSourceDeclaration, sourceDeclarationDigestOf,
+  // readVerifiedRecord and normalizeCoreInstallLayout) use the same checked
+  // reader for that profile and "source-declaration.json" under confined
+  // active/staged artifact roots. assertStoredRecordMetadata fixes the active
+  // manifestPath to the same generic literal. These are RI-owned structural
+  // filenames; their content is runtime-selected connector metadata, never
+  // an RI-committed connector catalog or provider policy. No second descriptor
+  // read site is needed for installed versus developer-local sources.
   'reference-implementation/server/connector-install/local-source.ts::readConfinedFile::readSync(fd, buffer, length, buffer.length - length, null)',
   // readVerifiedSpoolBlob() reads a runtime BLOB payload through a descriptor
   // opened only after its filename is constrained to one spool basename and

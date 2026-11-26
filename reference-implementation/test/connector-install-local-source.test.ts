@@ -205,7 +205,7 @@ test("re-adding a source whose profile changed connector key is rejected", async
   assert.equal((await store.list()).find((item) => item.sourceId === source.sourceId)?.connectorKey, "first-fixture")
 })
 
-test("a confined read refuses a file replaced after its check and stops one byte past the limit", () => {
+test("a confined read refuses a file replaced after its check or over its limit", () => {
   const root = fixture()
   const path = join(root, "profile", "collection-profile.json")
   const checked = { label: "Manifest", path, stat: lstatSync(path) }
@@ -218,7 +218,7 @@ test("a confined read refuses a file replaced after its check and stops one byte
 
   const current = { label: "Manifest", path, stat: lstatSync(path) }
   writeFileSync(path, "x".repeat(100))
-  assert.equal(readConfinedFile(current, 10).byteLength, 11)
+  assert.throws(() => readConfinedFile(current, 10), /Manifest exceeds the 10 byte limit/)
   assert.equal(readConfinedFile(current, 1000).byteLength, 100)
 })
 

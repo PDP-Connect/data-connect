@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +39,7 @@ const PROFILE_TOO_LARGE = /Connector profile exceeds the 1 MiB RI limit/;
 const REGISTRATION_REFUSED = /registration refused/;
 const PINNED_SIDECAR_MISSING = /Verified source declaration is missing/;
 const PINNED_SIDECAR_MISMATCH = /does not match installer-core verification/;
+const ACTIVE_BYTES_REFUSAL = /Active connector bytes failed integrity verification/;
 const MIB = 1024 * 1024;
 
 interface Layout {
@@ -180,6 +181,167 @@ function injectFirstSidecarStatEio(): { readonly faults: () => number; readonly 
     },
   };
 }
+
+function replaceFileAfterFirstRead(matches: (path: string) => boolean, replacement: string) {
+  const original = { openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync };
+  const handles = new Map<number, string>();
+  let reads = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const fd = original.openSync(...args);
+    const path = String(args[0]);
+    if (matches(path)) handles.set(fd, path);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: number | null) => {
+    const size = original.readSync(fd, buffer, offset, length, position);
+    const path = handles.get(fd);
+    if (path && size > 0) {
+      reads += 1;
+      if (reads === 1) {
+        writeFileSync(`${path}.replacement`, replacement);
+        renameSync(`${path}.replacement`, path);
+      }
+    }
+    return size;
+  }) as typeof fs.readSync;
+  fs.closeSync = (fd) => {
+    handles.delete(fd);
+    original.closeSync(fd);
+  };
+  syncBuiltinESMExports();
+  return {
+    reads: () => reads,
+    restore: () => {
+      for (const fd of handles.keys()) original.closeSync(fd);
+      Object.assign(fs, original);
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+function observeBoundedRead(path: string, hideSize = false) {
+  const original = {
+    closeSync: fs.closeSync, fstatSync: fs.fstatSync, lstatSync: fs.lstatSync,
+    openSync: fs.openSync, readFileSync: fs.readFileSync, readSync: fs.readSync,
+  };
+  const handles = new Set<number>();
+  let bytesRead = 0;
+  let closed = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const fd = original.openSync(...args);
+    if (String(args[0]) === path) handles.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.closeSync = (fd) => {
+    if (handles.delete(fd)) closed += 1;
+    original.closeSync(fd);
+  };
+  fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+    const bytes = original.readFileSync(...args);
+    if (String(args[0]) === path) bytesRead += Buffer.byteLength(bytes);
+    return bytes;
+  }) as typeof fs.readFileSync;
+  fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: number | null) => {
+    const size = original.readSync(fd, buffer, offset, length, position);
+    if (handles.has(fd)) bytesRead += size;
+    return size;
+  }) as typeof fs.readSync;
+  fs.lstatSync = ((...args: Parameters<typeof fs.lstatSync>) => {
+    const stat = original.lstatSync(...args);
+    if (stat && hideSize && String(args[0]) === path) stat.size = 0;
+    return stat;
+  }) as typeof fs.lstatSync;
+  fs.fstatSync = ((...args: Parameters<typeof fs.fstatSync>) => {
+    const stat = original.fstatSync(...args);
+    if (hideSize && handles.has(args[0])) stat.size = 0;
+    return stat;
+  }) as typeof fs.fstatSync;
+  syncBuiltinESMExports();
+  return {
+    stats: () => ({ bytesRead, closed, open: handles.size }),
+    restore: () => {
+      for (const fd of handles) original.closeSync(fd);
+      Object.assign(fs, original);
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+for (const file of ["source-declaration.json", "profile/collection-profile.json"]) {
+  test(`oversized ${file} reads at most the cap plus one and closes its handle`, async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-oci-bounded-read-"));
+    try {
+      const profile = profileFixture();
+      const { entry, service, store } = harness(dataDir, layoutOf(profile));
+      const record = await service.install(entry.connector_id, entry.digest);
+      const bytes = JSON.stringify({ ...profile, padding: "x".repeat(2 * MIB) });
+      const path = join(record.root, file);
+      writeFileSync(path, bytes);
+      if (file === "profile/collection-profile.json") {
+        await store.activate({ ...record, manifestSha256: digestOfText(bytes) });
+      }
+      const observed = observeBoundedRead(path, file === "source-declaration.json");
+      try {
+        const inspected = await inspectActiveConnector(store, SLUG);
+        assert.ok(observed.stats().bytesRead <= MIB + 1, "the read itself must be bounded");
+        assert.equal(inspected.status, "invalid");
+        if (file === "source-declaration.json") assert.equal(observed.stats().bytesRead, MIB + 1);
+        assert.equal(observed.stats().open, 0);
+        assert.equal(observed.stats().closed, 1);
+      } finally {
+        observed.restore();
+      }
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  });
+}
+
+for (const file of ["source-declaration.json", "profile/collection-profile.json"]) {
+  test(`active verification parses the hashed bytes of ${file} after the path changes`, async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-oci-single-read-"));
+    try {
+      const profile = profileFixture();
+      const declaration = declarationOf(profile);
+      const { entry, service, store } = harness(dataDir, layoutOf(profile));
+      const record = await service.install(entry.connector_id, entry.digest);
+      const replacement = file === "source-declaration.json"
+        ? sidecarOf(declarationOf(profileFixture("2.0.0")))
+        : JSON.stringify(profileFixture("2.0.0"));
+      const injected = replaceFileAfterFirstRead((path) => path === join(record.root, file), replacement);
+      try {
+        const inspected = await inspectActiveConnector(store, SLUG);
+        assert.equal(inspected.status, "active");
+        assert.ok(inspected.status === "active");
+        assert.deepEqual(inspected.record.manifest.source_declaration, declaration);
+        assert.equal(inspected.record.manifest.version, profile.version);
+        assert.equal(injected.reads(), 1);
+      } finally {
+        injected.restore();
+      }
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("staging binds the profile digest to the parsed bytes before publication", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-oci-staged-single-read-"));
+  const injected = replaceFileAfterFirstRead(
+    (path) => path.endsWith("/next/profile/collection-profile.json"),
+    JSON.stringify(profileFixture("2.0.0"))
+  );
+  try {
+    const { entry, registered, service, store } = harness(dataDir, layoutOf(profileFixture()));
+    await assert.rejects(() => service.install(entry.connector_id, entry.digest), ACTIVE_BYTES_REFUSAL);
+    assert.equal(registered.length, 0);
+    assert.equal(await store.getActive(SLUG), null);
+    assert.equal(injected.reads(), 1);
+  } finally {
+    injected.restore();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
 
 test("the verified source declaration reaches registration from the install record", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-oci-declaration-"));
