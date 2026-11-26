@@ -360,7 +360,7 @@ for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
   { abortReason: undefined, expectedStatus: "cancelled", expectedTerminalEvent: "run.cancelled" },
   { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
 ]) {
-  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, async (t) => {
+  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 5000 }, async (t) => {
     freshDb(t);
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
     t.after(() => rmSync(tmpDir, { force: true, recursive: true }));
@@ -411,18 +411,10 @@ setInterval(() => {}, 1000);
       (value) => value,
       (err: unknown) => err
     );
-    let deadline: NodeJS.Timeout | undefined;
-    const settled = await Promise.race([
-      outcome,
-      new Promise<"deadline">((resolve) => {
-        deadline = setTimeout(() => resolve("deadline"), 5000);
-      }),
-    ]);
-    clearTimeout(deadline);
+    // The test timeout is the deadline: a run held for the 600 s interaction timeout fails it.
+    const settled = await outcome;
     releaseHandler();
-    await outcome;
 
-    assert.notEqual(settled, "deadline", "the run must end within the kill grace, not the 600 s interaction timeout");
     assert.equal((settled as { status?: unknown }).status, expectedStatus);
     const events = spineEventsForRun(runId);
     const types = events.map((event) => event.event_type);

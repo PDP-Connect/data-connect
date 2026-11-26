@@ -16,7 +16,7 @@ import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
-    DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   OBSERVATION_CAPABILITY,

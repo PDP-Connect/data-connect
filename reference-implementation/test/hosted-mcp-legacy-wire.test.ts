@@ -11,8 +11,8 @@
 //   - tools/list schemas carry the draft-07 `$schema` and `execution` hints
 //     (the spec default dialect is JSON Schema 2020-12).
 //   - an unknown tool name is a 200 `isError` result, not a protocol error.
-//   - GET /mcp answers 200 `text/event-stream` and DELETE /mcp answers 200;
-//     the spec says servers SHOULD answer 405 to both.
+//   - DELETE /mcp answers 200; the spec says servers SHOULD answer 405.
+//     (GET /mcp already answers 405 with `Allow: POST, DELETE`.)
 //   - an unsupported `MCP-Protocol-Version` is 400 with JSON-RPC code -32000
 //     (the spec renumbers this to -32022 with `data.supported`).
 // When behavior changes on purpose, update the pin in the same change.
@@ -28,6 +28,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { PDPP_MCP_INSTRUCTIONS } from "@pdpp/mcp-server/server";
+import { productServerIcons } from "../server/product-icons.ts";
 import {
 	type PermanentAudienceFixture,
 	startPermanentAudienceFixture,
@@ -142,13 +143,7 @@ describe("hosted MCP legacy wire: initialize", () => {
 					instructions: PDPP_MCP_INSTRUCTIONS,
 					protocolVersion: version,
 					serverInfo: {
-						icons: [
-							{
-								mimeType: "image/svg+xml",
-								sizes: ["any"],
-								src: `${fixture.rsUrl}/icon.svg`,
-							},
-						],
+						icons: productServerIcons(fixture.rsUrl),
 						name: "pdpp-reference-mcp",
 						version: revision,
 					},
@@ -285,18 +280,21 @@ describe("hosted MCP legacy wire: errors", () => {
 });
 
 describe("hosted MCP legacy wire: GET and DELETE", () => {
-	test("GET /mcp: 200 empty text/event-stream, no Allow header", async () => {
+	test("GET /mcp: 405 JSON-RPC error with Allow: POST, DELETE", async () => {
 		const response = await wire("GET");
 
-		assert.equal(response.status, 200);
-		assert.equal(response.headers.get("content-type"), "text/event-stream");
-		assert.equal(
-			response.headers.get("cache-control"),
-			"no-cache, no-transform",
-		);
-		assert.equal(response.headers.get("allow"), null);
+		assert.equal(response.status, 405);
+		assert.equal(response.headers.get("content-type"), "application/json");
+		assert.equal(response.headers.get("allow"), "POST, DELETE");
 		assert.equal(response.headers.get("mcp-session-id"), null);
-		assert.equal(response.text, "");
+		assert.deepStrictEqual(response.body, {
+			error: {
+				code: -32_000,
+				message: "Method not allowed: this server offers no SSE stream on GET.",
+			},
+			id: null,
+			jsonrpc: "2.0",
+		});
 	});
 
 	test("DELETE /mcp: 200 empty body, application/octet-stream, no Allow header", async () => {
