@@ -37,13 +37,17 @@
  */
 
 import assert from "node:assert/strict";
+import type { ManifestLike } from "../scripts/compact-record-history.ts";
 import test from "node:test";
 
 import {
-  COMPACTION_POLICIES,
-  findPolicy,
+  compactionPoliciesFromManifests,
   recordFingerprint as scriptRecordFingerprint,
 } from "../scripts/compact-record-history.ts";
+
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
+const COMPACTION_POLICIES = compactionPoliciesFromManifests(readShippedManifests().map(({ manifest }) => manifest as ManifestLike)).policies;
+const findPolicy = (key: string, stream: string) => COMPACTION_POLICIES.find((policy) => policy.connectorIds.includes(key) && policy.stream === stream) ?? null;
 
 /**
  * Whether a TypeScript loader (tsx) is active in this process. When the suite

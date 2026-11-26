@@ -39,6 +39,7 @@ import {
   parseManifest,
   shouldRollback,
 } from "../scripts/canary/manifest.ts";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { CANARY_TRIGGERABLE_POSTURES, deriveOtpDenylist } from "../scripts/canary/otp-posture.ts";
 
 // --- ManifestError message assertions, hoisted so each `assert.throws`
@@ -725,5 +726,17 @@ test("evaluateAfter turns a throwing probe into a failed outcome so rollback can
     } else {
       process.env.PDPP_CANARY_ORIGIN = saved;
     }
+  }
+});
+
+test("snapshot OTP posture is derived from injected manifests", () => {
+  const entries = readShippedManifests();
+  assert.ok(entries.length > 0);
+  const denied = deriveFromFixtures(Object.fromEntries(entries.map(({ file, manifest }) => [file, JSON.stringify(manifest)])));
+  for (const { file, manifest } of entries) {
+    const capabilities = (manifest as { capabilities?: { human_interaction?: string[]; refresh_policy?: { interaction_posture?: string } } }).capabilities;
+    const posture = capabilities?.refresh_policy?.interaction_posture;
+    const allowed = typeof posture === "string" && CANARY_TRIGGERABLE_POSTURES.has(posture) && !capabilities?.human_interaction?.includes("otp");
+    assert.equal(denied.includes(file.slice(0, -5)), !allowed, file);
   }
 });

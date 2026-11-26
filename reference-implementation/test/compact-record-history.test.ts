@@ -242,7 +242,7 @@ test("COMPACTION_POLICIES exposes the registered policies (short-name canonical 
   // meaningful invariant (findPolicy is a keyed lookup, never a positional
   // one), so this compares the same expected SET of (connector, stream)
   // pairs sorted, rather than requiring an exact incidental order match.
-  const actual = COMPACTION_POLICIES.map((p) => [p.connectorIds[0], p.stream]);
+  const actual = compactionPoliciesFromManifests(allShippedManifestsForTest()).policies.map((p) => [p.connectorIds[0], p.stream]);
   const sortPairs = (pairs: (readonly [string, string])[]) =>
     [...pairs].map(([c, s]) => `${c}/${s}`).sort((a, b) => a.localeCompare(b));
   assert.deepEqual(sortPairs(actual as [string, string][]), sortPairs(expected as [string, string][]));
@@ -475,7 +475,7 @@ test("manifest-declared recurring point-in-time snapshot streams DO have a regis
   assert.ok(manifestRecurringSnapshot.length > 0, "expected at least one manifest to declare recurring_snapshot");
   for (const { connector, stream } of manifestRecurringSnapshot) {
     assert.ok(
-      findPolicy(connector, stream),
+      compactionPoliciesFromManifests(allShippedManifestsForTest()).policies.find((policy) => policy.connectorIds.includes(connector) && policy.stream === stream),
       `${connector}/${stream} is a recurring snapshot; it MUST keep a compaction policy as the no-op regression safety net`
     );
   }
