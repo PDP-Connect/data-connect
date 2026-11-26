@@ -38,7 +38,7 @@ export function appPractice(state: string, offset: number, now = Date.now()): Ap
   }
   const changes: AccessChange[] = ["allowed","not_allowed","removed"].map((change,index) => ({ id: `practice-change-${index}`, trace_id: `practice-trace-${index}`, at: new Date(now-index*60_000).toISOString(), day: personDay(now,offset), client_id: `practice-app-${index%2}`, change: change as AccessChange["change"], source_id: index === 1 ? null : "gmail", source_kind: "connector", connection_id: index === 1 ? null : "practice-source-2" }));
   const empty = state === "empty" || state === "unread";
-  return { mode: "days", data: empty || state === "changes" ? [] : state === "app" ? data.filter(row => row.client_id === "practice-app-0") : data, changes: empty ? [] : changes, has_more: false, next_cursor: null };
+  return { mode: "days", identities: [], data: empty || state === "changes" ? [] : state === "app" ? data.filter(row => row.client_id === "practice-app-0") : data, changes: empty ? [] : changes, has_more: false, next_cursor: null };
 }
 export function readPractice(state: string, now = Date.now()): AppHistory {
   const shapes = ["record_list","record_detail","search","search_hybrid","search_semantic","stream_aggregate","field_window","schema","stream_list"];

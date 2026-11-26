@@ -1,16 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { jsonObject, type AppAccess } from "./app-access.ts";
 import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
 export interface AppReadSource { source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
   day: string; client_id: string; reads: number; across_sources: number; sources: AppReadSource[];
-  last_at: string | null; permission_refusals: number;
+  last_at: string | null; last_refusal_at?: string | null; permission_refusals: number;
 }
 export interface AccessChange {
   id: string; trace_id: string; day: string; at: string; client_id: string;
   change: "allowed" | "not_allowed" | "removed"; source_id: string | null;
   source_kind: string | null; connection_id: string | null;
+  sources?: { source_id: string; source_kind: string | null; connection_id: string | null }[];
 }
 export interface AppReadEntry {
   id: string; trace_id: string; at: string; client_id: string; shape: string | null;
@@ -18,11 +20,11 @@ export interface AppReadEntry {
   record_kind: string | null; records: number | null; metric: string | null;
   refused: boolean; reason: string | null;
 }
-export type AppHistory = (HistoryList<AppReadDay, "days"> & { changes: AccessChange[] }) | HistoryList<AppReadEntry, "reads">;
+export type AppHistory = (HistoryList<AppReadDay, "days"> & { changes: AccessChange[]; identities: AppAccess[] }) | HistoryList<AppReadEntry, "reads">;
 /** Discovery describes available data rather than disclosing its contents. */
 export const DISCOVERY_SHAPES = ["schema", "stream_list", "connector_list", "stream_metadata"] as const;
 export const PERMISSION_REFUSALS = ["grant_invalid", "grant_revoked", "grant_expired", "field_not_granted", "grant_stream_not_allowed"] as const;
-const accessTypes = "'consent.approved','consent.denied','grant.issued','grant.revoked','grant_package.issued','grant_package.revoked'";
+const accessTypes = "'consent.approved','consent.denied','grant.issued','grant.revoked','grant_package.issued','grant_package.revoked','client.deleted'";
 function field(key: string, backend: HistoryBackend): string {
   return backend === "postgres" ? `e.data_json->>'${key}'` : `json_extract(e.data_json, '$.${key}')`;
 }
@@ -75,6 +77,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     SUM(CASE WHEN ${disclosure} THEN 1 ELSE 0 END) AS reads,
     SUM(CASE WHEN ${disclosure} THEN ${records} END) AS records,
     MAX(CASE WHEN ${disclosure} THEN e.occurred_at END) AS last_at,
+    MAX(CASE WHEN ${refusal} THEN e.occurred_at END) AS last_refusal_at,
     SUM(CASE WHEN ${refusal} THEN 1 ELSE 0 END) AS permission_refusals
     ${from} WHERE ${where} AND e.event_type IN ('disclosure.served','query.rejected')
     GROUP BY ${day}, ${client}, ${source}, e.source_kind, ${connection}`, values, backend, query);
@@ -85,6 +88,7 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     const key = `${row.day}\0${row.client_id}`;
     let entry = days.get(key);
     if (!entry) { entry = { day: String(row.day), client_id: String(row.client_id), reads: 0, across_sources: 0, sources: [], last_at: null, permission_refusals: 0 }; days.set(key, entry); }
+    if (row.last_refusal_at && String(row.last_refusal_at) > (entry.last_refusal_at ?? "")) entry.last_refusal_at = String(row.last_refusal_at);
     entry.reads += reads; entry.permission_refusals += refused;
     if (row.last_at && (!entry.last_at || String(row.last_at) > entry.last_at)) entry.last_at = String(row.last_at);
     if (row.source_id && reads) entry.sources.push({ source_id: String(row.source_id), source_kind: row.source_kind as string | null, connection_id: row.connection_id as string | null, reads, records: row.records === null ? null : Number(row.records) });
@@ -93,9 +97,26 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
   for (const entry of days.values()) entry.sources.sort((a,b) => b.reads-a.reads || a.source_id.localeCompare(b.source_id));
   const changes = await historyRows<AccessChange>(`SELECT e.event_id AS id, e.trace_id, ${day} AS day,
     e.occurred_at AS at, ${client} AS client_id,
-    CASE WHEN e.event_type='consent.denied' THEN 'not_allowed' WHEN e.event_type IN ('grant.revoked','grant_package.revoked') THEN 'removed' ELSE 'allowed' END AS change,
+    CASE WHEN e.event_type='consent.denied' THEN 'not_allowed' WHEN e.event_type IN ('grant.revoked','grant_package.revoked','client.deleted') THEN 'removed' ELSE 'allowed' END AS change,
     ${source} AS source_id, e.source_kind, ${connection} AS connection_id
     ${from} WHERE ${where} AND e.event_type IN (${accessTypes})
     ORDER BY e.occurred_at DESC, e.event_id DESC`, values, backend, query);
-  return { mode: "days", data: [...days.values()].sort((a,b) => b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id)), changes, has_more: false, next_cursor: null };
+  const byDecision = new Map<string,AccessChange>();
+  for (const change of changes) {
+    const key = `${change.trace_id}\0${change.client_id}\0${change.change}`;
+    const existing = byDecision.get(key);
+    const source = change.source_id ? {source_id:change.source_id,source_kind:change.source_kind,connection_id:change.connection_id} : null;
+    if (!existing) byDecision.set(key,{...change,sources:source ? [source] : []});
+    else if (source && !existing.sources?.some(row=>JSON.stringify(row)===JSON.stringify(source))) existing.sources?.push(source);
+  }
+  const decisions = [...byDecision.values()];
+  const ids = [...new Set([...days.values()].map(row => row.client_id).concat(changes.map(row=>row.client_id)))];
+  const metadata = ids.length ? await historyRows<{client_id: string; metadata_json: unknown}>(`SELECT client_id, metadata_json FROM oauth_clients WHERE client_id IN (${ids.map(()=>"?").join(",")})`,ids,backend,query) : [];
+  const identities: AppAccess[] = ids.map(id => {
+    const data = jsonObject(metadata.find(row=>row.client_id===id)?.metadata_json);
+    let host: string | null = null;
+    try { if (Array.isArray(data.redirect_uris) && typeof data.redirect_uris[0] === "string") host = new URL(data.redirect_uris[0]).hostname; } catch { /* unknown address */ }
+    return { client_id: id, client_name: typeof data.client_name === "string" ? data.client_name : "", return_host: host, returns_to_this_computer: host !== null && ["localhost","127.0.0.1","[::1]"].includes(host), domain_control_verified: false, sources: [], reads_last_7_days: 0 };
+  });
+  return { mode: "days", identities, data: [...days.values()].sort((a,b) => b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id)), changes: decisions, has_more: false, next_cursor: null };
 }

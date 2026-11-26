@@ -9,6 +9,8 @@ import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.
 import { readAppHistory } from "../lib/app-history.ts";
 type Write = (sql: string, values: unknown[]) => Promise<unknown>;
 async function fixture(write: Write) {
+  await write(`INSERT INTO oauth_clients(client_id,registration_mode,token_endpoint_auth_method,metadata_json,created_at,updated_at)
+    VALUES ('app','dynamic','none',?,'2026-11-24T00:00:00.000Z','2026-11-24T00:00:00.000Z')`, [JSON.stringify({client_name:"Test app",redirect_uris:["https://app.example/return"]})]);
   let seq = 0;
   for (const [type, shape, source, count, error] of [
     ["disclosure.served", "record_list", "mail", 20, null],
@@ -39,6 +41,8 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(result.mode, "days");
   if (result.mode !== "days") throw new Error("wrong mode");
   assert.equal(result.data.length, 1);
+  assert.equal(result.identities[0]?.client_name,"Test app");
+  assert.equal(result.identities[0]?.return_host,"app.example");
   assert.equal(result.data[0]?.reads, 3);
   assert.equal(result.data[0]?.permission_refusals, 1);
   assert.equal(result.data[0]?.across_sources, 1);

@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const PAGE = fileURLToPath(new URL("./page.tsx", import.meta.url));
+const PAGE = fileURLToPath(new URL("./technical-page.tsx", import.meta.url));
 const ENTRY_PAGE = fileURLToPath(new URL("./[traceId]/page.tsx", import.meta.url));
 const ENTRY_HREF_RE = /href=\{`\/audit\/\$\{encodeURIComponent\(trace\.trace_id\)\}`\}/;
 

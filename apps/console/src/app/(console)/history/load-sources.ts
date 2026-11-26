@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import { listConnectorSummaries } from "../lib/ref-client.ts";
-export interface HistorySource { id: string; connector: string; name: string }
+import type { HistorySource } from "./source-names.ts";
+export { sourceName, type HistorySource } from "./source-names.ts";
 export async function loadHistorySources(): Promise<HistorySource[]> {
   const sources: HistorySource[] = [];
   let cursor: string | undefined;
@@ -13,7 +14,4 @@ export async function loadHistorySources(): Promise<HistorySource[]> {
     cursor = page.has_more ? page.next_cursor ?? undefined : undefined;
   } while (cursor);
   return sources;
-}
-export function sourceName(sources: HistorySource[], id: string | null, connector?: string | null): string {
-  return sources.find(source => source.id === id)?.name ?? sources.find(source => source.connector === (connector ?? id))?.name ?? "Data source";
 }
