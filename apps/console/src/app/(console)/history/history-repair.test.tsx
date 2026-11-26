@@ -20,19 +20,19 @@ test("same failed-sync evidence gives every current surface the history cause an
     ["session_expired","Northwind asked for a new sign-in.","Sign in again"],
     ["auth_failed","Northwind didn't accept the sign-in.","Sign in again"],
     ["assistance_timed_out","The sign-in wasn't finished.","Try again"],
-    ["ingest_endpoint_saturated","DataConnect could not save the copies because its storage was busy. DataConnect tries again at the next check.",null],
-    ["surface_start_failed","DataConnect could not start its browser. DataConnect tries again at the next check.",null],
-    ["rate_limited","Northwind asked DataConnect to slow down. DataConnect tries again at the next check.",null],
+    ["ingest_endpoint_saturated","DataConnect could not save the copies because its storage was busy.",null],
+    ["surface_start_failed","DataConnect could not start its browser.",null],
+    ["rate_limited","Northwind asked DataConnect to slow down.",null],
     ["auth_blocked","Northwind didn't let DataConnect sign in.","Sign in again"],
     ["static_secret_credential_unavailable","DataConnect could not find the saved sign-in details for Northwind.","Sign in again"],
-    ["headed_browser_unavailable","DataConnect could not start its browser. DataConnect tries again at the next check.",null],
-    ["ingest_http_error","DataConnect could not save the copies because its storage refused them. This needs a fix from the people who maintain DataConnect.",null],
-    ["connector_protocol_violation","The connector for Northwind sent something DataConnect could not accept. This needs a fix from the people who maintain DataConnect.",null],
-    ["ECONNREFUSED","DataConnect could not reach everything it needs to sync Northwind. DataConnect tries again at the next check.",null],
-    ["launch_failed","DataConnect could not start the connector for Northwind. DataConnect tries again at the next check.",null],
-    ["controller_restarted","DataConnect restarted before the sync finished. DataConnect tries again at the next check.",null],
-    ["run_timed_out","DataConnect stopped the sync because it took too long. DataConnect tries again at the next check.",null],
-    ["connector_exit_without_done","The connector for Northwind stopped before reporting its result. DataConnect tries again at the next check.",null],
+    ["headed_browser_unavailable","DataConnect could not start its browser.",null],
+    ["ingest_http_error","DataConnect could not save the copies because its storage refused them.",null],
+    ["connector_protocol_violation","DataConnect could not use the copy from Northwind.",null],
+    ["ECONNREFUSED","DataConnect could not reach everything it needed to sync Northwind.",null],
+    ["launch_failed","DataConnect could not start this sync.",null],
+    ["controller_restarted","DataConnect restarted before the sync finished.",null],
+    ["run_timed_out","DataConnect stopped the sync because it took too long.",null],
+    ["connector_exit_without_done","The sync stopped before it reported a result.",null],
     ["stream_collection_failed","DataConnect could not copy some records from Northwind.","Try again"],
     ["venmo_login_incomplete_after_submit","The sign-in wasn't finished.","Try again"],
     ["unknown","Something stopped Northwind from syncing.","Try again"],
@@ -128,4 +128,20 @@ test("large practice record totals and automatic triggers agree with the day",as
  assert.equal(reads.reduce((sum,row)=>sum+(row.records ?? 0),0),summary.data[0]!.sources[0]!.records);
  const {oneSyncPractice}=await import("../syncs/[runId]/one-sync-model.ts");
  assert.equal(oneSyncPractice("could-not-start").trigger,"scheduled");
+});
+
+test("a past sync cause never promises another check or prescribes a fix now",()=>{
+ for(const reason of ["rate_limited","surface_start_failed","ingest_endpoint_saturated","ingest_http_error","connector_protocol_violation","ECONNREFUSED","launch_failed","controller_restarted","run_timed_out","connector_exit_without_done"]) {
+  const cause=resolveSyncCause({reason},"Northwind");
+  assert.ok(!cause.sentence.includes("tries again at the next check"));
+  assert.ok(!cause.sentence.includes("This needs a fix"));
+  assert.ok(!cause.sentence.includes("connector for"));
+ }
+});
+
+test("a mixed known and unknown missing kind never lists records as another kind",()=>{
+ const fixture=syncPractice("mixed",0);assert.equal(fixture.history.mode,"days");if(fixture.history.mode!=="days") {return;}
+ const [stored]=fixture.history.data;assert.ok(stored);
+ const sentence=syncDaySentence({...stored,missing:[{stream:"messages",retryable:false},{stream:null,retryable:false}]},"Northwind",["Messages","records"]);
+ assert.ok(!sentence.includes("Messages, records"));
 });

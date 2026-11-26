@@ -1,3 +1,4 @@
+import { CalendarDateInput } from "../history/calendar-date-input.tsx";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
@@ -18,7 +19,8 @@ export function syncCause(cause: string | null, name: string): string | null {
 }
 export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames: string[] = []): string {
   const current = row.currentState ? ` · ${row.currentState}` : "";
-  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : "";
+  const knownMissing=[...new Set(missingNames.filter(candidate=>candidate!=="records"))];
+  const missing = row.missing?.length ? ` · ${knownMissing.length ? knownMissing.join(", ") : "Some records"} didn't come` : "";
   if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}${current}`; }
   if (row.last_outcome === "failed") {
     const cause = resolveSyncCause(row.evidence ?? {reason:row.cause},name).sentence;
@@ -29,7 +31,7 @@ export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames:
   return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete.toLocaleString("en-US")} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
 }
 export function syncDayProblem(row: CurrentSyncDay): boolean {
-  if (row.currentProblem !== undefined) return row.currentProblem;
+  if (row.currentProblem !== undefined) {return row.currentProblem;}
   return Boolean(row.currentProblem) || row.failed + row.stopped + row.interrupted > 0 || Boolean(row.missing?.length) || row.could_not_start > 0;
 }
 export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:CurrentSyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
@@ -63,7 +65,7 @@ export function DailySyncsView({ rows, sources, current = [], offset, days = 7, 
     {sources.length ? <HistoryFilters path="/syncs">
       {demo ? <input name="demo" type="hidden" value={demo} /> : null}
       <select aria-label="Data source" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" defaultValue={params.connection_id ?? ""} name="connection_id"><option value="">All data sources</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select>
-      <label className="flex min-h-11 items-center gap-2"><input defaultChecked={params.only_problems === "true"} name="only_problems" type="checkbox" value="true" />Only problems</label><label className="flex flex-col gap-1">Go to a date<span>Date</span><input className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" aria-label="Go to a date" name="date" type="date" defaultValue={params.date} /></label>
+      <label className="flex min-h-11 items-center gap-2"><input defaultChecked={params.only_problems === "true"} name="only_problems" type="checkbox" value="true" />Only problems</label><label className="flex flex-col gap-1" htmlFor="sync-history-date">Date<CalendarDateInput id="sync-history-date" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" aria-label="Go to a date" name="date" defaultValue={params.date} /></label>
     </HistoryFilters> : null}
     {current.length ? <Section title="Now"><ul className="divide-y divide-border">{current.map(row => <li className="flex flex-wrap items-center justify-between gap-3 py-4" key={row.id}><Link href={`/syncs/${encodeURIComponent(row.id)}${demo ? `?demo=${row.needs ? "needs-you" : "syncing"}` : ""}`}>{row.name} · {row.needs ? "Needs you to finish signing in" : `Syncing now · started ${startedAgo(row.at)}`}</Link>{row.needs ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(row.id)}/stream`}>Continue</Link> : null}</li>)}</ul></Section> : null}
     <AppendHistory key={JSON.stringify(params)} initial={{content:<SyncHistoryDays rows={rows.filter(row=>shown.includes(row.day))} sources={sources} offset={offset} demo={demo} onlyProblems={params.only_problems==="true"} />,next:beforeDay ?? null,firstDay:shown.length ? firstDay : null}} load={loadMore} label="Earlier" />
