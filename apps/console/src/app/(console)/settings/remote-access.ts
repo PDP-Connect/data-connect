@@ -392,6 +392,7 @@ export type OriginReading =
   | { kind: "unverified" }
   | { kind: "stale"; checkedAt: number }
   | { kind: "reaches_this_console"; checkedAt: number }
+  | { kind: "agent_unconfirmed"; checkedAt: number }
   | { kind: "reaches_something_else"; checkedAt: number; status: number }
   | { kind: "unreachable"; checkedAt: number; reason: string }
 
@@ -419,6 +420,12 @@ export function originVerificationDisplay(
   const outcome = verification.outcome
   switch (outcome.kind) {
     case "reaches_this_console":
+      if (
+        (config.provider === "cloudflare_tunnel" || config.provider === "ngrok") &&
+        agent !== "running"
+      ) {
+        return { ...base, reading: { kind: "agent_unconfirmed", checkedAt } }
+      }
       return { ...base, reading: { kind: "reaches_this_console", checkedAt } }
     case "reaches_something_else":
       return { ...base, reading: { kind: "reaches_something_else", checkedAt, status: outcome.status } }
