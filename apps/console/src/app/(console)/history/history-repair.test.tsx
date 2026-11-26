@@ -70,6 +70,19 @@ test("earlier healthy sources collapse and missing kinds remain visible",async()
   assert.match(html,/Failed 3 times:/);
 });
 
+test("a day link keeps the data source when the history is for one data source",async()=>{
+  const React=await import("react");(globalThis as typeof globalThis & {React:typeof React}).React=React;
+  const {renderToStaticMarkup}=await import("react-dom/server");
+  const {SyncHistoryDays}=await import("../syncs/daily-syncs-view.tsx");
+  const model=syncPractice("mixed",0);if(model.history.mode!=="days") { throw Error("mode"); }
+  const one=model.history.data[0]!;
+  const rows=model.history.data.filter(row=>row.connection_id===one.connection_id).map(row=>({...row,day:"2026-08-13",failed:0,stopped:0,interrupted:0,could_not_start:0,missing:undefined}));
+  const html=renderToStaticMarkup(<SyncHistoryDays rows={rows} sources={model.sources} offset={0} />);
+  const hrefs=[...html.matchAll(/href="(\/syncs\/day[^"]*)"/g)].map(match=>match[1]);
+  assert.ok(hrefs.length>0);
+  for(const href of hrefs) { assert.match(href!,new RegExp(`connection_id=${encodeURIComponent(one.connection_id)}`)); }
+});
+
 test("consecutive discovery lines roll into one, with record reads first",async()=>{
   const {groupReadLines}=await import("../audit/day/read-day-rows.tsx");
   const {readPractice}=await import("./practice.ts");const history=readPractice("kinds");if(history.mode!=="reads") { throw Error("mode"); }

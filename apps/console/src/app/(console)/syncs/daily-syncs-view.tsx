@@ -36,13 +36,15 @@ export function syncDayProblem(row: CurrentSyncDay): boolean {
 }
 export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:CurrentSyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
   const name=(row:SyncDay)=>sourceName(sources,row.connection_id,row.connector_id);
+  const sourceIds=new Set(rows.map(row=>row.connection_id));
+  const onlySource=sourceIds.size===1 ? [...sourceIds][0] : undefined;
   return <>{visibleDays(rows,10_000).map(day=>{
     const all=rows.filter(row=>row.day===day);
     const older=!expand && day!==personDay(Date.now(),offset);
     const fine=older ? all.filter(row=>!syncDayProblem(row)) : [];
     const shown=older ? all.filter(syncDayProblem) : all;
     return <Section key={day} title={fine.length && !onlyProblems ? undefined : dayLabel(day,offset)}>
-      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
+      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,connection_id:onlySource,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
       <ul className="divide-y divide-border">{shown.map(row=><li key={row.connection_id} className="py-4">
         <Link className="flex items-center justify-between gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"history-day",fixture:demo}:{})})}>
           <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,sources.find(source=>source.id===row.connection_id)?.serviceName ?? name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
