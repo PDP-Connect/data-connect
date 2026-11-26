@@ -8,7 +8,6 @@ import { parseConnectorSummaryPageState } from "./components/connector-summary-p
 import { StandingOverview } from "./components/views/standing-overview.tsx";
 import {
   buildHomeViewModel,
-  HOME_GRANT_LIMIT,
   type HomeHrefs,
   type HomeInputs,
   type HomeReads,
@@ -18,7 +17,8 @@ import { liveDashboardDataSource } from "./lib/data-source.ts";
 import { getReferencePublicOrigin } from "./lib/owner-token.ts";
 import {
   type DatasetSummary,
-  type GrantSummary,
+  type AppAccess,
+  listAppAccess,
   type ListResponse,
   listOwnerIssuedClients,
   type OwnerIssuedClient,
@@ -74,7 +74,7 @@ async function loadHomeInputs(params: Record<string, string | string[] | undefin
   const pageState = parseConnectorSummaryPageState(params);
   const [summary, grants, traces, approvals, ownerClients, sourcePage] = await Promise.all([
     safeRead<DatasetSummary | null>("dataset_summary", () => ds.getDatasetSummary(), null),
-    safeRead("grants", () => ds.listGrants({ limit: HOME_GRANT_LIMIT }), listFallback<GrantSummary>()),
+    safeRead("grants", () => listAppAccess(), listFallback<AppAccess>()),
     safeRead("traces", () => ds.listTraces({ limit: 6 }), listFallback<TraceSummary>()),
     safeRead("approvals", () => ds.listPendingApprovals(), listFallback<PendingApproval>()),
     safeRead("owner_clients", () => listOwnerIssuedClients(), listFallback<OwnerIssuedClient>()),
@@ -108,7 +108,8 @@ async function loadHomeInputs(params: Record<string, string | string[] | undefin
     approvals: approvals.value.data,
     approvalsFailed: approvals.issue !== null,
     approvalsHaveMore: approvals.value.has_more,
-    grants: grants.value.data,
+    grants: [],
+    appRegistrations: grants.value.data,
     grantsFailed: grants.issue !== null,
     grantsHaveMore: grants.value.has_more,
     ownerClients: ownerClients.value.data,

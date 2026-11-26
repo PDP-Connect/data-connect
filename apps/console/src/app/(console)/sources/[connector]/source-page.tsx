@@ -1,3 +1,5 @@
+import { SourceApps, SourceAppsList } from "./source-apps.tsx";
+import { buildAppPractice } from "../../grants/app-practice.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -480,6 +482,7 @@ export default async function ConnectorPage({
       dangerError={sp.error}
       dangerMessage={sp.message}
       model={model}
+      apps={practiceModel ? <SourceAppsList apps={buildAppPractice("one").apps} connectionId={model.connectionId} /> : <Suspense fallback={null}><SourceApps connectionId={model.connectorInstanceId ?? model.connectionId} /></Suspense>}
       otherAccounts={otherAccounts}
       now={now}
       updateDemo={updateDemo}
@@ -714,6 +717,7 @@ function ConnectorPageView({
   addAnotherAccountAction,
   model,
   otherAccounts,
+  apps,
   dangerActiveRunId,
   dangerMessage,
   dangerError,
@@ -725,6 +729,7 @@ function ConnectorPageView({
   addAnotherAccountAction?: ReactNode;
   model: ConnectorPageModel;
   otherAccounts?: ReactNode;
+  apps?: ReactNode;
   /** The run that blocked a delete, forwarded from the delete action redirect. */
   dangerActiveRunId?: string;
   dangerMessage?: string;
@@ -898,6 +903,7 @@ function ConnectorPageView({
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
         </div> : null}
       </Section> : null}
+      {apps}
       {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
       <RecentRunsSection recentRuns={recentRuns} />
           {configuration && !neverConnected ? (

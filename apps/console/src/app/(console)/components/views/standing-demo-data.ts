@@ -1,3 +1,4 @@
+import { buildAppPractice } from "../../grants/app-practice.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -476,6 +477,7 @@ export function buildDemoInputs(scenario: DemoScenario, hrefs: HomeHrefs): HomeI
     approvalsFailed: false,
     approvalsHaveMore: false,
     grants: GRANTS,
+    appRegistrations: buildAppPractice("one").registrations,
     grantsFailed: false,
     grantsHaveMore: false,
     hrefs,

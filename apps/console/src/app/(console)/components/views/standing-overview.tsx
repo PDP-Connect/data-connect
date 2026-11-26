@@ -326,7 +326,7 @@ function AppsBlock({ data }: { data: HomeData }) {
     <section aria-labelledby="home-apps-heading">
       <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <Text as="h2" className={SECTION_LABEL} id="home-apps-heading">
-          Apps that can read your data
+          {data.appError ? "Apps" : `${data.apps.length} ${data.apps.length === 1 ? "app" : "apps"} can read your data`}
         </Text>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {data.allAppsLink ? (

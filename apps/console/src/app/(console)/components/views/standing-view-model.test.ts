@@ -325,6 +325,10 @@ function base(overrides: Partial<HomeInputs> = {}): HomeInputs {
     tracesFailed: false,
     tracesHaveMore: false,
     ...overrides,
+    appRegistrations: overrides.appRegistrations ?? (overrides.grants ?? []).map((grant) => ({
+      client_id: grant.client_id || grant.grant_id, client_name: grant.client?.client_name || grant.client_id || "", return_host: "assistant.example", returns_to_this_computer: false, domain_control_verified: true, reads_last_7_days: 0,
+      sources: [{ source: { kind: grant.source?.kind || "connector", id: grant.source?.id || grant.connector_id || "unknown", connector_id: grant.source?.connector_id || (grant.source ? grant.source.id : grant.connector_id) || null, connection_id: grant.source?.connection_id || null }, kinds: grant.kinds, in_force: grant.status === "active" || grant.status === "issued", first_issued_at: grant.first_at, expires_at: null, stopped_at: null, stopped_reason: null, last_read_at: grant.last_at, grant_ids: [grant.grant_id], active_grant_ids: [grant.grant_id], package_ids: [] }],
+    })),
   };
 }
 
@@ -893,8 +897,8 @@ test("apps group active grants, say what can be read, and include only matching 
   // DIRECTION.md, Home § Apps that can read your data: the app summary names its data sources.
   assert.equal(data.apps[0]?.reads, "Spotify and GitHub");
   // DIRECTION.md, Home § Apps that can read your data: grouped grants use the full access list address.
-  assert.equal(data.apps[0]?.href, HREFS.grants);
-  // DIRECTION.md, Home § Apps that can read your data: only a successful read by the same app supplies last-read text.
+  assert.equal(data.apps[0]?.href, HREFS.grant("g1"));
+  // The permission list supplies the last-read time. by the same app supplies last-read text.
   assert.match(data.apps[0]?.lastRead ?? "", /ago|today|yesterday/);
   // DIRECTION.md, Home § Apps that can read your data: token rows count active owner-made tokens directly.
   assert.equal(data.activeTokenCount, 1);
