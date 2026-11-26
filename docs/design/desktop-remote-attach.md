@@ -65,7 +65,7 @@ This is the part the experiment changed.
 
 Why browser connectors cannot be fixed by wiring: the server would have to dial the desktop's browser, and Chrome's DevTools server binds loopback only and rejects foreign `Host` and `Origin`. Every shipping product that reaches a user's browser from elsewhere has the browser side dial out. The corpus design for this (outbound authenticated channel per desktop; the desktop runs the signed connector locally and ships batches through the existing durable outbox and idempotent ingest routes; the server never gets raw CDP to a logged-in profile) is the follow-up. It needs a server-to-device run channel and per-device placement, both absent today. Doing it here would triple the PR. This document names it so the attach feature does not close the door.
 
-Tim's rule that any surface syncs with any surface, read as a constraint on this design: the desktop gets no private server API. Pairing mints the same owner session a browser sign-in mints, so a browser, a phone or a CLI can use the same route. Data from the desktop machine reaches the remote through the public device-exporter routes any other client uses. The attach feature adds no desktop-only path to data. If Tim means something wider, such as replication between two instances, say so; it is not in this PR.
+The requirement that any surface syncs with any surface, read as a constraint on this design: the desktop gets no private server API. Pairing mints the same owner session a browser sign-in mints, so a browser, a phone or a CLI can use the same route. Data from the desktop machine reaches the remote through the public device-exporter routes any other client uses. The attach feature adds no desktop-only path to data. If the intended scope is wider, such as replication between two instances, say so; it is not in this PR.
 
 ### 4. Switching and disconnecting
 
@@ -97,7 +97,7 @@ Tim's rule that any surface syncs with any surface, read as a constraint on this
 - The desktop's server URL is already one seam, and the experiment showed the console follows it with no other change.
 - The sign-in problem is solved by an object that already exists: an owner session, with listing, revocation and password-change revocation, minted through the same controller the login route uses (`owner-session.ts:368`).
 - The likeliest wrong assumption was that the console and sync paths honor the URL everywhere. The experiment tested it and it held; the failures were cookie parsing, sign-in and connector availability, which this design targets.
-- Remaining risk: Tauri keychain behavior on Tim's machine. The existing code already falls back and logs when the keychain write fails; this design degrades to in-memory with a visible notice rather than to a file.
+- Remaining risk: Tauri keychain behavior on the target machine. The existing code already falls back and logs when the keychain write fails; this design degrades to in-memory with a visible notice rather than to a file.
 
 ## Non-goals and follow-ups
 

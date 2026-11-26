@@ -295,12 +295,12 @@ test("desktop pairing: redeem mints an owner session the server accepts, listed 
     const { cookie } = await login(asUrl, TEST_PASSWORD);
     assert.ok(cookie);
     const { body: pairing } = await createPairing(asUrl, cookie);
-    const redeemed = await redeem(asUrl, { code: pairing.code, label: "  Tim's laptop  " });
+    const redeemed = await redeem(asUrl, { code: pairing.code, label: "  Example laptop  " });
     assert.equal(redeemed.status, 200);
     assert.equal(redeemed.setCookie, null, "the session id travels in the body only");
     assert.equal(redeemed.body.object, "desktop_pairing_session");
     assert.equal(redeemed.body.expires_in_seconds, THIRTY_DAYS_SECONDS);
-    assert.equal(redeemed.body.label, "Tim's laptop");
+    assert.equal(redeemed.body.label, "Example laptop");
     const session = redeemed.body.session as string;
     assert.match(session, /^[A-Za-z0-9_-]{43}$/u);
     const expiresMs = Date.parse(redeemed.body.expires_at as string);
@@ -311,7 +311,7 @@ test("desktop pairing: redeem mints an owner session the server accepts, listed 
     const list = (await (
       await fetch(`${asUrl}/owner/sessions`, { headers: { Accept: "application/json", Cookie: cookie } })
     ).json()) as { sessions: Array<{ id: string; label: string; current: boolean }> };
-    const paired = list.sessions.find((entry) => entry.label === "Tim's laptop");
+    const paired = list.sessions.find((entry) => entry.label === "Example laptop");
     assert.ok(paired, "the paired desktop appears in the session list");
     assert.equal(paired.current, false);
     assert.doesNotMatch(JSON.stringify(list), new RegExp(session, "u"), "the list never carries the session id");
