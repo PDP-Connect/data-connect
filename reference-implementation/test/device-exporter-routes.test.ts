@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { buildLocalDeviceRecordEnvelope } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { registerConnector } from "../server/auth.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
@@ -3008,7 +3008,7 @@ test("ingest rejects unaccepted collector protocol version with 409 before any r
 // no-resolvable-binding -> typed 400 reject. See design Decision 2.
 
 async function registerAmazonConnector(asUrl: string): Promise<void> {
-  const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+  const amazonManifestEntry = readShippedManifests().find((candidate) => candidate.file === "amazon.json");
   if (!amazonManifestEntry) {
     throw new Error("no polyfill manifest found for amazon.json");
   }

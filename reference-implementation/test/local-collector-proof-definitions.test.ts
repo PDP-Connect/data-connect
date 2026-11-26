@@ -20,14 +20,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "@pdpp/polyfill-connectors/collectors";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 
 interface ManifestLike {
   capabilities?: { proven?: { local_collector?: unknown } };
 }
 
-const vendored = readPolyfillManifests().flatMap(({ manifest }) => {
+const vendored = readShippedManifests().flatMap(({ manifest }) => {
   const key = canonicalConnectorKeyFromManifest(manifest as Record<string, unknown>);
   return key === null
     ? []

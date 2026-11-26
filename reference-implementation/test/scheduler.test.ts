@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { Controller } from "../runtime/controller.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
@@ -817,7 +817,7 @@ test("autonomous scheduler canonicalizes a legacy URL-shaped schedule connector_
   // under the non-canonical key — mismatching the canonical key the read and
   // admission paths key on. This test seeds the legacy row directly, ticks the
   // scheduler once, and asserts every persisted identity is the canonical key.
-  const ynabManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "ynab.json");
+  const ynabManifestEntry = readShippedManifests().find((candidate) => candidate.file === "ynab.json");
   if (!ynabManifestEntry) {
     throw new Error("no polyfill manifest found for ynab.json");
   }

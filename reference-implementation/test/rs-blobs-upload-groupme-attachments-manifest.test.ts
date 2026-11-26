@@ -24,7 +24,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import {
   type BlobsUploadDependencies,
@@ -33,7 +33,7 @@ import {
   executeBlobsUpload,
 } from "../operations/rs-blobs-upload/index.ts";
 
-const GROUPME_MANIFEST_ENTRY = readPolyfillManifests().find((candidate) => candidate.file === "groupme.json");
+const GROUPME_MANIFEST_ENTRY = readShippedManifests().find((candidate) => candidate.file === "groupme.json");
 if (!GROUPME_MANIFEST_ENTRY) {
   throw new Error("no polyfill manifest found for groupme.json");
 }

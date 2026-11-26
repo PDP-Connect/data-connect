@@ -1,0 +1,347 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/youtube-takeout",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/youtube",
+		"display": {
+			"name": "YouTube"
+		}
+	},
+	"connector_key": "youtube-takeout",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
+	"version": "0.1.3",
+	"display_name": "YouTube Takeout",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FF0000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": false
+			},
+			"filesystem": {
+				"required": true
+			}
+		}
+	},
+	"setup": {
+		"modality": "manual_or_upload",
+		"manual_or_upload": {
+			"label": "Google Takeout \"YouTube and YouTube Music\" export",
+			"description": "Request a Google Takeout export of \"YouTube and YouTube Music\", wait for the download link, then extract it and provide the folder here.",
+			"acquisition_methods": [
+				{
+					"label": "Request your export from Google Takeout",
+					"platform": "web",
+					"posture": "primary",
+					"detail": "Go to takeout.google.com, deselect all, select only \"YouTube and YouTube Music\", and create the export. Google emails a download link, usually within a few hours. Download the .zip, extract it, and place the extracted folder (or its contents) where this connector reads from.",
+					"help_url": "https://support.google.com/accounts/answer/3024190"
+				}
+			],
+			"accepted_file_extensions": [],
+			"import_dir_env_var": "YOUTUBE_TAKEOUT_DIR",
+			"help_url": "https://support.google.com/accounts/answer/3024190",
+			"help_text": "This is the optional Takeout profile retained alongside the browser-first youtube profile. It requires an owner-requested export and is excluded from publication pending review.",
+			"large_file_fallback": "This connector reads an already-extracted export directory, not the .zip directly. Extract the Takeout archive yourself and point YOUTUBE_TAKEOUT_DIR at the extracted folder.",
+			"validation_expectations": [
+				"Detected a Google Takeout \"YouTube and YouTube Music\" export directory",
+				"Reported missing expected files with skip results",
+				"Estimated record counts per stream that was found"
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "low",
+			"bot_detection_sensitivity": "low",
+			"background_safe": false,
+			"rationale": "Collection reads a Takeout export the owner requested; there is no credential, no session and nothing to poll, so an unattended run has nothing to collect. Refreshing means the owner requesting a new Takeout export and providing it again, which Google can take hours to days to prepare."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The owner's YouTube channel identity, from the Takeout channel export. UNVERIFIED: no confirmed real export has proven this file's path or columns.",
+			"display": {
+				"label": "Your YouTube channel",
+				"detail": "Channel id and URL from the Takeout channel export. Title, handle, join date, and stats are not present in that file and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": ["string", "null"],
+						"description": "Google's channel id."
+					},
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"handle": { "type": ["string", "null"] },
+					"email": { "type": ["string", "null"] },
+					"joined_at": { "type": ["string", "null"] },
+					"avatar_url": { "type": ["string", "null"], "format": "uri" },
+					"description": { "type": ["string", "null"] },
+					"country": { "type": ["string", "null"] },
+					"subscriber_count": { "type": ["integer", "null"] },
+					"view_count": { "type": ["integer", "null"] },
+					"video_count": { "type": ["integer", "null"] }
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "description"],
+					"semantic_fields": ["title", "description"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "subscriptions",
+			"required": false,
+			"description": "Channels the owner is subscribed to, from the Takeout subscriptions export. UNVERIFIED path/columns.",
+			"display": {
+				"label": "Your subscriptions",
+				"detail": "Channel id, URL, and title. Handle, avatar, subscriber count, verification, and notification state are not present in the export file this connector reads and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"channel_id": { "type": "string" },
+					"channel_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"handle": { "type": ["string", "null"] },
+					"avatar_url": { "type": ["string", "null"], "format": "uri" },
+					"subscriber_count": { "type": ["integer", "null"] },
+					"description": { "type": ["string", "null"] },
+					"is_verified": { "type": ["boolean", "null"] },
+					"notifications": { "type": ["boolean", "null"] }
+				},
+				"required": ["id", "channel_id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "playlists",
+			"required": false,
+			"description": "Playlists the owner created, from the Takeout playlists index. UNVERIFIED path/columns.",
+			"display": {
+				"label": "Your playlists",
+				"detail": "Playlist id and name. URL, owner, visibility, video count, and view count are not present in the index file this connector reads and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"url": { "type": ["string", "null"], "format": "uri" },
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"owner": { "type": ["string", "null"] },
+					"owner_url": { "type": ["string", "null"], "format": "uri" },
+					"visibility": { "type": ["string", "null"] },
+					"video_count": { "type": ["integer", "null"] },
+					"view_count": { "type": ["integer", "null"] }
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "playlist_items",
+			"required": false,
+			"description": "Videos inside the owner's playlists, one record per (playlist, video). UNVERIFIED path/columns.",
+			"display": {
+				"label": "Your playlist items",
+				"detail": "Video id and a derived watch URL per playlist entry. Title, channel, duration, and thumbnail are not present in the per-playlist export file this connector reads and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"playlist_id": { "type": "string" },
+					"video_id": { "type": ["string", "null"] },
+					"video_url": { "type": ["string", "null"], "format": "uri" },
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": { "type": ["string", "null"] },
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"duration_seconds": { "type": ["integer", "null"] },
+					"thumbnail_url": { "type": ["string", "null"], "format": "uri" }
+				},
+				"required": ["id", "playlist_id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "likes",
+			"required": false,
+			"description": "Videos the owner liked, from the Takeout \"Liked videos\" playlist export. UNVERIFIED path/columns.",
+			"display": {
+				"label": "Your liked videos",
+				"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"video_id": { "type": ["string", "null"] },
+					"video_url": { "type": ["string", "null"], "format": "uri" },
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": { "type": ["string", "null"] },
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"duration_seconds": { "type": ["integer", "null"] },
+					"thumbnail_url": { "type": ["string", "null"], "format": "uri" }
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "watch_later",
+			"required": false,
+			"description": "Videos saved to Watch Later, from the Takeout \"Watch later\" playlist export. UNVERIFIED path/columns.",
+			"display": {
+				"label": "Your watch later list",
+				"detail": "Video id and a derived watch URL. Title, channel, duration, and thumbnail are not present in the export file this connector reads and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"video_id": { "type": ["string", "null"] },
+					"video_url": { "type": ["string", "null"], "format": "uri" },
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": { "type": ["string", "null"] },
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"duration_seconds": { "type": ["integer", "null"] },
+					"thumbnail_url": { "type": ["string", "null"], "format": "uri" }
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": { "fields": true, "resources": true },
+			"incremental": false,
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "watch_history",
+			"required": false,
+			"description": "Videos the owner watched, from the Takeout watch-history.json export. VERIFIED: same file format and parser as google_takeout.youtube_watch_history (src/youtube-watch-history.ts).",
+			"display": {
+				"label": "Your watch history",
+				"detail": "Watched timestamp, video id, video URL, title, and channel. View count and description are not present in the Takeout history export and stay null."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": { "type": "string" },
+					"watched_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"video_id": { "type": ["string", "null"] },
+					"video_url": { "type": ["string", "null"], "format": "uri" },
+					"video_title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"channel_title": { "type": ["string", "null"] },
+					"channel_url": { "type": ["string", "null"], "format": "uri" },
+					"view_count": { "type": ["integer", "null"] },
+					"description": { "type": ["string", "null"] }
+				},
+				"required": ["id", "watched_at"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "watched_at",
+			"consent_time_field": "watched_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["description"],
+					"semantic_fields": ["description"]
+				},
+				"range_filters": {
+					"watched_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["watched_at"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
+		"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
+		"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
+	}
+}

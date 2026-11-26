@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "../test/helpers/shipped-manifests.ts";
 import {
   type ConnectorConnectionEnvironment,
   type ConnectorEnvironmentBinding,
@@ -63,7 +63,7 @@ function compose(
 }
 
 function shippedManifest(name: string): unknown {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

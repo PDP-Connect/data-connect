@@ -26,7 +26,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import {
   CURSOR_BAND_SPECS,
   describeCursorBandViolation,
@@ -225,7 +225,7 @@ test("gmail's messages stream still declares the shape that opts it into this ch
   // The RI no longer names that stream, so the wiring is only real if the
   // manifest still declares it — this is the drift guard for that, and it
   // reads the manifest as DATA rather than importing connector code.
-  const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  const gmailManifestEntry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
   if (!gmailManifestEntry) {
     throw new Error("no polyfill manifest found for gmail.json");
   }

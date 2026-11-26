@@ -1,0 +1,380 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/amazon",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/amazon",
+		"display": {
+			"name": "Amazon"
+		}
+	},
+	"connector_key": "amazon",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
+	"version": "0.2.28",
+	"display_name": "Amazon",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#FF9900"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			},
+			"browser": {
+				"required": true
+			}
+		}
+	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "username_password",
+			"label": "Amazon sign-in details",
+			"description": "Seal the Amazon sign-in details for this source. The connector uses them only for this source's browser-backed collection.",
+			"submit_label": "Save Amazon credential and start first sync",
+			"fields": [
+				{
+					"name": "username",
+					"label": "Amazon email or phone",
+					"type": "text",
+					"required": true,
+					"secret": true,
+					"autocomplete": "username",
+					"env": ["AMAZON_USERNAME"]
+				},
+				{
+					"name": "password",
+					"label": "Amazon password",
+					"type": "password",
+					"required": true,
+					"secret": true,
+					"autocomplete": "current-password",
+					"env": ["AMAZON_PASSWORD"]
+				}
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action", "otp"],
+		"refresh_policy": {
+			"recommended_mode": "automatic",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 7200,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "otp_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": true,
+			"assisted_after_owner_auth": true,
+			"rationale": "Sign-in and anti-bot checks are common on first login, but the session persists in the owner's browser profile afterward, so scheduled refresh reuses it. background_safe:true records that persistence and recommended_mode follows from it. assisted_after_owner_auth:true means a background run may still ask the owner for bounded help when Amazon re-challenges."
+		},
+		"public_listing": {
+			"tier": "supported"
+		}
+	},
+	"streams": [
+		{
+			"name": "orders",
+			"required": true,
+			"description": "Amazon retail orders scraped from Your Orders, on the Amazon store the account shops on (amazon.com, amazon.ca, amazon.co.uk, ...), every year the store lists.",
+			"compaction_fingerprint": {
+				"exclude_keys": ["fetched_at"]
+			},
+			"display": {
+				"label": "Your Amazon orders",
+				"detail": "Order IDs, dates, totals, delivery status, shipping summaries, the shipping address postal code (ZIP or postal code only), payment method summary, recipient name, and the Amazon store. Per-item breakdowns live in the order_items stream."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"order_date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time"
+					},
+					"order_total": {
+						"type": ["string", "null"]
+					},
+					"order_total_cents": {
+						"type": ["integer", "null"]
+					},
+					"delivery_status": {
+						"type": ["string", "null"]
+					},
+					"status_detail": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "secondary"
+					},
+					"recipient_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"shipping_address_summary": {
+						"type": ["string", "null"]
+					},
+					"shipping_postal_code": {
+						"type": ["string", "null"],
+						"description": "Postal code of the order's shipping address (ZIP, Canadian or UK postcode, ...), in the store country's format. Null when the order shows no shipping address."
+					},
+					"payment_method_summary": {
+						"type": ["string", "null"]
+					},
+					"gift_order": {
+						"type": "boolean"
+					},
+					"digital_order": {
+						"type": "boolean"
+					},
+					"item_count": {
+						"type": ["integer", "null"]
+					},
+					"store": {
+						"type": ["string", "null"],
+						"description": "The Amazon store the order was placed on, such as amazon.com or amazon.ca."
+					}
+				},
+				"required": ["id", "order_date"]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "order_date",
+			"consent_time_field": "order_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"views": [
+				{
+					"id": "reconciliation",
+					"label": "Fields for matching to bank/YNAB transactions",
+					"fields": [
+						"id",
+						"order_date",
+						"order_total",
+						"order_total_cents",
+						"payment_method_summary",
+						"delivery_status",
+						"item_count"
+					]
+				},
+				{
+					"id": "full",
+					"label": "Everything on the order row",
+					"fields": [
+						"id",
+						"order_date",
+						"order_total",
+						"order_total_cents",
+						"delivery_status",
+						"status_detail",
+						"recipient_name",
+						"shipping_address_summary",
+						"shipping_postal_code",
+						"payment_method_summary",
+						"gift_order",
+						"digital_order",
+						"item_count",
+						"store"
+					]
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"recipient_name",
+						"shipping_address_summary",
+						"status_detail",
+						"payment_method_summary"
+					]
+				},
+				"range_filters": {
+					"order_date": ["gte", "gt", "lte", "lt"],
+					"order_total_cents": ["gte", "gt", "lte", "lt"],
+					"item_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["order_date"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "order_items",
+			"description": "Line items within Amazon orders.",
+			"display": {
+				"label": "Your order line items",
+				"detail": "Product titles, ASINs, per-unit prices, quantities, sellers, product URLs, item-level return/refund status."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"order_id": {
+						"type": "string"
+					},
+					"order_date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time"
+					},
+					"asin": {
+						"type": ["string", "null"]
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"url": {
+						"type": ["string", "null"]
+					},
+					"unit_price": {
+						"type": ["string", "null"]
+					},
+					"unit_price_cents": {
+						"type": ["integer", "null"]
+					},
+					"quantity": {
+						"type": "integer"
+					},
+					"seller": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"item_image_url": {
+						"type": ["string", "null"]
+					},
+					"returned": {
+						"type": "boolean"
+					},
+					"refund_status": {
+						"type": ["string", "null"]
+					}
+				},
+				"required": ["id", "order_id", "order_date", "name"]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "order_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "order",
+					"stream": "orders",
+					"foreign_key": "order_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "seller"]
+				},
+				"range_filters": {
+					"order_date": ["gte", "gt", "lte", "lt"],
+					"unit_price_cents": ["gte", "gt", "lte", "lt"],
+					"quantity": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["order_date"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of",
+			"required": false
+		},
+		{
+			"name": "profile",
+			"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership, default delivery postal code, store).",
+			"display": {
+				"label": "Your Amazon account",
+				"detail": "Display name, Prime membership status, the postal code of the default delivery address (no street address), and the Amazon store, as shown in the Amazon nav bar. Each is null when not observable, never guessed."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"is_prime": {
+						"type": ["boolean", "null"]
+					},
+					"postal_code": {
+						"type": ["string", "null"],
+						"description": "Postal code of the account's default delivery address, from the nav bar's Deliver to location. Null when not shown."
+					},
+					"store": {
+						"type": ["string", "null"],
+						"description": "The Amazon store the profile was read on, such as amazon.ca."
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"required": false,
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"profiles": [
+		{
+			"id": "reconciliation",
+			"label": "Orders for bank/YNAB matching",
+			"streams": [
+				{
+					"name": "orders",
+					"view": "reconciliation"
+				},
+				{
+					"name": "order_items"
+				}
+			]
+		}
+	],
+	"reason_display_messages": {
+		"amazon_empty_history_after_prior_orders": "Amazon reported no order history for a year in which we previously collected orders. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove those orders are gone",
+		"empty_first_page_without_diagnostics": "The first page came back empty and we couldn't tell why",
+		"item_count_shortfall": "An order lists more items than we could save",
+		"list_page_order_id_not_found": "We skipped some order cards on this page because we couldn't find their order IDs",
+		"empty_first_page_without_terminal_signal": "The first page came back empty with no sign it was really the end",
+		"list_page_navigation_failed": "We couldn't load an orders page, so we stopped before advancing",
+		"list_page_readiness_timeout": "The orders page took too long to load. Try again.",
+		"list_page_shape_check_failed": "The page didn't look like we expected",
+		"no_orders_text": "This account shows no orders to import",
+		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
+		"pagination_exhausted": "We reached the end of the available pages",
+		"profile_page_read_failed": "We couldn't read the page to get your account profile",
+		"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
+		"selector_drift": "The page layout changed and we couldn't find what we needed",
+		"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
+		"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+		"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again",
+		"amazon_stopped_early": "Amazon stopped showing older orders part way. We kept the orders read so far; connect again later to read the rest"
+	}
+}

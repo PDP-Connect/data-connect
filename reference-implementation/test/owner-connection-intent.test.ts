@@ -38,7 +38,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
@@ -278,7 +278,7 @@ interface PackageManifest extends ConnectorManifestLike {
 }
 
 function loadPackageManifest(name: string): PackageManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
@@ -610,7 +610,7 @@ test("owner-agent initiating Amazon gets browser runtime class plus static-secre
     // Amazon must be a registered connector for its manifest (and thus its
     // browser binding) to resolve. An operator with the Amazon connector
     // available is the motivating second-account case.
-    const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+    const amazonManifestEntry = readShippedManifests().find((candidate) => candidate.file === "amazon.json");
     if (!amazonManifestEntry) {
       throw new Error("no polyfill manifest found for amazon.json");
     }
@@ -795,7 +795,7 @@ test("owner-agent initiating a static-secret API connector gets a non-secret cap
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
     // gmail must be a registered connector for the manifest to resolve.
-    const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+    const gmailManifestEntry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
     if (!gmailManifestEntry) {
       throw new Error("no polyfill manifest found for gmail.json");
     }
@@ -1021,7 +1021,7 @@ test("owner-agent intent rejects display_name values over the contract length ca
 test("owner-agent intent rejects a client grant token with 403 and audits the failure", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     // Register codex so a client grant is well-formed against a real connector.
-    const codexManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "codex.json");
+    const codexManifestEntry = readShippedManifests().find((candidate) => candidate.file === "codex.json");
     if (!codexManifestEntry) {
       throw new Error("no polyfill manifest found for codex.json");
     }

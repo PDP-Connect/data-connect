@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import type { Server as HttpServer } from "node:http";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import {
@@ -31,7 +31,7 @@ const OWNER_PASSWORD = "browser-shell-owner-password";
 const OWNER_SUBJECT_ID = "owner_local";
 
 function loadManifest(name: string): unknown {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

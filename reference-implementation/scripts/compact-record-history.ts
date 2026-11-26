@@ -402,8 +402,12 @@ const SHIPPED_POLICY_SET = compactionPoliciesFromManifests(readAllManifests());
 
 export const COMPACTION_POLICIES: readonly CompactionPolicy[] = SHIPPED_POLICY_SET.policies;
 
-export function findPolicy(connectorId: string, stream: string): CompactionPolicy | null {
-  return COMPACTION_POLICIES.find((p) => p.connectorIds.includes(connectorId) && p.stream === stream) || null;
+export function findPolicy(
+  connectorId: string,
+  stream: string,
+  policies: readonly CompactionPolicy[] = COMPACTION_POLICIES
+): CompactionPolicy | null {
+  return policies.find((p) => p.connectorIds.includes(connectorId) && p.stream === stream) || null;
 }
 
 export function describePolicies(): string {
