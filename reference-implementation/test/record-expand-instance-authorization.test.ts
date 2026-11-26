@@ -7,6 +7,7 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { getRecord as getRecordUntyped, ingestRecord, queryRecords as queryRecordsUntyped } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface StorageTarget {
   connector_id: string;
@@ -58,66 +59,69 @@ function getRecord(
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 function manifestFor(connectorId: string, includeNewRequiredFields: boolean): Manifest {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: "Expansion Instance Authorization Test",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "parents",
-        primary_key: ["id"],
-        query: {
-          expand: [{ default_limit: 10, max_limit: 20, name: "children" }, { name: "featured_child" }],
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: "Expansion Instance Authorization Test",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "parents",
+          primary_key: ["id"],
+          query: {
+            expand: [{ default_limit: 10, max_limit: 20, name: "children" }, { name: "featured_child" }],
+          },
+          relationships: [
+            {
+              cardinality: "has_many",
+              foreign_key: "parent_id",
+              name: "children",
+              stream: "children",
+            },
+            {
+              cardinality: "has_one",
+              foreign_key: "parent_id",
+              name: "featured_child",
+              stream: "children",
+            },
+          ],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              newly_required_parent: { type: "string" },
+              parent_id: { type: "string" },
+              title: { type: "string" },
+            },
+            required: includeNewRequiredFields ? ["id", "newly_required_parent"] : ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        relationships: [
-          {
-            cardinality: "has_many",
-            foreign_key: "parent_id",
-            name: "children",
-            stream: "children",
+        {
+          name: "children",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              "event-time": { format: "date-time", type: "string" },
+              id: { type: "string" },
+              newly_required_child: { type: "string" },
+              parent_id: { type: "string" },
+              visible: { type: "string" },
+            },
+            required: includeNewRequiredFields ? ["id", "parent_id", "newly_required_child"] : ["id", "parent_id"],
+            type: "object",
           },
-          {
-            cardinality: "has_one",
-            foreign_key: "parent_id",
-            name: "featured_child",
-            stream: "children",
-          },
-        ],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            newly_required_parent: { type: "string" },
-            parent_id: { type: "string" },
-            title: { type: "string" },
-          },
-          required: includeNewRequiredFields ? ["id", "newly_required_parent"] : ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "children",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            "event-time": { format: "date-time", type: "string" },
-            id: { type: "string" },
-            newly_required_child: { type: "string" },
-            parent_id: { type: "string" },
-            visible: { type: "string" },
-          },
-          required: includeNewRequiredFields ? ["id", "parent_id", "newly_required_child"] : ["id", "parent_id"],
-          type: "object",
-        },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: includeNewRequiredFields ? "2.0.0" : "1.0.0",
-  } as Manifest;
+      ],
+      version: includeNewRequiredFields ? "2.0.0" : "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  ) as Manifest;
 }
 
 async function seed(targetA: StorageTarget, targetB: StorageTarget): Promise<void> {

@@ -27,7 +27,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "./helpers/sqlite-driver.ts";
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
@@ -43,26 +42,33 @@ import {
   type SchedulerStore,
 } from "../server/stores/scheduler-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
-const SEMANTIC_CONNECTOR = "https://test.pdpp.dev/connectors/semantic-surface";
+const SOURCE_ID = "https://test.pdpp.dev/connectors/semantic-surface";
+const SEMANTIC_CONNECTOR = "semantic-surface";
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
-const SEMANTIC_MANIFEST = {
-  connector_id: SEMANTIC_CONNECTOR,
-  display_name: "Semantic Surface Connector",
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: true } } },
-  streams: [
-    {
-      name: "stream_x",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+const SEMANTIC_MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: SEMANTIC_CONNECTOR,
+    display_name: "Semantic Surface Connector",
+    manifest_uri: SOURCE_ID,
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    streams: [
+      {
+        name: "stream_x",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: SOURCE_ID }
+);
 
 async function withFreshStore(fn: (store: SchedulerStore) => Promise<void> | void): Promise<void> {
   initDb();

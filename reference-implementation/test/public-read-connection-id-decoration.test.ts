@@ -22,6 +22,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { aggregateRecords, getRecord, ingestRecord, queryRecords } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "connection-id-decoration";
 const INSTANCE_ID = "cin_test_decoration_main";
@@ -37,36 +38,39 @@ const grant: any = {
   streams: [{ fields: ["id", "subject", "received_at"], name: STREAM }],
 };
 
-const manifest: any = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Decoration Test Connector",
-  manifest_uri: "https://registry.pdpp.dev/connectors/connection-id-decoration",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: {
-        aggregations: { count: true },
-      },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+const manifest: any = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Decoration Test Connector",
+    manifest_uri: "https://registry.pdpp.dev/connectors/connection-id-decoration",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: {
+          aggregations: { count: true },
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/connection-id-decoration" }
+);
 
 function target() {
   return {

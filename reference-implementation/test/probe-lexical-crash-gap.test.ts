@@ -1,8 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Probe: does startup LEXICAL backfill detect a record that was durably
-// written but never got its index maintenance run (crash-abandoned)?
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
@@ -11,6 +9,9 @@ import { ingestRecord, ingestRecords } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest, lexicalIndexBackfillForManifest } from "../server/search.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { markSearchIndexDirtySqlite } from "../server/stores/search-index-dirty-store.ts";
+// Probe: does startup LEXICAL backfill detect a record that was durably
+// written but never got its index maintenance run (crash-abandoned)?
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function target(connectorInstanceId: string) {
   return { connector_id: "crash-gap-lex", connector_instance_id: connectorInstanceId };
@@ -25,28 +26,31 @@ function record(stream: string, key: string, subject: string) {
   };
 }
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: "crash-gap-lex",
-  display_name: "Crash gap lexical probe",
-  manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap-lex",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      query: { search: { lexical_fields: ["subject"] } },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: "crash-gap-lex",
+    display_name: "Crash gap lexical probe",
+    manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap-lex",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        query: { search: { lexical_fields: ["subject"] } },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "0.1.0",
-};
+    ],
+    version: "0.1.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/crash-gap-lex" }
+);
 
 // A SEPARATE manifest object (never passed to registerConnector, which
 // rejects unknown fields) pinning storage_binding.connector_instance_id to

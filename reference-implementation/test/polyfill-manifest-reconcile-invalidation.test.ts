@@ -33,6 +33,7 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { reconcilePolyfillManifests } from "../server/polyfill-manifest-reconcile.ts";
 import { ingestRecord as ingestRecordUntyped } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
 const REGEXP_1 = /seed-flip/;
@@ -72,7 +73,7 @@ const ingestRecordForInstance = ingestRecordUntyped as (
 const CONNECTOR_ID = "seed-flip";
 
 function referenceFixtureManifest(overrides: Partial<Manifest> = {}): Manifest {
-  return {
+  return withFixtureSourceDeclaration({
     connector_id: CONNECTOR_ID,
     connector_key: CONNECTOR_ID,
     display_name: "Seed flip fixture (reference shape)",
@@ -99,13 +100,13 @@ function referenceFixtureManifest(overrides: Partial<Manifest> = {}): Manifest {
     ],
     version: "1.0.0",
     ...overrides,
-  };
+  });
 }
 
 function shippedPolyfillManifest(overrides: Partial<Manifest> = {}): Manifest {
   // Same connector_id but different (version, sorted-stream-names)
   // fingerprint, matching the real spotify reference→polyfill drift shape.
-  return {
+  return withFixtureSourceDeclaration({
     connector_id: CONNECTOR_ID,
     connector_key: CONNECTOR_ID,
     display_name: "Seed flip fixture (polyfill shape)",
@@ -148,7 +149,7 @@ function shippedPolyfillManifest(overrides: Partial<Manifest> = {}): Manifest {
     ],
     version: "0.1.0",
     ...overrides,
-  };
+  });
 }
 
 function withTmpDb(fn: (ctx: { dir: string }) => Promise<void>): () => Promise<void> {
@@ -467,7 +468,7 @@ const GENERATION_STORAGE_CONNECTOR_ID = "generation-fixture";
 
 function generationManifestV1(overrides: Partial<Manifest> = {}): Manifest {
   const connectorId = overrides.connector_id ?? GENERATION_CONNECTOR_ID;
-  return {
+  return withFixtureSourceDeclaration({
     connector_id: connectorId,
     connector_key: connectorId,
     display_name: "Generation fixture connector",
@@ -489,7 +490,7 @@ function generationManifestV1(overrides: Partial<Manifest> = {}): Manifest {
     ],
     version: "0.1.0",
     ...overrides,
-  };
+  });
 }
 
 function generationManifestV2(overrides: Partial<Manifest> = {}): Manifest {

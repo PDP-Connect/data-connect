@@ -35,6 +35,7 @@ import {
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { bumpStorageGeneration, currentStorageGeneration } from "../server/storage-generation.ts";
 import { countDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve: (() => void) | undefined;
@@ -113,28 +114,31 @@ test("close+reinit: a stale-generation deferred job never touches the new databa
   const dbPath = join(dir, "pdpp.sqlite");
   try {
     initDb(dbPath);
-    const manifest = {
-      capabilities: { human_interaction: [] },
-      connector_id: "generation-fence-probe",
-      display_name: "Generation fence probe",
-      manifest_uri: "https://registry.pdpp.dev/connectors/generation-fence-probe",
-      protocol_version: "0.1.0",
-      streams: [
-        {
-          name: "items",
-          primary_key: ["id"],
-          query: { search: { lexical_fields: ["subject"] } },
-          schema: {
-            properties: { id: { type: "string" }, subject: { type: "string" } },
-            required: ["id", "subject"],
-            type: "object",
+    const manifest = withFixtureSourceDeclaration(
+      {
+        capabilities: { human_interaction: [] },
+        connector_id: "generation-fence-probe",
+        display_name: "Generation fence probe",
+        manifest_uri: "https://registry.pdpp.dev/connectors/generation-fence-probe",
+        protocol_version: "0.1.0",
+        streams: [
+          {
+            name: "items",
+            primary_key: ["id"],
+            query: { search: { lexical_fields: ["subject"] } },
+            schema: {
+              properties: { id: { type: "string" }, subject: { type: "string" } },
+              required: ["id", "subject"],
+              type: "object",
+            },
+            selection: { fields: true, resources: true },
+            semantics: "append_only",
           },
-          selection: { fields: true, resources: true },
-          semantics: "append_only",
-        },
-      ],
-      version: "0.1.0",
-    };
+        ],
+        version: "0.1.0",
+      },
+      { sourceId: "https://registry.pdpp.dev/connectors/generation-fence-probe" }
+    );
     await registerConnector(manifest);
 
     const connectorInstanceId = "cin_generation_fence_a";

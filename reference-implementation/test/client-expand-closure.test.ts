@@ -16,7 +16,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { configureNativeManifest, registerConnector } from "../server/auth.ts";
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -24,6 +23,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface Backend {
   databaseUrl?: string;
@@ -46,67 +46,70 @@ const OWNER_ID = "client_expand_closure_owner";
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 function runtimeManifest(connectorKey: string): JsonObject {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: "Client expansion closure",
-    manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "parents",
-        primary_key: ["id"],
-        query: { expand: [{ default_limit: 10, max_limit: 20, name: "children" }] },
-        relationships: [
-          {
-            cardinality: "has_many",
-            foreign_key: "parent_id",
-            name: "children",
-            stream: "children",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: "Client expansion closure",
+      manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "parents",
+          primary_key: ["id"],
+          query: { expand: [{ default_limit: 10, max_limit: 20, name: "children" }] },
+          relationships: [
+            {
+              cardinality: "has_many",
+              foreign_key: "parent_id",
+              name: "children",
+              stream: "children",
+            },
+          ],
+          schema: {
+            properties: { id: { type: "string" }, title: { type: "string" } },
+            required: ["id"],
+            type: "object",
           },
-        ],
-        schema: {
-          properties: { id: { type: "string" }, title: { type: "string" } },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "children",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            parent_id: { type: "string" },
-            visible: { type: "string" },
+        {
+          name: "children",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              parent_id: { type: "string" },
+              visible: { type: "string" },
+            },
+            required: ["id", "parent_id"],
+            type: "object",
           },
-          required: ["id", "parent_id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "alternate_children",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            alternate_parent_id: { type: "string" },
-            id: { type: "string" },
-            visible: { type: "string" },
+        {
+          name: "alternate_children",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              alternate_parent_id: { type: "string" },
+              id: { type: "string" },
+              visible: { type: "string" },
+            },
+            required: ["id", "alternate_parent_id"],
+            type: "object",
           },
-          required: ["id", "alternate_parent_id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://implementations.example/connectors/${connectorKey}` }
+  );
 }
 
 function localFulfillment(sourceId: string, connectorKey: string): JsonObject {

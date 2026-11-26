@@ -30,6 +30,7 @@ import {
   createPostgresConnectorInstanceStore,
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 type Json = Record<string, unknown>;
@@ -46,43 +47,46 @@ const DATED = "dated";
 const RANKED = "ranked";
 
 function manifestFor(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: "Null cursor pagination",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        cursor_field: "updated_at",
-        name: DATED,
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            updated_at: { format: "date-time", type: ["string", "null"] },
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: "Null cursor pagination",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          cursor_field: "updated_at",
+          name: DATED,
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              updated_at: { format: "date-time", type: ["string", "null"] },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        cursor_field: "rank",
-        name: RANKED,
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" }, rank: { type: ["integer", "null"] } },
-          required: ["id"],
-          type: "object",
+        {
+          cursor_field: "rank",
+          name: RANKED,
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" }, rank: { type: ["integer", "null"] } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 const FIELDS: Record<string, string[]> = { [DATED]: ["id", "updated_at"], [RANKED]: ["id", "rank"] };
