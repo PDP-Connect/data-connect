@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { closeDb, initDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import Database from "./helpers/sqlite-driver.ts";
 
 const injectedFailure = new Error("injected late bootstrap failure");
@@ -175,10 +175,37 @@ test("a failed SQLite bootstrap leaves the caller's previous handle open", () =>
     assert.ok(failed.length > 0);
     assert.deepEqual(failed.filter((connection) => connection.open), []);
     assert.equal(previous.prepare("SELECT 1 AS one").get<{ one: number }>()?.one, 1);
+    // Intended: initDb detaches the previous handle before it can fail (see detachDb()),
+    // so the caller's handle stays open but getDb() no longer returns it.
+    assert.equal(getDb(), null);
   } finally {
     tracker.restore();
     previous.close();
     closeDb();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failure in the last initDb step leaves no published handle", () => {
+  closeDb();
+  const injected = new Error("injected final-step failure");
+  const tracker = trackConnections();
+  const originalDefineProperty = Object.defineProperty;
+  Object.defineProperty = ((target: object, key: PropertyKey, descriptor: PropertyDescriptor) => {
+    if (key === "vectorIndexKind") throw injected;
+    return originalDefineProperty(target, key, descriptor);
+  }) as typeof Object.defineProperty;
+  try {
+    assert.throws(() => initDb(":memory:"), (error) => error === injected);
+  } finally {
+    Object.defineProperty = originalDefineProperty;
+    tracker.restore();
+  }
+  try {
+    assert.equal(getDb(), null, "a failed initDb must not publish its handle");
+    assert.ok(tracker.connections.length > 0, "the test must observe the bootstrap connection");
+    assert.deepEqual(tracker.connections.filter((connection) => connection.open), []);
+  } finally {
+    closeDb();
   }
 });

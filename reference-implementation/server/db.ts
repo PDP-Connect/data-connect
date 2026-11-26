@@ -7101,6 +7101,15 @@ function publishFileSchemaSnapshot(path: string, opts: InitDbOptions): boolean {
   }
 }
 
+function stampVectorIndexKind(raw: SqliteDatabase, vectorIndexKind: VectorIndexKind): void {
+  Object.defineProperty(raw, "vectorIndexKind", {
+    configurable: false,
+    enumerable: true,
+    value: vectorIndexKind,
+    writable: false,
+  });
+}
+
 export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
   // Detach, don't close: a previously-returned handle belongs to whoever
   // holds it. See `detachDb()` for why closing here was a cross-instance
@@ -7136,8 +7145,8 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   const raw = (restoredMemorySchema
     ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
     : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
-  // This function owns `raw` until it assigns `db`. Closing it on a failure
-  // before that point is the only way it is ever closed: `closeDb()` cannot
+  // This function owns `raw` until it assigns `db`, which is the last step.
+  // Closing it on a failure before that point is the only way it is ever closed: `closeDb()` cannot
   // reach a handle that was never published. A previous handle belongs to its
   // caller (see `detachDb()`) and is not touched here.
   try {
@@ -7164,13 +7173,9 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     if (restoredMemorySchema || restoredFileSchema) {
       sqliteSchemaSnapshotRestores += 1;
       raw.pragma("foreign_keys = ON");
+      stampVectorIndexKind(raw, vectorIndexKind);
+      // Publish last: nothing after this line can fail.
       db = withCachedPrepare(raw);
-      Object.defineProperty(raw, "vectorIndexKind", {
-        configurable: false,
-        enumerable: true,
-        value: vectorIndexKind,
-        writable: false,
-      });
       return db;
     }
 
@@ -7180,17 +7185,13 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     ) {
       sqliteMemorySchemaSnapshot = raw.serialize();
     }
-    db = withCachedPrepare(raw);
-    // Stamp the chosen vector-index backend onto the wrapped db so
-    // search-semantic.js can select without re-probing. The Proxy's
+    // Stamp the chosen vector-index backend onto `raw` so the wrapped db
+    // exposes it to search-semantic.js without re-probing. The Proxy's
     // get-handler falls through to Reflect for non-`prepare` properties,
     // so direct property reads like `db.vectorIndexKind` work.
-    Object.defineProperty(raw, "vectorIndexKind", {
-      configurable: false,
-      enumerable: true,
-      value: vectorIndexKind,
-      writable: false,
-    });
+    stampVectorIndexKind(raw, vectorIndexKind);
+    // Publish last: nothing after this line can fail.
+    db = withCachedPrepare(raw);
     return db;
   } catch (error) {
     try {
