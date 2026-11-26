@@ -352,7 +352,7 @@ test("an unconfirmed cleanup with no listed routes stays possibly live", async (
     "/state": ok({ ...idleState, lifecycle: { cleanup: "unconfirmed", handle: { id: "route-1" } } }),
   });
   await withScreen(handler, async ({ mainText }) => {
-    assert.match(mainText(), /Couldn't confirm the service closed your address\./);
+    assert.match(mainText(), /DataConnect couldn't confirm that your address closed\./);
     assert.match(mainText(), /Unknown, possibly live/);
     assert.doesNotMatch(mainText(), /Only this computer can open/);
   });
