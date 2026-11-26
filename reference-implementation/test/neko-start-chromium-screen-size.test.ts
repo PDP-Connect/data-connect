@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 
 const START_SCRIPT = fileURLToPath(new URL("../../docker/neko/start-chromium.sh", import.meta.url));
 const DEFAULT_SIZE = "1440,900";
+// No X server listens on this display; the stubs above should make it irrelevant.
+const UNREACHABLE_DISPLAY = ":65000";
 
 async function windowSizeFor(screen: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "neko-start-chromium-"));
@@ -23,16 +25,20 @@ async function windowSizeFor(screen: string): Promise<string> {
     const launcher = join(dir, "launcher");
     await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvLog}"\n`);
     await chmod(launcher, 0o755);
-    // The script polls with `sleep 1` while the launcher is alive; stub it out.
-    await writeFile(join(dir, "sleep"), "#!/bin/sh\nexit 0\n");
-    await chmod(join(dir, "sleep"), 0o755);
+    // While the launcher is alive the script polls with `sleep 1` and probes the
+    // X server with xwininfo and xdotool. Shadow all three with inert stubs so
+    // the test never touches a real display or waits.
+    for (const tool of ["sleep", "xwininfo", "xdotool"]) {
+      await writeFile(join(dir, tool), "#!/bin/sh\nexit 0\n");
+      await chmod(join(dir, tool), 0o755);
+    }
 
     const result = spawnSync("/bin/sh", [START_SCRIPT], {
       encoding: "utf8",
       env: {
         ...process.env,
         PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-        DISPLAY: ":99",
+        DISPLAY: UNREACHABLE_DISPLAY,
         NEKO_DESKTOP_SCREEN: screen,
         PDPP_PATCHRIGHT_CHROMIUM_BIN: launcher,
       },
