@@ -5,13 +5,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ConnectorManifestStorageContext,
-  normalizeIncomingConnectorManifest,
-  assertLegacyOwnershipPostgres,
-  assertLegacyOwnershipSqlite,
+  assertExclusiveLegacySourceOwnershipPostgres,
+  assertExclusiveLegacySourceOwnershipSqlite,
   assertRetainedSourceIdentities,
   moveSourceIdentityPostgres,
   moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
+  normalizeIncomingConnectorManifest,
   retainMovedFromIdentity,
   retainedSourceIdentityChange,
   retainedStorageContext,
@@ -164,7 +164,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
       }
-      await assertLegacyOwnershipPostgres(client, id, JSON.parse(derived.canonicalManifestJson));
+      await assertExclusiveLegacySourceOwnershipPostgres(client, id, JSON.parse(derived.canonicalManifestJson));
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)
          ON CONFLICT(connector_id) DO UPDATE SET manifest = EXCLUDED.manifest
@@ -220,7 +220,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
         if (identityMove) {
           moveSourceIdentitySqlite(identityMove);
         }
-        assertLegacyOwnershipSqlite(id, JSON.parse(derived.canonicalManifestJson));
+        assertExclusiveLegacySourceOwnershipSqlite(id, JSON.parse(derived.canonicalManifestJson));
         if (!old || canonicalJson(JSON.parse(old.manifest)) !== derived.canonicalManifestJson) {
           db.prepare(
             "INSERT INTO connectors(connector_id,manifest) VALUES(?,?) ON CONFLICT(connector_id) DO UPDATE SET manifest=excluded.manifest"

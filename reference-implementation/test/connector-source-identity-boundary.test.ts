@@ -292,12 +292,27 @@ for (const path of ["registration", "activation"] as const) {
   });
 }
 
-scenario("an uninstalled connector's retained registration still owns its current identity", async () => {
-  await publishConnectorActivation(installRecord("srcid-uninstalled", legacyManifest({ connector_key: "srcid-uninstalled", source: { id: EXPLICIT_SOURCE } })));
+for (const path of ["registration", "activation"] as const) {
+  scenario(`two shipped-style connectors can share a current source identity through ${path}`, async () => {
+    const api = legacyManifest({ connector_key: "shared-source-api", source: { id: EXPLICIT_SOURCE }, display_name: "Shared source API" });
+    const browser = legacyManifest({ connector_key: "shared-source-browser", source: { id: EXPLICIT_SOURCE }, display_name: "Shared source browser" });
+    await registerConnector(api, { skipDerivedRepair: true });
+    if (path === "registration") {
+      await registerConnector(browser, { skipDerivedRepair: true });
+    } else {
+      await publishConnectorActivation(installRecord("shared-source-browser", browser));
+    }
+    assert.equal(retainedSourceId(await storedFor("shared-source-api")), EXPLICIT_SOURCE);
+    assert.equal(retainedSourceId(await storedFor("shared-source-browser")), EXPLICIT_SOURCE);
+  });
+}
+
+scenario("an uninstalled connector's retained registration still owns its legacy identity", async () => {
+  await publishConnectorActivation(installRecord("srcid-uninstalled", legacyManifest({ connector_key: "srcid-uninstalled", source: { id: EXPLICIT_SOURCE }, legacy_source_ids: [OTHER_SOURCE] })));
   await createConnectorInstallStore().deactivateAndRemoveActivation!("srcid-uninstalled");
   assert.equal(await getConnectorActivation("srcid-uninstalled"), null);
   assert.ok(await storedFor("srcid-uninstalled"));
-  await assertRejectedWithoutWrite("srcid-claimant", () => registerConnector(legacyManifest({ connector_key: "srcid-claimant", source: { id: EXPLICIT_SOURCE } }), { skipDerivedRepair: true }), /already owned/);
+  await assertRejectedWithoutWrite("srcid-claimant", () => registerConnector(legacyManifest({ connector_key: "srcid-claimant", source: { id: OTHER_SOURCE } }), { skipDerivedRepair: true }), /already owned/);
 });
 
 // Causal guard: an explicit, valid declaration does not make an unknown URL an operational key.
@@ -369,6 +384,24 @@ scenario("a declared legacy identity cannot equal another connector's current id
   await assertRejectedWithoutWrite("srcid-legacy", () => registerConnector(legacyManifest({ connector_key: "srcid-legacy", legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }), /already owned/);
 });
 
+scenario("a retained historical projection protects its legacy identity without a manifest alias list", async () => {
+  const { storedManifest } = normalizeConnectorManifestForStorage(
+    legacyManifest({ connector_key: "srcid-historical-owner", legacy_source_ids: [EXPLICIT_SOURCE] })
+  );
+  delete storedManifest.legacy_source_ids;
+  if (isPostgresStorageBackend()) {
+    await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)",
+      ["srcid-historical-owner", JSON.stringify(storedManifest)]);
+  } else {
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)")
+      .run("srcid-historical-owner", JSON.stringify(storedManifest));
+  }
+  await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
+    legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
+    { skipDerivedRepair: true }
+  ), /already owned/);
+});
+
 scenario("concurrent legacy identity claims by different keys commit exactly one", async () => {
   const keys = ["srcid-owner-a", "srcid-owner-b"];
   const results = await Promise.allSettled(
@@ -388,7 +421,7 @@ scenario("concurrent legacy identity claims by different keys commit exactly one
   assert.equal(storedRows[loserIndex], null, "the refused claimant has no connector row");
 });
 
-scenario("registration and activation cannot claim the same current identity for different keys", async () => {
+scenario("registration and activation cannot claim the same legacy identity for different keys", async () => {
   const registrationKey = "srcid-race-register-owner";
   const activationKey = "srcid-race-activation-owner";
   let settled: Promise<PromiseSettledResult<unknown>[]> | undefined;
@@ -405,14 +438,14 @@ scenario("registration and activation cannot claim the same current identity for
     }
 
     const tasks = [
-      explicitRegistration(registrationKey, EXPLICIT_SOURCE),
+      registerConnector(legacyManifest({ connector_key: registrationKey, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }),
       publishConnectorActivation(
         installRecord(
           activationKey,
           legacyManifest({
             connector_id: activationKey,
             connector_key: activationKey,
-            source: { id: EXPLICIT_SOURCE },
+            legacy_source_ids: [EXPLICIT_SOURCE],
           })
         )
       ),
@@ -430,14 +463,14 @@ scenario("registration and activation cannot claim the same current identity for
     const results = await settled;
     const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
     const loserIndex = results.findIndex((result) => result.status === "rejected");
-    assert.notEqual(winnerIndex, -1, "one current identity claimant commits");
+    assert.notEqual(winnerIndex, -1, "one legacy identity claimant commits");
     assert.notEqual(loserIndex, -1, "the other claimant is rejected");
     const loser = rejectionOf(results[loserIndex]) as { code?: unknown; message?: unknown };
     assert.equal(loser.code, INVALID_REQUEST);
     assert.match(String(loser.message), /already owned/);
 
     const storedRows = await Promise.all([storedFor(registrationKey), storedFor(activationKey)]);
-    assert.equal(storedRows.filter(Boolean).length, 1, "the current source has exactly one persisted owner");
+    assert.equal(storedRows.filter(Boolean).length, 1, "the legacy identity has exactly one persisted owner");
     const winnerKey = winnerIndex === 0 ? registrationKey : activationKey;
     const loserKey = loserIndex === 0 ? registrationKey : activationKey;
     assert.equal(retainedSourceId(storedRows[winnerIndex] ?? null), EXPLICIT_SOURCE);
@@ -1240,7 +1273,7 @@ scenario("an installer publish cannot rebind a retained source to an explicit di
   assert.equal(await getConnectorActivation(key), null, "no activation is written for a rejected publish");
 });
 
-scenario("an installer cannot claim another connector's current source identity", async () => {
+scenario("an installer's legacy identity cannot claim another connector's current source identity", async () => {
   const ownerKey = "srcid-install-owner";
   const claimantKey = "srcid-install-claimant";
   await registerConnector(
@@ -1255,7 +1288,7 @@ scenario("an installer cannot claim another connector's current source identity"
   const claimantManifest = legacyManifest({
     connector_id: claimantKey,
     connector_key: claimantKey,
-    source: { id: EXPLICIT_SOURCE },
+    legacy_source_ids: [EXPLICIT_SOURCE],
   });
   assert.equal(claimantManifest.source_declaration, undefined, "the incoming package has no explicit SourceDeclaration");
 
