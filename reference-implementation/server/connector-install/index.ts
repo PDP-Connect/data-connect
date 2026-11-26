@@ -102,6 +102,24 @@ export interface ConnectorCatalogSnapshot {
   readonly generatedAt?: string;
 }
 
+/** The catalog as served: `fresh` is false when it is the kept copy of an earlier verified fetch. */
+export interface ConnectorCatalogView {
+  readonly entries: readonly ConnectorCatalogEntry[];
+  readonly fetchedAt: string | null;
+  readonly fresh: boolean;
+}
+
+/**
+ * How long one refresh may take before a kept catalog is served instead.
+ * Comparable clients fall back after one failed attempt of 5-60 s, 30 s typical
+ * (Home Assistant, HACS, Homebrew, apt, dnf); divan/software-supply-chain/
+ * when-a-remote-add-on-registry-is-unreachable-shipping-clients-keep-the-last-good-local-catalog-...
+ * Used only when a kept catalog exists; installs keep the full retry ladder.
+ */
+export const CATALOG_FALLBACK_WAIT_MS = 12_000;
+
+const CATALOG_SNAPSHOT_FILE = "connector-catalog-snapshot.json";
+
 interface InstallerCore {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
   fetchCatalog: (options: Record<string, unknown>) => Promise<unknown>;
@@ -965,6 +983,8 @@ async function installStagedEntry(options: {
 
 export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
+  /** Like `catalog`, plus whether the list is fresh and when it was fetched. */
+  catalogView?: () => Promise<ConnectorCatalogView>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
   inspectSelected: (connectorId: string) => Promise<SelectedConnectorArtifact>;
@@ -983,7 +1003,12 @@ export interface ConnectorInstallService {
 export function createConnectorInstallService(options: {
   readonly dataDir?: string;
   readonly store?: ConnectorInstallStore;
-  readonly catalogLoader?: () => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>;
+  readonly catalogLoader?: (context?: {
+    /** True when a kept catalog exists: make one attempt and give up fast. */
+    readonly bounded: boolean;
+  }) => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>;
+  /** Test seam for CATALOG_FALLBACK_WAIT_MS. */
+  readonly catalogFallbackWaitMs?: number;
   /** Test seam; production always delegates OCI verification to the pinned core. */
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
@@ -1012,14 +1037,31 @@ export function createConnectorInstallService(options: {
   // Local sources are owner state, read by the run path from PDPP_DATA_DIR, not
   // preloaded install state: do not follow PDPP_CONNECTOR_PRELOAD_DIR here.
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(options.dataDir);
-  let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
-  const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+  let catalogRefresh: Promise<ConnectorCatalogView> | undefined;
+  const snapshotPath = join(dataDir, CATALOG_SNAPSHOT_FILE);
+  const fallbackWaitMs = options.catalogFallbackWaitMs ?? CATALOG_FALLBACK_WAIT_MS;
+  const loadCatalog = async (): Promise<ConnectorCatalogView> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
       const previousHighWater = await store.getCatalogHighWater();
-      const loaded = options.catalogLoader
-        ? await options.catalogLoader()
-        : await loadCatalogFromPinnedCore(previousHighWater);
+      const kept = readCatalogSnapshotFile(snapshotPath);
+      let loaded: readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot;
+      try {
+        loaded = await withinCatalogWait(
+          (bounded) =>
+            options.catalogLoader
+              ? options.catalogLoader({ bounded })
+              : loadCatalogFromPinnedCore(previousHighWater, bounded),
+          kept ? fallbackWaitMs : null
+        );
+      } catch (error) {
+        // Only "could not reach the registry" falls back. A verification
+        // failure (signature, rollback, shape) must still fail.
+        if (kept && isRegistryUnreachable(error)) {
+          return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
+        }
+        throw error;
+      }
       const snapshot: ConnectorCatalogSnapshot = Array.isArray(loaded)
         ? { entries: loaded as readonly ConnectorCatalogEntry[] }
         : (loaded as ConnectorCatalogSnapshot);
@@ -1047,12 +1089,18 @@ export function createConnectorInstallService(options: {
         throw new Error("Catalog rollback refused by high-water mark.");
       }
       await store.setCatalogHighWater(highWater);
-      return snapshot.entries;
+      const fetchedAt = new Date().toISOString();
+      writeCatalogSnapshotFile(snapshotPath, {
+        entries: snapshot.entries,
+        fetchedAt,
+        ...(snapshot.generatedAt ? { generatedAt: snapshot.generatedAt } : {}),
+      });
+      return { entries: snapshot.entries, fetchedAt, fresh: true };
     } finally {
       release();
     }
   };
-  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+  const catalogView = async (): Promise<ConnectorCatalogView> => {
     const refresh = catalogRefresh ?? loadCatalog();
     catalogRefresh = refresh;
     try {
@@ -1063,6 +1111,7 @@ export function createConnectorInstallService(options: {
       }
     }
   };
+  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => (await catalogView()).entries;
   const installEntryCore = async (
     connectorId: string,
     entry: ConnectorCatalogEntry,
@@ -1353,6 +1402,7 @@ export function createConnectorInstallService(options: {
   return {
     addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
+    catalogView,
     install,
     resolveManifestFromCatalog,
     listLocalSources: () => localSourceStore.list(),
@@ -1423,11 +1473,119 @@ async function loadPinnedCore(): Promise<InstallerCore> {
   return (await import(CORE_MODULE)) as InstallerCore;
 }
 
-async function loadCatalogFromPinnedCore(lastAcceptedGeneratedAt: string | null): Promise<ConnectorCatalogSnapshot> {
+interface KeptCatalogSnapshot {
+  readonly entries: readonly ConnectorCatalogEntry[];
+  readonly fetchedAt: string;
+  readonly generatedAt?: string;
+}
+
+/** Reads the kept catalog, re-checking every entry; anything unreadable or invalid counts as none kept. */
+function readCatalogSnapshotFile(path: string): KeptCatalogSnapshot | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    if (
+      !isRecord(parsed) ||
+      !Array.isArray(parsed.entries) ||
+      typeof parsed.fetched_at !== "string" ||
+      !Number.isFinite(Date.parse(parsed.fetched_at))
+    ) {
+      return null;
+    }
+    const entries = parsed.entries as ConnectorCatalogEntry[];
+    for (const entry of entries) {
+      assertCatalogEntry(entry, entry.connector_id, entry.digest);
+    }
+    return {
+      entries,
+      fetchedAt: parsed.fetched_at,
+      ...(typeof parsed.generated_at === "string" ? { generatedAt: parsed.generated_at } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Written only after a fetch passed every check; atomic so a crash never leaves half a file. */
+function writeCatalogSnapshotFile(path: string, snapshot: KeptCatalogSnapshot): void {
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(
+    temp,
+    JSON.stringify({
+      entries: snapshot.entries,
+      fetched_at: snapshot.fetchedAt,
+      ...(snapshot.generatedAt ? { generated_at: snapshot.generatedAt } : {}),
+      schema: 1,
+    })
+  );
+  renameSync(temp, path);
+}
+
+class CatalogWaitExpiredError extends Error {
+  constructor(waitMs: number) {
+    super(`The connector registry did not answer within ${waitMs} ms.`);
+    this.name = "CatalogWaitExpiredError";
+  }
+}
+
+async function withinCatalogWait<T>(run: (bounded: boolean) => Promise<T>, waitMs: number | null): Promise<T> {
+  if (waitMs === null) return run(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new CatalogWaitExpiredError(waitMs)), waitMs);
+  });
+  const work = run(true);
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True only when the registry could not be asked or did not answer. The pinned
+ * core reports that as OciRegistryError reason "unverifiable" (its fetch
+ * wrapper drops the cause); every rejection it can make about what it did
+ * read has another reason (tampered, misidentified, unsigned, stale-catalog,
+ * invalid-catalog, ...). Raw fetch failures and timeouts also count.
+ */
+export function isRegistryUnreachable(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; current instanceof Error && depth < 5; depth += 1) {
+    if (current instanceof CatalogWaitExpiredError) return true;
+    if (current.name === "OciRegistryError") {
+      return (current as { reason?: unknown }).reason === "unverifiable";
+    }
+    if (current.name === "AbortError" || current.name === "TimeoutError") return true;
+    if (current instanceof TypeError && current.message === "fetch failed") return true;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && NETWORK_ERROR_CODES.has(code)) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+async function loadCatalogFromPinnedCore(
+  lastAcceptedGeneratedAt: string | null,
+  bounded = false
+): Promise<ConnectorCatalogSnapshot> {
   const core = await loadPinnedCore();
   const value = (await core.fetchCatalog({
     identity: core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
     registry: "ghcr.io",
+    // One attempt, each request bounded, when a kept catalog can stand in.
+    ...(bounded ? { retryOptions: { attempts: 1 }, timeoutMs: CATALOG_FALLBACK_WAIT_MS } : {}),
     ...(lastAcceptedGeneratedAt ? { lastAcceptedGeneratedAt } : {}),
   })) as { catalog?: { generated_at?: string; connectors?: unknown[] } };
   const connectors = value.catalog?.connectors;

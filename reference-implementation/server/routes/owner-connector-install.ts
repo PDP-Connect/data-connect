@@ -133,8 +133,13 @@ export function mountOwnerConnectorInstall(
   };
   const catalogHandler: Handler = async (_req, res) => {
     try {
+      const view = options.service.catalogView
+        ? await options.service.catalogView()
+        : { entries: await options.service.catalog(), fetchedAt: null, fresh: true };
       res.json({
-        data: (await options.service.catalog()).map(projectCatalogEntry),
+        data: view.entries.map(projectCatalogEntry),
+        ...(view.fetchedAt ? { fetched_at: view.fetchedAt } : {}),
+        fresh: view.fresh,
         object: "connector_install_catalog",
       });
     } catch (error) {
