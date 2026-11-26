@@ -21,7 +21,9 @@ test("same stored evidence comparison records the source-page differences awaiti
   const sourceSentence=sourceStateSentence(shared,{now,name:"Northwind"});
   const history=resolveSyncCause(evidence,"Northwind");
   // Source page is under independent review; the orchestrator forbids changing its sentences.
-  assert.notEqual(sourceSentence.text,history.sentence);
+  assert.equal(sourceSentence.text,"Something stopped Northwind from syncing.");
+  assert.equal(history.sentence,"Northwind asked for a new sign-in.");
+  assert.equal(words.action?.label,"Try again");
   assert.equal(history.action,"Sign in again");
 });
 test("day counts describe copied records, including singular and zero",()=>{
@@ -42,4 +44,12 @@ test("earlier healthy sources collapse and missing kinds remain visible",async()
   const html=renderToStaticMarkup(<SyncHistoryDays rows={rows} sources={model.sources} offset={0} />);
   assert.match(html,/data sources checked/);assert.match(html,/didn&#x27;t come/);
   assert.match(html,/Failed 3 times:/);
+});
+
+test("consecutive discovery lines roll into one, with record reads first",async()=>{
+  const {groupReadLines}=await import("../audit/day/read-day-view.tsx");
+  const {readPractice}=await import("./practice.ts");const history=readPractice("kinds");if(history.mode!=="reads")throw Error("mode");
+  const schema=history.data.find(row=>row.shape==="schema")!;
+  const rolled=groupReadLines(Array.from({length:35},(_,index)=>({...schema,id:`discovery-${index}`})));
+  assert.equal(rolled.length,1);assert.equal(rolled[0]?.occurrences,35);
 });

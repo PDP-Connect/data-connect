@@ -15,6 +15,7 @@
  *   - No hardcoded hex/rgb; all color via CSS custom properties / data-surface.
  */
 
+import Link from "next/link";
 import {
   Band,
   BandCell,
@@ -342,6 +343,7 @@ export default async function TraceDetailPage({
 
   return (
     <RecordroomShellWithPalette>
+      <nav aria-label="Breadcrumb" className="mb-3 text-primary"><Link href="/audit">Activity</Link></nav>
       <header className="mb-5">
         <h1 className="pdpp-heading text-foreground">Technical details for this activity</h1>
         <p>{title}</p>

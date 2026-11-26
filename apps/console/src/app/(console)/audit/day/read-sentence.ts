@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { humanizeFieldLabel } from "@pdpp/display";
 import type { AppReadEntry } from "../../lib/ref-client.ts";
-export function readSentence(read: AppReadEntry, source: string | null): string {
-  const kind = read.record_kind ? humanizeFieldLabel(read.record_kind).toLowerCase() : "records";
+export function readSentence(read: AppReadEntry, source: string | null, kindLabel?: string): string {
+  const kind = kindLabel ?? (read.record_kind ? humanizeFieldLabel(read.record_kind).toLowerCase() : "records");
   const from = source ? ` from ${source}` : "";
   const results = read.records === null ? "" : ` · ${read.records} results`;
   switch (read.shape) {
