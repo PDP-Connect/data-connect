@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
 import type { ConnectorInstallCatalogEntry } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
@@ -184,4 +184,23 @@ test("an unavailable-first alias does not hide a usable service", () => {
 test("saved account keys normalize across catalog aliases", () => {
   const model = build({ apple_health: ["cin_a"] }, [appleHealth]);
   assert.equal(model.rows[0]?.added, true);
+});
+
+mock.module("server-only", { namedExports: {} });
+
+test("list and route lookup choose the connectable alias in either input order", async () => {
+  const { findCatalogEntry } = await import("./add-source-catalog-read.ts");
+  const usable = { ...ynab, connectorKey: "my-service" };
+  const blocked = { ...usable, connectorKey: "my_service", publicTier: "preview", disposition: "unknown_unsupported" } as ConnectorCatalogEntry;
+  for (const catalog of [[blocked, usable], [usable, blocked]]) {
+    const read = {
+      catalog,
+      catalogTransientlyUnavailable: false,
+      existingConnectionIds: {},
+      lifecycleFor: () => notInstalled("my-service"),
+    };
+    const row = buildAddSourceList(read).rows[0]!;
+    assert.equal(row.connectorKey, usable.connectorKey);
+    assert.equal(findCatalogEntry(read, row.connectorKey), usable);
+  }
 });

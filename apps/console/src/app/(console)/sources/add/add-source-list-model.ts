@@ -74,6 +74,17 @@ function compareByName(a: { displayName: string }, b: { displayName: string }): 
   return a.displayName.localeCompare(b.displayName);
 }
 
+/** One alias choice for the list and every route that opens a service. */
+export function selectCatalogAlias(
+  aliases: readonly ConnectorCatalogEntry[],
+  input: Omit<AddSourceListInput, "catalog">
+): ConnectorCatalogEntry | null {
+  return aliases.find((entry) => isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable))
+    ?? aliases.find((entry) => input.existingConnectionIds[entry.connectorKey]?.length)
+    ?? aliases[0]
+    ?? null;
+}
+
 export function buildAddSourceList(input: AddSourceListInput): AddSourceListModel {
   const rows: AddSourceRow[] = [];
   const notAddable: string[] = [];
@@ -89,9 +100,8 @@ export function buildAddSourceList(input: AddSourceListInput): AddSourceListMode
     else groups.set(identity, [entry]);
   }
   for (const [identity, aliases] of groups) {
-    const usable = aliases.find((entry) => isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable));
-    const entry = usable ?? aliases.find((alias) => input.existingConnectionIds[alias.connectorKey]?.length) ?? aliases[0]!;
-    const connectable = usable !== undefined;
+    const entry = selectCatalogAlias(aliases, input)!;
+    const connectable = isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable);
     const firstAccount = accounts.get(identity) ?? null;
     if (connectable || firstAccount !== null) {
       rows.push({

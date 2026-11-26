@@ -7,6 +7,7 @@ import type { ConnectorInstallLifecycle } from "../../lib/connector-install-pres
 import { buildConnectorInstallLifecycleByConnector, connectorLookupKey } from "../../lib/connector-install-presentation.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { getConnectorInstallSnapshot } from "../connector-updates-read.ts";
+import { selectCatalogAlias } from "./add-source-list-model.ts";
 import { readInstalledSourceCatalog } from "./installed-source-catalog.ts";
 
 export interface AddSourceCatalogRead {
@@ -63,9 +64,9 @@ export async function readAddSourceCatalog({ withAccounts = true }: { withAccoun
 
 /** The entry for one service, matching the way the install catalog spells keys. */
 export function findCatalogEntry(
-  read: Pick<AddSourceCatalogRead, "catalog">,
+  read: Pick<AddSourceCatalogRead, "catalog" | "lifecycleFor" | "catalogTransientlyUnavailable" | "existingConnectionIds">,
   connectorKey: string
 ): ConnectorCatalogEntry | null {
   const wanted = connectorLookupKey(connectorKey);
-  return read.catalog.find((entry) => connectorLookupKey(entry.connectorKey) === wanted) ?? null;
+  return selectCatalogAlias(read.catalog.filter((entry) => connectorLookupKey(entry.connectorKey) === wanted), read);
 }
