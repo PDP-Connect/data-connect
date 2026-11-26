@@ -14,6 +14,7 @@ import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
 import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
 import { isServerOwnedEnvironmentKey } from "./server-owned-environment.ts";
 import { sanitizeSvg } from "../vendor/brand-react/src/sanitize-svg.ts";
+import { hexColorOrNull } from "../vendor/brand-react/src/hex-color.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
@@ -1123,7 +1124,7 @@ export function validateManifestIcon(manifest: Record<string, unknown>, code: st
   }
   const svg = iconObj.svg.trim();
   assertSvgIsAllowlisted(svg, code);
-  if (iconObj.color !== undefined && !(isNonEmptyString(iconObj.color) && HEX_COLOR_RE.test(iconObj.color))) {
+  if (iconObj.color !== undefined && hexColorOrNull(iconObj.color) === null) {
     throw invalidConnectorManifest("icon.color must be a hex color (e.g. #1ED760) when declared", code);
   }
 }
