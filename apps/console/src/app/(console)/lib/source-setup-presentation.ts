@@ -595,15 +595,14 @@ export function sourceSetupCardModel(
 ): SourceSetupCardModel {
   // No setup path means no reason to install: the package could never be used.
   //
-  // One exception. A local collector's proof is a claim in its installed
-  // manifest. An entry that is not registered yet is built from the package
-  // listing alone, which carries no claim, so its disposition reads "unproven"
-  // only because nothing has been installed to prove it. Hiding the install
-  // action for it would leave no way to ever register it. Install stays
-  // offered, and the claim is judged from the manifest once it is registered.
+  // The listing carries no proof claim, so install-before-proof is allowed
+  // only for supported/preview packages. Replace this tier check with a proof
+  // field from the signed catalog when one exists; the installed manifest's
+  // claim is still judged once the connector is registered.
   const proofJudgedAfterInstall =
     entry.disposition === "local_collector_unproven" &&
     entry.registrationStatus !== "registered" &&
+    (entry.publicTier === "supported" || entry.publicTier === "preview") &&
     Boolean(lifecycle?.catalog || lifecycle?.installed);
   const noSetupPath = sourceSetupRowIsUnavailable(entry) && !proofJudgedAfterInstall;
   const installModel = lifecycle && !noSetupPath ? connectorInstallRowModel(entry, lifecycle) : null;

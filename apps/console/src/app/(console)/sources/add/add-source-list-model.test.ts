@@ -7,6 +7,7 @@ import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../li
 import type { ConnectorInstallCatalogEntry } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector, connectorLookupKey } from "../../lib/connector-install-presentation.ts";
+import { sourceSetupCardModel } from "../../lib/source-setup-presentation.ts";
 import { buildAddSourceList, isConnectableEntry, searchAddSourceList } from "./add-source-list-model.ts";
 import { ALL_ENTRIES, amazon, appleHealth, chase, claudeCode, installed, notInstalled, whoop, ynab } from "./add-flow-fixtures.ts";
 
@@ -81,7 +82,7 @@ test("a service with no package and no registration is not listed", () => {
   assert.equal(isConnectableEntry({ ...chase, registrationStatus: undefined }, { catalog: null, installed: null }, false), false);
 });
 
-test("fresh Core lists local collectors whose setup proof is judged after package installation", () => {
+test("fresh Core offers install-before-proof only for supported or preview local collectors", () => {
   // Latest signed catalog entries, normalized by Core; a fresh image has no
   // registered manifests, templates, or installed packages to supply proof yet.
   const packages: ConnectorInstallCatalogEntry[] = [
@@ -90,24 +91,31 @@ test("fresh Core lists local collectors whose setup proof is judged after packag
       display_name: "Claude Code",
       digest: "sha256:13687c6441cede6b6a50169f9d66c28878bdb1212c694c4152896612453f5d68",
       version: "0.3.30",
+      tier: "supported",
     },
     {
       connector_key: "codex",
       display_name: "OpenAI Codex CLI",
       digest: "sha256:6df59e78fcfd79cef46c0b3ef512a7bc3c921cf9536cabb647893e7ca131437e",
       version: "0.3.15",
+      tier: "supported",
     },
+    { connector_key: "twitter-archive", display_name: "Twitter/X Archive", version: "0.1.26", tier: "development", digest: "sha256:d45bca513f6fe29f57572bae6e2850295baab9f20c1253a731110daa6e54da6c" },
+    { connector_key: "ical", display_name: "Calendar (iCal)", version: "0.1.26", tier: "development", digest: "sha256:2b8c4cc8db4adf57fb135a983caf8e4e4934f5dada8d156cccbad64541d4cce5" },
+    { connector_key: "apple-photos", display_name: "Apple Photos", version: "0.1.27", tier: "development", digest: "sha256:291787ea345a1bc70655ae0a02b9ed134cb75467d6aac2441c259b8341e1744b" },
+    { connector_key: "google-takeout", display_name: "Google Takeout", version: "0.1.28", tier: "development", digest: "sha256:d7a388d383c7474dde89031dbe129c69bf9dc702cf4d9340e9725a606d92c111" },
+    { connector_key: "imessage", display_name: "iMessage (macOS)", version: "0.1.26", tier: "development", digest: "sha256:f38ee9b8958748b76dc84fbdfc8ea9ec5c803c1a76798a767f000cebd8d6c204" },
   ].map((entry) => ({
     ...entry,
-    bindings: { filesystem: { required: true } },
+    bindings: { filesystem: { required: true }, ...(entry.connector_key === "google-takeout" ? { network: { required: false } } : {}) },
     catalog_connector_id: `https://registry.pdpp.dev/connectors/${entry.connector_key}`,
     connector_id: entry.connector_key,
     latest: true,
-    tier: "supported",
+    tier: entry.tier as ConnectorInstallCatalogEntry["tier"],
   }));
   const catalog = buildOwnerConnectorCatalog([], [], packages);
   const lifecycle = buildConnectorInstallLifecycleByConnector(packages, []);
-  assert.deepEqual(catalog.map((entry) => entry.disposition), ["local_collector_unproven", "local_collector_unproven"]);
+  assert.ok(catalog.every((entry) => entry.disposition === "local_collector_unproven"));
   const model = buildAddSourceList({
     catalog,
     catalogTransientlyUnavailable: false,
@@ -117,11 +125,27 @@ test("fresh Core lists local collectors whose setup proof is judged after packag
   assert.deepEqual(model.rows.map((row) => row.connectorKey), ["claude-code", "codex"]);
   for (const entry of catalog) {
     const state = lifecycle[entry.connectorKey]!;
+    const offered = entry.publicTier === "supported" || entry.publicTier === "preview";
+    assert.equal(isConnectableEntry(entry, state, false), offered, `${entry.connectorKey}: connect page availability`);
+    const card = sourceSetupCardModel(entry, state, false);
+    assert.equal(card.noSetupPath, !offered);
+    assert.equal(card.packageNeedsInstall, offered, `${entry.connectorKey}: no automatic install for a refused service`);
     assert.equal(isConnectableEntry({ ...entry, registrationStatus: "registered" }, state, false), false);
     assert.equal(isConnectableEntry(entry, {
       ...state,
       catalog: { ...state.catalog!, bindings: { filesystem: { available: false } } },
     }, false), false);
+  }
+});
+
+test("preview permits install-before-proof, but development and unknown tiers do not", () => {
+  const unregistered = { ...claudeCode, disposition: "local_collector_unproven", registrationStatus: undefined } as ConnectorCatalogEntry;
+  for (const publicTier of ["supported", "preview", "development", "unknown"] as const) {
+    const expected = publicTier === "supported" || publicTier === "preview";
+    assert.equal(isConnectableEntry({ ...unregistered, publicTier }, notInstalled("claude-code"), false), expected);
+    assert.equal(isConnectableEntry({ ...unregistered, publicTier }, notInstalled("claude-code"), true), expected);
+    assert.equal(isConnectableEntry({ ...claudeCode, publicTier }, installed("claude-code"), false), true,
+      "a registered, proven collector keeps its setup path regardless of tier");
   }
 });
 
