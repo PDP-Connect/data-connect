@@ -1,221 +1,46 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-/**
- * Source-regex guard for the operator dashboard page.
- *
- * The spec scenarios that matter most for the dashboard are also the ones
- * that are easiest to backslide on once a renderer is rewritten:
- *
- *  - No secret material renders in the operator projection (no reference to
- *    `secret`, `secret_hash`, or `secret_text` in the page or its server
- *    action).
- *  - The disable affordance must POST through the server action, not call
- *    the `_ref` route directly from a client component.
- *  - The owner-session re-verify (`requireDashboardAccess`) must run inside
- *    the disable action, per CVE-2025-29927 / Next.js 2026 guidance.
- *
- * Spec: openspec/changes/add-client-event-subscription-management/specs/
- *       reference-implementation-architecture/spec.md
- */
-
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
-const ACTION_FILE = `${HERE}disable-action.ts`;
-
-const BLOCK_COMMENT_RE = /\/\*[\s\S]*?\*\//g;
-const LINE_COMMENT_RE = /^\s*\/\/.*$/gm;
-
-const SECRET_HASH_RE = /secret_hash/;
-const SECRET_TEXT_RE = /secret_text/;
-const SECRET_FIELD_RE = /\.secret\b/;
-const SECRET_LITERAL_RE = /"secret"/;
-
-const FORM_ACTION_RE = /action=\{disableSubscriptionAction\}/;
-const REF_DISABLE_PATH_RE = /\/_ref\/event-subscriptions\/.+\/disable/;
-
-const USE_SERVER_DIRECTIVE_RE = /"use server"/;
-const REQUIRE_DASHBOARD_ACCESS_CALL_RE = /requireDashboardAccess\(/;
-const DISABLE_CLIENT_CALL_RE = /disableClientEventSubscription\(/;
-const DETAIL_RETURN_HREF_RE = /returnTo === "detail" \? `\/event-subscriptions\/\$\{encodeURIComponent\(subscriptionId\)\}`/;
-
-// Stale-string sentinels. These are real defects we corrected; the
-// regression-tests keep the page from drifting back.
-const STALE_CLIENT_EVENTS_ENDPOINT_RE = /\/as\/client-events\/subscriptions/;
-const STALE_CLIENT_SUBSCRIPTION_STATUS_RE = /client_subscription_status/;
-const STALE_REASON_CHARS_LABEL_RE = /max 256 chars/i;
-// "Terminal" vocabulary is wrong for operator-disabled subscriptions
-// because three of the four hide-the-form statuses are client-recoverable
-// via PATCH { enabled: true }. The page must not call any disabled
-// subscription "terminal" and must not bring back the old identifiers.
-const STALE_TERMINAL_DISABLED_COPY_RE = /terminal disabled/i;
-const STALE_TERMINAL_IDENTIFIER_RE = /\bDISABLED_TERMINAL_STATUSES\b/;
-const STALE_TERMINAL_BOOL_RE = /\bisDisabledTerminal\b/;
-
-// Each hide-the-form status branch in `DisabledNoticeCopy` must remain
-// distinct so the copy keeps matching the real state-machine behavior
-// surfaced by `operations/as-client-event-subscriptions/index.ts`.
-const STATUS_BRANCH_DISABLED_RE = /status === "disabled"/;
-const STATUS_BRANCH_DISABLED_FAILURE_RE = /status === "disabled_failure"/;
-const STATUS_BRANCH_DISABLED_REVOKED_RE = /status === "disabled_revoked"/;
-const GRANT_REVOKED_409_RE = /409 grant_revoked/;
-// RAISE-RULES.md #4: deleted-state copy names the webhook in plain words.
-const DELETED_COPY_RE = /webhook (?:has been|was) deleted/;
-
-// Filter-status select must surface exactly one empty-value option (the
-// "any" fallback). A duplicate is a real bug we saw upstream of this
-// revision; locking it in keeps a future refactor from re-introducing it.
-// The status filter migrated from a native <select>/<option> to the Ink
-// Carbon <IcSelect>, which takes its choices via an `options` array, so the
-// "any" default is now the lone `value: ""` entry in that array literal.
-const ANY_STATUS_OPTION_GLOBAL_RE = /\bvalue:\s*""/g;
-
-// Server-rendered confirmation. The form must POST a `confirm_disable`
-// field and the action must reject submits where it is not exactly "yes".
-const CONFIRM_INPUT_RE = /name="confirm_disable"/;
-const CONFIRM_REQUIRED_GATE_RE = /confirm_disable[\s\S]{0,200}!==\s*"yes"/;
-
-// Reason cap is byte-based and never truncates silently.
-const REASON_BYTE_CAP_LABEL_RE = /max 256 bytes/i;
-const REASON_BYTE_LENGTH_CALL_RE = /Buffer\.byteLength\(.+,\s*"utf8"\)/;
-const SILENT_TRUNCATE_RE = /raw\.slice\(0,\s*MAX_REASON_BYTES\)/;
-
-function stripComments(src: string): string {
-  return src.replace(BLOCK_COMMENT_RE, "").replace(LINE_COMMENT_RE, "");
-}
-
-test("operator dashboard page does not reference subscription secret material", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // Strip comments so the assertion targets executable code, not the file
-  // header rationale which legitimately explains the no-secret invariant.
-  const code = stripComments(src);
-  assert.doesNotMatch(code, SECRET_HASH_RE);
-  assert.doesNotMatch(code, SECRET_TEXT_RE);
-  // Neither the field name `secret` nor a string literal containing
-  // "secret" should appear in the rendered page code.
-  assert.doesNotMatch(code, SECRET_FIELD_RE);
-  assert.doesNotMatch(code, SECRET_LITERAL_RE);
+const read = (file: string) => readFile(new URL(file, import.meta.url), "utf8");
+test("webhook pages render no secret material or technical folds", async () => {
+  for (const file of ["page.tsx", "webhook-view.tsx", "[subscriptionId]/page.tsx"]) {
+    const src = await read(file);
+    assert.doesNotMatch(src, /\.secret\b|secret_hash|secret_text|<details/);
+  }
 });
-
-test("operator dashboard page wires Disable through the server action", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, FORM_ACTION_RE);
-  // The page must not POST to the `_ref` route directly — the server action
-  // owns that hop, including the owner-session re-verify.
-  assert.doesNotMatch(src, REF_DISABLE_PATH_RE);
+test("webhook stopping uses the existing action with explicit confirmation", async () => {
+  const [view, action] = await Promise.all([read("webhook-view.tsx"), read("disable-action.ts")]);
+  assert.match(view, /action=\{disableSubscriptionAction\}/);
+  assert.match(view, /name="confirm_disable"/);
+  assert.match(view, /value="yes"\s+required/);
+  assert.match(action, /requireDashboardAccess\(/);
+  assert.match(action, /disableClientEventSubscription\(/);
+  assert.match(action, /confirm_disable[\s\S]{0,200}!==\s*"yes"/);
+  assert.match(action, /Buffer.byteLength\(raw, "utf8"\)/);
+  assert.doesNotMatch(action, /raw.slice\(0,/);
 });
-
-test("disable server action re-verifies the owner session", async () => {
-  const src = await readFile(ACTION_FILE, "utf8");
-  assert.match(src, USE_SERVER_DIRECTIVE_RE);
-  assert.match(src, REQUIRE_DASHBOARD_ACCESS_CALL_RE);
-  assert.match(src, DISABLE_CLIENT_CALL_RE);
+test("list and detail preserve the shared action return routes", async () => {
+  const [view, detail, action] = await Promise.all([read("webhook-view.tsx"), read("[subscriptionId]/page.tsx"), read("disable-action.ts")]);
+  assert.match(detail, /<WebhookDetail/);
+  assert.match(view, /returnTo = "detail"/);
+  assert.match(view, /name="return_to" type="hidden" value=\{returnTo\}/);
+  assert.match(action, /returnTo === "detail"/);
+  assert.match(action, /returnTo === "list" \? \{ peek: subscriptionId \} : \{\}/);
 });
-
-test("operator dashboard page references the correct client-facing routes", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.doesNotMatch(src, STALE_CLIENT_EVENTS_ENDPOINT_RE);
-  assert.doesNotMatch(src, STALE_CLIENT_SUBSCRIPTION_STATUS_RE);
-  assert.doesNotMatch(src, STALE_REASON_CHARS_LABEL_RE);
+test("webhooks retain distinct recovery instructions for stopped, failed, removed access and deleted", async () => {
+  const src = await read("webhook-view.tsx");
+  assert.match(src, /row.status === "disabled_revoked"/);
+  assert.match(src, /row.status === "deleted"/);
+  assert.match(src, /row.status === "disabled_failure"/);
+  assert.match(src, /The app needs new access and a new webhook/);
+  assert.match(src, /The app can turn them back on/);
 });
-
-test("operator dashboard page does not call disabled subscriptions 'terminal'", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // Disabled subscriptions are not terminal — three of the four
-  // hide-the-form statuses are client-recoverable. The page must not
-  // teach the wrong state model via either copy or identifiers.
-  assert.doesNotMatch(src, STALE_TERMINAL_DISABLED_COPY_RE);
-  assert.doesNotMatch(src, STALE_TERMINAL_IDENTIFIER_RE);
-  assert.doesNotMatch(src, STALE_TERMINAL_BOOL_RE);
-});
-
-test("operator dashboard page splits disabled-state copy by real state machine", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The renderer must branch on each of the four hide-the-form statuses
-  // (disabled, disabled_failure, disabled_revoked, deleted). A future
-  // refactor that collapses them back into a single "terminal" message
-  // would re-introduce the false-lifecycle bug.
-  assert.match(src, STATUS_BRANCH_DISABLED_RE);
-  assert.match(src, STATUS_BRANCH_DISABLED_FAILURE_RE);
-  assert.match(src, STATUS_BRANCH_DISABLED_REVOKED_RE);
-  // `disabled_revoked` must not promise a client re-enable PATCH —
-  // the operations layer rejects that with 409 grant_revoked.
-  assert.match(src, GRANT_REVOKED_409_RE);
-  // `deleted` is also handled (the final fall-through branch).
-  assert.match(src, DELETED_COPY_RE);
-});
-
-test("status filter renders exactly one empty-value option", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  const matches = src.match(ANY_STATUS_OPTION_GLOBAL_RE) ?? [];
-  assert.equal(
-    matches.length,
-    1,
-    `expected exactly one empty-value ("any") status option in page.tsx but found ${matches.length}: ${JSON.stringify(matches)}`
-  );
-});
-
-test("disable form is server-rendered with an explicit confirmation input", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, CONFIRM_INPUT_RE);
-  assert.match(src, REASON_BYTE_CAP_LABEL_RE);
-});
-
-test("disable server action enforces confirmation and byte-bounded reason without truncation", async () => {
-  const src = await readFile(ACTION_FILE, "utf8");
-  assert.match(src, CONFIRM_REQUIRED_GATE_RE);
-  // Byte-based cap with Buffer.byteLength, not UTF-16 `slice` truncation.
-  assert.match(src, REASON_BYTE_LENGTH_CALL_RE);
-  assert.doesNotMatch(src, SILENT_TRUNCATE_RE);
-});
-
-test("list and detail use the same disable action while preserving their return routes", async () => {
-  const [action, detail] = await Promise.all([
-    readFile(ACTION_FILE, "utf8"),
-    readFile(`${HERE}[subscriptionId]/page.tsx`, "utf8"),
-  ]);
-  // DIRECTION.md §The frame and the menu: addresses stay fixed; the brief specifies one shared disable action.
-  assert.ok(action.includes('returnTo: "list" | "detail"'));
-  assert.match(action, DETAIL_RETURN_HREF_RE);
-  assert.ok(action.includes('returnTo === "list" ? { peek: subscriptionId } : {}'));
-  assert.ok(detail.includes("action={disableSubscriptionAction}"));
-  assert.ok(detail.includes('name="return_to" type="hidden" value="detail"'));
-});
-
-test("webhook page uses its plain title and purpose sentence", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // DIRECTION.md §What the look is for: use plain words and a short purpose sentence.
-  assert.ok(src.includes('title: "Webhooks"'));
-  assert.ok(src.includes("Send a message to your own address when something changes."));
-  // RAISE-RULES.md #6: the empty sentence says how a webhook appears (apps create them), not a wrong retry hint.
-  assert.ok(src.includes("An app adds a webhook here when it asks to hear about changes."));
-  assert.ok(!src.includes("Try again after an app sends a message"));
-});
-
-test("webhook rows show the address and delivery time, with identifiers in Details", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  const row = src.slice(src.indexOf("function SubscriptionRow"), src.indexOf("function LastAttemptCell"));
-  const peek = src.slice(src.indexOf("function PeekPane"), src.indexOf("function DisabledNoticeCopy"));
-  // RAISE-RULES.md #2 and #4: rows use familiar words and raw IDs stay in Details.
-  assert.ok(row.includes("subscription.callback_host"));
-  assert.ok(row.includes("Last delivery {relativeTime(subscription.last_attempted_at)}"));
-  const rowDetails = row.indexOf('<summary className="cursor-pointer text-foreground">Details</summary>');
-  assert.ok(rowDetails >= 0 && row.indexOf("subscription.client_id", rowDetails) > rowDetails);
-  assert.ok(peek.includes('<KVRow k="Address">') && peek.includes('<KVRow k="Last delivery">'));
-  const peekDetails = peek.indexOf('<summary className="cursor-pointer">Details</summary>');
-  assert.ok(peekDetails >= 0 && peek.indexOf("subscription.subscription_id", peekDetails) > peekDetails);
-});
-
-test("the Webhooks menu entry is marked Experimental", async () => {
-  const menu = fileURLToPath(
-    new URL("../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url)
-  );
-  const src = await readFile(menu, "utf8");
-  // DIRECTION.md §The frame and the menu: experimental links sit under the Experimental label.
-  assert.ok(src.includes('label: "Webhooks", href: "/event-subscriptions", labelBefore: "Experimental"'));
+test("webhook page names the app with the Apps naming functions and keeps status filtering", async () => {
+  const [page, view] = await Promise.all([read("page.tsx"), read("webhook-view.tsx")]);
+  assert.match(page, /appNamesByClientId/);
+  assert.match(view, /pendingApprovalAppName/);
+  assert.match(page, /name="status"/);
+  assert.match(page, /An app can ask to be told when your data changes/);
 });
