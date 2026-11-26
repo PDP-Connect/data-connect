@@ -15,3 +15,10 @@ test("service-only activity uses the same authored service name as source invent
  assert.equal(sourceName(sources,null,"ynab"),"YNAB");
  assert.equal(sourceName(sources,null,"whatsapp_web"),"WhatsApp");
 });
+
+test("a registry URL fallback never prints its underscore key",()=>{
+ for(const host of ["registry.pdpp.dev","catalog.example"]) {
+   const name=sourceName([],null,`https://${host}/connectors/apple_contacts`);
+   assert.ok(!name.includes("_"));
+ }
+});
