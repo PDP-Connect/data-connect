@@ -8,7 +8,6 @@ import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { Callout, ToolbarField } from "@pdpp/operator-ui/components/primitives";
 import { useActionState, useState } from "react";
 import { pdppLocalCollectorEnrollCommand, pdppLocalCollectorRunCommand } from "@/lib/pdpp-cli-command.ts";
-import { SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as COLLECTOR_RUN_CONNECTORS } from "../lib/connection-modality.ts";
 import { createEnrollmentCodeAction } from "./actions.ts";
 
 const MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS = ["imessage", "apple_photos"] as const;
@@ -23,9 +22,16 @@ function isExternalToolLocalCollectorConnector(connectorId: string): boolean {
 }
 
 export function EnrollmentForm({
+  collectorConnectorIds,
   referenceBaseUrl,
   defaultConnectorId,
 }: {
+  /**
+   * Enrollment keys of the connectors this server can enroll a local collector
+   * for, read from the server's connector templates by the page. The "other
+   * connectors" run commands list these.
+   */
+  collectorConnectorIds: readonly string[];
   referenceBaseUrl: string;
   /**
    * Optional connector key to prefill the `connector_id` field. The Connect
@@ -206,7 +212,7 @@ export function EnrollmentForm({
             </button>
             {showOtherConnectors ? (
               <div className="mt-3 space-y-2">
-                {COLLECTOR_RUN_CONNECTORS.filter((connectorId) => connectorId !== state.code.connector_id).map(
+                {collectorConnectorIds.filter((connectorId) => connectorId !== state.code.connector_id).map(
                   (connectorId) => {
                     const otherRunCommand = pdppLocalCollectorRunCommand({ baseUrl: referenceBaseUrl, connectorId });
                     const fullCommand = [

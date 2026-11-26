@@ -78,8 +78,7 @@ const BROWSER_SURFACE_FIELDS = [
 // on the connector-evidence spine-validation hot path (runtime/index.ts).
 // test/connector-gap-bounding-browser-surface-kind-manifest-parity.test.ts
 // pins this Set against the real manifests directory, so a manifest gaining
-// or losing this field without updating the Set fails CI. Same shape as
-// BROWSER_BOUND_CONNECTORS in server/connection-setup-plan.ts — see
+// or losing this field without updating the Set fails CI — see
 // docs/inbox/report-clusters-bc-completion.md.
 export const BROWSER_SURFACE_KINDS = new Set(["chase_current_activity", "usaa_transaction_export"]);
 

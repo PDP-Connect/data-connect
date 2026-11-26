@@ -7,18 +7,10 @@ import {
   normalizeStaticSecretCredentialCapture,
   type StaticSecretCredentialCaptureFieldLike,
   type StaticSecretFieldType,
-  CONFORMANCE_ROSTER_LOADED,
-  KNOWN_SCAFFOLD_CONNECTORS,
-  PRODUCTION_READY_CONNECTORS,
   credentialValidationMode,
 } from "./polyfill-connectors-runtime.ts";
 import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts";
 import { legacyLocalAliasMap } from "./connector-key.ts";
-import {
-  BROWSER_BOUND_KEYS,
-  LEGACY_LOCAL_ALIASES,
-  LOCAL_COLLECTOR_PROVEN_KEYS,
-} from "./generated/connector-registry.generated.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
 
@@ -316,73 +308,6 @@ export interface ConnectionSetupPlan {
   readonly validationMode: CredentialValidationMode;
 }
 
-// The enrollment-key (bundle-directory-id) form of every manifest declaring
-// capabilities.proven.local_collector === true. LEGACY_LOCAL_ALIASES is
-// generated from LOCAL_COLLECTOR_DEFINITIONS (the connector package's own
-// local-collector bundle registry) keyed by bundle id -> canonical manifest
-// key; inverting it here (rather than re-deriving from canonical keys
-// forward) means a local-collector connector whose bundle id already equals
-// its canonical key still resolves correctly. See
-// connector-registry.generated.ts.
-const CANONICAL_TO_ENROLLMENT_KEY: Readonly<Record<string, string>> = Object.freeze(
-  Object.fromEntries(
-    Object.entries(LEGACY_LOCAL_ALIASES).map(([enrollmentKey, canonicalKey]) => [canonicalKey, enrollmentKey])
-  )
-);
-
-export const SUPPORTED_LOCAL_COLLECTOR_CONNECTORS: readonly string[] = Object.freeze(
-  LOCAL_COLLECTOR_PROVEN_KEYS.map((canonicalKey) => CANONICAL_TO_ENROLLMENT_KEY[canonicalKey] ?? canonicalKey)
-);
-
-export type SupportedLocalCollectorConnector = (typeof SUPPORTED_LOCAL_COLLECTOR_CONNECTORS)[number];
-
-// Every manifest declaring a runtime_requirements.bindings.browser binding —
-// see connector-registry.generated.ts. Equivalent to filtering the manifest
-// set through classifyConnectorIntentModality === "browser_bound", expressed
-// as generated data so this module (imported by apps/console; must stay
-// node:fs-free) never hand-copies the connector-id list.
-export const BROWSER_BOUND_CONNECTORS: readonly string[] = BROWSER_BOUND_KEYS;
-
-export type BrowserBoundConnector = (typeof BROWSER_BOUND_CONNECTORS)[number];
-
-/**
- * Browser enrollment is available when the shipped manifest/runtime pair is
- * both browser-bound and production-ready. The conformance roster is the
- * connector package's authority for the latter: it is checked against
- * an owner-visible lifecycle tier and each entry names a real collection
- * oracle. Deriving this intersection keeps a scaffold such as Anthropic out
- * without maintaining a second browser setup allowlist.
- */
-export type SupportedBrowserCollectorConnector = Extract<
-  BrowserBoundConnector,
-  keyof typeof PRODUCTION_READY_CONNECTORS
->;
-
-export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS: readonly SupportedBrowserCollectorConnector[] = Object.freeze(
-  BROWSER_BOUND_CONNECTORS.filter((connector): connector is SupportedBrowserCollectorConnector =>
-    Object.hasOwn(PRODUCTION_READY_CONNECTORS, connector)
-  )
-);
-
-/**
- * Whether this connector key names a KNOWN scaffold: manifest ships,
- * registers, and validates, but its `collect()` is an unconditional
- * `SKIP_RESULT` placeholder with no real parsing/pagination/cursor logic.
- * `connector-conformance-roster.ts`'s `KNOWN_SCAFFOLD_CONNECTORS` is the
- * single hand-maintained list this reads (kept disjoint from
- * `PRODUCTION_READY_CONNECTORS` and `REAL_UNLISTED_CONNECTORS` by
- * `connector-conformance.test.ts`), so a Development-tier connector never
- * needs a second allowlist to tell "unproven but real" apart from
- * "unimplemented": a genuine stub must never render an add action, even
- * inside a Development disclosure, because clicking it can never collect
- * anything.
- */
-export function isKnownScaffoldConnector(connectorKey: string | null | undefined): boolean {
-  return (
-    typeof connectorKey === "string" &&
-    (KNOWN_SCAFFOLD_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorKey) ?? connectorKey)
-  );
-}
 
 export const PROVIDER_AUTH_RUNBOOK_PATH = "docs/operator/add-connection.md";
 
@@ -577,65 +502,11 @@ export function expectedStaticSecretCredentialKind(
   return staticSecretCredentialCaptureFromManifest(manifest)?.kind ?? null;
 }
 
-export function isSupportedLocalCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedLocalCollectorConnector {
-  return (
-    typeof connectorId === "string" &&
-    (SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as readonly string[]).includes(enrollmentKeyForCanonicalKey(connectorId))
-  );
-}
-
-export function isSupportedBrowserCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedBrowserCollectorConnector {
-  return (
-    typeof connectorId === "string" &&
-    (SUPPORTED_BROWSER_COLLECTOR_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorId))
-  );
-}
-
 export function isStaticSecretConnector(
   connectorId: string | null | undefined,
   manifest?: ConnectorManifestLike | null
 ): boolean {
   return typeof connectorId === "string" && expectedStaticSecretCredentialKind(connectorId, manifest) !== null;
-}
-
-export function isBrowserBoundConnector(connectorId: string | null | undefined): boolean {
-  return (
-    typeof connectorId === "string" &&
-    (BROWSER_BOUND_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorId))
-  );
-}
-
-export interface BrowserEnrollmentSupport {
-  /** The manifest declares a browser binding, so the browser-session flow applies. */
-  readonly browserBound: boolean;
-  /** The browser-session flow may add a new account for this connector. */
-  readonly canAddAccount: boolean;
-}
-
-/**
- * Browser-session support from the connector's own manifest bindings, shared
- * by the console's browser-session routes and the RI's enrollment-shell route
- * so both give the same answer. A connector installed from the runtime catalog
- * qualifies through its bindings, without a connector-key list.
- *
- * A known scaffold can never collect, so it cannot add an account. The
- * scaffold list comes from the optional conformance roster; when the roster
- * did not load, no connector can add an account, because a scaffold cannot be
- * told apart from a real connector.
- */
-export function browserEnrollmentSupport(
-  connectorKey: string,
-  manifest: ConnectorManifestLike | null
-): BrowserEnrollmentSupport {
-  const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
-  return {
-    browserBound,
-    canAddAccount: browserBound && CONFORMANCE_ROSTER_LOADED && !isKnownScaffoldConnector(connectorKey),
-  };
 }
 
 export function classifyConnectorIntentModality(manifest: ConnectorManifestLike | null): ConnectorIntentModality {
@@ -893,6 +764,7 @@ export function unsupportedReason(modality: ConnectorIntentModality | ConnectorS
 }
 
 type ConnectionSetupPlanContext = Readonly<{
+  browserEnrollmentRunnable: boolean;
   connectorKey: string;
   connectorModality: ConnectorIntentModality;
   deploymentReadiness: ConnectorSetupDeploymentReadiness;
@@ -994,9 +866,10 @@ function buildLocalCollectorSetupPlan(ctx: ConnectionSetupPlanContext): Connecti
 }
 
 function buildBrowserBoundSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  // The same rule as the console's browser-session routes and the RI's
-  // enrollment-shell route. Production readiness is the tier badge, not a gate.
-  const hasManualBrowserPath = browserEnrollmentSupport(ctx.connectorKey, ctx.manifest).canAddAccount;
+  // The caller passes the server-owned readiness projection's verdict
+  // (`connector-readiness.ts`). Tier, roster membership and the catalog never
+  // decide it; absent, the connector is not runnable.
+  const hasManualBrowserPath = ctx.browserEnrollmentRunnable;
   return {
     catalogDisposition: hasManualBrowserPath ? "browser_collector_manual" : "browser_bound_runbook",
     connectorKey: ctx.connectorKey,
@@ -1196,6 +1069,8 @@ function buildUnsupportedSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionS
 }
 
 export function buildConnectionSetupPlan(args: {
+  /** True when the readiness projection says the owner can connect now. */
+  readonly browserEnrollmentRunnable?: boolean;
   readonly connectorKey?: string | null;
   readonly configuredProviderAuthConnectorKeys?: readonly string[];
   readonly deploymentEnv?: DeploymentEnvLike;
@@ -1233,6 +1108,7 @@ export function buildConnectionSetupPlan(args: {
   const validationMode: CredentialValidationMode =
     setupModality === "static_secret" ? credentialValidationMode(connectorKey) : "first_sync";
   const ctx: ConnectionSetupPlanContext = {
+    browserEnrollmentRunnable: args.browserEnrollmentRunnable === true,
     connectorKey,
     connectorModality,
     deploymentReadiness,
