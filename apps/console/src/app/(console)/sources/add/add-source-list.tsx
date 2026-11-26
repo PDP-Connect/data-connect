@@ -13,8 +13,10 @@ import {
   type AddSourceRow,
   cannotAddCopy,
   noMatchCopy,
+  notFreshCopy,
   searchAddSourceList,
 } from "./add-source-list-model.ts";
+import { formatLocalTime } from "../../settings/plain-text.ts";
 
 function Row({ row }: { row: AddSourceRow }) {
   return (
@@ -48,7 +50,15 @@ export function AddSourceListSkeleton() {
   );
 }
 
-export function AddSourceList({ model, query }: { model: AddSourceListModel; query: string }) {
+export function AddSourceList({
+  model,
+  notFresh = null,
+  query,
+}: {
+  model: AddSourceListModel;
+  notFresh?: { readonly fetchedAt: string | null } | null;
+  query: string;
+}) {
   const [searchText, setSearchText] = useState(query);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => setSearchText(query), [query]);
@@ -63,6 +73,12 @@ export function AddSourceList({ model, query }: { model: AddSourceListModel; que
   const result = searchAddSourceList(model, searchText);
   return (
     <div className={`grid gap-4 ${LIST_WIDTH}`}>
+      {notFresh ? (
+        // Formatted in the browser so the time is the person's own, not the server's.
+        <p className="pdpp-caption text-muted-foreground" data-testid="add-source-not-fresh" role="status" suppressHydrationWarning>
+          {notFreshCopy(notFresh.fetchedAt ? formatLocalTime(notFresh.fetchedAt) : null)}
+        </p>
+      ) : null}
       <label className="sr-only" htmlFor="source_q">
         {ADD_SOURCE_COPY.searchPlaceholder}
       </label>

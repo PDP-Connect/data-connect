@@ -20,8 +20,11 @@ interface PageParams {
 export default async function AddSourcePage({ searchParams }: { searchParams: Promise<PageParams> }) {
   const params = await searchParams;
   let model: ReturnType<typeof buildAddSourceList>;
+  let notFresh: Awaited<ReturnType<typeof readAddSourceCatalog>>["catalogNotFresh"];
   try {
-    model = buildAddSourceList(await readAddSourceCatalog());
+    const read = await readAddSourceCatalog();
+    notFresh = read.catalogNotFresh;
+    model = buildAddSourceList(read);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError || isDeterministicSourcesReadError(err)) {
       return (
@@ -39,7 +42,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
     <RecordroomShellWithPalette>
       <AddSourceHeader />
       {setupError ? <p className="pdpp-caption py-2 text-muted-foreground" role="alert">{setupError}</p> : null}
-      <AddSourceList model={model} query={sourceQuery} />
+      <AddSourceList model={model} notFresh={notFresh} query={sourceQuery} />
     </RecordroomShellWithPalette>
   );
 }

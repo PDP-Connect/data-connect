@@ -24,6 +24,17 @@ export function isTransientConnectorInstallCatalogError(err: unknown): boolean {
   );
 }
 
+/** The server could not reach the package registry and has no kept list to send. */
+export function isRegistryUnreachableCatalogError(err: unknown): boolean {
+  const candidate = err as ResourceServerHttpErrorLike;
+  return (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    candidate.path === "/v1/owner/connector-install/catalog" &&
+    candidate.status === 503
+  );
+}
+
 const INSTALL_ROUTE_PREFIX = "/v1/owner/connector-install/";
 /** Not found, method not allowed, not implemented: what a server without the route family answers. */
 const ROUTE_UNAVAILABLE_STATUSES = new Set([404, 405, 501]);
