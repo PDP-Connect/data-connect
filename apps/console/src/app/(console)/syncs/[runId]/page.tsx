@@ -76,7 +76,7 @@ interface LatestProgress {
   total: number | null;
 }
 
-type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string; return_to?: string }>;
 
 function getCursor(value: string | string[] | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -106,7 +106,7 @@ export default async function RunDetailPage({
   const runId = decodeURIComponent(raw);
   const query = await searchParams;
   const preview = flowPreviewState("details", query);
-  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.startError : undefined} runId={runId} /></RecordroomShellWithPalette>;
+  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" serviceName={flowPreview.connector.displayName} message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.startError : undefined} runId={runId} /></RecordroomShellWithPalette>;
   const cursor = getCursor(query.cursor);
   const receiptsCursor = getCursor(query.receipts_cursor);
 
@@ -261,6 +261,8 @@ export default async function RunDetailPage({
         }
       />
       <CurrentAssistanceSection
+        serviceName={connectorName}
+        returnHref={query.return_to === "status" && runStatus?.connector_instance_id ? `/connect/status/${encodeURIComponent(runStatus.connector_instance_id)}?run_id=${encodeURIComponent(runId)}` : `/syncs/${encodeURIComponent(runId)}/stream`}
         active={active}
         credentialSetup={credentialSetup}
         currentAssistance={currentAssistance}
@@ -323,11 +325,15 @@ export default async function RunDetailPage({
 }
 
 function CurrentAssistanceSection({
+  serviceName,
+  returnHref,
   active,
   credentialSetup,
   currentAssistance,
   runId,
 }: {
+  serviceName: string;
+  returnHref: string;
   active: boolean;
   credentialSetup: Awaited<ReturnType<typeof getStaticSecretSetup>> | null;
   currentAssistance: CurrentRunAssistance | null;
@@ -370,7 +376,7 @@ function CurrentAssistanceSection({
           : "Your response is needed to continue."
       }
       surface="human"
-      title="Waiting for your input"
+      title={currentAssistance.kind === "credentials" ? `${serviceName} needs your sign-in details` : "Waiting for your input"}
     >
       {requiresBrowserSurfaceAssistance(currentAssistance) ? (
         <Link
@@ -382,11 +388,13 @@ function CurrentAssistanceSection({
       ) : null}
       {!requiresBrowserSurfaceAssistance(currentAssistance) && supportsSubmit ? (
         <RunInteractionForm
+          serviceName={undefined}
+          returnHref={returnHref}
           fields={credentialView?.fields ?? currentAssistance.fields}
           interactionId={currentAssistance.id}
           key={currentAssistance.id}
           kind={interactionKind}
-          message={credentialView?.message ?? currentAssistance.message}
+          message={currentAssistance.message}
           runId={runId}
           submitLabel={credentialView?.submitLabel}
         />

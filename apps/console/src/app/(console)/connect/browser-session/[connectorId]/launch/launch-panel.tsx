@@ -130,7 +130,7 @@ export function BrowserSessionLaunchPanel({
     setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
-        window.location.assign(href);
+        window.location.assign(`${href}${href.includes("?") ? "&" : "?"}auto_open=1`);
       })
       .catch((err) => {
         setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
@@ -145,7 +145,7 @@ export function BrowserSessionLaunchPanel({
     setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
-        window.location.assign(href);
+        window.location.assign(`${href}${href.includes("?") ? "&" : "?"}auto_open=1`);
       })
       .catch((err) => {
         setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
@@ -164,7 +164,7 @@ export function LaunchPresentation({ connectorId, displayName, icon, onRetry, st
       {state.starting ? <p className="text-muted-foreground">This can take a minute. Keep this page open.</p> : null}
       {!state.starting && !state.networkLost && /busy|queued|deferred/i.test(state.error ?? "") ? <p className="text-muted-foreground">DataConnect is signing in to another service right now. Try again in a moment.</p> : null}
       {!state.starting ? <div className="flex flex-wrap gap-2"><button className={buttonVariants({ size: "sm", variant: "default" })} onClick={onRetry} type="button">{state.networkLost ? "Check again" : "Try again"}</button>{!state.networkLost ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">Back to all services</Link> : null}</div> : null}
-      {state.error && !state.networkLost ? <WentWrong message={state.error.replaceAll(/secure browser/giu, "the browser")} /> : null}
+      {state.error && !state.networkLost ? <WentWrong message={state.error.replaceAll(/secure browser/giu, "browser")} /> : null}
     </section>
   </>;
 }

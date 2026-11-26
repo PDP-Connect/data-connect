@@ -3,8 +3,7 @@
 
 import { buttonVariants } from "@pdpp/brand-react";
 import type { Viewport } from "next";
-import { notFound } from "next/navigation";
-import { ConnectorMark } from "../../../components/connector-mark.tsx";
+import { notFound, redirect } from "next/navigation";
 import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
   getRunStatus,
@@ -27,16 +26,18 @@ import {
   type ConnectorContext,
   resolveConnectorSummaryRouteId,
 } from "./connector-context-resolution.ts";
-import { NoAssistanceRunPoller } from "./no-assistance-run-poller.tsx";
 import { normalizeInteractionPrompt } from "./interaction-prompt.ts";
 import {
-  type NoAssistanceEndedStatus,
-  resolveNoAssistanceEndedTerminalStatus,
   selectNoAssistanceStreamState,
 } from "./stream-state.ts";
 import { ResolvedSurface, StreamSurface } from "./stream-viewer.tsx";
 
-import { flowPreview, flowPreviewState } from "../../../connect/flow-preview.ts";
+import { flowPreviewState } from "../../../connect/flow-preview.ts";
+
+import { ExternalApprovalSurface, PreparingBrowserSurface, SignInFrame } from "./sign-in-parts.tsx";
+import { setupStatusHref, signInDestination } from "./sign-in-flow.ts";
+
+import { SignInPreview } from "./sign-in-preview.tsx";
 
 export const dynamic = "force-dynamic";
 export const viewport: Viewport = {
@@ -45,32 +46,6 @@ export const viewport: Viewport = {
   viewportFit: "cover",
   width: "device-width",
 };
-
-function RunDetailLink({ runId }: { runId: string }) {
-  return (
-    <a
-      className={buttonVariants({ className: "mt-5", size: "sm", variant: "default" })}
-      href={`/syncs/${encodeURIComponent(runId)}`}
-    >
-      Sync details
-    </a>
-  );
-}
-
-function SetupStatusLink({ connectionId, runId }: { connectionId: string | null; runId: string }) {
-  if (!connectionId) {
-    return <RunDetailLink runId={runId} />;
-  }
-  const query = new URLSearchParams({ run_id: runId });
-  return (
-    <a
-      className={buttonVariants({ className: "mt-5", size: "sm", variant: "default" })}
-      href={`/connect/status/${encodeURIComponent(connectionId)}?${query.toString()}`}
-    >
-      Data source status
-    </a>
-  );
-}
 
 function getConnectorIdFromTimeline(events: SpineEvent[]): string | null {
   const fromRuntime = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
@@ -143,46 +118,16 @@ function renderNoAssistanceSurface({
   runId: string;
   runStatus: RunStatusEnvelope | null;
 }) {
-  if (currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) {
-    return <UnavailableStreamSurface connector={connector} runId={runId} />;
-  }
-  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") {
-    return <ExternalApprovalSurface assistance={currentAssistance} runId={runId} />;
-  }
-  const noAssistanceState = selectNoAssistanceStreamState({
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
-    runHandleStatus: runStatus?.status ?? null,
-    terminalStatus: envelope.terminal_status,
-  });
-  if (noAssistanceState === "resolved") {
-    return <ResolvedSurface connector={connector} runId={runId} />;
-  }
-  if (noAssistanceState === "ended") {
-    return (
-      <RunEndedSurface
-        connector={connector}
-        runId={runId}
-        terminalStatus={resolveNoAssistanceEndedTerminalStatus({
-          // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
-          runHandleStatus: runStatus?.status ?? null,
-          terminalStatus: envelope.terminal_status,
-        })}
-      />
-    );
-  }
-  if (hasActiveBrowserSurface(envelope.events)) {
-    return <PreparingBrowserSurface connectionId={connectorInstanceId} runId={runId} />;
-  }
-  // The owner already completed a browser step (e.g. H-E-B login) for this
-  // run, and no further browser action is currently open. Say so plainly
-  // instead of reusing the generic "No browser action is waiting" copy,
-  // which reads as a dead end right after a login the owner just finished
-  // (fr-setup-status-lifecycle-0806) — the run keeps going in the
-  // background and this page's job here is done.
-  if (hasResolvedBrowserSurfaceAssistance(envelope.events)) {
-    return <AssistanceCompleteSurface connectionId={connectorInstanceId} runId={runId} />;
-  }
-  return <RunContinuingSurface connectionId={connectorInstanceId} runId={runId} />;
+  const statusHref = setupStatusHref(connectorInstanceId, runId);
+  const state = selectNoAssistanceStreamState({ runHandleStatus: runStatus?.status ?? null, terminalStatus: envelope.terminal_status });
+  if (state === "ended") redirect(statusHref);
+  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") return <ExternalApprovalSurface connector={connector} message={currentAssistance.message} runId={runId} />;
+  if (currentAssistance?.kind === "credentials") return <StreamSurface connector={connector} interactionId={currentAssistance.id} interactionKind="credentials" interactionMessage={currentAssistance.message} runId={runId} />;
+  if (state === "resolved" || hasResolvedBrowserSurfaceAssistance(envelope.events)) return <ResolvedSurface connector={connector} runId={runId} statusHref={statusHref} />;
+  if ((currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) || hasActiveBrowserSurface(envelope.events)) return <PreparingBrowserSurface connector={connector} runId={runId} />;
+  const destination = signInDestination(state, statusHref);
+  if (destination) redirect(destination);
+  return null;
 }
 
 export default async function RunInteractionStreamPage({
@@ -190,19 +135,14 @@ export default async function RunInteractionStreamPage({
   searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: Promise<{ _preview?: string; _state?: string }>;
+  searchParams: Promise<{ _preview?: string; _state?: string; auto_open?: string }>;
 }) {
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
   const sp = await searchParams;
 
   const preview = flowPreviewState("browser", sp);
-  if (preview) {
-    if (preview === "signed-in") return <ResolvedSurface connector={flowPreview.connector} runId={runId} />;
-    if (preview === "opening") return <PreparingBrowserSurface connectionId={flowPreview.connectionId} poll={false} runId={runId} />;
-    if (preview === "approve") return <ExternalApprovalSurface poll={false} assistance={{ message: flowPreview.message } as NonNullable<ReturnType<typeof getCurrentRunAssistance>>} runId={runId} />;
-    return <StreamSurface connector={flowPreview.connector} interactionId="sample-step" interactionKind={preview === "needs-details" ? "credentials" : preview === "browser-step" ? "manual_action" : "otp"} interactionMessage={flowPreview.message} interactionRequiresResponse pollForResolution={false} previewState={preview} runId={runId} />;
-  }
+  if (preview) return <SignInPreview state={preview} />;
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
@@ -211,7 +151,7 @@ export default async function RunInteractionStreamPage({
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
-        <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
+        <SignInFrame connector={null} title="This page lost contact with DataConnect.">
           <section className="rounded-lg border border-destructive/30 p-6">
             <h1 className="pdpp-heading text-foreground">Can't reach DataConnect right now.</h1>
             <p className="mt-3 text-muted-foreground text-sm leading-6">
@@ -229,7 +169,7 @@ export default async function RunInteractionStreamPage({
               </a>
             </div>
           </section>
-        </main>
+        </SignInFrame>
       );
     }
     throw err;
@@ -269,6 +209,7 @@ export default async function RunInteractionStreamPage({
 
   return (
     <StreamSurface
+      autoOpen={sp.auto_open === "1"}
       connector={connectorWithIcon}
       interactionId={streamableAssistance.id}
       // Only an OTP step gets the code field; every other browser step keeps the manual Done dock.
@@ -280,159 +221,5 @@ export default async function RunInteractionStreamPage({
       interactionRequiresResponse={streamableAssistance.responseContract === "response_required"}
       runId={runId}
     />
-  );
-}
-
-function RunEndedSurface({
-  connector,
-  runId,
-  terminalStatus,
-}: {
-  connector: ConnectorContext | null;
-  runId: string;
-  terminalStatus: NoAssistanceEndedStatus;
-}) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: connector is nullable; tsc rejects removing this.
-  const subject = connector?.displayName ?? "This sync";
-  let statusLabel = "failed";
-  let title = "Can't show the browser";
-  let description =
-    "The sync did not finish. Open sync details to see what happened and what to do next.";
-  let sectionClass = "rounded-3xl border border-destructive/30 bg-destructive/5 p-6 shadow-2xl shadow-black/10";
-  if (terminalStatus === "cancelled") {
-    statusLabel = "cancelled";
-  } else if (terminalStatus === "abandoned") {
-    statusLabel = "stopped";
-  } else if (terminalStatus === "deferred") {
-    statusLabel = "browser deferred";
-    title = "The browser is not available yet.";
-    description = `${subject} is waiting for a browser. Try again when one is available.`;
-    sectionClass = "rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10";
-  }
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className={sectionClass}>
-        <p className="pdpp-eyebrow text-muted-foreground">sync {statusLabel}</p>
-        <h1 className="pdpp-heading mt-3 flex items-center gap-2 text-balance text-foreground">
-          {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
-          <span>{title}</span>
-        </h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">{description}</p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function RunContinuingSurface({
-  connectionId,
-  runId,
-}: {
-  connectionId: string | null;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">Live</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Syncing now.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          DataConnect will update this page if it needs you.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function AssistanceCompleteSurface({ connectionId, runId }: { connectionId: string | null; runId: string }) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">Live</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">You're done here.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          DataConnect is continuing on its own. Close this page if you like.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function PreparingBrowserSurface({
-  poll = true,
-  connectionId,
-  runId,
-}: {
-  poll?: boolean;
-  connectionId: string | null;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        {poll ? <NoAssistanceRunPoller runId={runId} /> : null}
-        <p className="pdpp-eyebrow text-muted-foreground">Opening the browser</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Getting the browser ready.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          Keep this page open. Browser controls will appear when DataConnect needs you.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function ExternalApprovalSurface({
-  poll = true,
-  assistance,
-  runId,
-}: {
-  poll?: boolean;
-  assistance: NonNullable<ReturnType<typeof getCurrentRunAssistance>>;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        {poll ? <NoAssistanceRunPoller runId={runId} /> : null}
-        <p className="pdpp-eyebrow text-muted-foreground">approval waiting</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Approve the request.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">{assistance.message}</p>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          The sync will continue after approval. No browser action is needed here.
-        </p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function UnavailableStreamSurface({ connector, runId }: { connector: ConnectorContext | null; runId: string }) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-[color:var(--warning)] bg-[color:var(--warning-wash)] p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">Can't show the browser</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Getting the browser ready.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          {connector ? (
-            <>
-              <span className="mr-1 inline-flex items-center gap-2 align-middle">
-                <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
-                {connector.displayName}
-              </span>{" "}
-              needs a browser. Keep this page open while DataConnect gets it ready.
-            </>
-          ) : (
-            "This data source needs a browser. Keep this page open while DataConnect gets it ready."
-          )}
-        </p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
   );
 }

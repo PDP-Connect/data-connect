@@ -20,7 +20,7 @@ const hideButtonSubmitPattern = /onClick=\{\(\) => submitInteraction\(\)\}[\s\S]
 // The corner close button is the only stream-killer on this surface. An owner
 // mid-auth read the icon-only X as "dismiss this notice" and lost the session,
 // so its label must say it ENDS the browser session, never an ambiguous "Close".
-const endSessionLabelPattern = /aria-label=\{`End \$\{connectorName\} browser session`\}/;
+const endSessionLabelPattern = /aria-label="Stop signing in"/;
 const oldCloseLabelPattern = /aria-label=\{`Close \$\{connectorName\} browser`\}/;
 
 // Close-on-pending-interaction guard. The corner X must not call the raw
@@ -40,7 +40,7 @@ const confirmEndsSessionPattern = /handleCloseConfirm = useCallback\(\(\) => \{[
 const noNativeConfirmPattern = /window\.confirm\(/;
 // The bubble's copy must name ending as destructive and point the owner at the
 // non-destructive "Hide instructions" alternative so the two never blur.
-const guardCopyPattern = /End the \{connectorName\} browser session now\?[\s\S]{0,260}Hide\n?\s*instructions/;
+const guardCopyPattern = /Stop signing in to \{connectorName\}\?[\s\S]{0,260}can't copy your/;
 // When no interaction is pending, the guarded handler falls straight through
 // to onClose() outside the `if (interactionPending)` block — unchanged.
 const guardFallsThroughWhenIdlePattern = /if \(interactionPending\) \{[\s\S]{0,200}return;\n\s*\}\n\s*onClose\(\);/;

@@ -25,11 +25,13 @@ interface Props {
   submitLabel?: string | null;
   previewError?: string;
   preview?: boolean;
+  serviceName?: string;
+  returnHref?: string;
 }
 
 const INITIAL: RunInteractionActionState = { error: null, status: null };
 
-export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel, previewError, preview }: Props) {
+export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel, previewError, preview, serviceName, returnHref }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [state, setState] = useState<RunInteractionActionState>({ ...INITIAL, error: previewError ?? null });
@@ -44,7 +46,8 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
       const next = await submitRunInteractionAction(INITIAL, formData);
       setState(next);
       if (!next.error) {
-        router.refresh();
+        if (returnHref) router.replace(returnHref);
+        else router.refresh();
       }
     });
   }
@@ -76,15 +79,17 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
         ]
       : fields;
   const showFields = kind !== "manual_action" && effectiveFields.length > 0;
-  const effectiveSubmitLabel = submitLabel ?? getSubmitLabel(kind);
+  const effectiveSubmitLabel = kind === "credentials" ? "Continue" : submitLabel ?? getSubmitLabel(kind);
 
   return (
     <form
       aria-label="Answer this request"
+      id={kind === "credentials" ? "sign-in-details" : undefined}
       autoComplete="off"
       className="mt-3 flex flex-col gap-3"
       onSubmit={handleSubmit}
     >
+      {kind === "credentials" && serviceName ? <h2 className="pdpp-heading">{serviceName} needs your sign-in details</h2> : null}
       <p className="pdpp-caption text-muted-foreground">{message}</p>
       {showFields ? (
         <div className="grid gap-2">
@@ -110,7 +115,7 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
         </div>
       ) : null}
       <p className="pdpp-caption text-muted-foreground">
-        Your answer is used only for this sync. DataConnect does not save it with the data source.
+        {kind === "credentials" ? "These sign-in details are used only for this copy. DataConnect does not save them with the data source." : "Your answer is used only for this sync. DataConnect does not save it with the data source."}
       </p>
       {state.error ? (
         <p className="pdpp-caption text-destructive" role="alert">
@@ -134,9 +139,9 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
           <IcButton disabled={isPending} size="sm" type="submit">
             {isPending ? "Submitting…" : effectiveSubmitLabel}
           </IcButton>
-          <IcButton disabled={isPending} onClick={handleCancel} size="sm" type="button" variant="ghost">
+          {kind !== "credentials" ? <IcButton disabled={isPending} onClick={handleCancel} size="sm" type="button" variant="ghost">
             Cancel interaction
-          </IcButton>
+          </IcButton> : null}
         </div>
       )}
     </form>

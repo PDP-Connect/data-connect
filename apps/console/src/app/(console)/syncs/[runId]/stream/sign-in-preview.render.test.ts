@@ -22,3 +22,12 @@ test("the sample browser uses the real step dock without a transport", async () 
     if (previewState === "stop-question") assert.match(html, /role="alertdialog"/);
   }
 });
+
+test("stop question explains the unfinished sign-in and offers Stop and Keep going", async () => {
+  const { StreamSurface } = await viewer;
+  const html = renderToStaticMarkup(React.createElement(StreamSurface, { connector: flowPreview.connector, interactionId: "sample-step", interactionKind: "otp", interactionMessage: flowPreview.message, previewState: "stop-question", runId: flowPreview.runId }));
+  assert.match(html, /Stop signing in to/);
+  assert.match(html, /can&#x27;t copy your/);
+  assert.match(html, />Stop</);
+  assert.match(html, /Keep going/);
+});

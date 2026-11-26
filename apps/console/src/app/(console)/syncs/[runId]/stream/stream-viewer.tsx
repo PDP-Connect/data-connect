@@ -96,7 +96,8 @@ import {
   useState,
   useTransition,
 } from "react";
-import { PdppLogo } from "@/components/pdpp-logo.tsx";
+import { SignInFrame, SignInMark } from "./sign-in-parts.tsx";
+import { scheduleSignInContinuation } from "./sign-in-flow.ts";
 import { ConnectorMark } from "../../../components/connector-mark.tsx";
 import type { ConnectorContext } from "./connector-context-resolution.ts";
 import { submitRunInteractionAction } from "../actions.ts";
@@ -156,7 +157,8 @@ import { flowPreview } from "../../../connect/flow-preview.ts";
 
 interface StreamSurfaceProps {
   previewState?: string;
-  /** Open the Stage-2 overlay on mount (preview only). */
+  statusHref?: string;
+  /** Open the browser on arrival from the connect launch page. */
   autoOpen?: boolean;
   connector: ConnectorContext | null;
   interactionId: string;
@@ -1568,7 +1570,7 @@ function LiveStreamSurface({
       <UnsupportedSurface
         connector={connector}
         interactionMessage={interactionMessage}
-        runHref={dashboardRoutes.run(runId)}
+        runHref={`${dashboardRoutes.run(runId)}?return_to=browser#sign-in-details`}
       />
     );
   }
@@ -1582,7 +1584,7 @@ function LiveStreamSurface({
 
       <div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
         <OrientationCard
-          buttonLabel="Open browser"
+          buttonLabel={`Open ${connectorName}`}
           connectorId={connector?.connectorId}
           connectorIcon={connector?.icon}
           connectorName={connector?.displayName}
@@ -1594,6 +1596,7 @@ function LiveStreamSurface({
       </div>
 
       <StreamOverlay
+        connector={connector}
         connectorName={connectorName}
         initialSession={mintedSession}
         interactionId={interactionId}
@@ -1619,12 +1622,7 @@ function LiveStreamSurface({
 // ─── Wordmark and orientation card ───────────────────────────────────────────
 
 function WordmarkCorner() {
-  return (
-    <div className="pointer-events-none absolute top-3 left-3 z-10 flex items-center gap-2 opacity-65">
-      <PdppLogo className="block" size={14} title="DataConnect" />
-      <span className="pdpp-caption font-medium text-foreground tracking-tight">DataConnect</span>
-    </div>
-  );
+  return <SignInMark />;
 }
 
 interface OrientationCardProps {
@@ -1667,11 +1665,12 @@ function OrientationCard({
       className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
       data-surface="human"
     >
+      <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
       {connectorName && connectorId ? (
-        <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
+        <h1 className="pdpp-heading flex items-center gap-2 text-foreground">
           <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={connectorName} />
-          {connectorName}
-        </p>
+          Sign in to {connectorName}
+        </h1>
       ) : null}
       <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
         {message}
@@ -1699,6 +1698,7 @@ function OrientationCard({
 // ─── Stage 2: the overlay holding the live stream ─────────────────────────────
 
 interface StreamOverlayProps {
+  connector: ConnectorContext | null;
   connectorName: string;
   /**
    * The session minted by the orientation card's "Open browser" click.
@@ -1719,6 +1719,7 @@ interface StreamOverlayProps {
 }
 
 function StreamOverlay({
+  connector,
   connectorName,
   initialSession,
   interactionId,
@@ -1753,6 +1754,8 @@ function StreamOverlay({
             and scroll-lock machinery behave. */}
         <IcDialogBackdrop className="pdpp-stream-dialog-backdrop" />
         <IcDialogPopup aria-label={`${connectorName} live browser`} className="pdpp-stream-dialog">
+          <WordmarkCorner />
+          <div className="pointer-events-none absolute top-12 left-3 z-10 max-w-[60%] rounded-lg bg-background/90 p-3"><p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p><h1 className="pdpp-heading flex items-center gap-2">{connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connectorName} /> : null}Sign in to {connectorName}</h1></div>
           {open && initialSession ? (
             <StreamStage
               connectorName={connectorName}
@@ -3584,6 +3587,7 @@ function StreamStage({
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
       <StreamInteractionDock
+        connectorName={connectorName}
         interactionId={interactionId}
         interactionKind={interactionKind}
         interactionRequiresResponse={interactionRequiresResponse}
@@ -4935,7 +4939,7 @@ function remoteClipboardStatus(copyState: ClipboardCopyState, remoteClipboard: R
     return "Copy failed. Use the selectable text fallback.";
   }
   if (remoteClipboard) {
-    return "Remote text is buffered only in this session.";
+    return "This text is kept only until you close this page.";
   }
   return "Copy text inside the browser first.";
 }
@@ -5606,10 +5610,10 @@ function CornerControls({
           // as "dismiss this notice" and lost their session. Say plainly that
           // this ends the live browser session, in both the tooltip and the
           // assistive label.
-          aria-label={`End ${connectorName} browser session`}
+          aria-label="Stop signing in"
           className="pdpp-stream-control-button"
           onClick={onClose}
-          title={`End ${connectorName} browser session`}
+          title="Stop signing in"
           type="button"
         >
           <svg
@@ -5622,7 +5626,7 @@ function CornerControls({
             viewBox="0 0 16 16"
             width="16"
           >
-            <title>End browser session</title>
+            <title>Stop signing in</title>
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
           </svg>
         </button>
@@ -5713,24 +5717,23 @@ function CloseConfirmBubble({
 }) {
   return (
     <div
-      aria-label="Confirm ending the browser session"
+      aria-label={`Stop signing in to ${connectorName}?`}
       className="pdpp-stream-toast-zone"
       data-pdpp-stream-ui
       data-slot="close-confirm"
       role="alertdialog"
     >
       <div className="pdpp-stream-toast-bubble flex w-full flex-col gap-2 text-left">
-        <p className="pdpp-caption font-medium text-foreground">End the {connectorName} browser session now?</p>
+        <p className="pdpp-caption font-medium text-foreground">Stop signing in to {connectorName}?</p>
         <p className="pdpp-caption text-muted-foreground">
-          The step in progress will be abandoned. To get the panel out of the way without ending the session, use “Hide
-          instructions” instead.
+          DataConnect can't copy your {connectorName} data until the sign-in is finished. You can start again from Data sources.
         </p>
         <div className="flex flex-wrap gap-2">
           <IcButton onClick={onConfirm} size="sm" type="button" variant="destructive">
-            End browser session
+            Stop
           </IcButton>
           <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
-            Keep working
+            Keep going
           </IcButton>
         </div>
       </div>
@@ -5741,14 +5744,18 @@ function CloseConfirmBubble({
 // ─── Interaction response dock ───────────────────────────────────────────────
 
 function StreamInteractionDock({
+  connectorName,
   previewError,
+  preview = false,
   interactionId,
   interactionKind,
   interactionRequiresResponse,
   message,
   runId,
 }: {
+  connectorName: string;
   previewError?: string;
+  preview?: boolean;
   interactionId: string;
   interactionKind: string;
   interactionRequiresResponse: boolean;
@@ -5766,6 +5773,7 @@ function StreamInteractionDock({
   }
 
   function submitInteraction(data?: Record<string, string>) {
+    if (preview) { setError(previewError ?? null); return; }
     const formData = new FormData();
     formData.set("run_id", runId);
     formData.set("interaction_id", interactionId);
@@ -5790,7 +5798,7 @@ function StreamInteractionDock({
     if (interactionKind === "otp") {
       const trimmed = code.trim();
       if (!trimmed) {
-        setError('Enter the code, or use "I entered it in the browser" after completing 2FA there.');
+        setError(`Type the code, or press "I typed it into ${connectorName} already".`);
         return;
       }
       submitInteraction({ code: trimmed });
@@ -5801,10 +5809,10 @@ function StreamInteractionDock({
 
   let submitLabel = "Done";
   if (interactionKind === "otp") {
-    submitLabel = "Submit code";
+    submitLabel = "Continue";
   }
   if (isPending) {
-    submitLabel = interactionKind === "otp" ? "Submitting…" : "Saving…";
+    submitLabel = interactionKind === "otp" ? "Checking…" : "Saving…";
   }
 
   if (collapsed) {
@@ -5847,14 +5855,13 @@ function StreamInteractionDock({
           </IcButton>
         </div>
         {interactionKind === "otp" ? (
-          <IcInput
+          <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
+            id={`code-${interactionId}`}
             autoComplete="one-time-code"
             inputMode="numeric"
             onChange={(event) => setCode(event.currentTarget.value)}
-            pattern="\\d{6}"
-            placeholder="6-digit code"
             value={code}
-          />
+          /></label>
         ) : null}
         {error ? (
           <p className="pdpp-caption text-destructive" role="alert">
@@ -5867,7 +5874,7 @@ function StreamInteractionDock({
           </IcButton>
           {interactionKind === "otp" ? (
             <IcButton disabled={isPending} onClick={() => submitInteraction()} size="sm" type="button" variant="ghost">
-              I entered it in the browser
+              I typed it into {connectorName} already
             </IcButton>
           ) : null}
         </div>
@@ -5917,38 +5924,13 @@ function PopupToast({ message }: { message: string }) {
  * satisfied. Quiet and declarative; never promises browser-controlled tab
  * closing because browsers block scripted tab closing for normal navigations.
  */
-export function ResolvedSurface({ connector, runId }: { connector: ConnectorContext | null; runId: string }) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const subject = connector?.displayName ?? "The data source";
-
-  return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
-        <section
-          aria-labelledby="stream-resolved-title"
-          className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
-          data-surface="human"
-        >
-          <p className="pdpp-body-lg text-foreground" id="stream-resolved-title">
-            <span className="flex items-center gap-2">
-              {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
-              {subject} is ready.
-            </span>
-          </p>
-          <p className="pdpp-body text-foreground">
-            You're done here. DataConnect is continuing on its own; you can close this tab.
-          </p>
-          <Link
-            className={buttonVariants({ className: "h-12 w-full justify-center", size: "lg", variant: "default" })}
-            href={`/syncs/${encodeURIComponent(runId)}`}
-          >
-            Sync details
-          </Link>
-        </section>
-      </div>
-    </main>
-  );
+export function ResolvedSurface({ connector, statusHref = "/sources", preview = false }: { connector: ConnectorContext | null; runId: string; statusHref?: string; preview?: boolean }) {
+  const router = useRouter();
+  useEffect(() => {
+    if (preview) return;
+    return scheduleSignInContinuation(statusHref, (href) => router.replace(href));
+  }, [preview, router, statusHref]);
+  return <SignInFrame connector={connector} title={`You're signed in to ${connector?.displayName ?? "the data source"}.`}><Link className={buttonVariants({ size: "sm", variant: "default" })} href={statusHref}>Continue</Link></SignInFrame>;
 }
 
 // ─── Unsupported interaction kind (credentials / OTP) ────────────────────────
@@ -5959,50 +5941,15 @@ export function ResolvedSurface({ connector, runId }: { connector: ConnectorCont
  * not adding navigation chrome, but a stuck operator with no path forward is
  * worse — keep one explicit escape to the run timeline.
  */
-function UnsupportedSurface({
-  connector,
-  interactionMessage,
-  runHref,
-}: {
-  connector: ConnectorContext | null;
-  interactionMessage: string;
-  runHref: string;
-}) {
-  return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
-        <section
-          aria-labelledby="stream-unsupported-title"
-          className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
-          data-surface="human"
-        >
-          {connector ? (
-            <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
-              <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
-              {connector.displayName}
-            </p>
-          ) : null}
-          <p className="pdpp-body-lg text-foreground" id="stream-unsupported-title">
-            {interactionMessage}
-          </p>
-          <p className="pdpp-body text-foreground">This step needs sign-in details. Use sync details to continue.</p>
-          <Link className="block w-full" href={runHref}>
-            <IcButton className="h-12 w-full" size="lg" type="button">
-              Sync details
-            </IcButton>
-          </Link>
-        </section>
-      </div>
-    </main>
-  );
+function UnsupportedSurface({ connector, interactionMessage, runHref }: { connector: ConnectorContext | null; interactionMessage: string; runHref: string }) {
+  return <SignInFrame connector={connector} title={`${connector?.displayName ?? "The data source"} needs your sign-in details`}><p className="text-muted-foreground">{interactionMessage}</p><Link className={buttonVariants({ size: "sm", variant: "default" })} href={runHref}>Continue</Link></SignInFrame>;
 }
 
 function PreviewStreamSurface({ connector, interactionId, interactionKind, interactionMessage, interactionRequiresResponse = true, previewState, runId }: StreamSurfaceProps) {
   const name = connector?.displayName ?? "the data source";
   const [open, setOpen] = useState(previewState !== "card" && previewState !== "card-error");
   const [confirming, setConfirming] = useState(previewState === "stop-question");
-  if (interactionKind === "credentials") return <UnsupportedSurface connector={connector} interactionMessage={interactionMessage} runHref={`/syncs/${encodeURIComponent(runId)}`} />;
-  if (!open) return <main className="relative min-h-dvh"><WordmarkCorner /><div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-16"><OrientationCard buttonLabel="Open browser" connectorId={connector?.connectorId} connectorIcon={connector?.icon} connectorName={name} isMinting={false} message={interactionMessage} onAction={() => setOpen(true)} troubleMessage={previewState === "card-error" ? "Couldn't reach the browser." : null} /></div></main>;
-  return <main className="relative min-h-dvh"><WordmarkCorner /><div className="flex min-h-dvh items-center justify-center bg-muted"><p>Sample page, not a real sign-in</p></div><button aria-label="End browser session" className="absolute top-4 right-4" onClick={() => setConfirming(true)} type="button">×</button>{confirming ? <CloseConfirmBubble connectorName={name} onCancel={() => setConfirming(false)} onConfirm={() => setOpen(false)} /> : previewState === "browser-trouble" ? <TroubleToast message="Couldn't reach the browser." /> : <StreamInteractionDock interactionId={interactionId} interactionKind={interactionKind} interactionRequiresResponse={interactionRequiresResponse} message={interactionMessage} previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined} runId={runId} />}</main>;
+  if (interactionKind === "credentials") return <UnsupportedSurface connector={connector} interactionMessage={interactionMessage} runHref={`/syncs/${encodeURIComponent(runId)}?return_to=browser#sign-in-details`} />;
+  if (!open) return <main className="relative min-h-dvh"><WordmarkCorner /><div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-16"><OrientationCard buttonLabel={`Open ${name}`} connectorId={connector?.connectorId} connectorIcon={connector?.icon} connectorName={name} isMinting={false} message={interactionMessage} onAction={() => setOpen(true)} troubleMessage={previewState === "card-error" ? "Couldn't reach the browser." : null} /></div></main>;
+  return <main className="relative min-h-dvh"><WordmarkCorner /><div className="absolute top-12 left-3"><p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p><h1 className="pdpp-heading">Sign in to {name}</h1></div><div className="flex min-h-dvh items-center justify-center bg-muted"><p>Sample page, not a real sign-in</p></div><button aria-label="Stop signing in" className="absolute top-4 right-4" onClick={() => setConfirming(true)} type="button">×</button>{confirming ? <CloseConfirmBubble connectorName={name} onCancel={() => setConfirming(false)} onConfirm={() => setOpen(false)} /> : previewState === "browser-trouble" ? <TroubleToast message="Couldn't reach the browser." /> : <StreamInteractionDock connectorName={name} preview interactionId={interactionId} interactionKind={interactionKind} interactionRequiresResponse={interactionRequiresResponse} message={interactionMessage} previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined} runId={runId} />}</main>;
 }

@@ -22,7 +22,7 @@ const EXPANDED_STATE_RE = /const \[expanded, setExpanded\] = useState\(false\)/;
 const SECONDARY_ACTIONS_GATED_RE = /\{expanded && on(Clipboard|Copy|Paste|Keyboard) \?/g;
 const WINDOW_CAPTURE_ESCAPE_RE = /window\.addEventListener\("keydown", handleWindowKeyDown, true\)/;
 const CLOSE_BUTTON_UNGATED_RE =
-  /aria-label=\{`End \$\{connectorName\} browser session`\}[\s\S]{0,40}className="pdpp-stream-control-button"/;
+  /aria-label="Stop signing in"[\s\S]{0,40}className="pdpp-stream-control-button"/;
 
 test("CornerControls disclosure structure: collapsed state, gated secondary actions, window-capture Escape, ungated close", async () => {
   const src = await readFile(STREAM_VIEWER_FILE, "utf8");

@@ -290,3 +290,20 @@ test("the getting-ready states use none of the banned words", async () => {
     assertClean(renderToStaticMarkup(createElement(GettingReadyBody, { name: "Amazon", onRetry: noop, view })), `getting ready: ${view.kind}`);
   }
 });
+
+// The second half uses the same check for every named development state.
+test("signing in and sign-in details use none of the banned words in every sample state", async () => {
+  const { flowPreview, previewStates } = await import("../../connect/flow-preview.ts");
+  const { SignInPreview } = await import("../../syncs/[runId]/stream/sign-in-preview.tsx");
+  const { RunInteractionForm } = await import("../../syncs/[runId]/interaction-form.tsx");
+  for (const state of previewStates.browser) {
+    const html = renderToStaticMarkup(createElement(SignInPreview, { state }));
+    assertClean(html, `sign-in: ${state}`);
+    assert.doesNotMatch(visibleText(html), /\b(?:run|sync details|data source status|approval waiting|browser deferred|browser session|secure browser|PDPP|interaction|assistance|surface|stream|close this tab)\b/i, state);
+  }
+  for (const state of previewStates.details) {
+    const html = renderToStaticMarkup(createElement(RunInteractionForm, { fields: flowPreview.fields, interactionId: "sample-step", kind: "credentials", message: flowPreview.message, preview: true, previewError: state === "rejected" ? flowPreview.startError : undefined, runId: flowPreview.runId, serviceName: flowPreview.connector.displayName }));
+    assertClean(html, `sign-in details: ${state}`);
+    assert.doesNotMatch(visibleText(html), /\b(?:run|credential|interaction|assistance|surface|stream)\b/i, state);
+  }
+});
