@@ -102,18 +102,21 @@ pdpp-local-collector advertise
 ## Ownership And Publishing
 
 The intended npm scope is `@pdpp`, owned by the durable PDPP/Vana project
-organization rather than an individual maintainer. Normal publication is handled
-by semantic-release from GitHub Actions using npm trusted publishing/OIDC and
-registry provenance when the source repository is public. npm does not support
-provenance for packages published from private GitHub repositories, so
-`publishConfig.provenance` stays disabled until this repository is public.
+organization rather than an individual maintainer. `@pdpp/cli`, `@pdpp/mcp-server`
+and `@pdpp/read-core` publish from PDP-Connect/data-connect, in lockstep with the
+collector packages: semantic-release runs in `.github/workflows/npm-release.yml`
+with npm trusted publishing/OIDC and registry provenance. Versions up to 1.8.0
+were published from PDP-Connect/pdpp; the first release from this repository is
+above 2.5.2.
 
-After the package exists on npm, configure the trusted publisher with npm CLI
-11.5.1+:
+Each package's trusted publisher must name this repository and workflow, with
+npm CLI 11.5.1+:
 
 ```bash
-# npm trust command for the @pdpp/cli package publisher config
-npm trust github @pdpp/cli --repo PDP-Connect/pdpp --file semantic-release.yml
+# npm trust commands for the three package publisher configs
+npm trust github @pdpp/cli --repo PDP-Connect/data-connect --file npm-release.yml
+npm trust github @pdpp/mcp-server --repo PDP-Connect/data-connect --file npm-release.yml
+npm trust github @pdpp/read-core --repo PDP-Connect/data-connect --file npm-release.yml
 npm trust list @pdpp/cli
 ```
 

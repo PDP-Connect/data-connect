@@ -13,8 +13,9 @@
 //     reported as superseded rather than passing unnoticed.
 //   - verify-release-complete.ts asks it, after a release, whether every
 //     package the tag claims is actually live.
-//   - verify-connector-protocol-published.ts asks it at the publish-ordering
-//     barrier, before the next package in the sequence publishes.
+//   - verify-lockstep-dependencies-published.ts asks it at each
+//     publish-ordering barrier, before a package that depends on others
+//     publishes.
 //
 // THE RULE THIS MODULE EXISTS TO ENFORCE: "I could not tell" is never
 // "not published".
@@ -57,14 +58,6 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 const run = promisify(execFile)
-
-export const LOCKSTEP_PACKAGES = [
-  "@pdpp/connector-protocol",
-  "@pdpp/collector-runtime",
-  "@pdpp/local-collector",
-] as const
-
-export type LockstepPackage = (typeof LOCKSTEP_PACKAGES)[number]
 
 export type RegistryState = "published" | "missing"
 
@@ -147,17 +140,21 @@ export async function registryStateFor(
 
 export interface LockstepRegistryState {
   version: string
-  published: LockstepPackage[]
-  missing: LockstepPackage[]
+  published: string[]
+  missing: string[]
 }
 
-// The registry's view of one lockstep version across all three packages.
-// Any UNKNOWN propagates — a partial picture is not a picture.
-export async function lockstepRegistryState(version: string): Promise<LockstepRegistryState> {
-  const published: LockstepPackage[] = []
-  const missing: LockstepPackage[] = []
+// The registry's view of one lockstep version across the packages that
+// version was released with (scripts/lockstep-packages.ts). Any UNKNOWN
+// propagates — a partial picture is not a picture.
+export async function lockstepRegistryState(
+  version: string,
+  packages: readonly string[]
+): Promise<LockstepRegistryState> {
+  const published: string[] = []
+  const missing: string[] = []
 
-  for (const name of LOCKSTEP_PACKAGES) {
+  for (const name of packages) {
     const state = await registryStateFor(name, version)
     if (state === "published") published.push(name)
     else missing.push(name)

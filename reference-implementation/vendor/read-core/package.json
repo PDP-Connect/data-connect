@@ -37,7 +37,7 @@
   "license": "Apache-2.0",
   "publishConfig": {
     "access": "public",
-    "provenance": false,
+    "provenance": true,
     "registry": "https://registry.npmjs.org/",
     "tag": "latest"
   },
