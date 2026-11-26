@@ -9,11 +9,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { bannedCopyProblems, visibleText } from "../../../sources/add/banned-copy.ts";
 import type { ConnectionSetupStatus } from "../../../lib/ref-client.ts";
-import { type FirstSyncFacts, firstSyncOutcome, scheduleSentence } from "./first-sync-outcome.ts";
+import { type FirstSyncFacts, firstSyncOutcome, headlineFor, scheduleSentence } from "./first-sync-outcome.ts";
 
 Object.assign(globalThis, { React });
 mock.module("server-only", { namedExports: {} });
-mock.module("next/navigation", { namedExports: { ...navigation } });
+mock.module("next/navigation", { namedExports: { ...navigation, useRouter: () => ({ refresh() {}, replace() {} }) } });
 
 const bodyModule = import("./first-sync-body.tsx");
 
@@ -144,7 +144,7 @@ test("failed shows its reason under the headline and the server message only in 
   const outcome = firstSyncOutcome(failedState.status, "Amazon", withOrders);
   const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)));
   assert.match(html, /Amazon didn&#x27;t connect\./);
-  assert.match(html, /Wait a few minutes and try again\./);
+  assert.match(html, /Something went wrong while copying your data\./);
   assert.match(html, /<details/);
   assert.match(html, /What went wrong/);
 });
@@ -180,4 +180,45 @@ test("paused: Resume posts the connection id to the resume action, beside one li
   assert.match(html, /<form[\s\S]*name="connection_id"[^>]*value="conn_1"[\s\S]*>Resume</);
   assert.equal((html.match(/class="[^"]*min-h-11/g) ?? []).length, 2, "Resume and one link");
   assert.doesNotMatch(visibleText(html), /Back to Data sources/);
+});
+
+// Second-half design: report missing kinds and only promise a retry with explicit evidence.
+test("missing kinds remain visible, informational notes are excluded, and retry needs an explicit flag", () => {
+  const facts = { ...withOrders, gaps: [{ kind: "skip_result", stream: "returns", reason: "not_available", message: "Northwind could not send returns.", recovery_hint: { retryable: true } }, { kind: "note", reason: "nothing_new", severity: "informational" as const }] };
+  const outcome = firstSyncOutcome(status(), "Northwind", facts);
+  assert.equal(outcome.kind, "partial");
+  assert.equal(headlineFor(outcome, "Northwind"), "Northwind is connected, but some of it didn't come.");
+  if (outcome.kind !== "partial") return;
+  assert.equal(outcome.missing.length, 1);
+  assert.equal(outcome.missing[0]?.label, "Returns");
+  assert.ok(outcome.retry);
+  const noRetry = firstSyncOutcome(status(), "Northwind", { ...facts, gaps: [{ kind: "skip_result", stream: "returns", reason: "not_available", recovery_hint: { retryable: false } }] });
+  assert.equal(noRetry.kind === "partial" ? noRetry.retry : undefined, null);
+});
+test("reported busy, owner stop, and assistance timeout get their own truthful result", () => {
+  for (const [reason, title] of [["owner_cancelled", "You stopped this."], ["owner_cancel_forced", "You stopped this."], ["assistance_timed_out", "The sign-in to Northwind wasn't finished."]] as const) {
+    const outcome = firstSyncOutcome(status({ setup_state: "first_sync_failed" }), "Northwind", { ...withOrders, failureReason: reason });
+    assert.equal(headlineFor(outcome, "Northwind"), title);
+  }
+  const busy = firstSyncOutcome(status({ setup_state: "first_sync_failed" }), "Northwind", { ...withOrders, runStatus: "deferred" });
+  assert.equal(headlineFor(busy, "Northwind"), "DataConnect was busy with another sign-in.");
+  // Arbitrary prose, connector cancellation, and scheduler timeout do not prove these causes.
+  for (const reason of ["auth failed", "connector_reported_cancelled", "run_timed_out"]) {
+    const outcome = firstSyncOutcome(status({ setup_state: "first_sync_failed" }), "Northwind", { ...withOrders, failureReason: reason });
+    assert.equal(headlineFor(outcome, "Northwind"), "Northwind didn't connect.");
+  }
+});
+test("needs-you goes to the code page or the same-copy details form, not back to Connect", () => {
+  for (const [setup_state, suffix] of [["awaiting_browser_login", "/stream"], ["awaiting_credential", "?return_to=status#sign-in-details"]] as const) {
+    const outcome = firstSyncOutcome(status({ setup_state }), "Northwind", withOrders);
+    assert.equal(outcome.kind === "needs-you" ? outcome.next.href : null, `/syncs/run_1${suffix}`);
+  }
+});
+
+test("copying stop asks before stopping and preserves copied data in its explanation", async () => {
+  const { StopCopyingQuestion } = await import("./stop-copying.tsx");
+  const html = renderToStaticMarkup(createElement(StopCopyingQuestion, { name: "Northwind", onKeepGoing() {}, onStop() {} }));
+  assert.match(visibleText(html), /Stop copying Northwind\? What has been copied so far is kept\. You can start again any time\./);
+  assert.match(html, /role="alertdialog"/);
+  assert.match(visibleText(html), /Keep going/);
 });

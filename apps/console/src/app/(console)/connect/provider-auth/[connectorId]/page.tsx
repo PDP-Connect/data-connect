@@ -33,7 +33,7 @@ export default async function ProviderAuthPage({
 }) {
   const previewQuery = await searchParams;
   const preview = flowPreviewState("provider", previewQuery);
-  if (preview) return <RecordroomShellWithPalette><ProviderAuthBody connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} error={preview === "could-not-start" ? flowPreview.startError : undefined} accounts={preview === "already-have-one" ? [{ connectionId: flowPreview.connectionId, displayName: "Northwind, home" }] : []} /></RecordroomShellWithPalette>;
+  if (preview) return <RecordroomShellWithPalette><ProviderAuthBody connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} error={preview === "could-not-start" ? flowPreview.startError : undefined} accounts={preview === "already-have-one" ? flowPreview.accounts : []} /></RecordroomShellWithPalette>;
   const [{ connectorId }, query, manifests, templates] = await Promise.all([
     params,
     searchParams,

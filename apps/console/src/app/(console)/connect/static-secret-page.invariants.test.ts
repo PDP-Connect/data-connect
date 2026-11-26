@@ -82,7 +82,7 @@ const STATUS_FAILED_STATE = /first_sync_failed/;
 const STATUS_ZERO_YIELD_STATE = /first_sync_zero_yield/;
 const STATUS_LAST_ERROR = /last_error/;
 const STATUS_NOT_FOUND = /notFound\(\)/;
-const STATUS_LIVE_POLLER = /<LivePoller enabled=\{status\.pending\} \/>/;
+const STATUS_LIVE_POLLER = /<LivePoller enabled=\{status\.pending \|\| status\.running \|\| outcome\.kind === "running" \|\| outcome\.kind === "needs-you"\} \/>/;
 const STATUS_NO_PASSWORD_INPUT = /type="password"/;
 const STATUS_NO_SECRET_INPUT = /name="secret"/;
 const NO_UNPROVEN_FIRST_SYNC_COPY = /The first sync accepted records/;

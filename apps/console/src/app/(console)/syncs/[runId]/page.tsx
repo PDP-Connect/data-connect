@@ -106,7 +106,7 @@ export default async function RunDetailPage({
   const runId = decodeURIComponent(raw);
   const query = await searchParams;
   const preview = flowPreviewState("details", query);
-  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" serviceName={flowPreview.connector.displayName} message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.startError : undefined} runId={runId} /></RecordroomShellWithPalette>;
+  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" serviceName={flowPreview.connector.displayName} message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.detailsRejected : undefined} runId={runId} /></RecordroomShellWithPalette>;
   const cursor = getCursor(query.cursor);
   const receiptsCursor = getCursor(query.receipts_cursor);
 

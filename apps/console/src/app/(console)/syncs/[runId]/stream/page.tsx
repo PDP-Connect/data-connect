@@ -216,7 +216,7 @@ export default async function RunInteractionStreamPage({
       interactionKind={streamableAssistance.kind === "otp" ? "otp" : "manual_action"}
       interactionMessage={normalizeInteractionPrompt(
         streamableAssistance.message,
-        `Sign in to ${connectorWithIcon?.displayName ?? "the data source"}. DataConnect continues on its own when you're done.`
+        `This is ${connectorWithIcon?.displayName ?? "the data source"}'s own sign-in page, in a browser that DataConnect runs for you. When you are signed in, DataConnect carries on by itself.`
       )}
       interactionRequiresResponse={streamableAssistance.responseContract === "response_required"}
       runId={runId}

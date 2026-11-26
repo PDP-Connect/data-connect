@@ -307,3 +307,22 @@ test("signing in and sign-in details use none of the banned words in every sampl
     assert.doesNotMatch(visibleText(html), /\b(?:run|credential|interaction|assistance|surface|stream)\b/i, state);
   }
 });
+
+test("opening, provider, and copying results use plain copy in every named sample state", async () => {
+  const { flowPreview, previewStates, previewStatus, previewFacts } = await import("../../connect/flow-preview.ts");
+  const { LaunchPresentation } = await import("../../connect/browser-session/[connectorId]/launch/launch-panel.tsx");
+  const { ProviderAuthBody } = await import("../../connect/provider-auth/[connectorId]/provider-auth-body.tsx");
+  const { FirstSyncBody } = await import("../../connect/status/[connectionId]/first-sync-body.tsx");
+  const { firstSyncOutcome } = await import("../../connect/status/[connectionId]/first-sync-outcome.ts");
+  const views: Array<[string, React.ReactElement]> = [];
+  for (const state of previewStates.launch) views.push([`opening: ${state}`, createElement(LaunchPresentation, { connectorId: flowPreview.connector.connectorId, displayName: flowPreview.connector.displayName, onRetry() {}, state: { starting: state === "opening", networkLost: state === "lost-contact", error: state === "opening" ? null : state === "busy" ? flowPreview.busyError : flowPreview.startError } })]);
+  for (const state of previewStates.provider) views.push([`provider: ${state}`, createElement(ProviderAuthBody, { connectorId: flowPreview.connector.connectorId, displayName: flowPreview.connector.displayName, error: state === "could-not-start" ? flowPreview.startError : undefined, accounts: state === "already-have-one" ? [{ connectionId: flowPreview.connectionId, displayName: "Northwind, home" }] : [] })]);
+  for (const state of previewStates.status) views.push([`copying: ${state}`, createElement(FirstSyncBody, { connectionId: flowPreview.connectionId, connectorId: flowPreview.connector.connectorId, name: flowPreview.connector.displayName, outcome: firstSyncOutcome(previewStatus(state), flowPreview.connector.displayName, previewFacts(state)), preview: true, resumeAction() {} })]);
+  for (const [state, view] of views) {
+    const html = renderToStaticMarkup(view);
+    assertClean(html, state);
+    // The server's own diagnostic words are confined to the allowed fold.
+    const body = html.replace(/<details[\s\S]*?<\/details>/g, "");
+    assert.doesNotMatch(visibleText(body), /\b(?:run|sync details|data source status|approval waiting|browser deferred|browser session|secure browser|PDPP|interaction|assistance|surface|stream|close this tab)\b/i, state);
+  }
+});
