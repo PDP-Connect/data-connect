@@ -19,7 +19,7 @@ export function agreementPractice(state: string) {
   const held = index === 4 ? 1 : index === 5 ? 207 : 428;
   const failed = ![2,3,4,10,11].includes(index);
   const reason = index === 7 ? "assistance_timed_out" : index === 9 ? "stream_collection_failed" : "connector_reported_failed";
-  const records = [{ stream: kind, record_count: index === 4 ? 0 : held, retained_record_count: held, count_state: index === 4 ? "known_zero" as const : "known" as const }];
+  const records = [{ stream: kind, last_updated:null, record_count: index === 4 ? 0 : held, retained_record_count: held, count_state: index === 4 ? "known_zero" as const : "known" as const }];
   const source = {
     ...model.source, connection_id: id, connector_instance_id: id, connector_id: "northwind",
     display_name: "Northwind (practice account)", connector_display_name: "Northwind",
@@ -28,7 +28,7 @@ export function agreementPractice(state: string) {
     status: index === 3 ? "paused" : "active", streams: [kind], stream_records: records,
     total_records: index === 4 ? 0 : held, total_records_state: "known" as const,
     last_run: { ...model.source.last_run!, status: failed ? "failed" : index === 10 || index === 11 ? "skipped" : "succeeded", failure_reason: reason, terminal_reason: reason, connector_error: null },
-    collection_report: [2,3,4,5,6,7,8,9].includes(index) ? [{stream:kind, checkpoint:"unknown",collected:index===4?1:index===5?442:14,considered:"unknown" as const,coverage_condition:index===4?"complete" as const:"terminal_gap" as const,forward_disposition:index===4?"satisfied" as const:"terminal" as const,pending_detail_gaps:0,skipped:null}] : [],
+    collection_report: [2,3,4,5,6,7,8,9].includes(index) ? [{stream:kind, checkpoint:"unknown",collected:index===4?1:index===5?442:14,considered:"unknown" as const,coverage_condition:index===4?"complete" as const:"terminal_gap" as const,forward_disposition:index===4?"complete" as const:"terminal" as const,pending_detail_gaps:0,skipped:null}] : [],
     local_device_progress: index === 10 ? {...model.source.local_device_progress!,records_pending:4_959} : null,
   };
   if (index === 1 || index === 4) source.owner_state = {...source.owner_state!,resolver:"owner_paused"};

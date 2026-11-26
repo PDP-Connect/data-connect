@@ -33,7 +33,7 @@ for(const state of AGREEMENT_STATES)test(`five places agree: ${state}`,async(t)=
  const historySource:HistorySource={id:source.connection_id,connector:source.connector_id,name:source.display_name,serviceName:source.connector_display_name??undefined};
  applyCurrentSourceWords([source],[historySource]);
  const fixture=syncPractice("mixed",0);assert.equal(fixture.history.mode,"days");if(fixture.history.mode!=="days")return;
- const row={...fixture.history.data[0]!,connection_id:source.connection_id,connector_id:source.connector_id,last_outcome:source.last_run?.status==="failed"?"failed" as const:"finished" as const,evidence:{reason:source.last_run?.failure_reason}};
+ const row={...fixture.history.data[0]!,connection_id:source.connection_id,connector_id:source.connector_id,last_outcome:source.last_run?.status==="failed"?"failed" as const:"finished" as const,evidence:{reason:source.last_run?.failure_reason ?? null,error:null,connector_error:null}};
  const current=withCurrentSourceState([row],[historySource]);
  const history=<SyncHistoryDays rows={current} sources={[historySource]} offset={0} expand />;
  const {OneSyncView}=await import("../syncs/[runId]/one-sync-view.tsx");

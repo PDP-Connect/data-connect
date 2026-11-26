@@ -446,6 +446,7 @@ export interface RefSchedule {
  * `reference-implementation/server/ref-control.ts`.
  */
 export interface RefLocalDeviceProgress {
+  device_name?: string | null;
   last_heartbeat_at: string | null;
   last_heartbeat_status: string | null;
   last_ingest_at: string | null;

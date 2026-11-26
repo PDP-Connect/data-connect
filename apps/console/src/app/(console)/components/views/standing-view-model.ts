@@ -259,13 +259,13 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     (source) => source.status.row !== 1 && source.status.row !== 2 && source.status.row !== 3,
   );
   const waitingSources = oldestFirst(
-    activeSources.filter(
+    preparedSources.filter(
       (source) => source.status.needsYou && source.status.row === 8 && source.actionSurface === "provider_interaction",
     ),
     (source) => source.sortAt,
   );
   const otherNeedsSources = oldestFirst(
-    activeSources.filter(
+    preparedSources.filter(
       (source) =>
         source.status.needsYou && !(source.status.row === 8 && source.actionSurface === "provider_interaction"),
     ),

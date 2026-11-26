@@ -785,7 +785,7 @@ function ConnectorPageView({
   const neverConnected = sourceNeverConnected(source);
   const archived = source.source_visibility === "archived";
   const oneTime = source.source_kind === "manual" || source.rendered_verdict?.pill.label === "Import complete";
-  const pausable = !(revoked || paused || archived || oneTime) && overview.connectionStatus === "active";
+  const pausable = !(revoked || paused || archived || oneTime) && Boolean(model.schedule) && overview.connectionStatus === "active";
   // Stable rename selector: prefer the explicit instance id, fall back to the
   // connection id. Both address the same connection on the backend route.
   const renameSelector = connectorInstanceId ?? connectionId;
@@ -831,29 +831,11 @@ function ConnectorPageView({
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  let stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, deviceName: sourceInstances[0]?.device_display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
-  const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? canStartSyncFromSummary(source) ? { kind: "sync_now" as const, label: "Try again", filled: true } : null : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
-  const devicePending = sourceInstances[0]?.records_pending ?? overview.localDeviceProgress?.records_pending;
-  const hasDeviceLocalRemediation = !archived && devicePending !== 0 && (primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict) || (source.source_kind === "local_device" && sourceStatus.row === 8));
-  const deviceStepsAvailable = hasDeviceRecoverySteps({ connectionHealth, localDeviceProgress: overview.localDeviceProgress ?? null, renderedVerdict: connectionRenderedVerdict, sourceInstances, connectionId: connectorInstanceId ?? connectionId, connectorId, providerOrigin: model.providerOrigin });
-  const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
-  const partial = source.collection_report?.some((entry) => ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)) || gaps.length > 0;
-  const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)));
-  if (hasDeviceLocalRemediation) {
-    const device = sourceInstances[0];
-    const deviceName = device?.device_display_name ?? device?.local_binding_name;
-    const pending = device?.records_pending ?? overview.localDeviceProgress?.records_pending;
-    stateSentence = { text: deviceStepsAvailable && typeof pending === "number" && pending > 0 ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.` : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${serviceName}.`, slot: null };
-  } else if (!archived && running) {
-    stateSentence = { text: "Syncing now.", slot: null };
-  } else if (partial && markedMissing && [19, 20, 21].includes(sourceStatus.row)) {
-    const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
-    stateSentence = { text: `Synced${when ? ` ${when}` : ""}. Some of it didn't come.`, slot: null };
-  } else if (([14, 15].includes(sourceStatus.row) && !markedMissing) || (partial && !markedMissing && [19, 20, 21].includes(sourceStatus.row))) {
-    stateSentence = { text: `${serviceName} synced, but DataConnect could not copy some of it.`, slot: null };
-  } else if (sourceStatus.row === 8 && !connectionPrimaryAction) {
-    stateSentence = { text: `Something stopped ${serviceName} from syncing.`, slot: null };
-  }
+  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, pendingDetails, signInRepairAvailable });
+  const pageStatusAction = sourceStatus.action;
+  const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
+  const deviceStepsAvailable = hasDeviceLocalRemediation;
+  const devicePending = source.local_device_progress?.records_pending;
   const recordTotal = sourceRecordCount(source);
   const visibleTotal = recordTotal.count === null ? undefined : `${recordTotal.count.toLocaleString()} record${recordTotal.count === 1 ? "" : "s"}`;
 
