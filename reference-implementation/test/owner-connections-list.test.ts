@@ -599,7 +599,7 @@ test("owner-agent connection listing rejects a client grant token with 403", asy
     const streamName = String(asRecord(asArray(streams)[0]).name);
     const clientToken = await approveClientGrant(
       asUrl,
-      String(manifest.connector_id),
+      String((manifest.source as { id: string }).id),
       streamName,
       "cin_amazon_personal"
     );

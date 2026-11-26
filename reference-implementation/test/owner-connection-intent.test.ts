@@ -1022,7 +1022,7 @@ test("owner-agent intent rejects a client grant token with 403 and audits the fa
     if (!codexManifestEntry) {
       throw new Error("no polyfill manifest found for codex.json");
     }
-    const manifest = codexManifestEntry.manifest as PackageManifest;
+    const manifest = withExplicitTestSourceDeclaration(codexManifestEntry.manifest as PackageManifest);
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },
@@ -1035,7 +1035,13 @@ test("owner-agent intent rejects a client grant token with 403 and audits the fa
       sourceBindingKey: "the owner@example.com",
     });
     const streamName = manifest.streams?.[0]?.name || "sessions";
-    const clientToken = await approveClientGrant(asUrl, manifest.connector_id, streamName, "cin_codex_client_auth");
+    const sourceDeclaration = manifest.source_declaration as { source: { id: string } };
+    const clientToken = await approveClientGrant(
+      asUrl,
+      sourceDeclaration.source.id,
+      streamName,
+      "cin_codex_client_auth"
+    );
 
     const { status, body: rawBody, resp } = await createIntent(rsUrl, clientToken, { connector_id: "codex" });
     const body = rawBody as IntentResponseBody;

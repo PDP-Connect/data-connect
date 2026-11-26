@@ -642,7 +642,12 @@ test("owner-agent rename rejects a client grant token with 403", async () => {
     });
     const firstStream = manifest.streams?.[0];
     assert.ok(firstStream, "manifest carries at least one stream");
-    const clientToken = await approveClientGrant(asUrl, manifest.connector_id, firstStream.name, "cin_amazon_personal");
+    const clientToken = await approveClientGrant(
+      asUrl,
+      String((manifest.source as { id: string }).id),
+      firstStream.name,
+      "cin_amazon_personal"
+    );
 
     const {
       status,
