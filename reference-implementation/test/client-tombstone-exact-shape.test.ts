@@ -31,6 +31,7 @@ const CLIENT_TOMBSTONE_FORBIDDEN = [
   "display_name",
   "emitted_at",
   "deleted_at",
+  "removal",
   "data",
 ];
 
@@ -135,7 +136,7 @@ async function loadGithubManifest(): Promise<JsonObject> {
   return JSON.parse(await readFile(path, "utf8")) as JsonObject;
 }
 
-test("served client tombstone is exactly the Core members with the grant instance_id; owner tombstone is unchanged", async () => {
+test("served client tombstone is exactly Core; the owner tombstone also describes its deletion", async () => {
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
@@ -210,7 +211,20 @@ test("served client tombstone is exactly the Core members with the grant instanc
       assert.equal(key in clientTombstone, false, `client tombstone must not carry "${key}"`);
     }
 
-    // (d) the owner response for the same deletion keeps its fields.
+    // (d) the owner response has the deletion reason plus its usual identity.
+    assert.deepEqual(ownerTombstone, {
+      connection_id: expectedInstanceId,
+      connector_instance_id: expectedInstanceId,
+      deleted: true,
+      deleted_at: ownerTombstone.deleted_at,
+      display_name: "GitHub",
+      emitted_at: ownerTombstone.emitted_at,
+      id: "repo-1",
+      instance_id: expectedInstanceId,
+      object: "record",
+      removal: "deleted",
+      stream: STREAM,
+    });
     assert.equal(ownerTombstone.deleted, true);
     assert.equal(typeof ownerTombstone.emitted_at, "string", "owner tombstone keeps emitted_at");
     assert.equal(typeof ownerTombstone.deleted_at, "string", "owner tombstone keeps deleted_at");
