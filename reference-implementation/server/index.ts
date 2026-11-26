@@ -223,6 +223,7 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import {
+  type PinnedLocalCollectorManifestResult,
   readPinnedLocalCollectorManifest,
   readLocalCollectorArtifactDigest,
   readLocalCollectorRelease,
@@ -1700,15 +1701,11 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 // catalog row, the connector_instances row, and the record storage target all
 // use the canonical key (`claude-code`) so a legacy-alias enroll cannot fork
 // the connector type away from its canonical identity.
-function readReferenceLocalConnectorCatalogManifestResult(connectorId: string) {
-  return readPinnedLocalCollectorManifest(connectorId);
-}
-
 async function ensureReferenceConnectorCatalogEntry(
   connectorId: string,
-  connectorDisplayName: string | null | undefined
+  connectorDisplayName: string | null | undefined,
+  localCollectorResult: PinnedLocalCollectorManifestResult
 ) {
-  const localCollectorResult = readReferenceLocalConnectorCatalogManifestResult(connectorId);
   if (localCollectorResult.kind === "invalid_pin") {
     throw Object.assign(new Error(localCollectorResult.reason), { code: "local_collector_profile_repair_required" });
   }
@@ -6583,7 +6580,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     prepareDeviceFinalRecords,
     putSyncState,
     readCollectorProtocolHeader,
-    readReferenceLocalConnectorCatalogManifestResult,
+    readReferenceLocalConnectorCatalogManifestResult: readPinnedLocalCollectorManifest,
     logInvalidPinnedLocalConnectorProfile: (diagnostic: {
       connectorKey: string;
       expectedDigest: string | null;
@@ -7981,7 +7978,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleError,
     hashDeviceSecret,
     pdppError,
-    readReferenceLocalConnectorCatalogManifestResult,
+    readReferenceLocalConnectorCatalogManifestResult: readPinnedLocalCollectorManifest,
     requireOwner,
     requireToken,
     resolveEnrollBaseUrl: resolveAsIssuerBase,

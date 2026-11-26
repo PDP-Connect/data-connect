@@ -264,6 +264,8 @@ test("D2: a successful re-enroll emits a credential-rotation audit receipt", asy
   let auditEvent: Record<string, unknown> | null = null;
   const ctx = {
     canonicalConnectorKey: (k: string | null | undefined) => k ?? null,
+    // The retry path reads the pin once, before it rotates a credential.
+    readReferenceLocalConnectorCatalogManifestResult: () => ({ kind: "not_local" }),
     deviceExporterStore: {
       findEnrollmentByCodeHash: async () => ({
         connectorId: "codex",

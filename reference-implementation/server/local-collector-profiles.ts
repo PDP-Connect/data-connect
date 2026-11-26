@@ -40,16 +40,19 @@ const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PROFILE_SHA256 = /^sha256:[a-f0-9]{64}$/;
 
+/** A pin or its profile that is present but failed verification. */
+export interface InvalidPinnedProfile {
+  readonly expectedDigest: string | null;
+  readonly kind: "invalid_pin";
+  readonly observedDigest: string | null;
+  readonly reason: string;
+  readonly reasonCategory: PinnedProfileFailureCategory;
+}
+
 export type PinnedLocalCollectorManifestResult =
   | { readonly kind: "not_local" }
   | { readonly kind: "verified"; readonly manifest: Record<string, unknown> }
-  | {
-      readonly kind: "invalid_pin";
-      readonly reason: string;
-      readonly reasonCategory: PinnedProfileFailureCategory;
-      readonly expectedDigest: string | null;
-      readonly observedDigest: string | null;
-    };
+  | InvalidPinnedProfile;
 
 export type PinnedProfileFailureCategory =
   | "pin_unreadable"
@@ -148,13 +151,7 @@ export function readLocalCollectorRelease(connectorKey: string): LocalCollectorR
 type PinnedProfileResult =
   | { readonly kind: "not_local" }
   | { readonly kind: "verified"; readonly digest: string; readonly profile: Record<string, unknown> }
-  | {
-      readonly kind: "invalid_pin";
-      readonly reason: string;
-      readonly reasonCategory: PinnedProfileFailureCategory;
-      readonly expectedDigest: string | null;
-      readonly observedDigest: string | null;
-    };
+  | InvalidPinnedProfile;
 
 function readPinnedProfile(connectorKey: string): PinnedProfileResult {
   if (!CONNECTOR_KEY.test(connectorKey)) {

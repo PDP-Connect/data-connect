@@ -4,10 +4,11 @@
 import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { syncBuiltinESMExports } from "node:module";
+import test, { mock } from "node:test";
 
 import { buildLocalDeviceRecordEnvelope } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
@@ -3408,6 +3409,100 @@ test("enrollment redemption rejects a broken local pin before materializing a de
       rmSync(directory, { force: true, recursive: true });
     }
   });
+});
+
+test("an already-bound device retry is refused under a broken local pin and its credential keeps working", async () => {
+  await withServer(async ({ asUrl }) => {
+    const code = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "codex",
+      local_binding_name: "bound-codex",
+    });
+    assert.equal(code.status, 201);
+    const enrollmentCode = stringField(bodyOf(code), "enrollment_code");
+    const first = await postJson(`${asUrl}/_ref/device-exporters/enroll`, { enrollment_code: enrollmentCode }, PROTOCOL_HEADERS);
+    assert.equal(first.status, 201);
+    const device: EnrolledDevice = {
+      connector_id: stringField(bodyOf(first), "connector_id"),
+      connector_instance_id: stringField(bodyOf(first), "connector_instance_id"),
+      device_id: stringField(bodyOf(first), "device_id"),
+      device_token: stringField(bodyOf(first), "device_token"),
+      source_instance_id: stringField(bodyOf(first), "source_instance_id"),
+    };
+    const credentialsBefore = selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_ingest_credentials").n;
+
+    await withBrokenCodexProfile("tampered", async () => {
+      const retry = await postJson(`${asUrl}/_ref/device-exporters/enroll`, { enrollment_code: enrollmentCode }, PROTOCOL_HEADERS);
+      assert.equal(retry.status, 409, "a valid-code retry must not rotate a credential while the pin is invalid");
+      assert.equal(errorCode(retry), "local_collector_profile_repair_required");
+      assert.equal(retry.body?.device_token, undefined);
+    });
+
+    assert.equal(
+      selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_ingest_credentials").n,
+      credentialsBefore,
+      "no credential is written"
+    );
+    const stillWorks = await getSourceInstanceState(asUrl, device);
+    assert.equal(stillWorks.status, 200, "the existing credential still authenticates after the refused retry");
+  });
+});
+
+test("first redemption reads the local pin once, so a pin change mid-request cannot split identity from the refusal", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+  const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+  copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+  copyFileSync(new URL("codex.json", sourceDirectory), join(directory, "codex.json"));
+  const pinPath = join(directory, "codex.pin.json");
+  const realReadFileSync = fs.readFileSync;
+  let pinReads = 0;
+  try {
+    await withServer(async ({ asUrl }) => {
+      const code = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+        connector_id: "codex",
+        local_binding_name: "race-codex",
+      });
+      assert.equal(code.status, 201);
+      __setLocalCollectorProfilesDirectoryForTest(directory);
+      // The first read of the pin record sees the verified pin; any later read
+      // sees a pin a reinstall has just corrupted.
+      mock.method(fs, "readFileSync", ((path: unknown, ...rest: unknown[]) => {
+        if (path === pinPath) {
+          pinReads += 1;
+          if (pinReads > 1) {
+            return Buffer.from("{");
+          }
+        }
+        return (realReadFileSync as (...args: unknown[]) => unknown)(path, ...rest);
+      }) as typeof fs.readFileSync);
+      syncBuiltinESMExports();
+      let response: JsonResponse;
+      try {
+        response = await postJson(`${asUrl}/_ref/device-exporters/enroll`, {
+          enrollment_code: stringField(bodyOf(code), "enrollment_code"),
+        }, PROTOCOL_HEADERS);
+      } finally {
+        mock.restoreAll();
+        syncBuiltinESMExports();
+        __setLocalCollectorProfilesDirectoryForTest(null);
+      }
+      assert.ok(pinReads >= 1, "the seam must be exercised");
+      const deviceCount = selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters").n;
+      if (response.status === 201) {
+        assert.equal(deviceCount, 1, "a successful redemption has exactly one identity");
+        assert.equal(
+          selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters WHERE device_id = ?", stringField(bodyOf(response), "device_id")).n,
+          1,
+          "the response names the identity that was written"
+        );
+      } else {
+        assert.equal(response.status, 409);
+        assert.equal(deviceCount, 0, "a refused redemption writes no identity");
+      }
+    });
+  } finally {
+    __setLocalCollectorProfilesDirectoryForTest(null);
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 // --- connect's narrowing-only device scope, end to end against the real enroll route ---
