@@ -142,23 +142,24 @@ function readSqliteCheckpoint(connectorInstanceId: string): RecordSourceCheckpoi
   });
 }
 
-async function readPostgresCheckpoint(connectorInstanceId: string): Promise<RecordSourceCheckpoint> {
-  const generationResult = await postgresQuery(
-    "SELECT record_reset_generation::text AS reset_generation FROM connector_instances WHERE connector_instance_id = $1",
-    [connectorInstanceId]
-  );
-  const [generationRow] = generationResult.rows;
-  const resetGeneration = resetGenerationFromRow(generationRow);
-  const streamsResult = await postgresQuery(
-    "SELECT stream, max_version::text AS max_version FROM version_counter WHERE connector_instance_id = $1",
+export async function readPostgresCheckpoint(
+  connectorInstanceId: string,
+  query: (sql: string, params: string[]) => Promise<{ readonly rows: readonly Row[] }> = postgresQuery
+): Promise<RecordSourceCheckpoint> {
+  // One statement gives both halves the same MVCC snapshot. The scalar
+  // generation subquery preserves a row even when no stream counters exist.
+  const { rows } = await query(
+    `SELECT generation.reset_generation, counters.stream, counters.max_version::text AS max_version
+       FROM (SELECT (SELECT record_reset_generation::text FROM connector_instances
+                      WHERE connector_instance_id = $1) AS reset_generation) AS generation
+       LEFT JOIN version_counter AS counters ON counters.connector_instance_id = $1`,
     [connectorInstanceId]
   );
   return normalizeRecordSourceCheckpoint({
-    resetGeneration,
-    streams: (streamsResult.rows as Row[]).map((row) => ({
-      maxVersion: String(row.max_version),
-      stream: String(row.stream),
-    })),
+    resetGeneration: resetGenerationFromRow(rows[0]),
+    streams: rows.flatMap((row) => typeof row.stream === "string"
+      ? [{ maxVersion: String(row.max_version), stream: row.stream }]
+      : []),
   });
 }
 

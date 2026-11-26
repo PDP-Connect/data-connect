@@ -54,7 +54,20 @@ export function createLiveRevisions({ tickMs = 1000 }: LiveRevisionsOptions = {}
   const lastSeen = new Map<LiveTopic, string>()
   const listeners = new Set<LiveListener>()
   let timer: ReturnType<typeof setInterval> | null = null
-  let ticking = false
+  let subscriberEpoch = 0
+  let tickingEpoch: number | null = null
+  const latestRead = new Map<LiveTopic, symbol>()
+  const pendingBumps = new Set<LiveTopic>()
+
+  function beginRead(topic: LiveTopic): symbol {
+    const ticket = Symbol()
+    latestRead.set(topic, ticket)
+    return ticket
+  }
+
+  function canCommit(topic: LiveTopic, epoch: number, ticket: symbol): boolean {
+    return listeners.size > 0 && epoch === subscriberEpoch && latestRead.get(topic) === ticket
+  }
 
   async function read(topic: LiveTopic): Promise<string | null> {
     const source = sources.get(topic)
@@ -77,18 +90,25 @@ export function createLiveRevisions({ tickMs = 1000 }: LiveRevisionsOptions = {}
   }
 
   async function tick(): Promise<void> {
-    if (ticking) return
-    ticking = true
+    const epoch = subscriberEpoch
+    if (tickingEpoch === epoch || listeners.size === 0) return
+    tickingEpoch = epoch
     try {
       for (const topic of sources.keys()) {
+        if (epoch !== subscriberEpoch) return
+        const ticket = beginRead(topic)
         const revision = await read(topic)
-        if (revision !== null && revision !== lastSeen.get(topic)) {
-          lastSeen.set(topic, revision)
-          emit(topic, revision)
+        if (!canCommit(topic, epoch, ticket)) continue
+        // A newer poll may supersede the read, but it still owes the writer's refetch.
+        const forced = pendingBumps.delete(topic)
+        const next = forced ? revision ?? ABSENT_REVISION : revision
+        if (next !== null && (forced || next !== lastSeen.get(topic))) {
+          lastSeen.set(topic, next)
+          emit(topic, next)
         }
       }
     } finally {
-      ticking = false
+      if (tickingEpoch === epoch) tickingEpoch = null
     }
   }
 
@@ -97,11 +117,16 @@ export function createLiveRevisions({ tickMs = 1000 }: LiveRevisionsOptions = {}
   // a write that happened just before a new tab connected.
   async function snapshot(): Promise<Record<string, string>> {
     const revisions: Record<string, string> = {}
+    const epoch = subscriberEpoch
     for (const topic of sources.keys()) {
+      // A snapshot is observational: it must never supersede a pending bump.
+      const ticket = latestRead.get(topic)
       const revision = await read(topic)
       if (revision === null) continue
       revisions[topic] = revision
-      if (!lastSeen.has(topic)) lastSeen.set(topic, revision)
+      if (epoch === subscriberEpoch && latestRead.get(topic) === ticket && !lastSeen.has(topic)) {
+        lastSeen.set(topic, revision)
+      }
     }
     return revisions
   }
@@ -110,7 +135,13 @@ export function createLiveRevisions({ tickMs = 1000 }: LiveRevisionsOptions = {}
     // An explicit bump always emits, even if the content hash is unchanged:
     // the writer knows it wrote, and a refetch is cheap.
     bump(topic) {
+      if (listeners.size === 0) return
+      const epoch = subscriberEpoch
+      const ticket = beginRead(topic)
+      pendingBumps.add(topic)
       void read(topic).then(revision => {
+        if (!canCommit(topic, epoch, ticket)) return
+        pendingBumps.delete(topic)
         const next = revision ?? ABSENT_REVISION
         lastSeen.set(topic, next)
         emit(topic, next)
@@ -131,6 +162,9 @@ export function createLiveRevisions({ tickMs = 1000 }: LiveRevisionsOptions = {}
         if (listeners.size === 0 && timer) {
           clearInterval(timer)
           timer = null
+          subscriberEpoch += 1
+          latestRead.clear()
+          pendingBumps.clear()
           lastSeen.clear()
         }
       }
