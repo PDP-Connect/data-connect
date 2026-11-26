@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { clockLabel, sentenceDayLabel, startedAgo, personDay } from "../../history/day-cut.ts";
 import { StopCopying } from "../../connect/status/[connectionId]/stop-copying.tsx";
-import { copiedRecords, resolveSyncCause } from "../../history/sync-cause.ts";
+import { copiedRecords, resolveSyncCause } from "../../lib/sync-cause.ts";
 import { buttonVariants } from "@/components/ui/button";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { durationWords, recordKindName, type OneSyncModel } from "./one-sync-model.ts";
@@ -22,7 +22,7 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
   return <>
     <PageHeader breadcrumbs={[{ href: "/syncs", label: "Sync history" }, { href: m.connection ? `/sources/${encodeURIComponent(m.connection)}` : "/sources", label: m.name }]} title={<span className="inline-flex items-center gap-3"><ConnectorMark connectorId={m.connector} name={m.name} /><span>{m.name}{m.at ? `, ${sentenceDayLabel(personDay(m.at,offset),offset)} at ${clockLabel(m.at,offset)}` : ""}</span></span>} />
     <div className="mb-8 space-y-3"><p className={m.outcome === "failed" || m.outcome === "needs_you" ? "text-destructive" : "text-foreground"}>{sentence}</p>
-    {m.outcome === "failed" ? <><p>{cause.sentence}</p>{m.retryHref ? <Link className={buttonVariants()} href={m.retryHref}>{cause.action}</Link> : <p>See {m.name} to try again.</p>}</> : null}
+    {m.outcome === "failed" ? <><p>{cause.sentence}</p>{cause.action && m.retryHref ? <Link className={buttonVariants()} href={m.retryHref}>{cause.action}</Link> : cause.action ? <p>See {m.name} to try again.</p> : null}</> : null}
     {m.outcome === "syncing" ? <StopCopying name={m.name} runId={m.id} preview={practice} /> : null}
     {m.outcome === "needs_you" ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(m.id)}/stream`}>Continue</Link> : null}
     {m.assistance?.kind === "credentials" && m.assistance.responseContract === "response_required" && m.assistance.ownerAction === "provide_value" ? <RunInteractionForm fields={m.assistance.fields} interactionId={m.assistance.id} kind={m.assistance.kind} message={m.assistance.message} runId={m.id} serviceName={m.name} heading={false} preview={practice} /> : null}

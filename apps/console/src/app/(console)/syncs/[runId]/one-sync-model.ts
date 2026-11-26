@@ -7,7 +7,7 @@ export interface OneSyncModel {
   id: string; name: string; connector: string; connection: string | null;
   at: string | null; started: string | null; completed: string | null;
   outcome: SyncEntry["outcome"] | "needs_you";
-  evidence?: import("../../history/sync-cause.ts").SyncCauseEvidence;
+  evidence?: import("../../lib/sync-cause.ts").SyncCauseEvidence;
   kindNames?: Record<string,string>;
   cause: string | null; rawError: string | null; trigger: string | null;
   total: number | null; kinds: { kind: string; count: number }[] | null;

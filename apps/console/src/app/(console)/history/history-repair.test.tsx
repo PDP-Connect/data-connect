@@ -2,29 +2,38 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveSyncCause } from "./sync-cause.ts";
+import { resolveSyncCause } from "../lib/sync-cause.ts";
 import { sourceStatusWords, sourceStateSentence } from "../lib/source-status-words.ts";
 import { buildSourcesDemoSummaries } from "../sources/sources-demo-data.ts";
 import { syncDaySentence } from "../syncs/daily-syncs-view.tsx";
+import { toSourceInstanceView } from "../sources/sources-view-model.ts";
+import { buildHomeViewModel } from "../components/views/standing-view-model.ts";
 import { syncPractice } from "./practice.ts";
 test("expired sign-in nested beneath generic run failure keeps its known action",()=>{
   const cause=resolveSyncCause({reason:"connector_reported_failed",connector_error:{code:"service_session_inactive",cause_chain:[{message:"The authenticated session is no longer active."}]}},"Northwind");
   assert.deepEqual(cause,{sentence:"Northwind asked for a new sign-in.",action:"Sign in again",known:true});
   assert.equal(resolveSyncCause({reason:"unknown",error:"machine_failure_code=123"},"Northwind").known,false);
 });
-test("same stored evidence comparison records the source-page differences awaiting owner decision",()=>{
+test("same failed-sync evidence gives every current surface the history cause and action",()=>{
   const source=buildSourcesDemoSummaries("mixed")[0]!;
-  const now=new Date();
-  const evidence={reason:"session_expired",connector_error:{code:"session_expired"}};
-  const shared={...source,last_run:{...source.last_run!,status:"failed",failure_reason:evidence.reason},owner_state:{...source.owner_state!,resolver:"system_degraded" as const}};
-  const words=sourceStatusWords(shared,{now});
-  const sourceSentence=sourceStateSentence(shared,{now,name:"Northwind"});
-  const history=resolveSyncCause(evidence,"Northwind");
-  // Source page is under independent review; the orchestrator forbids changing its sentences.
-  assert.equal(sourceSentence.text,"Something stopped Northwind from syncing.");
-  assert.equal(history.sentence,"Northwind asked for a new sign-in.");
-  assert.equal(words.action?.label,"Try again");
-  assert.equal(history.action,"Sign in again");
+  for(const [reason,sentence,label] of [
+    ["session_expired","Northwind asked for a new sign-in.","Sign in again"],
+    ["auth_failed","Northwind didn't accept the sign-in.","Sign in again"],
+    ["assistance_timed_out","The sign-in wasn't finished.","Try again"],
+    ["ingest_endpoint_saturated","DataConnect could not save the copies because its storage was busy. DataConnect tries again at the next check.",null],
+    ["surface_start_failed","DataConnect could not start its browser. DataConnect tries again at the next check.",null],
+    ["unknown","Something stopped Northwind from syncing.","Try again"],
+  ] as const) {
+    const shared={...source,display_name:"Northwind",connector_display_name:"Northwind",last_run:{...source.last_run!,status:"failed",failure_reason:reason},owner_state:{...source.owner_state!,resolver:"system_degraded" as const}};
+    const history=resolveSyncCause({reason},"Northwind");
+    assert.equal(history.sentence,sentence);assert.equal(history.action,label);
+    assert.equal(sourceStateSentence(shared,{now:new Date(),name:"Northwind"}).text,sentence);
+    const words=sourceStatusWords(shared,{now:new Date()});
+    const list=toSourceInstanceView(shared).statusWords;
+    const home=buildHomeViewModel({approvals:[],approvalsFailed:false,approvalsHaveMore:false,grants:[],grantsFailed:false,grantsHaveMore:false,ownerClients:[],ownerClientsFailed:false,ownerClientsHaveMore:false,sourcePage:{kind:"ok",hasMore:false,sources:[shared]},summary:null,summaryFailed:false,traces:[],tracesFailed:false,tracesHaveMore:false,now:new Date(),reloadHref:"/",hrefs:{addSource:"/sources/add",connect:"/connect",deployment:"/deployment",deploymentTokens:"/deployment/tokens",grant:(id)=>`/grants/${id}`,grants:"/grants",source:(id)=>`/sources/${id}`,sources:"/sources"}}).dataSources[0]!.status;
+    for(const status of [list,home]) {assert.equal(status.words,sentence);assert.equal(status.action?.label ?? null,label);}
+    assert.equal(words.words,sentence);assert.equal(words.action?.label ?? null,label);
+  }
 });
 test("day counts describe copied records, including singular and zero",()=>{
   const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days")throw Error("mode");
@@ -85,4 +94,13 @@ test("practice has 110 dates, 59 reading apps and a real console sign-in that is
   const raw=appPractice("console-sign-ins",0);const shown=practiceAppHistory("console-sign-ins",0).history;
   if(raw.mode!=="days"||shown.mode!=="days")throw Error("mode");
   assert.equal(raw.changes.length,shown.changes.length+1);
+});
+
+test("current owner steps and maintenance blocks take precedence over failed-sync evidence",()=>{
+  const source=buildSourcesDemoSummaries("mixed")[0]!;
+  for(const resolver of ["needs_owner","setup_in_progress","owner_paused","blocked_maintainer"] as const){
+    const shared={...source,last_run:{...source.last_run!,status:"failed",failure_reason:"session_expired"},owner_state:{...source.owner_state!,resolver}};
+    assert.notEqual(sourceStatusWords(shared,{now:new Date()}).words,"Northwind asked for a new sign-in.");
+    assert.notEqual(sourceStateSentence(shared,{now:new Date(),name:"Northwind"}).text,"Northwind asked for a new sign-in.");
+  }
 });

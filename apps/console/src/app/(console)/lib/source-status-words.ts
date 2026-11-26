@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolveSyncCause } from "./sync-cause.ts";
 import { formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
 import { projectSourceActionability } from "./source-actionability.ts";
@@ -18,6 +19,7 @@ export type SourceStatusActionKind =
   | "review_result"
   | "server_cta"
   | "resume"
+  | "repair_sign_in"
   | "repair_credential"
   | "sync_now"
   | "view_device";
@@ -264,6 +266,11 @@ function matchSourceStatus(source: RefConnectorSummary, { now, signInRepairAvail
   ) {
     return { row: 12, words: withWhen("Trying again on its own"), tone: "plain", action: null };
   }
+  if (source.last_run?.status === "failed") {
+    const run = source.last_run;
+    const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, source.connector_display_name || source.display_name);
+    return { row: 16, words: cause.sentence, tone: "plain", action: cause.action && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", cause.action, true) : null };
+  }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
     const base = label === "Missing optional data"
@@ -411,7 +418,9 @@ function matchStateSentence(
     case 14:
     case 15:
     case 16: {
-      if (status.row === 16) return { text: `Something stopped ${options.name} from syncing.` };
+      if (status.row === 16) return { text: source.last_run?.status === "failed"
+        ? resolveSyncCause({ reason: source.last_run.failure_reason ?? source.last_run.terminal_reason, connector_error: source.last_run.connector_error }, options.name).sentence
+        : `Something stopped ${options.name} from syncing.` };
       const base = `${wordsWithoutWhen()}.`;
       const retry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";
       return { text: `${base}${retry}${when ? ` Last synced ${when}.` : ""}` };

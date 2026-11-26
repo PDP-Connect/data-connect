@@ -861,7 +861,7 @@ function ConnectorPageView({
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
           </DeviceSteps> : null : running ? null : <ConnectorHeaderActions
             browserSessionRepairHref={browserSessionRepairHref}
-            canStartSync={!archived && canStartSyncFromSummary(source)}
+            canStartSync={!archived && canStartSyncFromSummary(source) && !(sourceStatus.row === 16 && sourceStatus.action === null)}
             connectionId={connectorInstanceId}
             connectorId={connectorId}
             credentialUpdateHref={credentialUpdateHref}
@@ -1270,6 +1270,9 @@ function ConnectorPrimaryHeaderAction({
   }
   if (statusAction?.kind === "resume") {
     return <ResumeConnectionButton connectionId={connectionId} label={statusAction.label} />;
+  }
+  if (statusAction?.kind === "repair_sign_in") {
+    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={browserSessionRepairHref ?? storedCredentialUpdateHref ?? credentialUpdateHref ?? addSourceHrefForConnector(connectorId)}>{statusAction.label}</Link>;
   }
   if (statusAction?.kind === "repair_credential" && credentialUpdateHref) {
     return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;

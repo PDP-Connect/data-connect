@@ -3,7 +3,7 @@
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
-import { copiedRecords, resolveSyncCause } from "../history/sync-cause.ts";
+import { copiedRecords, resolveSyncCause } from "../lib/sync-cause.ts";
 import { AppendHistory, type HistoryPageChunk } from "../history/append-history.tsx";
 import { HistoryFilters } from "../history/history-filters.tsx";
 import { personDay } from "../history/day-cut.ts";
@@ -43,7 +43,7 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
           <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
           <span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(row.last_at,offset)}</span>
         </Link>
-        {row.last_outcome==="failed" ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{resolveSyncCause(row.evidence ?? {reason:row.cause},name(row)).action}</Link></div> : null}
+        {row.last_outcome==="failed" && resolveSyncCause(row.evidence ?? {reason:row.cause},name(row)).action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{resolveSyncCause(row.evidence ?? {reason:row.cause},name(row)).action}</Link></div> : null}
       </li>)}</ul>
     </Section>;
   })}</>;

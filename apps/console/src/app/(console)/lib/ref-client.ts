@@ -362,6 +362,8 @@ export interface RunSummary {
 }
 
 export interface RefConnectorRunSummary {
+  connector_error?: unknown;
+  terminal_reason?: string | null;
   event_count: number;
   failure_reason: string | null;
   finished_at: string | null;
