@@ -250,9 +250,10 @@ test("declared 0.2.0 OBSERVATION facts are accepted and the run succeeds", async
     assert.ok(start.protocol_capabilities.includes("OBSERVATION"), "START advertises the implemented message");
     assert.equal(
       start.protocol_capabilities.includes("DETAIL_COVERAGE_KEY_SETS"),
-      true,
-      "the runtime implements key-set extension credit rules"
+      false,
+      "the runtime no longer implements key-set extension credit rules"
     );
+    assert.ok(start.protocol_capabilities.includes("BLOB"), "START retains implemented blob support");
     const record = await persistedRecord("run_c020_accept");
     assert.ok(record, "the run's bounded diagnostic record must be persisted");
     assert.deepEqual(

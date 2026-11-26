@@ -1338,7 +1338,8 @@ test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and
   );
   assert.equal(thrown, null);
   assert.ok(start, "the connector received START");
-  assert.deepEqual(start.protocol_capabilities, ["OBSERVATION", "STREAM_EVIDENCE"], "START omits the keyset advisory");
+  assert.deepEqual(start.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
+  assert.equal(start.protocol_capabilities.includes("DETAIL_COVERAGE_KEY_SETS"), false, "START omits the keyset advisory");
   assert.equal(result?.status, "succeeded");
   assert.equal(result?.checkpoint_summary?.state_streams_committed, 1, "the hydrated declaration credits the key");
   assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
