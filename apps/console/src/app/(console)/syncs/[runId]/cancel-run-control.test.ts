@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const CONTROL_FILE = `${HERE}cancel-run-control.tsx`;
 const ACTIONS_FILE = `${HERE}actions.ts`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}technical-page.tsx`;
 
 // ── Page: render only when active, inside beforeTimeline ──────────────────────
 

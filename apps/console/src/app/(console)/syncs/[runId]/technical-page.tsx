@@ -41,7 +41,6 @@ import {
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
-import { loadRunRejectionView } from "../../lib/run-rejections.ts";
 import { getCollectedKinds, getCollectionTerminalEvent } from "./collected-kinds.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { SignInDetailsSurface } from "./stream/sign-in-parts.tsx";
@@ -78,10 +77,19 @@ interface LatestProgress {
   total: number | null;
 }
 
-type TimelineSearchParams = Promise<{ cursor?: string | string[]; _preview?: string; _state?: string; return_to?: string }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string; return_to?: string }>;
 
-function getCursor(searchParams: { cursor?: string | string[] }): string | null {
-  return typeof searchParams.cursor === "string" && searchParams.cursor.length > 0 ? searchParams.cursor : null;
+function getCursor(value: string | string[] | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+// The receipt list pages on its own cursor; keep the timeline page the reader is on.
+function runReceiptsHref(runId: string, timelineCursor: string | null, receiptsCursor: string): string {
+  const query = new URLSearchParams({ receipts_cursor: receiptsCursor });
+  if (timelineCursor) {
+    query.set("cursor", timelineCursor);
+  }
+  return `/syncs/${encodeURIComponent(runId)}/technical?${query.toString()}`;
 }
 
 function runTimelineHref(runId: string, cursor: string): string {
@@ -93,14 +101,15 @@ export default async function RunDetailPage({
   searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: TimelineSearchParams;
+  searchParams: RunPageSearchParams;
 }) {
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
   const query = await searchParams;
   const preview = flowPreviewState("details", query);
   if (preview) return <SignInDetailsSurface connector={flowPreview.connector} fields={flowPreview.fields.map(field => ({ ...field, autocomplete: null }))} interactionId="sample-step" message={previewBrowserMessage("needs-details")} preview previewError={preview === "rejected" ? flowPreview.detailsRejected : undefined} runId={runId} />;
-  const cursor = getCursor(query);
+  const cursor = getCursor(query.cursor);
+  const receiptsCursor = getCursor(query.receipts_cursor);
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
@@ -163,22 +172,16 @@ export default async function RunDetailPage({
       ? await getStaticSecretSetup(connectorId).catch(() => null)
       : null;
   const latestProgress = getLatestProgress(events);
-  // One timeline page holds only part of a long run, so the rejected total
-  // comes from the run status first, like liveness above, and `active` is that
-  // same liveness. The page's events state a count only where they can prove
-  // it. Receipts are read when the count is positive or unknown; a failed read
-  // or a run with no known connection renders as an unavailable list.
-  const { receipts: rejectionReceipts, summary: rejections } = await loadRunRejectionView({
-    connectionId,
-    events,
-    inputs: {
-      active,
-      statusTotal: runStatus?.records_permanently_rejected ?? null,
-      timelineComplete: cursor === null && !envelope.truncated,
-    },
-    readReceipts: listRunRecordRejectionReceipts,
-    runId,
-  });
+  // The server totals the run's rejected and unaccounted records over every
+  // event, so the page only reads them. Receipts are filtered by run on the
+  // server and paged by their own cursor, separate from the timeline's. A run
+  // that reports no rejections has none to list; a failed read renders as an
+  // unavailable list rather than failing the page.
+  const recordOutcomes = runStatus?.record_outcomes ?? null;
+  const rejectionReceipts =
+    connectionId && recordOutcomes?.permanently_rejected !== 0
+      ? await listRunRecordRejectionReceipts(connectionId, runId, receiptsCursor).catch(() => null)
+      : null;
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
   const gapClassification = classifyKnownGaps(terminalKnownGaps.gaps);
@@ -214,7 +217,13 @@ export default async function RunDetailPage({
         skipped={summarizeSkippedStreams(events)}
         summary={terminalKnownGaps.summary ?? gapClassification.summary}
       />
-      <RejectedRecordsSection receipts={rejectionReceipts} summary={rejections} />
+      <RejectedRecordsSection
+        moreReceiptsHref={
+          rejectionReceipts?.nextCursor ? runReceiptsHref(runId, cursor, rejectionReceipts.nextCursor) : null
+        }
+        outcomes={recordOutcomes}
+        receipts={rejectionReceipts}
+      />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />
       <ConnectorDiagnosticLinesSection

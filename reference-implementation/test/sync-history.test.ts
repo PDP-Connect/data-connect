@@ -34,6 +34,8 @@ async function check(backend: "sqlite" | "postgres") {
     finished: 1, failed: 1, stopped: 0, interrupted: 0, could_not_start: 2, records: 16,
     last_at: "2026-11-25T01:00:00.000Z", last_outcome: "failed", manual: 1, cause: "auth_failed",
   });
+  const single = await readSyncHistory({ ...input, run_id: "one" }, backend);
+  assert.equal(single.mode, "syncs"); assert.equal(single.data.length, 1);
   const west = await readSyncHistory({ ...input, first: "2026-11-24", last: "2026-11-24", offset: -360 }, backend);
   assert.equal(west.mode, "days");
   if (west.mode !== "days") throw new Error("wrong response");

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export type SyncOutcome = "finished" | "failed" | "stopped" | "interrupted" | "could_not_start" | "syncing";
-export interface SyncHistoryInput extends HistoryInput { only_problems?: boolean }
+export interface SyncHistoryInput extends HistoryInput { only_problems?: boolean; run_id?: string }
 export interface SyncDay {
   day: string; connection_id: string; connector_id: string;
   ran: number; finished: number; failed: number; stopped: number; interrupted: number;
@@ -23,8 +23,9 @@ export async function readSyncHistory(input: SyncHistoryInput, backend: HistoryB
   const values: unknown[] = [first, end];
   let where = `${time} >= ? AND ${time} < ?`;
   if (input.connection_id) { where += " AND connector_instance_id = ?"; values.push(input.connection_id); }
-  if (input.day) {
-    if (!input.connection_id) throw new RangeError("A single day requires a connection");
+  if (input.day || input.run_id) {
+    if (input.run_id) { where += " AND run_id = ?"; values.push(input.run_id); }
+    if (!input.connection_id && !input.run_id) throw new RangeError("A single day requires a connection");
     const limit = historyLimit(input);
     if (input.cursor) {
       const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString()) as [string, string];

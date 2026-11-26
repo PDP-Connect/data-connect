@@ -353,7 +353,7 @@ async function renderScenario(name: string): Promise<{ details: string; visible:
     truncated: false,
   } as TimelineEnvelope;
   runStatus = scenario.status;
-  const { default: RunDetailPage } = await import("./page.tsx");
+  const { default: RunDetailPage } = await import("./technical-page.tsx");
   const realNow = Date.now;
   Date.now = () => NOW;
   try {

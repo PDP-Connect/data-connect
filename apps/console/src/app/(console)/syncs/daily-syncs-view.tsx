@@ -10,7 +10,7 @@ export function syncCause(cause: string | null, name: string): string | null {
   if (!cause) return null;
   if (["auth_failed","invalid_credentials","authentication_failed","login_failed"].includes(cause)) return `${name} didn't accept the sign-in.`;
   if (["auth_blocked","login_blocked","access_denied"].includes(cause)) return `${name} didn't let DataConnect sign in.`;
-  if (["interaction_timeout","assistance_timeout","login_timeout"].includes(cause)) return "The sign-in wasn't finished.";
+  if (["interaction_timeout","assistance_timeout","assistance_timed_out","login_timeout"].includes(cause)) return "The sign-in wasn't finished.";
   return null;
 }
 export function syncDaySentence(row: SyncDay, name: string): string {

@@ -27,7 +27,7 @@ export function mountRefSyncHistory(app: HistoryRouteApp, ctx: HistoryRouteConte
   app.get("/_ref/sync-history", ctx.requireOwnerSession, async (req: HistoryRequest, res: HistoryResponse) => {
     try {
       const input = parseHistoryInput(req.query ?? {});
-      return res.json(await readSyncHistory({ ...input, only_problems: req.query?.only_problems === "true" }));
+      return res.json(await readSyncHistory({ ...input, only_problems: req.query?.only_problems === "true", ...(req.query?.run_id ? { run_id: String(req.query.run_id) } : {}) }));
     } catch (error) {
       if (error instanceof RangeError || error instanceof SyntaxError) return ctx.pdppError(res, 400, "invalid_request", error.message);
       return ctx.handleError(res, error);

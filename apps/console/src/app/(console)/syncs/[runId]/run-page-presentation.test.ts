@@ -6,10 +6,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const source = readFileSync(fileURLToPath(new URL("./page.tsx", import.meta.url)), "utf8");
+const source = readFileSync(fileURLToPath(new URL("./technical-page.tsx", import.meta.url)), "utf8");
 
 test("the sync page puts its source title and relative start time above the request", () => {
-  assert.match(source, /<span>\{connectorName\} sync<\/span>/);
+  assert.match(source, /<span>Technical details for this sync<\/span>/);
   assert.match(source, /formatRelative\(new Date\(startedAt\), Date\.now\(\)\)/);
   assert.ok(source.indexOf("<PageHeader") < source.indexOf("<CurrentAssistanceSection"));
   const header = source.slice(source.indexOf("<PageHeader"), source.indexOf("<CurrentAssistanceSection"));
@@ -43,7 +43,7 @@ test("the sync page omits the internal server address and keeps one source bread
 
 test("collection facts show cancelled and failed partial counts, while zero kinds stay out", () => {
   // Brief item 3: cancelled and failed syncs label partial counts as collected before stopping.
-  assert.match(source, /event\.event_type === "run\.cancelled"/);
+  assert.match(readFileSync(new URL("./collected-kinds.ts",import.meta.url),"utf8"), /event\.event_type === "run\.cancelled"/);
   assert.match(source, /Collected before it stopped/);
   // Brief item 3: zero-count kinds are omitted, and an all-zero result says nothing was collected.
   assert.match(source, /collectedKinds\.filter\(\(\{ count \}\) => count > 0\)/);
