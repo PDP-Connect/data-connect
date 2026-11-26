@@ -54,6 +54,7 @@ import { SourceWebhookError } from "../operations/ref-source-webhook-ingest/inde
 import { deriveClientEventsFromRecordChange } from "../operations/rs-client-event-derive/index.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
 import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
+import { createAllocatorReadinessCheck } from "../runtime/browser-surface/allocator-readiness.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
 import {
   type BrowserSurfaceLeaseSweepCloseSource,
@@ -10108,6 +10109,9 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
 
   if (runtimeConfig.dynamic) {
     options.browserSurfaceAllocator = createBrowserSurfaceAllocator({
+      baseUrl: runtimeConfig.dynamic.allocatorUrl,
+    });
+    options.browserSurfaceAllocatorReadiness = createAllocatorReadinessCheck({
       baseUrl: runtimeConfig.dynamic.allocatorUrl,
     });
     // This is a non-secret endpoint identity used only to keep independent
