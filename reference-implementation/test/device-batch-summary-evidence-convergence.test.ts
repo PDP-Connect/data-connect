@@ -45,6 +45,7 @@
  * SQLite alone.
  */
 
+import { withFixturePublisher } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -271,7 +272,7 @@ function createDriver(kind: string, server: { asPort: number }): Driver {
         : (row as { manifest: unknown }).manifest;
     },
     async registerManifest(manifest: unknown, options: Record<string, unknown> = {}) {
-      await registerConnector(manifest as never, options as never);
+      await registerConnector(withFixturePublisher(manifest as Record<string, unknown>), options as never);
     },
     target(instanceId: string) {
       return { connector_id: "codex", connector_instance_id: instanceId };

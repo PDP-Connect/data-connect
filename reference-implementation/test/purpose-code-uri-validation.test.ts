@@ -6,6 +6,7 @@
 // codes, but MUST NOT reject a code merely for being unrecognized (registry
 // membership is advisory). Drives normalizeAuthorizationDetail via initiateGrant.
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initiateGrant, registerConnector, registerDynamicClient } from "../server/auth.ts";
@@ -27,7 +28,7 @@ const MANIFEST = {
     declaration_version: "purpose-code-test.v1",
     display: { name: "Purpose Code Test" },
     protocol_version: "0.1.0",
-    publisher: { id: "https://pdpp.dev/reference-implementation" },
+    publisher: { id: FIXTURE_PUBLISHER },
     source: { id: SOURCE_ID, kind: "connector" },
     streams: [
       {
