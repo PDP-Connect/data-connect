@@ -28,7 +28,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -188,7 +188,7 @@ interface PackageManifest {
 }
 
 function loadManifest(name: string): PackageManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
@@ -642,7 +642,12 @@ test("owner-agent rename rejects a client grant token with 403", async () => {
     });
     const firstStream = manifest.streams?.[0];
     assert.ok(firstStream, "manifest carries at least one stream");
-    const clientToken = await approveClientGrant(asUrl, manifest.connector_id, firstStream.name, "cin_amazon_personal");
+    const clientToken = await approveClientGrant(
+      asUrl,
+      String((manifest.source as { id: string }).id),
+      firstStream.name,
+      "cin_amazon_personal"
+    );
 
     const {
       status,

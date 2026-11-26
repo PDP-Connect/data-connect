@@ -41,6 +41,7 @@ const baseManifest = {
   connector_id: SOURCE_ID,
   display_name: "Blob Fan-in Test Connector",
   protocol_version: "0.1.0",
+  source: { id: SOURCE_ID, kind: "connector" },
   streams: [
     {
       consent_time_field: "received_at",

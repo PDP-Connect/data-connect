@@ -3,29 +3,47 @@
 
 import assert from "node:assert/strict";
 import { appendFile, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { computeSourceInputsDigest as computeProtocolSourceInputsDigest } from "../../connector-protocol/scripts/package-artifact.mjs";
-import {
+import { resolve } from "node:path";
+import test, { after, before } from "node:test";
+import { pathToFileURL } from "node:url";
+import { createArtifactTestFixture } from "../../connector-protocol/scripts/package-artifact-fixture.mjs";
+
+const COMMIT_FIRST_ERROR = /commit first/i;
+const PROTOCOL_DECLARATIONS_DRIFT_ERROR = /connector-protocol declarations drift/;
+
+const fixture = await createArtifactTestFixture("collector-runtime");
+after(async () => {
+  await rm(fixture.root, { force: true, recursive: true });
+});
+const { packageRoot } = fixture;
+const protocolRoot = resolve(packageRoot, "..", "connector-protocol");
+const protocolSourcePath = resolve(protocolRoot, "src", "auth.ts");
+const {
   assertProtocolBuildMatchesReceipt,
   cloneCommittedSourceTree,
   computeSourceInputsDigest,
-} from "./package-artifact.mjs";
-
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const protocolRoot = resolve(packageRoot, "..", "connector-protocol");
-const protocolSourcePath = resolve(packageRoot, "..", "connector-protocol", "src", "auth.ts");
-const PROTOCOL_DECLARATIONS_DRIFT_ERROR = /connector-protocol declarations drift/;
+  generateArtifactMetadata,
+  verifyArtifactMetadata,
+} = fixture.api;
+const { computeSourceInputsDigest: computeProtocolSourceInputsDigest } = await import(
+  pathToFileURL(resolve(protocolRoot, "scripts", "package-artifact.mjs"))
+);
+before((context) => {
+  context.diagnostic(`artifact fixture checkout: ${fixture.checkoutMs.toFixed(0)} ms`);
+});
 
 test("runtime source inputs bind the connector-protocol source receipt", async () => {
   const original = await readFile(protocolSourcePath, "utf8");
-  const before = await computeSourceInputsDigest();
+  const originalDigest = await computeSourceInputsDigest();
 
   try {
     await appendFile(protocolSourcePath, "\n// artifact-input-mutant\n");
-    const after = await computeSourceInputsDigest();
-    assert.notEqual(after, before, "a connector-protocol source mutant must invalidate runtime source inputs");
+    const mutatedDigest = await computeSourceInputsDigest();
+    assert.notEqual(
+      mutatedDigest,
+      originalDigest,
+      "a connector-protocol source mutant must invalidate runtime source inputs"
+    );
   } finally {
     await writeFile(protocolSourcePath, original);
   }
@@ -52,5 +70,67 @@ test("runtime clones resolve connector-protocol from their archived sibling", as
     assert.equal(resolvedProtocol, await realpath(clone.clonedProtocolRoot));
   } finally {
     await rm(clone.cloneDir, { force: true, recursive: true });
+  }
+});
+
+for (const untracked of [false, true]) {
+  test(`generate refuses ${untracked ? "untracked" : "modified"} package source and names it`, async () => {
+    const sourcePath = resolve(packageRoot, "src", untracked ? "artifact-untracked-fixture.ts" : "index.ts");
+    const original = untracked ? null : await readFile(sourcePath);
+    const metadataPath = resolve(packageRoot, "artifact.json");
+    const metadata = await readFile(metadataPath);
+    try {
+      await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+      await assert.rejects(generateArtifactMetadata, (error) => {
+        assert.match(error.message, COMMIT_FIRST_ERROR);
+        assert.ok(error.message.includes(untracked ? "artifact-untracked-fixture.ts" : "index.ts"));
+        return true;
+      });
+      assert.deepEqual(await readFile(metadataPath), metadata, "refusal must leave the receipt unchanged");
+    } finally {
+      if (untracked) {
+        await rm(sourcePath, { force: true });
+      } else {
+        await writeFile(sourcePath, original);
+      }
+      await writeFile(metadataPath, metadata);
+    }
+  });
+}
+
+test("receipt digest and identity match HEAD despite working-tree edits", async () => {
+  const sourcePath = resolve(packageRoot, "src", "index.ts");
+  const manifestPath = resolve(packageRoot, "package.json");
+  const source = await readFile(sourcePath);
+  const manifest = await readFile(manifestPath, "utf8");
+  const committedDigest = await computeSourceInputsDigest();
+  try {
+    await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+    assert.notEqual(await computeSourceInputsDigest(), committedDigest);
+    const metadata = await verifyArtifactMetadata();
+    assert.equal(metadata.source_inputs_sha256, committedDigest);
+    await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(manifest), version: "99.0.0" }));
+    assert.equal((await verifyArtifactMetadata()).package_version, JSON.parse(manifest).version);
+  } finally {
+    await writeFile(sourcePath, source);
+    await writeFile(manifestPath, manifest);
+  }
+});
+
+test("generate refuses when only connector-protocol source is dirty", async () => {
+  const metadataPath = resolve(packageRoot, "artifact.json");
+  const metadata = await readFile(metadataPath);
+  const source = await readFile(protocolSourcePath);
+  try {
+    await appendFile(protocolSourcePath, "\n// dirty dependency fixture\n");
+    await assert.rejects(generateArtifactMetadata, (error) => {
+      assert.match(error.message, COMMIT_FIRST_ERROR);
+      assert.ok(error.message.includes("packages/connector-protocol/src/auth.ts"));
+      return true;
+    });
+    assert.deepEqual(await readFile(metadataPath), metadata);
+  } finally {
+    await writeFile(protocolSourcePath, source);
+    await writeFile(metadataPath, metadata);
   }
 });

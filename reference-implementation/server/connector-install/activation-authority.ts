@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ConnectorManifestStorageContext,
-  assertIncomingSourceDeclarationPublisher,
+  normalizeIncomingConnectorManifest,
   assertLegacyOwnershipPostgres,
   assertLegacyOwnershipSqlite,
   assertRetainedSourceIdentities,
@@ -140,7 +140,7 @@ function parseRow(row: ActivationRow | undefined): ConnectorActivation | null {
 
 /** Atomically publish the registry manifest, generation advance, and executable tuple. */
 export async function publishConnectorActivation(record: ConnectorInstallRecord): Promise<ConnectorActivation> {
-  record = { ...record, manifest: await assertIncomingSourceDeclarationPublisher(record.manifest) };
+  record = { ...record, manifest: await normalizeIncomingConnectorManifest(record.manifest) };
   const attemptId = randomUUID();
   const id = record.connectorId;
   // Only a record that carries the digest of the sidecar its installer core verified supplies a verified declaration.

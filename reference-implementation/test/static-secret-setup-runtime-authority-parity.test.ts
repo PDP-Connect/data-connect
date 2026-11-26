@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import {
   type ConnectorManifestLike,
   isStaticSecretConnector as isStaticSecretConnectorForSetup,
@@ -23,7 +23,7 @@ function connectorKeyOf(manifest: ConnectorManifestLike): string | null {
 }
 
 test("every shipped manifest: setup and run-time static-secret classification agree", () => {
-  const entries = readPolyfillManifests();
+  const entries = readShippedManifests();
   assert.ok(entries.length > 0, "expected at least one shipped connector manifest");
 
   const disagreements: string[] = [];
@@ -44,7 +44,7 @@ test("every shipped manifest: setup and run-time static-secret classification ag
 });
 
 test("venmo is classified from its installed profile manifest", () => {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "venmo.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "venmo.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for venmo.json");
   }

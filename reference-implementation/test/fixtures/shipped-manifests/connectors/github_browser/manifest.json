@@ -1,0 +1,884 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/github-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/github",
+		"display": {
+			"name": "GitHub"
+		}
+	},
+	"connector_key": "github-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
+	"version": "0.3.20",
+	"display_name": "GitHub (browser session)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#181717"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": [
+					"host_http_request"
+				]
+			},
+			"browser": {
+				"required": true,
+				"features": [
+					"page_script_evaluation",
+					"page_navigation",
+					"page_content_read",
+					"page_condition_wait",
+					"host_http_request"
+				]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": [
+			"manual_action"
+		],
+		"public_listing": {
+			"tier": "preview",
+			"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
+		},
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "high",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Uses an owner signed-in GitHub browser session and public GitHub web/API surfaces. Expired sessions need owner sign-in."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": true,
+			"description": "Legacy GitHub profile, pinned repositories, organization links, achievements, and displayed contribution count, collected from the signed-in profile page.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"username": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"fullName": {
+						"type": "string"
+					},
+					"bio": {
+						"type": "string"
+					},
+					"company": {
+						"type": "string"
+					},
+					"location": {
+						"type": "string"
+					},
+					"website": {
+						"type": "string"
+					},
+					"avatarUrl": {
+						"type": "string"
+					},
+					"followers": {
+						"type": "number"
+					},
+					"following": {
+						"type": "number"
+					},
+					"repositoryCount": {
+						"type": "number"
+					},
+					"profileUrl": {
+						"type": "string"
+					},
+					"pinnedRepositories": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"fullName": {
+									"type": "string"
+								},
+								"url": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"description": {
+									"type": "string"
+								},
+								"language": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"stars": {
+									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
+								}
+							},
+							"required": [
+								"fullName"
+							],
+							"additionalProperties": false
+						}
+					},
+					"organizations": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"login": {
+									"type": "string"
+								},
+								"label": {
+									"type": "string"
+								},
+								"url": {
+									"type": "string"
+								},
+								"avatarUrl": {
+									"type": [
+										"string",
+										"null"
+									]
+								}
+							},
+							"required": [
+								"login"
+							],
+							"additionalProperties": false
+						}
+					},
+					"achievements": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"iconUrl": {
+									"type": [
+										"string",
+										"null"
+									]
+								}
+							},
+							"required": [
+								"name"
+							],
+							"additionalProperties": false
+						}
+					},
+					"contributionsLastYear": {
+						"type": [
+							"number",
+							"null"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"username",
+					"profileUrl"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"username",
+						"bio",
+						"company",
+						"location"
+					],
+					"semantic_fields": [
+						"bio"
+					]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "repositories",
+			"required": true,
+			"description": "Repositories displayed in the signed-in user's repositories tab.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
+					"repositories": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"url": {
+									"type": "string"
+								},
+								"description": {
+									"type": "string"
+								},
+								"language": {
+									"type": "string"
+								},
+								"stars": {
+									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
+								},
+								"visibility": {
+									"type": "string"
+								},
+								"topics": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"updatedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								}
+							},
+							"required": [
+								"name",
+								"url"
+							],
+							"additionalProperties": false
+						}
+					}
+				},
+				"required": [
+					"id",
+					"repositories"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "starred",
+			"required": true,
+			"description": "Repositories displayed in the signed-in user's starred list.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
+					"starred": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"fullName": {
+									"type": "string"
+								},
+								"url": {
+									"type": "string"
+								},
+								"description": {
+									"type": "string"
+								},
+								"language": {
+									"type": "string"
+								},
+								"stars": {
+									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
+								},
+								"updatedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								}
+							},
+							"required": [
+								"fullName",
+								"url"
+							],
+							"additionalProperties": false
+						}
+					}
+				},
+				"required": [
+					"id",
+					"starred"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "events",
+			"required": true,
+			"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"events": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"type": {
+									"type": "string"
+								},
+								"createdAt": {
+									"type": "string"
+								},
+								"repo": {
+									"type": "string"
+								},
+								"repoUrl": {
+									"type": "string"
+								},
+								"action": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"title": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"body": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"url": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"branch": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"commits": {
+									"type": [
+										"number",
+										"null"
+									]
+								},
+								"isPublic": {
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
+							"additionalProperties": false
+						}
+					},
+					"fetchedAt": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
+					"windowDescription": {
+						"type": "string"
+					}
+				},
+				"required": [
+					"id",
+					"events",
+					"fetchedAt"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "contributions",
+			"required": true,
+			"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"totalContributionsLastYear": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"yearTotals": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"year": {
+									"type": "number"
+								},
+								"total": {
+									"type": "number"
+								}
+							},
+							"required": [
+								"year",
+								"total"
+							],
+							"additionalProperties": false
+						}
+					},
+					"days": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"date": {
+									"type": "string"
+								},
+								"count": {
+									"type": "number"
+								},
+								"level": {
+									"type": [
+										"number",
+										"null"
+									]
+								}
+							},
+							"required": [
+								"date",
+								"count"
+							],
+							"additionalProperties": false
+						}
+					},
+					"monthlyTotals": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"month": {
+									"type": "string"
+								},
+								"count": {
+									"type": "number"
+								}
+							},
+							"required": [
+								"month",
+								"count"
+							],
+							"additionalProperties": false
+						}
+					},
+					"topDay": {
+						"type": [
+							"object",
+							"null"
+						],
+						"properties": {
+							"date": {
+								"type": "string"
+							},
+							"count": {
+								"type": "number"
+							}
+						},
+						"required": [
+							"date",
+							"count"
+						],
+						"additionalProperties": false
+					},
+					"fetchedAt": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					}
+				},
+				"required": [
+					"id",
+					"days",
+					"fetchedAt"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "history",
+			"required": true,
+			"description": "One legacy aggregate snapshot of authored issues and pull requests. Each type completes after exactly min(stable total_count, 1000) valid distinct items; totals above 1000 describe a bounded search window. Otherwise the snapshot and checkpoint are withheld.",
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"pullRequests": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"type": {
+									"type": "string"
+								},
+								"number": {
+									"type": [
+										"number",
+										"null"
+									]
+								},
+								"title": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"body": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"state": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"createdAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"updatedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"closedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"mergedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"url": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"repo": {
+									"type": "string"
+								},
+								"repoUrl": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"labels": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"comments": {
+									"type": "number"
+								},
+								"reactionsTotal": {
+									"type": "number"
+								},
+								"isDraft": {
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
+							"additionalProperties": false
+						}
+					},
+					"issues": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"type": {
+									"type": "string"
+								},
+								"number": {
+									"type": [
+										"number",
+										"null"
+									]
+								},
+								"title": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"body": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"state": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"createdAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"updatedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"closedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"mergedAt": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"url": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"repo": {
+									"type": "string"
+								},
+								"repoUrl": {
+									"type": [
+										"string",
+										"null"
+									]
+								},
+								"labels": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"comments": {
+									"type": "number"
+								},
+								"reactionsTotal": {
+									"type": "number"
+								},
+								"isDraft": {
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
+							"additionalProperties": false
+						}
+					},
+					"fetchedAt": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
+					"windowDescription": {
+						"type": "string"
+					}
+				},
+				"required": [
+					"id",
+					"pullRequests",
+					"issues",
+					"fetchedAt"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"profiles": [
+		{
+			"id": "legacy",
+			"label": "Legacy GitHub browser collection",
+			"streams": [
+				{
+					"name": "profile"
+				},
+				{
+					"name": "repositories"
+				},
+				{
+					"name": "starred"
+				},
+				{
+					"name": "events"
+				},
+				{
+					"name": "contributions"
+				},
+				{
+					"name": "history"
+				}
+			]
+		}
+	],
+	"reason_display_messages": {
+		"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+		"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "github_browser.ts",
+			"exception": "Preserves the app's existing GitHub envelope and summary shape.",
+			"scope_prefix": "github",
+			"login_url": "https://github.com/login"
+		}
+	}
+}

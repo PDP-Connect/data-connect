@@ -1,14 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { withFixturePublisher } from "./helpers/fixture-source-declaration.ts";
+import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { buildLocalDeviceRecordEnvelope } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { registerConnector } from "../server/auth.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
@@ -654,7 +654,7 @@ test("device ingest preflight rejects before reservation while an accepted repla
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
-    await registerConnector(withFixturePublisher(driftedManifest));
+    await registerConnector(withReauthoredFixtureDeclaration(driftedManifest));
     assert.equal(
       selectRow<{ semantic_time: string }>(
         "SELECT semantic_time FROM records WHERE connector_instance_id = ? AND record_key = ?",
@@ -769,7 +769,17 @@ test("semantic-capability-identity-only drift (no manifest change) is captured a
       "outcome row must exist"
     ).status;
     assert.equal(statusBeforeBackfill, "accepted", "registration's backfill runs against an already-accepted batch");
+    const storedBeforeBackfill = selectRow<{ manifest: string }>(
+      "SELECT manifest FROM connectors WHERE connector_id = ?",
+      "codex"
+    ).manifest;
+    assert.deepEqual(JSON.parse(storedBeforeBackfill), manifest, "the second registration submits the exact stored manifest");
     await registerConnector(manifest);
+    assert.equal(
+      selectRow<{ manifest: string }>("SELECT manifest FROM connectors WHERE connector_id = ?", "codex").manifest,
+      storedBeforeBackfill,
+      "semantic identity repair leaves the complete persisted manifest and declaration byte-identical"
+    );
 
     const metaAfterBackfill = selectRow<{ model_id: string }>(
       "SELECT model_id FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = 'messages'",
@@ -1475,7 +1485,17 @@ test("device batch's derived (embedding) section does not block a same-instance 
         "messages stream must exist"
       );
       messages.query.search.semantic_fields = ["content"];
+      const storedBeforeRegistration = selectRow<{ manifest: string }>(
+        "SELECT manifest FROM connectors WHERE connector_id = ?",
+        "codex"
+      ).manifest;
+      assert.deepEqual(JSON.parse(storedBeforeRegistration), manifest, "the semantic field assignment is unchanged");
       await registerConnector(manifest);
+      assert.equal(
+        selectRow<{ manifest: string }>("SELECT manifest FROM connectors WHERE connector_id = ?", "codex").manifest,
+        storedBeforeRegistration,
+        "coordination setup preserves the stored manifest and declaration byte-identically"
+      );
 
       const records = [
         {
@@ -3009,7 +3029,7 @@ test("ingest rejects unaccepted collector protocol version with 409 before any r
 // no-resolvable-binding -> typed 400 reject. See design Decision 2.
 
 async function registerAmazonConnector(asUrl: string): Promise<void> {
-  const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+  const amazonManifestEntry = readShippedManifests().find((candidate) => candidate.file === "amazon.json");
   if (!amazonManifestEntry) {
     throw new Error("no polyfill manifest found for amazon.json");
   }

@@ -1,0 +1,455 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/discord-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/discord",
+		"display": {
+			"name": "Discord"
+		}
+	},
+	"connector_key": "discord-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
+	"version": "0.1.20",
+	"display_name": "Discord (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#5865F2"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 86400,
+			"maximum_staleness_seconds": 2592000,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "high",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Discord's terms forbid automating a user account outside its OAuth2 and bot APIs, and Discord can terminate an account for it, so a run happens only when the owner starts one, never in the background and at most once a day. Collection runs in the owner's own signed-in discord.com session; every request the connector makes is a GET, one at a time from inside the page, 3 to 5 seconds apart. Prompting an idle client into the in-app Shop link makes the Discord client save its own settings state (a PATCH the client issues, not the connector); that client-side write is an accepted side effect decided by the product owner on 2026-10-09. A run reads the owner's profile, server list and linked accounts, then the owner's own messages from the last 90 days, at most about 1,000 messages and 25 servers per run; a saved queue continues with the remaining servers on later runs, and only a fully readable walk that reached a server's range end records coverage, so a server cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again next run. Discord's search listing stops at offset 9,975, which the product owner accepts as a server's range end. Direct messages, group DMs and the friends list are never read. A sign-in prompt, a captcha, an account check or a second rate limit ends the run without a retry."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile and server list; a non-empty message history, desktop and incremental second runs are not verified. The requests were also checked by hand in one signed-in desktop session on 2026-10-08. Discord's terms forbid this kind of account automation, so the owner must accept the account risk described in the connector README before using it."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The owner's own Discord account profile. The email address, phone number and sign-in security settings are not collected.",
+			"display": {
+				"label": "Your Discord profile",
+				"detail": "Username, display name, avatar and banner hashes, bio, language and Nitro level. Not your email address, phone number or sign-in security settings."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,20}$",
+						"description": "Discord's own user id, stable for the life of the account.",
+						"x_pdpp_role": "secondary"
+					},
+					"username": {
+						"type": "string",
+						"maxLength": 500,
+						"description": "The account's unique username.",
+						"x_pdpp_role": "primary-title"
+					},
+					"global_name": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "Display name shown in place of the username. Null when none is set."
+					},
+					"discriminator": {
+						"type": ["string", "null"],
+						"maxLength": 8,
+						"description": "Legacy four-digit tag; \"0\" for accounts on unique usernames."
+					},
+					"avatar": {
+						"type": ["string", "null"],
+						"maxLength": 80,
+						"description": "Avatar image hash. Null for a default avatar."
+					},
+					"banner": {
+						"type": ["string", "null"],
+						"maxLength": 80,
+						"description": "Profile banner image hash. Null when none is set."
+					},
+					"accent_color": {
+						"type": ["integer", "null"],
+						"description": "Profile accent colour as an integer RGB value."
+					},
+					"bio": {
+						"type": ["string", "null"],
+						"maxLength": 2000,
+						"description": "The owner's \"About Me\" text."
+					},
+					"locale": {
+						"type": ["string", "null"],
+						"maxLength": 20,
+						"description": "The language the owner chose for Discord."
+					},
+					"verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether the email address is verified."
+					},
+					"premium_type": {
+						"type": ["integer", "null"],
+						"description": "Nitro subscription level as Discord's integer code; 0 is none."
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the account was created, derived from the user id.",
+						"x_pdpp_role": "event-time"
+					}
+				},
+				"required": ["id", "username", "created_at"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["username", "global_name", "bio"],
+					"semantic_fields": ["bio"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "servers",
+			"required": false,
+			"description": "The servers (guilds) the owner is a member of. Names and settings of the server itself only; no member lists and no channels.",
+			"display": {
+				"label": "Your Discord servers",
+				"detail": "Server name, icon hash, whether you own it, your permissions in it, and its feature flags."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,20}$",
+						"description": "Discord's own server (guild) id.",
+						"x_pdpp_role": "secondary"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "Server name.",
+						"x_pdpp_role": "primary-title"
+					},
+					"icon": {
+						"type": ["string", "null"],
+						"maxLength": 80,
+						"description": "Server icon image hash. Null when the server has no icon."
+					},
+					"is_owner": {
+						"type": ["boolean", "null"],
+						"description": "Whether the owner of this data owns the server."
+					},
+					"permissions": {
+						"type": ["string", "null"],
+						"maxLength": 40,
+						"description": "The owner's permissions in the server, as Discord's bit set in decimal."
+					},
+					"features": {
+						"type": "array",
+						"items": {
+							"type": "string",
+							"maxLength": 80
+						},
+						"description": "Discord's feature flags for the server."
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the server was created, derived from the server id. Not when the owner joined: Discord does not return that here."
+					}
+				},
+				"required": ["id", "features", "created_at"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "connections",
+			"required": false,
+			"description": "Accounts on other services the owner linked to their Discord profile. Access tokens for those services are never collected.",
+			"display": {
+				"label": "Your linked accounts",
+				"detail": "The linked service, your account name and id on it, and its visibility and sync settings."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"maxLength": 261,
+						"description": "The service type and the linked account's id on it, joined with a colon.",
+						"x_pdpp_role": "secondary"
+					},
+					"type": {
+						"type": "string",
+						"maxLength": 60,
+						"description": "The linked service, in Discord's own vocabulary (github, spotify, steam)."
+					},
+					"account_id": {
+						"type": "string",
+						"maxLength": 200,
+						"description": "The linked account's id on that service."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The linked account's username on that service.",
+						"x_pdpp_role": "primary-title"
+					},
+					"verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether Discord verified the link."
+					},
+					"revoked": {
+						"type": ["boolean", "null"],
+						"description": "Whether the link is revoked."
+					},
+					"visibility": {
+						"type": ["integer", "null"],
+						"description": "Who can see the link on the owner's profile: 0 no one, 1 everyone."
+					},
+					"friend_sync": {
+						"type": ["boolean", "null"],
+						"description": "Whether friend sync is on for the link."
+					},
+					"show_activity": {
+						"type": ["boolean", "null"],
+						"description": "Whether activity from the linked service shows in presence."
+					},
+					"two_way_link": {
+						"type": ["boolean", "null"],
+						"description": "Whether the link is confirmed from both sides."
+					}
+				},
+				"required": ["id", "type", "account_id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "type"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["type"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "messages",
+			"required": false,
+			"description": "Messages the owner themselves wrote in servers, from the most recent 90 days. Other people's messages are never collected, and neither are direct messages or group DMs. A run saves at most about 1,000 messages from at most 25 servers; later runs continue with the remaining servers. Discord's search listing stops at offset 9,975, accepted as a server's range end; a server whose walk is cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again on the next run.",
+			"display": {
+				"label": "Your messages in servers",
+				"detail": "The text you wrote, when you sent and edited it, the server and channel, and the names and sizes of files you attached. No direct messages, and nothing written by anyone else."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,20}$",
+						"description": "Discord's own message id.",
+						"x_pdpp_role": "secondary"
+					},
+					"server_id": {
+						"type": "string",
+						"pattern": "^[0-9]{1,20}$",
+						"description": "The server the message was sent in. Joins to servers.id."
+					},
+					"server_name": {
+						"type": ["string", "null"],
+						"maxLength": 500,
+						"description": "The server's name when the message was collected."
+					},
+					"channel_id": {
+						"type": ["string", "null"],
+						"pattern": "^[0-9]{1,20}$",
+						"description": "The channel or thread the message was sent in."
+					},
+					"content": {
+						"type": ["string", "null"],
+						"maxLength": 8000,
+						"description": "The message text as the owner wrote it, including Discord's own mention and emoji markup. Null for a message with no text, such as an attachment alone.",
+						"x_pdpp_role": "primary-title"
+					},
+					"timestamp": {
+						"type": "string",
+						"format": "date-time",
+						"description": "When the message was sent, in UTC. This is the stream's consent_time_field.",
+						"x_pdpp_role": "event-time"
+					},
+					"edited_timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the message was last edited. Null when it never was."
+					},
+					"type": {
+						"type": ["integer", "null"],
+						"description": "Discord's integer message type; 0 is a normal message, 19 a reply."
+					},
+					"pinned": {
+						"type": ["boolean", "null"],
+						"description": "Whether the message is pinned in its channel."
+					},
+					"reply_to_message_id": {
+						"type": ["string", "null"],
+						"pattern": "^[0-9]{1,20}$",
+						"description": "The id of the message this one replies to. Only the id: the other message is not collected."
+					},
+					"attachments": {
+						"type": "array",
+						"description": "Files the owner attached. Names and sizes only; no file content and no download link.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,20}$"
+								},
+								"filename": {
+									"type": ["string", "null"],
+									"maxLength": 500
+								},
+								"content_type": {
+									"type": ["string", "null"],
+									"maxLength": 120
+								},
+								"size": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id"]
+						}
+					},
+					"embed_count": {
+						"type": "integer",
+						"description": "How many embeds (link previews) the message carries."
+					}
+				},
+				"required": [
+					"id",
+					"server_id",
+					"timestamp",
+					"attachments",
+					"embed_count"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["content", "server_name"],
+					"semantic_fields": ["content"]
+				},
+				"range_filters": {
+					"timestamp": ["gte", "gt", "lte", "lt"],
+					"edited_timestamp": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["timestamp"],
+					"group_by": ["server_id", "channel_id"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of",
+			"cursor_field": "timestamp",
+			"consent_time_field": "timestamp"
+		}
+	],
+	"reason_display_messages": {
+		"discord_sign_in_required": "Discord needs you to sign in again before this can continue.",
+		"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
+		"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
+		"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
+		"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
+		"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
+		"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
+		"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
+		"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "discord_browser.ts",
+			"exception": "Opens the Discord app before the first sign-in check, passes saved STATE so the server queue resumes, and reports work left for a later run as progress so the host keeps that STATE.",
+			"scope_prefix": "discord",
+			"login_url": "https://discord.com/login",
+			"login_message": "Sign in to Discord, then return here.",
+			"collect_export": "collectDiscordBrowser",
+			"probe_export": "probeDiscordBrowserSession",
+			"summary": {
+				"singular": "item",
+				"plural": "items",
+				"details": ["profile", "servers", "connections", "messages"]
+			}
+		}
+	}
+}

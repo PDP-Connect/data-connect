@@ -1,0 +1,694 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/x-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/x",
+		"display": {
+			"name": "X"
+		}
+	},
+	"connector_key": "x-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
+	"version": "0.1.20",
+	"display_name": "X (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 604800,
+			"minimum_interval_seconds": 86400,
+			"maximum_staleness_seconds": 2592000,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "high",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection reads what the x.com web app loads for the owner's own signed-in session; it sends no request of its own. X's terms do not permit automated access, and reading posts spends the owner's own daily reading allowance, so the owner starts every run and no run happens in the background. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run reads at most about 400 posts in total, about 100 for each of posts, replies, likes and bookmarks; later runs stop each list at the first post already collected. It does one thing at a time, pauses 2 to 5 seconds between actions, never retries, and stops the whole run on a rate limit, an error response or a lost session. Run it at most once a day."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile, posts, likes and bookmarks. Desktop, incremental second runs and Android are not verified. X's terms do not permit automated access; see the connector README for the owner's legal basis and the limits this connector keeps to."
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The signed-in owner's own X profile, as x.com shows it to them.",
+			"display": {
+				"label": "Your X profile",
+				"detail": "Handle, display name, bio, location, website, profile and banner image addresses, when the account was created, and your follower, following, post and like counts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "X's own numeric id for the account, as a string. Stable across handle changes."
+					},
+					"handle": {
+						"type": "string",
+						"description": "The account's handle, without the @.",
+						"x_pdpp_role": "primary-title"
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "The account's display name."
+					},
+					"url": {
+						"type": "string",
+						"description": "The profile's address on x.com."
+					},
+					"bio": {
+						"type": ["string", "null"],
+						"description": "The profile's bio text."
+					},
+					"location": {
+						"type": ["string", "null"],
+						"description": "The location text on the profile, as the owner typed it."
+					},
+					"website_url": {
+						"type": ["string", "null"],
+						"description": "The website linked from the profile."
+					},
+					"avatar_url": {
+						"type": ["string", "null"],
+						"description": "The address of the profile image. The image itself is not collected."
+					},
+					"banner_url": {
+						"type": ["string", "null"],
+						"description": "The address of the banner image. The image itself is not collected."
+					},
+					"account_created_at": {
+						"type": ["string", "null"],
+						"description": "When the account was created, ISO-8601 UTC.",
+						"format": "date-time"
+					},
+					"followers_count": {
+						"type": ["integer", "null"],
+						"description": "Accounts following this one when it was collected."
+					},
+					"following_count": {
+						"type": ["integer", "null"],
+						"description": "Accounts this one followed when it was collected."
+					},
+					"posts_count": {
+						"type": ["integer", "null"],
+						"description": "Posts on the account when it was collected."
+					},
+					"likes_count": {
+						"type": ["integer", "null"],
+						"description": "Posts the account had liked when it was collected."
+					},
+					"is_blue_verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether the account shows X's paid verification mark."
+					},
+					"is_verified": {
+						"type": ["boolean", "null"],
+						"description": "Whether X reports the account as verified, apart from the paid mark."
+					},
+					"is_protected": {
+						"type": ["boolean", "null"],
+						"description": "Whether the account's posts are protected (visible to approved followers only)."
+					}
+				},
+				"required": ["id", "handle", "url"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["handle", "name", "bio", "location"],
+					"semantic_fields": ["bio"]
+				},
+				"range_filters": {
+					"account_created_at": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "posts",
+			"required": false,
+			"description": "Posts the signed-in owner wrote on X: original posts, replies and quotes, and reposts where X lists them. Other people's posts in the same threads are not saved. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"display": {
+				"label": "Your X posts",
+				"detail": "Your posts and replies: text, when you posted, what it replied to or quoted, links, hashtags, mentions, media addresses, and like, repost, reply, quote, bookmark and view counts. No direct messages."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "X's own numeric id for the post, as a string. Stable."
+					},
+					"url": {
+						"type": ["string", "null"],
+						"description": "The post's address on x.com. Null when X did not send the author's handle."
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["post", "reply", "quote", "repost"],
+						"description": "What the post is: an original post, a reply to another post, a quote of another post, or a repost. A reply that also quotes is a reply."
+					},
+					"created_at": {
+						"type": "string",
+						"description": "When the post was created, ISO-8601 UTC.",
+						"format": "date-time"
+					},
+					"text": {
+						"type": ["string", "null"],
+						"description": "The post's text. For a long post this is the full text, not the truncated head.",
+						"x_pdpp_role": "primary-title"
+					},
+					"lang": {
+						"type": ["string", "null"],
+						"description": "The language X detected for the post, as X's code (for example en, or und when undetermined)."
+					},
+					"author_id": {
+						"type": "string",
+						"description": "X's numeric id for the account that wrote the post."
+					},
+					"author_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account that wrote the post, without the @."
+					},
+					"author_name": {
+						"type": ["string", "null"],
+						"description": "The display name of the account that wrote the post."
+					},
+					"conversation_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post that started the thread this post belongs to."
+					},
+					"in_reply_to_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one replies to. Null unless it is a reply."
+					},
+					"in_reply_to_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account this post replies to, without the @."
+					},
+					"quoted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one quotes. Null when it quotes nothing or the quoted post is unavailable."
+					},
+					"reposted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one reposts. Null unless kind is repost."
+					},
+					"like_count": {
+						"type": ["integer", "null"],
+						"description": "Likes on the post when it was collected."
+					},
+					"repost_count": {
+						"type": ["integer", "null"],
+						"description": "Reposts of the post when it was collected."
+					},
+					"reply_count": {
+						"type": ["integer", "null"],
+						"description": "Replies to the post when it was collected."
+					},
+					"quote_count": {
+						"type": ["integer", "null"],
+						"description": "Quotes of the post when it was collected."
+					},
+					"bookmark_count": {
+						"type": ["integer", "null"],
+						"description": "Bookmarks of the post when it was collected."
+					},
+					"view_count": {
+						"type": ["integer", "null"],
+						"description": "Views of the post when it was collected. Null when X did not report a count."
+					},
+					"hashtags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Hashtags in the post, without the #."
+					},
+					"mention_handles": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Handles the post mentions, without the @."
+					},
+					"urls": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The full addresses of the links in the post."
+					},
+					"media": {
+						"type": "array",
+						"description": "Photos, videos and GIFs attached to the post: the kind and the address of the image or video poster. The files themselves are not collected.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"type": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": "string"
+								}
+							},
+							"required": ["type", "url"]
+						}
+					},
+					"sort_index": {
+						"type": ["string", "null"],
+						"description": "X's position key for the post in the list it was read from. Larger is nearer the top. For likes and bookmarks it follows the order they were made, which X does not otherwise date."
+					}
+				},
+				"required": [
+					"id",
+					"kind",
+					"created_at",
+					"author_id",
+					"hashtags",
+					"mention_handles",
+					"urls",
+					"media"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "created_at",
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["text"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"],
+					"group_by": ["kind", "lang"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "likes",
+			"required": false,
+			"description": "Posts the signed-in owner liked on X, with who wrote each and its text. X does not say when a post was liked, so this stream cannot be limited to a date range. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"display": {
+				"label": "Posts you liked on X",
+				"detail": "The posts you liked: who wrote each, its text, when it was posted, links, hashtags, mentions, media addresses and its counts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "X's own numeric id for the post, as a string. Stable."
+					},
+					"url": {
+						"type": ["string", "null"],
+						"description": "The post's address on x.com. Null when X did not send the author's handle."
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["post", "reply", "quote", "repost"],
+						"description": "What the post is: an original post, a reply to another post, a quote of another post, or a repost. A reply that also quotes is a reply."
+					},
+					"created_at": {
+						"type": "string",
+						"description": "When the post was created, ISO-8601 UTC.",
+						"format": "date-time"
+					},
+					"text": {
+						"type": ["string", "null"],
+						"description": "The post's text. For a long post this is the full text, not the truncated head.",
+						"x_pdpp_role": "primary-title"
+					},
+					"lang": {
+						"type": ["string", "null"],
+						"description": "The language X detected for the post, as X's code (for example en, or und when undetermined)."
+					},
+					"author_id": {
+						"type": "string",
+						"description": "X's numeric id for the account that wrote the post."
+					},
+					"author_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account that wrote the post, without the @."
+					},
+					"author_name": {
+						"type": ["string", "null"],
+						"description": "The display name of the account that wrote the post."
+					},
+					"conversation_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post that started the thread this post belongs to."
+					},
+					"in_reply_to_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one replies to. Null unless it is a reply."
+					},
+					"in_reply_to_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account this post replies to, without the @."
+					},
+					"quoted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one quotes. Null when it quotes nothing or the quoted post is unavailable."
+					},
+					"reposted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one reposts. Null unless kind is repost."
+					},
+					"like_count": {
+						"type": ["integer", "null"],
+						"description": "Likes on the post when it was collected."
+					},
+					"repost_count": {
+						"type": ["integer", "null"],
+						"description": "Reposts of the post when it was collected."
+					},
+					"reply_count": {
+						"type": ["integer", "null"],
+						"description": "Replies to the post when it was collected."
+					},
+					"quote_count": {
+						"type": ["integer", "null"],
+						"description": "Quotes of the post when it was collected."
+					},
+					"bookmark_count": {
+						"type": ["integer", "null"],
+						"description": "Bookmarks of the post when it was collected."
+					},
+					"view_count": {
+						"type": ["integer", "null"],
+						"description": "Views of the post when it was collected. Null when X did not report a count."
+					},
+					"hashtags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Hashtags in the post, without the #."
+					},
+					"mention_handles": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Handles the post mentions, without the @."
+					},
+					"urls": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The full addresses of the links in the post."
+					},
+					"media": {
+						"type": "array",
+						"description": "Photos, videos and GIFs attached to the post: the kind and the address of the image or video poster. The files themselves are not collected.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"type": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": "string"
+								}
+							},
+							"required": ["type", "url"]
+						}
+					},
+					"sort_index": {
+						"type": ["string", "null"],
+						"description": "X's position key for the post in the list it was read from. Larger is nearer the top. For likes and bookmarks it follows the order they were made, which X does not otherwise date."
+					}
+				},
+				"required": [
+					"id",
+					"kind",
+					"created_at",
+					"author_id",
+					"hashtags",
+					"mention_handles",
+					"urls",
+					"media"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["text"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"],
+					"group_by": ["kind", "lang"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "bookmarks",
+			"required": false,
+			"description": "Posts the signed-in owner bookmarked on X, with who wrote each and its text. X does not say when a post was bookmarked, so this stream cannot be limited to a date range. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"display": {
+				"label": "Posts you bookmarked on X",
+				"detail": "The posts you bookmarked: who wrote each, its text, when it was posted, links, hashtags, mentions, media addresses and its counts."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "X's own numeric id for the post, as a string. Stable."
+					},
+					"url": {
+						"type": ["string", "null"],
+						"description": "The post's address on x.com. Null when X did not send the author's handle."
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["post", "reply", "quote", "repost"],
+						"description": "What the post is: an original post, a reply to another post, a quote of another post, or a repost. A reply that also quotes is a reply."
+					},
+					"created_at": {
+						"type": "string",
+						"description": "When the post was created, ISO-8601 UTC.",
+						"format": "date-time"
+					},
+					"text": {
+						"type": ["string", "null"],
+						"description": "The post's text. For a long post this is the full text, not the truncated head.",
+						"x_pdpp_role": "primary-title"
+					},
+					"lang": {
+						"type": ["string", "null"],
+						"description": "The language X detected for the post, as X's code (for example en, or und when undetermined)."
+					},
+					"author_id": {
+						"type": "string",
+						"description": "X's numeric id for the account that wrote the post."
+					},
+					"author_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account that wrote the post, without the @."
+					},
+					"author_name": {
+						"type": ["string", "null"],
+						"description": "The display name of the account that wrote the post."
+					},
+					"conversation_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post that started the thread this post belongs to."
+					},
+					"in_reply_to_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one replies to. Null unless it is a reply."
+					},
+					"in_reply_to_handle": {
+						"type": ["string", "null"],
+						"description": "The handle of the account this post replies to, without the @."
+					},
+					"quoted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one quotes. Null when it quotes nothing or the quoted post is unavailable."
+					},
+					"reposted_post_id": {
+						"type": ["string", "null"],
+						"description": "The id of the post this one reposts. Null unless kind is repost."
+					},
+					"like_count": {
+						"type": ["integer", "null"],
+						"description": "Likes on the post when it was collected."
+					},
+					"repost_count": {
+						"type": ["integer", "null"],
+						"description": "Reposts of the post when it was collected."
+					},
+					"reply_count": {
+						"type": ["integer", "null"],
+						"description": "Replies to the post when it was collected."
+					},
+					"quote_count": {
+						"type": ["integer", "null"],
+						"description": "Quotes of the post when it was collected."
+					},
+					"bookmark_count": {
+						"type": ["integer", "null"],
+						"description": "Bookmarks of the post when it was collected."
+					},
+					"view_count": {
+						"type": ["integer", "null"],
+						"description": "Views of the post when it was collected. Null when X did not report a count."
+					},
+					"hashtags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Hashtags in the post, without the #."
+					},
+					"mention_handles": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Handles the post mentions, without the @."
+					},
+					"urls": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The full addresses of the links in the post."
+					},
+					"media": {
+						"type": "array",
+						"description": "Photos, videos and GIFs attached to the post: the kind and the address of the image or video poster. The files themselves are not collected.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"type": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": "string"
+								}
+							},
+							"required": ["type", "url"]
+						}
+					},
+					"sort_index": {
+						"type": ["string", "null"],
+						"description": "X's position key for the post in the list it was read from. Larger is nearer the top. For likes and bookmarks it follows the order they were made, which X does not otherwise date."
+					}
+				},
+				"required": [
+					"id",
+					"kind",
+					"created_at",
+					"author_id",
+					"hashtags",
+					"mention_handles",
+					"urls",
+					"media"
+				]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["text"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"],
+					"group_by": ["kind", "lang"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "X stopped answering normally partway through, so this run stopped straight away. What was already read is saved. Wait a while, then run it again.",
+		"list_end_unconfirmed": "X stopped loading more before the end of the list, so some older items may be missing. What was read is saved.",
+		"records_unreadable": "Some posts couldn't be read and were skipped. Everything else was collected normally.",
+		"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. Run it again tomorrow for the rest.",
+		"run_stopped_early": "The run stopped before it got to this part. Nothing is wrong with it. Run it again later.",
+		"sign_in_required": "X needs you to sign in again before this can continue.",
+		"source_rate_limited": "X asked this connector to slow down, so the run stopped straight away. What was already read is saved. Wait a day before running it again.",
+		"source_unreadable": "X showed a page this connector doesn't recognise, so this part wasn't read. X may have changed its site. Please report this rather than retrying."
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "x_browser.ts",
+			"exception": "Carries STATE between runs, so a later run stops at the first post already collected instead of reading the owner's allowance again; opens x.com before the first sign-in check.",
+			"scope_prefix": "x",
+			"login_url": "https://x.com/login",
+			"login_message": "Sign in to X, then return here.",
+			"collect_export": "collectXBrowser",
+			"probe_export": "probeXSession",
+			"summary": {
+				"singular": "item",
+				"plural": "items",
+				"details": ["profile", "posts", "likes", "bookmarks"]
+			}
+		}
+	}
+}

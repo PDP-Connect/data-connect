@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 
@@ -74,7 +74,7 @@ const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token"
 const SUPPORTED_RANGE_OPERATORS = new Set(["gte", "gt", "lte", "lt"]);
 const AGGREGATION_DECLARED_CONNECTORS = ["ynab", "chase", "usaa", "gmail", "slack"];
 const POLYFILL_MANIFESTS_BY_NAME = new Map(
-  readPolyfillManifests().map((entry) => [entry.file.replace(REGEXP_1, ""), entry.manifest as Manifest])
+  readShippedManifests().map((entry) => [entry.file.replace(REGEXP_1, ""), entry.manifest as Manifest])
 );
 const POLYFILL_MANIFEST_NAMES = [...POLYFILL_MANIFESTS_BY_NAME.keys()].sort();
 
@@ -89,6 +89,36 @@ function readManifest(name: string): Manifest {
   // mutation into every later read of the same manifest.
   return structuredClone(manifest);
 }
+
+function redditScoreRangeManifest(): Manifest {
+  return {
+    connector_id: "https://registry.pdpp.dev/connectors/reddit",
+    connector_key: "reddit",
+    display_name: "Synthetic Reddit",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "submitted",
+        primary_key: ["id"],
+        query: { range_filters: { score: ["gte", "gt", "lte", "lt"] } },
+        schema: {
+          properties: {
+            created_utc: { format: "date-time", type: "string" },
+            id: { type: "string" },
+            score: { type: "integer" },
+          },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
+const REDDIT_SCORE_RANGE_MANIFEST = redditScoreRangeManifest();
 
 function hasQueryRangeFilters(manifest: Manifest): boolean {
   return manifest.streams.some((stream) => Object.keys(stream.query?.range_filters || {}).length > 0);
@@ -568,13 +598,17 @@ test("first-party polyfill manifests with aggregation declarations register thro
 
 test("first-party polyfill range filters execute against synthetic records", async () => {
   await withHarness(async ({ asUrl, rsUrl }) => {
-    for (const manifestName of RANGE_FILTERED_CONNECTORS) {
+    for (const manifestName of new Set([...RANGE_FILTERED_CONNECTORS, "reddit"])) {
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-      await registerManifest(asUrl, readManifest(manifestName));
+      await registerManifest(
+        asUrl,
+        manifestName === "reddit" ? REDDIT_SCORE_RANGE_MANIFEST : readManifest(manifestName)
+      );
     }
     const ownerToken = await issueOwnerToken(asUrl, "polyfill_range_owner");
     for (const queryCase of rangeQueryCases) {
-      const manifest = readManifest(queryCase.manifestName);
+      const manifest =
+        queryCase.manifestName === "reddit" ? REDDIT_SCORE_RANGE_MANIFEST : readManifest(queryCase.manifestName);
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
       await seedStream(rsUrl, ownerToken, manifest.connector_id, queryCase.stream, queryCase.records);
       const url =
