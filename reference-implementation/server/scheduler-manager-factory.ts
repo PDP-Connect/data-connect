@@ -29,7 +29,6 @@ import type {
 } from "../runtime/scheduler.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
-import { describeRunConfigFailure } from "./connector-run-config.ts";
 import { getConnectorManifest } from "./auth.ts";
 import { buildConnectionScopedRunEnvResolver } from "./connection-scoped-run-env.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
@@ -451,10 +450,17 @@ function projectManagedControllerTerminalRun(
     typeof terminalData.terminal_reason === "string" ? (terminalData.terminal_reason as TerminalReason) : null;
   return {
     checkpoint_summary: checkpointSummary,
-    connector_error: connectorError ?? describeRunConfigFailure(failureReason),
+    connector_error: connectorError,
     failure_reason: failureReason,
     known_gaps: knownGaps,
     run_id: handle.run_id,
+    runtime_retryable:
+      connectorError === null &&
+      terminalData.runtime_failure &&
+      typeof terminalData.runtime_failure === "object" &&
+      typeof (terminalData.runtime_failure as { retryable?: unknown }).retryable === "boolean"
+        ? (terminalData.runtime_failure as { retryable: boolean }).retryable
+        : null,
     status: terminalStatus,
     terminal_reason: terminalReason,
     trace_id: handle.trace_id,

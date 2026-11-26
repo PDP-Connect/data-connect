@@ -205,7 +205,11 @@ function isAdmissionDeniedMessage(message: string): boolean {
 
 function coerceRunError(err: unknown): RunConnectorError {
   if (err instanceof RunConfigBlockedError) {
-    return { connector_error: describeRunConfigFailure(err.reason), failure_reason: err.reason, message: err.message };
+    return {
+      failure_reason: err.reason,
+      message: err.message,
+      runtime_retryable: describeRunConfigFailure(err.reason)?.retryable ?? false,
+    };
   }
   if (err && typeof err === "object") {
     const candidate = err as RunConnectorError;
@@ -529,7 +533,7 @@ function runTimedOutError(result: RunConnectorResult, maxRunWallClockMs: number)
     // known_gaps: [] / checkpoint_summary: null on every timed-out run
     // regardless of how much work it durably completed before being killed.
     checkpoint_summary: result.checkpoint_summary || null,
-    connector_error: result.connector_error || { message },
+    connector_error: result.connector_error || null,
     failure_reason: "run_timed_out",
     known_gaps: result.known_gaps || null,
     message,

@@ -202,6 +202,7 @@ test("an unreadable config store records a typed terminal and retries with sched
   assert.equal(terminal?.event_type, "run.failed");
   assert.equal(terminal?.data?.reason, "store_unreadable");
   assert.equal(records[0]?.attempt, 2);
+  assert.equal(records[0]?.connectorError, null, "a runtime store failure is not a connector terminal claim");
   const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
   assert.equal(stored?.failureReason, "store_unreadable");
 });
@@ -222,6 +223,7 @@ test("automatic runs skip an invalid revision once and resume when the active re
   assert.equal(refusal?.status, "failed");
   assert.equal(refusal?.failureReason, "invalid_active_config");
   assert.equal(refusal?.attempt, 1, "the invalid revision does not retry in the same tick");
+  assert.equal(refusal?.connectorError, null, "a runtime config refusal is not a connector terminal claim");
   assert.equal(pending?.status, "skipped");
   assert.ok(pending?.error?.includes("invalid_active_config:1"));
   await waitForScheduledConfig(() => reads >= 5);
