@@ -11,7 +11,7 @@ let liveCalls = 0;
 const live = async () => { liveCalls++; throw Error("Practice called a live loader or action"); };
 mock.module("server-only", { namedExports: {} });
 mock.module("next/navigation", { namedExports: { useRouter: () => ({ refresh() {} }), usePathname: () => "/settings", useSearchParams: () => new URLSearchParams() } });
-mock.module(new URL("../components/recordroom-shell-with-palette.tsx", import.meta.url).href, { namedExports: { RecordroomShellWithPalette: ({ children }: { children: React.ReactNode }) => createElement("div", null, children) } });
+mock.module(new URL("../components/recordroom-shell-with-palette.tsx", import.meta.url).href, { namedExports: { RecordroomShellWithPalette: ({ children }: { children: React.ReactNode }) => createElement("main", null, children) } });
 mock.module(new URL("../lib/owner-credential-client.ts", import.meta.url).href, { namedExports: { hasValidLocalOwnerCredentialRevealProofCookie: live } });
 mock.module(new URL("./settings-summary-data.ts", import.meta.url).href, { namedExports: { loadSettingsSummary: live } });
 mock.module(new URL("./owner-password-data.ts", import.meta.url).href, { namedExports: { loadOwnerPasswordSet: live, loadOwnerPasswordSource: live } });
@@ -37,6 +37,18 @@ for (const demo of settingsPracticeNames) test(`Settings ${demo}: plain page, no
     await act(async () => {});
     const text = container.textContent ?? '';
     assert.equal(container.querySelector('details'), null);
+    assert.equal(container.querySelectorAll('main').length, 1);
+    assert.doesNotMatch(container.querySelector('main > div')?.className ?? '', /min-w-\[/);
+    if (demo === 'browser-desktop') assert.doesNotMatch(text, /Recovery code|Start at login/);
+    if (['off', 'choose'].includes(demo)) {
+      assert.doesNotMatch(text, /can't work|Try again/);
+      assert.ok([...container.querySelectorAll('button')].some(button => button.textContent?.startsWith('Turn on')));
+    }
+    if (demo === 'desktop-fresh') { assert.doesNotMatch(text, /Step 1/); assert.match(text, /DataConnect made a password for you/); assert.match(text, /To turn on remote access, choose your own password first/); }
+    if (demo === 'on-private') { assert.match(text, /Works on your devices/); assert.doesNotMatch(text, /Next: connect ChatGPT/); }
+    if (demo === 'on-public') assert.doesNotMatch(text, /Copy details for support/);
+    if (demo === 'off-unconfirmed') { assert.equal((text.match(/couldn.t confirm/g) ?? []).length, 1); assert.doesNotMatch(text, /Works from the internet/); }
+
     assert.doesNotMatch(text, /\b(?:exporter|heartbeat|stale|bearer|enrollment|revoked|VAPID|jitter|PDPP|Personal Server|keychain|connector|readiness|deployment|origin)\b/i);
     assert.doesNotMatch(text, /\b(?:PDPP_|DATACONNECT_)|Code:|\b[a-z]+_[a-z]+_[a-z]+\b/);
     assert.equal([...container.querySelectorAll('button')].filter(row => row.textContent === 'Revoke access token').length, 0);
@@ -44,7 +56,7 @@ for (const demo of settingsPracticeNames) test(`Settings ${demo}: plain page, no
     if (demo === 'sessions-thirteen') assert.match(text, /Show all 13/);
     if (demo.startsWith('server')) assert.doesNotMatch(text, /Quit and reopen/);
     // Practice controls may explain their simulated action but must never call the live actions above.
-    for (const label of ['Show password', 'Set password', 'Change password', 'Show recovery code']) {
+    for (const label of ['Show password', 'Choose a password', 'Change password', 'Show recovery code']) {
       const button = [...container.querySelectorAll('button')].find(row => row.textContent === label);
       if (button) await act(async () => button.click());
     }

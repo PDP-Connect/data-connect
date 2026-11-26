@@ -10,6 +10,7 @@ import { NotificationsRow } from "./notifications-row.tsx";
 for (const state of ['unsupported','on','off','failed'] as const) test(`notification summary reads this browser: ${state}`, async () => {
   const dom = new JSDOM('<div id="root"></div>');
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.defineProperty(dom.window, 'isSecureContext', { value: true });
   const container = dom.window.document.querySelector('#root'); assert.ok(container);
   if (state !== 'unsupported') {
     Object.defineProperty(dom.window, 'Notification', { configurable: true, value: { permission: 'granted' } });

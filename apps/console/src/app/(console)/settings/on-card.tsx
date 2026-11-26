@@ -171,13 +171,13 @@ export function OnCard({
   const ends = expiryLine(route);
   const cost = shortCost(facts);
   const readers = trafficReaders(facts);
-  const through = way ? `Through ${way.title} (${way.provider})${cost ? ` · ${cost}` : ""}` : null;
+  const through = way ? `Through ${way.title}${cost ? ` · ${cost}` : ""}` : null;
   const access = accessStatuses(route, way?.reach);
   return (
     <section aria-label="On" className="grid">
       <p className="border-b border-border/70 py-3 text-sm" role="status">
         <span className="text-primary">On</span>
-        <span className="text-muted-foreground"> · {proofLine(route, now, { synthetic })}</span>
+        <span className="text-muted-foreground"> · {way?.reach === "tailnet" ? "Works on your devices" : proofLine(route, now, { synthetic })}</span>
       </p>
       <div className="grid gap-3 py-3">
         {addressChanged ? (
@@ -205,7 +205,7 @@ export function OnCard({
           <ReachStatus access={access.chatgpt} label="ChatGPT" />
           <ReachStatus access={access.phone} label="Your phone" />
         </section>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border/70 py-3">
+        {route.verification.status === "verified" && route.verification.vantage === "public" ? <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border/70 py-3">
           <div className="grid gap-0.5">
             <span className="text-sm font-medium">Next: connect ChatGPT or Claude</span>
             <span className="pdpp-caption">Connect apps uses this address and asks you to approve each app.</span>
@@ -213,7 +213,7 @@ export function OnCard({
           <a className="text-sm font-medium underline-offset-4 hover:underline" href={dashboardRoutes.section.connect}>
             Connect apps ›
           </a>
-        </div>
+        </div> : null}
         <div className="flex flex-wrap gap-3">
           <Button disabled={busy} onClick={onTurnOff} type="button" variant="outline">
             Turn off

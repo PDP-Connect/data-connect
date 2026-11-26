@@ -282,33 +282,25 @@ const changesHostFor = (calls: Call[], providerId: string) =>
       (call.body?.providerId === providerId || call.url.includes(`d-${providerId}/`))
   );
 
-test("the phone and ChatGPT outcomes lead; Other ways still opens the full list", async () => {
-  await withScreen(noTailscale, async ({ container, press, text }) => {
-    const card = container.querySelector("[aria-label='Recommended way']")!;
-    assert.match(card.textContent!, /Temporary address/);
-    // RAISE rule 3: the suggested option uses plain words without a recommendation badge.
-    assert.doesNotMatch(card.textContent!, /Recommended/);
-    assert.match(text(), /Use DataConnect from my phone/);
-    assert.match(text(), /Let ChatGPT reach it/);
-    assert.match(card.textContent!, /Free\. Needs no account\./);
-    assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
-    await press(/^Other ways$/);
-    const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
-    // RAISE rule 4: the alternative groups use the same plain outcome language.
-    assert.deepEqual(headings.slice(0, 2), ["Addresses ChatGPT can open", "Your phone and computers"]);
-    assert.match(headings[2] ?? "", /^Details · /, headings[2] ?? "no Details row");
-    assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
-    assert.equal(container.querySelector("fieldset details"), null, "the alternatives are shown without folds");
-    const shown = container.querySelector("fieldset")!.textContent!;
-    assert.doesNotMatch(shown, /Label |ngrok-tcp|detect-only|deferred|admitted/);
-    assert.deepEqual(bannedIn(shown), []);
+test("one list retains every former alternative and marks the selected way", async () => {
+  await withScreen(noTailscale, async ({ container, text }) => {
+    const list = container.querySelector("[aria-label='Choose a way']")!;
+    assert.ok(list);
+    const radios = [...list.querySelectorAll<HTMLInputElement>("input[type=radio]")];
+    const expected = otherWays(noTailscale as never, {}, null, {}).flatMap(group => group.rows).map(row => row.providerId).sort();
+    assert.deepEqual(radios.map(radio => radio.value).sort(), expected);
+    assert.equal(radios.filter(radio => radio.checked).length, 1);
+    assert.match(list.textContent!, /Temporary address/);
+    assert.match(text(), /Needs the Tailscale app, signed in/);
+    assert.equal(container.querySelector("details"), null);
+    assert.deepEqual(bannedIn(list.textContent!), []);
   });
 });
 
 test("choosing another way prepares that way and never approves without the click", async () => {
-  await withScreen(tailscaleReady, async ({ calls, container, press, text, settle }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
-    await press(/^Other ways$/);
+  await withScreen(tailscaleReady, async ({ calls, container,  text, settle }) => {
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Tailscale · public address/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
     const before = calls.filter((call) => call.url === "/drafts").length;
     await act(async () => radio.click());
@@ -363,8 +355,8 @@ test("choosing a way that needs a token shows an empty token field and sends no 
       : draft(`d-${providerId}`);
   await withScreen(
     catalog,
-    async ({ calls, container, press, settle }) => {
-      await press(/^Other ways$/);
+    async ({ calls, container,  settle }) => {
+      assert.ok(container.querySelector("[aria-label='Choose a way']"));
       const label = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!;
       const radio = label.querySelector("input")!;
       assert.equal(radio.disabled, false, "the way can be chosen");
@@ -444,8 +436,8 @@ test("choosing managed Cloudflare reserves its sign-in step and shows an empty t
   };
   await withScreen(
     catalog,
-    async ({ calls, container, press, settle }) => {
-      await press(/^Other ways$/);
+    async ({ calls, container,  settle }) => {
+      assert.ok(container.querySelector("[aria-label='Choose a way']"));
       const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
       assert.equal(radio.disabled, false, "the way can be chosen");
       await act(async () => radio.click());
@@ -479,3 +471,29 @@ test("choosing managed Cloudflare reserves its sign-in step and shows an empty t
     route
   );
 });
+
+for (const row of otherWays(inv(tailscaleReady), caps, null).flatMap(
+  group => group.rows
+)) {
+  test(`single list preserves selection of ${row.providerId}`, async () => {
+    await withScreen(tailscaleReady, async ({ container, calls, settle }) => {
+      const radio = container.querySelector<HTMLInputElement>(
+        `input[type=radio][value="${row.providerId}"]`
+      )
+      assert.ok(radio)
+      assert.equal(radio.disabled, !row.usable)
+      if (row.usable) {
+        await act(async () => radio.click())
+        await settle()
+        assert.equal(radio.checked, true)
+        assert.ok(
+          calls.some(
+            call =>
+              call.url === "/drafts" && call.body?.providerId === row.providerId
+          )
+        )
+        assert.deepEqual(mutating(calls), [])
+      }
+    })
+  })
+}

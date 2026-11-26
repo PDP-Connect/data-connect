@@ -8,6 +8,7 @@ export function NotificationsRow({ practice = false }: { practice?: boolean }) {
   useEffect(() => {
     if (practice) { setState("Off"); return; }
     let active = true;
+    if (!window.isSecureContext) { setState("Needs a secure address"); return; }
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
       setState("Not available in this browser"); return;
     }

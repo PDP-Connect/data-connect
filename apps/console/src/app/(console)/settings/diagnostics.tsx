@@ -77,9 +77,9 @@ function supportText(node: ReactNode): string {
   return "";
 }
 
-export function Diagnostics({ children, label = "Details", note }: { children: ReactNode; label?: string; note?: string }) {
+export function Diagnostics({ children, label = "Details", note, technicalOnly = false }: { children: ReactNode; label?: string; note?: string; technicalOnly?: boolean }) {
   const { technical } = useContext(DiagnosticsContext);
-  return technical ? <div className="grid gap-2" data-diagnostics=""><h4>{label}</h4>{note ? <p>{note}</p> : null}{children}</div> : <div data-diagnostics=""><CopyButton label="Copy details for support" text={supportText(children)} /></div>;
+  return !technical && technicalOnly ? null : technical ? <div className="grid gap-2" data-diagnostics=""><h4>{label}</h4>{note ? <p>{note}</p> : null}{children}</div> : <div data-diagnostics=""><CopyButton label="Copy details for support" text={supportText(children)} /></div>;
 }
 
 function CopyButton({ label, text }: { label: string; text: string }) {

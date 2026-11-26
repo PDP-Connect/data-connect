@@ -70,8 +70,8 @@ test("the desktop app can set the missing password before remote access is avail
   const screen = await mount(false)
   try {
     const text = screen.container.textContent ?? ""
-    assert.match(text, /Step 1: Set a password/)
-    assert.match(text, /only\s+thing stopping them/)
+    assert.match(text, /Choose your own password for remote access/)
+    assert.match(text, /To turn on remote access, choose your own password first/)
     assert.doesNotMatch(text, /Turn on remote access/)
     assert.doesNotMatch(text, /Password saved/)
   } finally {
@@ -84,8 +84,8 @@ test("a browser gets directions to the desktop app instead of a dead-end passwor
   const screen = await mount(false)
   try {
     assert.match(screen.container.textContent ?? "", /Set a password from the DataConnect app on the computer that runs it\./)
-    assert.equal([...screen.container.querySelectorAll("button")].some((item) => item.textContent === "Set password"), false)
-    assert.doesNotMatch(screen.container.textContent ?? "", /Step 1: Set a password/)
+    assert.equal([...screen.container.querySelectorAll("button")].some((item) => item.textContent === "Choose a password"), false)
+    assert.doesNotMatch(screen.container.textContent ?? "", /Choose your own password for remote access/)
   } finally {
     await screen.stop()
   }
@@ -96,8 +96,8 @@ test("with a password set there is no step 1 and step 2 is open", async () => {
     const screen = await mount(passwordSet)
     try {
       assert.doesNotMatch(screen.container.textContent ?? "", /Set a password|Password saved/)
-      assert.match(screen.container.textContent ?? "", /Use DataConnect from my phone/)
-      assert.match(screen.container.textContent ?? "", /Let ChatGPT reach it/)
+      assert.match(screen.container.textContent ?? "", /Choose a way/)
+      assert.match(screen.container.textContent ?? "", /Temporary address/)
     } finally {
       await screen.stop()
     }
@@ -145,7 +145,7 @@ test("Set password records the return fragment before the native window opens", 
   windowCalls.length = 0
   const screen = await mount(false)
   try {
-    const button = [...screen.container.querySelectorAll("button")].find(item => item.textContent === "Set password")!
+    const button = [...screen.container.querySelectorAll("button")].find(item => item.textContent === "Choose a password")!
     await act(async () => button.dispatchEvent(new screen.window.MouseEvent("click", { bubbles: true })))
     assert.deepEqual(windowCalls, ["#remote-access-password-set"])
   } finally {

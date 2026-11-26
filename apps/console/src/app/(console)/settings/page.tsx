@@ -49,7 +49,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
 
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <div className="mx-auto grid min-w-0 w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Settings" />
         <Section
           id="remote-access"
@@ -78,22 +78,10 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
           ) : null}
           <SettingsRow href="/deployment/tokens" title="Tokens for scripts and tools" state={summary.tokens === null ? "Could not check" : summary.tokens ? String(summary.tokens) : "None"} />
         </Section>
-        <Section title="Notifications"><NotificationsRow practice={!!practice} /></Section>
-        {managedDesktopHost ? (
-          <Section description="Control how DataConnect starts on the computer that runs it." title="This computer">
-            {/* Shown in any signed-in browser, not only the desktop window: the
-                owner may change how the desktop app starts from a phone that
-                reaches it over remote access (e2e/live-settings.spec.ts). */}
-            {practice ? <DesktopSettingsPractice /> : <DesktopSettingsSetting />}
-            <div className="grid gap-3 py-5">
-              <Text as="h3">Recovery code</Text>
-              {practice ? <RecoveryKeySetting practice /> : <RecoveryKeySetting />}
-            </div>
-          </Section>
-        ) : null}
+        <NotificationsRow practice={!!practice} />
         <Section title="Updates">
           <Text as="p">DataConnect {identity.version}</Text>
-          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases">See the latest version</OpenExternalLink>
+          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases" className="underline">See the latest version</OpenExternalLink>
           <SettingsRow href="/settings/packages" title="Data source updates" state={summary.updates === null ? "Could not check" : summary.updates ? `${summary.updates} available` : "All up to date"} />
         </Section>
         <Section title="Advanced" description="For scripts, other devices, and people who run DataConnect on a server.">
@@ -108,9 +96,18 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
           <SettingsRow href="/deployment/provider-apps" title="Sign-in apps for data sources" />
           <div id="developer-mode"><DeveloperModeSetting /></div>
         </Section>
+        {managedDesktopHost && hasLocalRevealProof ? (
+          <Section description="Control how DataConnect starts on the computer that runs it." title="This computer">
+            {practice ? <DesktopSettingsPractice /> : <DesktopSettingsSetting />}
+            <div className="grid gap-3 py-5">
+              <Text as="h3">Recovery code</Text>
+              {practice ? <RecoveryKeySetting practice /> : <RecoveryKeySetting />}
+            </div>
+          </Section>
+        ) : null}
         <AboutSection identity={identity} />
         <Text as="a" href="/settings/technical" link>Technical details</Text>
-      </main>
+      </div>
     </RecordroomShellWithPalette>
   )
 }

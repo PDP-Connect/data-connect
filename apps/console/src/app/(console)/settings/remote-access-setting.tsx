@@ -47,7 +47,7 @@ import {
   runAction,
   staleReviewCodes,
 } from "./prepare-remote-access.ts";
-import { OtherWays, OutcomeWays, RecommendedWay } from "./choose-way.tsx";
+import { WaysList } from "./choose-way.tsx";
 import {
   type Blocks,
   funnelPolicyActionId,
@@ -171,7 +171,6 @@ export function RemoteAccessSetting({
   // Bumped whenever the way on screen changes. A preparation or click binds to
   // the value it started with and sends nothing positive once it has moved on.
   const selection = useRef(0);
-  const [showOtherWays, setShowOtherWays] = useState(false);
   const [declined, setDeclined] = useState<string | null>(null);
   const [prep, setPrep] = useState<Prep>({ status: "idle" });
   const [prepError, setPrepError] = useState<DisplayError | null>(null);
@@ -443,14 +442,6 @@ export function RemoteAccessSetting({
   // A way the owner already set up and committed is one the host has seen working.
   const setUp = new Set((state.services ?? []).filter((entry) => entry.committed).map((entry) => entry.providerId));
   const recommended = inventory ? recommendedWay(inventory, capabilities, blocks, setUp) : undefined;
-  const canPrepareWay = (provider: NonNullable<typeof inventory>["providers"][number]) =>
-    !wayUnusable(provider, capabilities, blocks) && pickUsage(provider, capabilities) !== null;
-  const phoneProvider = inventory?.providers.find((item) => item.providerId === "tailscale-private" && canPrepareWay(item))
-    ?? inventory?.providers.find((item) => item.reach !== "internet" && canPrepareWay(item))
-    ?? recommended;
-  const chatgptProvider = (recommended?.reach === "internet" && canPrepareWay(recommended) ? recommended : undefined)
-    ?? inventory?.providers.find((item) => item.reach === "internet" && canPrepareWay(item))
-    ?? recommended;
   const pinnedWay = inventory && pinned ? inventory.providers.find((item) => item.providerId === pinned) : undefined;
   // The pinned way stays until it truly cannot be used: a way whose prerequisite
   // is only unreadable for a moment is not one.
@@ -792,7 +783,6 @@ export function RemoteAccessSetting({
   }
   function chooseAnotherWay() {
     if (wayId) setDeclined(wayId);
-    setShowOtherWays(true);
     setPrep({ status: "idle" });
   }
   async function stopOperation(current: Operation) {
@@ -1086,14 +1076,13 @@ export function RemoteAccessSetting({
       {closingPage ? <p className="text-sm" role="status">Turning off… this page will stop working in a moment.</p> : null}
       {passwordMissing && canSetPasswordHere === true ? (
         <div className="grid gap-2 border-y border-border/70 py-3">
-          <h3 className="pdpp-label">Step 1: Set a password</h3>
+          <h3 className="pdpp-label">Choose your own password for remote access</h3>
           <p className="max-w-prose text-sm">
-            Once remote access is on, anyone with your address can reach the sign-in page. Your password is the only
-            thing stopping them, so choose one first.
+            DataConnect made a password for you. To turn on remote access, choose your own password first.
           </p>
           <div className="flex flex-wrap gap-3">
             <Button disabled={busy || stale} onClick={() => void setPassword()} type="button">
-              Set password
+              Choose a password
             </Button>
           </div>
         </div>
@@ -1108,10 +1097,10 @@ export function RemoteAccessSetting({
         {way.detection.checkedAt ? `Provider checked ${formatLocalTime(way.detection.checkedAt)}${way.detection.fresh ? "" : " (stale)"}.` : "Provider has not been checked."}
       </p> : null}
       <RecoveryContext.Provider value={recover}>
-        {error ? <ErrorNotice error={error} /> : null}
-        {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}
+        {error ? <ErrorNotice error={noAnswer ? { ...error, serverMessage: [error.serverMessage, diagnosticsText(noAnswer, appVersion)].filter(Boolean).join("\n") } : error} /> : null}
+        {prepError && !error ? <ErrorNotice action="prepare" error={prepError} /> : null}
       </RecoveryContext.Provider>
-      {stale ? (
+      {stale && !error ? (
         <div className="grid gap-1" role="status">
           <p className="text-sm text-muted-foreground">
             {noAnswer
@@ -1126,16 +1115,16 @@ export function RemoteAccessSetting({
         </div>
       ) : null}
       {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
-      {state.lifecycle?.cleanup === "unconfirmed" ? (
+      {state.lifecycle?.cleanup === "unconfirmed" && visibleRoutes.length === 0 ? (
         <p className="text-sm text-muted-foreground" role="status">{CLEANUP_UNCONFIRMED}</p>
       ) : null}
-      {inventory ? null : (
+      {inventory || error ? null : (
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
       {inventory?.earlierSetup === "needs_reentry" ? (
         <p className="text-sm text-muted-foreground">An earlier setup was saved by an older version. Enter it again to turn remote access on.</p>
       ) : null}
-      {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
+      {journalWarning && state.lifecycle?.cleanup !== "unconfirmed" ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
         <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
       ) : null}
@@ -1144,34 +1133,14 @@ export function RemoteAccessSetting({
       ) : null}
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
-          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
+          {visibleRoutes.length === 0 && !operation && reservations.length === 0 ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
           <div className="grid gap-4 p-4">
             <div className="grid gap-1">
               <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
               <h3 className="text-base font-semibold">Turn on</h3>
             </div>
             <p className="text-sm text-muted-foreground">Choose whether to use DataConnect from your phone or with ChatGPT.</p>
-            {phoneProvider && chatgptProvider ? (
-              <>
-                <OutcomeWays
-                  chatgpt={wayRow(chatgptProvider, capabilities, blocks)}
-                  disabled={mutationBlocked}
-                  onPick={pickWay}
-                  phone={wayRow(phoneProvider, capabilities, blocks)}
-                  pickedId={wayId}
-                />
-                {recommended ? (
-                  <div className="grid gap-2">
-                    <RecommendedWay
-                      checked={wayId === recommended.providerId}
-                      disabled={mutationBlocked}
-                      onPick={pickWay}
-                      row={wayRow(recommended, capabilities, blocks)}
-                    />
-                  </div>
-                ) : null}
-              </>
-            ) : null}
+            {inventory ? <WaysList inventory={inventory} capabilities={capabilities} blocks={blocks} disabled={mutationBlocked} pickedId={wayId} onPick={pickWay} /> : null}
             {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
             {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
             {done?.kind === "allow" && declined !== wayId ? (
@@ -1207,27 +1176,6 @@ export function RemoteAccessSetting({
             ) : null}
             {wayId && wayUsage === null ? (
               <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
-            ) : null}
-            <Button
-              aria-expanded={showOtherWays}
-              className="justify-self-start"
-              disabled={busy}
-              onClick={() => setShowOtherWays((open) => !open)}
-              type="button"
-              variant="outline"
-            >
-              Other ways
-            </Button>
-            {showOtherWays && inventory ? (
-              <OtherWays
-                blocks={blocks}
-                capabilities={capabilities}
-                disabled={mutationBlocked}
-                inventory={inventory}
-                onPick={pickWay}
-                pickedId={wayId}
-                recommendedId={recommended?.providerId ?? null}
-              />
             ) : null}
           </div>
         </section>
@@ -1413,13 +1361,13 @@ export function RemoteAccessSetting({
                 way={onWay}
               >
                 {extras}
-                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
+                <Diagnostics technicalOnly={!hostReasonShown} label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
                   {detailsBody}
                 </Diagnostics>
               </OnCard>
             );
           }
-          const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
+          const cardProof = (attention === "cleanup-unconfirmed" || route.cleanup.state === "unconfirmed") ? null : routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
           const needsOwner = headline === "Needs your action";
           return (
           <div className="grid gap-2 border-y border-border/70 py-3" key={route.handle.id}>
@@ -1537,7 +1485,7 @@ export function RemoteAccessSetting({
             </div>
           </>
         ) : (
-          <p>Host settings unavailable: {host.reason}.</p>
+          <p>Not known on this install.</p>
         )}
         {inventory?.providers.map((item) => (
           <div key={`${item.providerId}-${item.reach}`}>

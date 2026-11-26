@@ -82,8 +82,8 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   secret_input_unavailable: KEYCHAIN,
   secret_reference_inconsistent: KEYCHAIN,
   secret_in_use: "Those sign-in details are still in use. Turn off remote access first, then try again.",
-  secret_backend_locked: "The system keychain is locked. Unlock it, then try again.",
-  secret_backend_unavailable: "DataConnect couldn't reach the system keychain. Try again.",
+  secret_backend_locked: "The this computer’s password store is locked. Unlock it, then try again.",
+  secret_backend_unavailable: "DataConnect couldn't reach the this computer’s password store. Try again.",
   // Not codes from the server: reasons a recovery check reports.
   public_operation_recovery_unavailable: "We can't check this automatically. Turn it off, then try again.",
   route_reconciliation_required: "We lost track of the address. It may still be on. Turn it off to check.",

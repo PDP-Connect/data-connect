@@ -97,20 +97,20 @@ test("in the desktop app window a managed desktop host renders the Desktop and V
   assert.match(html, /data-widget="recovery-key"/)
 })
 
-test("a browser reaching a managed desktop host over remote access still renders the Desktop section", async () => {
+test("a remote browser hides controls for this computer", async () => {
   // Owner-password sign-in only, no desktop reveal proof: the case
   // e2e/live-settings.spec.ts drives from a second device.
   const html = await render(true, false)
   assert.match(html, /data-widget="remote-access"/)
-  assert.match(html, /data-widget="desktop-settings"/)
+  assert.doesNotMatch(html, /data-widget="desktop-settings"/)
   // cc963a0ef8: "this computer" is false from a phone; keep "the computer that runs it".
-  assert.match(html, /Control how DataConnect starts on the computer that runs it/)
-  assert.match(html, /data-widget="recovery-key"/)
+  assert.doesNotMatch(html, /Control how DataConnect starts on the computer that runs it/)
+  assert.doesNotMatch(html, /data-widget="recovery-key"/)
 })
 
 test("settings keeps the required section order and links to access tokens", async () => {
   const html = await render(true)
-  const order = ["Remote access", "Password and sign-in", "Notifications", "This computer", "Updates", "Advanced", "About"]
+  const order = ["Remote access", "Password and sign-in", "Notifications", "Updates", "Advanced", "This computer", "About"]
   // Brief settings-pages, decision 1: these sections stay in this order; Desktop remains host-gated.
   const positions = order.map((label) => html.indexOf(label))
   assert.ok(positions.every((position) => position >= 0))

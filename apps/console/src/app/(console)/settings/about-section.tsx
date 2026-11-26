@@ -25,7 +25,6 @@ export function AboutSection({ identity }: { identity: ProductIdentity }) {
     >
       <KV>
         <KVRow k="Product">{identity.name}</KVRow>
-        <KVRow k="Version">{identity.version}</KVRow>
         <KVRow k="Copyright">© 2026 The PDP-Connect Contributors</KVRow>
       </KV>
       <nav

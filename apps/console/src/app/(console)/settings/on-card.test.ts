@@ -256,7 +256,7 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(factLines[0] ?? "", /⏱/);
     assert.match(factLines[0] ?? "", /Turns off at .*\. Keep this computer awake and online until then\./);
     assert.match(factLines[1] ?? "", /↔/);
-    assert.ok((factLines[1] ?? "").includes("Through Tunnel service (Tunnel service) · Free"), factLines[1] ?? "no way line");
+    assert.ok((factLines[1] ?? "").includes("Through Tunnel service · Free"), factLines[1] ?? "no way line");
     assert.match(factLines[2] ?? "", /👁/);
     assert.ok((factLines[2] ?? "").includes("The tunnel relay can read the traffic."), factLines[2] ?? "no readers line");
     // The next step names the apps; the link to them sits on its right.

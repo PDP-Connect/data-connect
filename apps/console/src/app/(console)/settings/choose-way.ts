@@ -42,7 +42,7 @@ const copy: Record<string, { title: string; line: string; group: GroupId }> = {
     line: "Needs a domain you own.",
     group: "lasting",
   },
-  "ngrok-https-edge": { title: "ngrok", line: "Free. Needs an account with the service.", group: "lasting" },
+  "ngrok-https-edge": { title: "ngrok", line: "Free. Needs an ngrok account.", group: "lasting" },
   "tailscale-private": {
     title: "Tailscale · my devices only",
     line: "Free. Needs the Tailscale app on your phone and computer.",

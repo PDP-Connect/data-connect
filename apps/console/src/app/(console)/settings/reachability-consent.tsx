@@ -169,7 +169,7 @@ export function disclosureSentences(value: unknown, except: readonly string[] = 
 /** The structured disclosure, verbatim, for the owner who wants every field. Closed unless `open`. */
 export function DisclosureDetails({ value, providerId, open }: { value: unknown; providerId?: string | null; open?: boolean }) {
   return (
-    <div data-disclosure="">{open ? <ConsentDisclosures value={value} providerId={providerId} /> : null}<Diagnostics><pre>{JSON.stringify(value, null, 2)}</pre></Diagnostics></div>
+    <div data-disclosure="">{open ? <ConsentDisclosures value={value} providerId={providerId} /> : null}<Diagnostics technicalOnly><pre>{JSON.stringify(value, null, 2)}</pre></Diagnostics></div>
   );
 }
 

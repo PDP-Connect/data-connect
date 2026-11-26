@@ -490,7 +490,7 @@ test("Turn on remote access asks before sending the disconnect acknowledgement",
 
 test("the recommended way's radio has a name and every way's radio carries its provider id", async () => {
   await withScreen(host(), async ({ container }) => {
-    const recommended = container.querySelector('[aria-label="Recommended way"] input[type="radio"]');
+    const recommended = container.querySelector('[aria-label="Choose a way"] input[type="radio"]');
     assert.ok(recommended);
     assert.equal(recommended.getAttribute("aria-label"), "Tunnel service");
     assert.equal((recommended as HTMLInputElement).value, "p-tunnel");
@@ -618,7 +618,7 @@ test("Choose another way drops the step without running it", async () => {
     await press(/^Choose another way$/);
     assert.ok(!calls.some((call) => call.url.includes("/actions/")));
     assert.doesNotMatch(text(), /Check the SSH client/);
-    assert.match(text(), /Other ways/);
+    assert.match(text(), /Choose a way/);
   });
 });
 
@@ -759,7 +759,7 @@ test("with no password, a saved draft and its setup action cannot be approved or
     "/drafts/d-1": ok(draftWith([effectful])),
   });
   await withScreen(handler, async ({ calls, text, container }) => {
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     assert.ok(!calls.some(positive), `ran ${calls.filter(positive).map((call) => call.url).join(",")}`);
     const labels = [...container.querySelectorAll("button")].map((node) => node.textContent);
     assert.ok(!labels.some((label) => /Allow|Turn on remote access|Approve|Save and review/.test(label ?? "")), labels.join(","));
@@ -779,7 +779,7 @@ test("an open review cannot be approved once the password is reported missing", 
     passwordSet = false;
     await act(async () => t.mock.timers.tick(3000));
     await settle();
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     const labels = [...container.querySelectorAll("button")].map((node) => node.textContent);
     assert.ok(!labels.includes("Turn on remote access"));
     assert.deepEqual(approvals(calls), []);
@@ -1001,9 +1001,9 @@ test("a hung old draft does not block preparation of a newly selected way", asyn
     "/drafts/d-next/commit": ok(nextDraft.configuration),
     "/drafts/d-next/review": ok(nextReview),
   });
-  await withScreen(handler, async ({ container, calls, press, settle, text }) => {
+  await withScreen(handler, async ({ container, calls,  settle, text }) => {
     assert.equal(calls.filter((call) => call.url === "/drafts").length, 1);
-    await press(/^Other ways$/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const radio = [...container.querySelectorAll("label")].find((node) => /Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
     await act(async () => radio.click());
     await settle();
@@ -1027,7 +1027,7 @@ test("a private missing-password observation restarts preparation after a true p
     assert.equal(states, 2, "initial poll followed by the chain's private read");
     await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
     await settle();
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     assert.equal(calls.filter((call) => call.url === "/drafts").length, 0);
     await act(async () => t.mock.timers.tick(3_000));
     await settle();

@@ -221,7 +221,7 @@ export function DesktopSettingsSetting({
               Start minimized
             </span>
             <span className="pdpp-caption text-muted-foreground">
-              Keep the console window hidden at startup. DataConnect keeps
+              Start with the window hidden at startup. DataConnect keeps
               running in the tray; open it from there. Off by default.
             </span>
           </span>

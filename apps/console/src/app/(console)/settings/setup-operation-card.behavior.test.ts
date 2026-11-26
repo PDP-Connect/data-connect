@@ -137,7 +137,7 @@ test("an approval card lists sentences and facts, keeps the raw descriptor in De
     assert.equal(text.includes(DIGEST), false, "no digest in the default view")
     assert.equal(text.includes(REVISION), false, "no revision in the default view")
     const details = container.querySelector("[data-disclosure]")!
-    assert.match(details.textContent ?? "", /Copy details for support/)
+    assert.doesNotMatch(details.textContent ?? "", /Copy details for support/)
     assert.equal(container.querySelector("details"), null)
     assert.doesNotMatch(container.textContent ?? "", new RegExp(DIGEST))
     const box = container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!

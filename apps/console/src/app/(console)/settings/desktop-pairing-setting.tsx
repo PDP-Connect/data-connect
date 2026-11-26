@@ -192,8 +192,9 @@ export function DesktopPairingSetting({ practice = false }: { practice?: boolean
 
   return (
     <div className="grid gap-4">
-      <Button aria-expanded={expanded} className="justify-self-start" onClick={() => setExpanded(!expanded)} type="button" variant="ghost">Connect a DataConnect app on another computer</Button>
+      <Button aria-expanded={expanded} className="w-full justify-between px-0" onClick={() => setExpanded(!expanded)} type="button" variant="ghost">Connect a DataConnect app on another computer <span aria-hidden="true">›</span></Button>
       {expanded ? <>
+      <p>Use DataConnect’s app on another computer with this data.</p>
       {error ? (
         <>
         <p

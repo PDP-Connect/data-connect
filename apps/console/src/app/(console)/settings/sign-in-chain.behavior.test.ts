@@ -199,7 +199,7 @@ test("signed out: one card throughout, one click runs the chain and opens the br
     await render(root, request, { pollTick: 0 })
     const text = () => container.textContent ?? ""
     assert.match(text(), /Needs your action/)
-    assert.match(text(), /Sign in to Tailscale to finish\./)
+    assert.match(text(), /Waiting for you to sign in at Tailscale\./)
     // RAISE rule 4: keep account setup fields clear of protocol terms.
     assert.ok(field("Email address"))
     assert.ok(field("Your Tailscale address"))
@@ -298,7 +298,7 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
     // The entry check and the email ran; the tailnet step has facts nobody has seen.
     assert.deepEqual(posts(calls).map(call => call.body!.actionId), ["tailscale-setup", "tailscale-account"])
     assert.ok(button("Sign in to Tailscale"))
-    assert.match(container.textContent ?? "", /Sign in to Tailscale to finish\./)
+    assert.match(container.textContent ?? "", /Waiting for you to sign in at Tailscale\./)
     assert.equal(opened.length, 0)
     assert.match(container.querySelector('[aria-label="What this does"]')!.textContent ?? "", /Facts for tailscale-tailnet\./)
     // The owner clicks again with those facts on the card; the login step's facts are new again.
@@ -393,7 +393,7 @@ test("a pasted account token is in the submit body only: not in the page, the fi
     const text = () => container.textContent ?? ""
     assert.match(text(), /Needs your action/)
     assert.match(text(), /Add your ngrok token to finish\./)
-    const input = field("ngrok agent authtoken")!
+    const input = field("ngrok token (from your ngrok dashboard)")!
     assert.equal(input.type, "password")
     assert.equal(container.querySelector("a")?.textContent, "Get a token")
     assert.equal(container.querySelector("a")?.getAttribute("href"), "https://dashboard.example.test/get-started/your-authtoken")
@@ -567,7 +567,7 @@ for (const mode of ["server message", "thrown error"] as const) {
     }
     try {
       await render(root, request, { reservation: ngrokReservation })
-      const input = field("ngrok agent authtoken")!
+      const input = field("ngrok token (from your ngrok dashboard)")!
       await type(input, SECRET)
       await act(async () => button("Save token")!.click())
       assert.equal(posts(calls).length, 1)

@@ -112,27 +112,26 @@ export function OwnerPasswordSetting({
   }
 
   if (source === "env") {
-    return <p className="pdpp-caption text-muted-foreground">This password is set where DataConnect was installed. Change it there, then restart DataConnect.</p>
+    return <p className="text-sm text-muted-foreground">This password is set where DataConnect was installed. Change it there, then restart DataConnect.</p>
   }
 
   if (source === "desktop" && !canReveal) {
-    return <p className="pdpp-caption text-muted-foreground">Change or show the password in the DataConnect app on the computer that runs it.</p>
+    return <p className="text-sm text-muted-foreground">Change or show the password in the DataConnect app on the computer that runs it.</p>
   }
 
   if (source === "desktop") {
     return (
       <div className="grid justify-items-start gap-3">
-        <p className="pdpp-caption text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {passwordSet ? "You chose this password." : "DataConnect made a password for you. You need it only to sign in from another device."}
         </p>
         {canReveal ? <OwnerCredentialSetting practice={practice} /> : null}
         {message ? (
-          <p className="pdpp-caption text-muted-foreground" role="status">
+          <p className="text-sm text-muted-foreground" role="status">
             {message}
           </p>
         ) : null}
         <Button
-          className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
           disabled={busy}
           onClick={() => void requestDesktopChange()}
           type="button"
@@ -148,12 +147,12 @@ export function OwnerPasswordSetting({
       className="grid max-w-xl gap-3"
       onSubmit={event => void submit(event)}
     >
-      <p className="pdpp-caption text-muted-foreground">
+      <p className="text-sm text-muted-foreground">
         Use at least 15 characters. Your current browser stays signed in; other
         sessions are ended.
       </p>
       {message ? (
-        <p className="pdpp-caption text-muted-foreground" role="status">
+        <p className="text-sm text-muted-foreground" role="status">
           {message}
         </p>
       ) : null}
@@ -193,7 +192,7 @@ export function OwnerPasswordSetting({
         />
       </label>
       <Button
-        className="justify-self-start rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+        className="justify-self-start"
         disabled={busy}
         type="submit"
       >

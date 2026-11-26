@@ -186,6 +186,12 @@ export function buildSettingsPractice(
 				]
 			: [],
 	};
+  const draft = { draftId: "practice-draft", providerId, usage: "session", configuration: provider.configuration };
+  const candidate = {
+    providerId, display: { label: provider.label }, consentFactsDigest: "practice-facts", facts: [],
+    consent: { scope: { kind: "route", query: { usage: { kind: "session" } } }, facts: [], consentFactsDigest: "practice-facts", disclosures: {} },
+    disclosures: {},
+  };
 	const request: typeof requestReachability = async (path, body) => {
 		if (path === "/catalog") return { ok: true, data: catalog };
 		if (path === "/state") return { ok: true, data: state };
@@ -203,6 +209,9 @@ export function buildSettingsPractice(
 			};
 		if (path === "/host-capabilities")
 			return { ok: true, data: { session: { known: true, value: true } } };
+    if (path === "/drafts" || path.startsWith("/drafts/practice-draft?")) return { ok: true, data: draft };
+    if (path === "/drafts/practice-draft/commit") return { ok: true, data: draft.configuration };
+    if (path === "/drafts/practice-draft/review") return { ok: true, data: { id: "practice-review", kind: "route", candidate } };
 		if (path.startsWith("/setup-operations/"))
 			return { ok: true, data: setupView };
 		if (path.startsWith("/operations/")) return { ok: true, data: operation };
@@ -225,7 +234,7 @@ export function buildSettingsPractice(
 	};
 	const expect =
 		name === "password" || name === "desktop-fresh"
-			? /Set a password/
+			? /Choose your own password/
 			: name === "turning-on"
 				? /Connecting|Checked this computer/
 				: name === "lost-address"

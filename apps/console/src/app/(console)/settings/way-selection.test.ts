@@ -167,7 +167,7 @@ async function withScreen<T>(
         }
       },
       pickRadio: async (label) => {
-        const radio = [...container.querySelectorAll("label, section[aria-label='Recommended way']")]
+        const radio = [...container.querySelectorAll("label, section[aria-label='Choose a way']")]
           .find((node) => label.test(node.textContent ?? ""))
           ?.querySelector("input");
         assert.ok(radio, `no radio matching ${label}`);
@@ -212,7 +212,7 @@ test("catalog polls do not switch the way being prepared", async (t) => {
       ["/drafts/d-tailscale-funnel/review"]
     );
     assert.match(text(), /Turn on remote access/);
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale/);
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Tailscale/);
   });
 });
 
@@ -241,8 +241,8 @@ test("choosing another way while the old draft is pending sends nothing further 
     const handler = host(() => tailscaleReady, {
       "/drafts": (call) => (call.body?.providerId === "tailscale-funnel" ? slow.promise : ok(draftOf(String(call.body?.providerId)))),
     });
-    await withScreen(handler, async ({ calls, press, pickRadio, settle }) => {
-      await press(/^Other ways$/);
+    await withScreen(handler, async ({ calls, container,  pickRadio, settle }) => {
+      assert.ok(container.querySelector("[aria-label='Choose a way']"));
       await pickRadio(/^\s*Cloudflare/);
       await act(async () => slow.resolve(ok(draftOf("tailscale-funnel", [...actions]))));
       await settle();
@@ -258,11 +258,11 @@ test("the recommended radio is disabled and inert while Turn on is in flight", a
   const slow = deferred<Result>();
   const handler = host(() => noTailscale, { "/operations": () => slow.promise });
   await withScreen(handler, async ({ calls, container, press, pickRadio, text }) => {
-    await press(/^Other ways$/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     await pickRadio(/^\s*Cloudflare/);
     const before = draftsFor(calls).length;
     await press(/^Turn on remote access$/);
-    const radio = container.querySelector("[aria-label='Recommended way'] input") as HTMLInputElement;
+    const radio = container.querySelector("[aria-label='Choose a way'] input[value='localhost-run']") as HTMLInputElement;
     assert.equal(radio.disabled, true);
     await act(async () => radio.click());
     assert.equal(draftsFor(calls).length, before, "no new preparation");
@@ -281,11 +281,11 @@ test("the recommended radio is disabled while Allow is in flight", async () => {
     "/drafts/d-cloudflare-named/actions/act-1": () => slow.promise,
   });
   await withScreen(handler, async ({ calls, container, press, pickRadio }) => {
-    await press(/^Other ways$/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     await pickRadio(/^\s*Cloudflare/);
     const before = draftsFor(calls).length;
     await press(/^Allow$/);
-    const radio = container.querySelector("[aria-label='Recommended way'] input") as HTMLInputElement;
+    const radio = container.querySelector("[aria-label='Choose a way'] input[value='localhost-run']") as HTMLInputElement;
     assert.equal(radio.disabled, true);
     await act(async () => radio.click());
     assert.equal(draftsFor(calls).length, before);
@@ -320,12 +320,12 @@ const funnelHost = (view: unknown) =>
   });
 
 test("a Funnel setup blocked on the administrator step demotes Funnel and recommends the temporary address", async () => {
-  await withScreen(funnelHost(blockedView("tailscale-funnel-policy")), async ({ calls, container, press, text }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
+  await withScreen(funnelHost(blockedView("tailscale-funnel-policy")), async ({ calls, container,  text }) => {
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Temporary address/);
     assert.ok(draftsFor(calls).includes("localhost-run"), "the temporary address is prepared");
     // RAISE rule 4: the step explains what to do without naming its protocol feature.
     assert.match(text(), /Tailscale · public address can't be used now: An administrator needs to allow this address on the computer\. Using Temporary address instead\./);
-    await press(/^Other ways$/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const row = [...container.querySelectorAll("label")].find((node) => /Tailscale · public address/.test(node.textContent ?? ""))!;
     // RAISE rule 4: the missing step names the action in plain words.
     assert.match(row.textContent!, /An administrator needs to allow this address on the computer/);
@@ -337,14 +337,14 @@ test("a Funnel setup blocked on the administrator step demotes Funnel and recomm
 
 test("only the Funnel policy outcome demotes: another blocked step leaves Funnel recommended", async () => {
   await withScreen(funnelHost(blockedView("tailscale-install")), async ({ calls, container }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Tailscale · public address/);
     assert.ok(!draftsFor(calls).includes("localhost-run"));
   });
 });
 
 test("an administrator link that is not https falls back to the Funnel help page", async () => {
-  await withScreen(funnelHost(blockedView("tailscale-funnel-policy", "javascript:alert(1)")), async ({ container, press }) => {
-    await press(/^Other ways$/);
+  await withScreen(funnelHost(blockedView("tailscale-funnel-policy", "javascript:alert(1)")), async ({ container }) => {
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const row = [...container.querySelectorAll("label")].find((node) => /Tailscale · public address/.test(node.textContent ?? ""))!;
     assert.equal(row.querySelector("a")!.getAttribute("href"), "https://tailscale.com/kb/1223/funnel");
   });
@@ -436,11 +436,11 @@ test("a final review arriving after Funnel policy demotion cannot start the old 
     assert.equal(reviews, 2, "the final refresh is actually pending");
     await act(async () => policy.resolve(ok(blockedView("tailscale-funnel-policy"))));
     await settle();
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Temporary address/);
     await act(async () => lateReview.resolve(ok({ id: "late-review", kind: "route", candidate: candidate("tailscale-funnel") })));
     await settle();
     assert.equal(calls.filter((call) => call.url === "/operations").length, 0);
-    const other = [...container.querySelectorAll("button")].find((node) => node.textContent === "Other ways")!;
+    const other = container.querySelector<HTMLInputElement>("input[type=radio]:checked")!;
     assert.equal(other.disabled, false, "stale return clears busy");
   });
 });

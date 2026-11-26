@@ -508,8 +508,8 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     const text = visibleText(container);
     assertClean("ready to turn on", text);
     // RAISE rule 2: the first choice names the person's outcome instead of a setup step.
-    assert.match(text, /Use DataConnect from my phone/);
-    assert.match(text, /Let ChatGPT reach it/);
+    assert.match(text, /Choose a way/);
+    assert.match(text, /Tunnel service/);
     // One line per kind under the caption naming the selected way.
     assert.match(text, /For Tunnel for remote access:/);
     assert.match(text, /People who open the address must sign in with your password\. Apps also need your permission\./);
@@ -575,7 +575,7 @@ test("a failed first load says what to do, keeps the code in Details, and clears
       assert.match(text, /Set a password first/);
       // The service answered, so it is reachable: the paused line says why changes wait.
       assert.doesNotMatch(text, /Can't reach DataConnect's background service/);
-      assert.match(text, /Changes are paused until remote access can be checked\./);
+      assert.doesNotMatch(text, /Changes are paused until remote access can be checked\./);
       const details = (await copySupport(container.querySelector("[role=alert]")!));
       assert.match(details, /Code: owner_password_required/);
       assert.match(details, /App version: 0\.0\.0-test/);
@@ -629,7 +629,7 @@ test("a read the service answers with its generic error shows a card that says i
     assert.doesNotMatch(text, /couldn't turn on/);
     // The service answered, so the paused line must not say it can't be reached.
     assert.doesNotMatch(text, /Can't reach DataConnect's background service/);
-    assert.match(text, /Changes are paused until remote access can be checked\./);
+    assert.doesNotMatch(text, /Changes are paused until remote access can be checked\./);
   });
 });
 
@@ -637,7 +637,7 @@ test("a read the service answers with a specific error is shown even when anothe
   await withScreen(world({ "/catalog": fail("service_unreachable"), "/state": fail("host_path_too_long") }), async ({ container }) => {
     const alert = container.querySelector("[role=alert]")?.textContent ?? "";
     assert.match(alert, /too long for remote access/);
-    assert.match(visibleText(container), /Can't reach DataConnect's background service/);
+    assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/);
   });
 });
 
@@ -651,8 +651,8 @@ test("a read the service answers with a specific error is shown even when anothe
     async ({ container }) => {
       const alert = container.querySelector("[role=alert]")?.textContent ?? "";
       assert.match(alert, /too long for remote access/);
-      assert.match(visibleText(container), /Can't reach DataConnect's background service/);
-      const details = await copySupport(container.querySelector("[role=status]")!);
+      assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/);
+      const details = await copySupport(container.querySelector("[role=alert]")!);
       assert.match(details, /Code: client_error/, "the thrown read keeps its code under Details");
     }
   );
