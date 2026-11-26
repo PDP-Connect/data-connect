@@ -7,6 +7,8 @@ export function parseHistoryInput(query: Record<string, unknown>): HistoryInput 
   const input: HistoryInput = {
     first: String(query.first ?? ""), last: String(query.last ?? ""), offset: Number(query.offset ?? 0),
     ...(query.connection_id ? { connection_id: String(query.connection_id) } : {}),
+    ...(query.before ? { before: String(query.before) } : {}),
+    ...(query.days ? { days: Number(query.days) } : {}),
     ...(query.day ? { day: String(query.day) } : {}),
     ...(query.limit ? { limit: Number(query.limit) } : {}),
     ...(query.cursor ? { cursor: String(query.cursor) } : {}),

@@ -38,6 +38,9 @@ async function fixture(write: Write) {
     VALUES ('foreign', 11, 'disclosure.served', '2026-11-24T23:30:00.000Z','2026-11-24T23:30:00.000Z','test','foreign','client','other','foreign','query','q','succeeded','foreign','{}','1')`, []);
 }
 async function check(backend: "sqlite" | "postgres") {
+  const write: Write = backend === "sqlite" ? async (sql,values) => getDb().prepare(sql).run(...values) : async (sql,values) => {let i=0; return postgresQuery(sql.replaceAll("?",()=>`$${++i}`), values);};
+  await write(`INSERT INTO spine_events(event_id,event_seq,event_type,occurred_at,recorded_at,scenario_id,trace_id,actor_type,actor_id,subject_id,object_type,object_id,status,client_id,data_json,version)
+    VALUES ('console',99,'grant.issued','2026-11-24T23:30:00.000Z','2026-11-24T23:30:00.000Z','test','console','client','console','owner','grant','g','succeeded','dataconnect-console','{}','1')`,[]);
   const input = { first: "2026-11-25", last: "2026-11-25", offset: 120 };
   const result = await readAppHistory("owner", input, backend);
   assert.equal(result.mode, "days");
@@ -51,6 +54,10 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(result.data[0]?.sources[0]?.reads, 3);
   assert.equal(result.data[0]?.sources[0]?.records, 25);
   assert.equal(result.changes.length, 3);
+  const dates = await readAppHistory("owner",{...input,first:"1970-01-01",days:7},backend);
+  assert.equal(dates.first_day,"2026-11-25");
+  assert.equal(dates.before_day,null);
+  assert.equal((await readAppHistory("owner",{...input,first:"1970-01-01",days:7,before:"2026-11-25"},backend)).data.length,0);
   const west = await readAppHistory("owner", { ...input, first: "2026-11-24", last: "2026-11-24", offset: -360 }, backend);
   assert.equal(west.data.length, 1);
   const page = await readAppHistory("owner", { ...input, day: input.first, client_ids: ["app"], limit: 3 }, backend);
@@ -60,7 +67,9 @@ async function check(backend: "sqlite" | "postgres") {
   assert.equal(page.data.length, 3);
   assert.equal(page.data.filter(row => row.refused).length, 2);
   const next = await readAppHistory("owner", { ...input, day: input.first, client_ids: ["app"], limit: 5, ...(page.next_cursor ? { cursor: page.next_cursor } : {}) }, backend);
-  assert.equal(next.data.length, 5);
+  assert.equal(next.data.length, 3);
+  if(next.mode!=="reads")throw Error("mode");
+  assert.equal(next.discovery?.reduce((n,row)=>n+(row.occurrences ?? 0),0),2);
   assert.equal(next.has_more, false);
   assert.equal((await readAppHistory("owner", { ...input, client_ids: ["foreign"] }, backend)).data.length, 0);
   const scoped = await readAppHistory("owner", { ...input, connection_id: "mail_account" }, backend);

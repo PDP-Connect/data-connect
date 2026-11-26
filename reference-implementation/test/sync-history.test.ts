@@ -26,18 +26,32 @@ async function fixture(write: Write) {
   }
 }
 async function check(backend: "sqlite" | "postgres") {
+  const write: Write = backend === "sqlite" ? async (sql, values) => getDb().prepare(sql).run(...values) : async (sql,values) => { let i=0; return postgresQuery(sql.replaceAll("?",()=>`$${++i}`), values); };
+  await write("UPDATE run_history SET connector_error_json=? WHERE run_id='two'", [JSON.stringify({ code: "session_expired", message: "The authenticated session is no longer active." })]);
+  await write("UPDATE run_history SET known_gaps_json=? WHERE run_id='one'", [JSON.stringify([{kind:"coverage",reason:"unavailable",stream:"messages",recovery_hint:{retryable:true}},{kind:"informational",reason:"empty",stream:"empty"}])]);
   const input = { first: "2026-11-25", last: "2026-11-25", offset: 120 };
   const east = await readSyncHistory(input, backend);
   assert.equal(east.mode, "days");
   if (east.mode !== "days") throw new Error("wrong response");
   assert.equal(east.data.length, 1);
-  assert.deepEqual(east.data[0], {
+  assert.deepEqual({...east.data[0], evidence: undefined, missing: undefined}, {
+    evidence: undefined, missing: undefined,
     day: "2026-11-25", connection_id: "mail_account", connector_id: "mail", ran: 2,
     finished: 1, failed: 1, stopped: 0, interrupted: 0, could_not_start: 2, records: 16,
     last_at: "2026-11-25T01:00:00.000Z", last_outcome: "failed", manual: 1, cause: "auth_failed",
   });
+  assert.deepEqual(east.data[0]?.missing, [{stream:"messages",retryable:true}]);
+  assert.equal((east.data[0]?.evidence?.connector_error as {code?:string} | undefined)?.code, "session_expired");
   const single = await readSyncHistory({ ...input, run_id: "one" }, backend);
   assert.equal(single.mode, "syncs"); assert.equal(single.data.length, 1);
+  assert.deepEqual(single.data[0]?.missing,[{stream:"messages",retryable:true}]);
+  const dates = await readSyncHistory({...input,first:"1970-01-01",days:1},backend);
+  assert.equal(dates.first_day,"2026-11-24");
+  assert.equal(dates.before_day,"2026-11-25");
+  const earlier = await readSyncHistory({...input,first:"1970-01-01",days:1,before:dates.before_day ?? undefined},backend);
+  assert.equal(earlier.data[0]?.day,"2026-11-24");
+  assert.equal(earlier.has_more,false);
+  assert.equal((await readSyncHistory({...input,first:"1970-01-01",days:1,before:"2026-11-24"},backend)).data.length,0);
   const west = await readSyncHistory({ ...input, first: "2026-11-24", last: "2026-11-24", offset: -360 }, backend);
   assert.equal(west.mode, "days");
   if (west.mode !== "days") throw new Error("wrong response");

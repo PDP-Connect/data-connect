@@ -1,7 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { CONSOLE_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import { jsonObject, type AppAccess } from "./app-access.ts";
-import { historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
+import { historyDates, historyBackend, historyBounds, historyDaySql, historyLimit, historyPage, historyRows, type HistoryQuery, type HistoryBackend, type HistoryInput, type HistoryList } from "./history-query.ts";
 export interface AppHistoryInput extends HistoryInput { client_ids?: string[] }
 export interface AppReadSource { source_id: string; source_kind: string | null; connection_id: string | null; reads: number; records: number | null }
 export interface AppReadDay {
@@ -18,9 +19,10 @@ export interface AppReadEntry {
   id: string; trace_id: string; at: string; client_id: string; shape: string | null;
   source_id: string | null; source_kind: string | null; connection_id: string | null;
   record_kind: string | null; records: number | null; metric: string | null;
+  occurrences?: number;
   refused: boolean; reason: string | null;
 }
-export type AppHistory = (HistoryList<AppReadDay, "days"> & { changes: AccessChange[]; identities: AppAccess[] }) | HistoryList<AppReadEntry, "reads">;
+export type AppHistory = (HistoryList<AppReadDay, "days"> & { changes: AccessChange[]; identities: AppAccess[] }) | (HistoryList<AppReadEntry, "reads"> & { discovery?: AppReadEntry[] });
 /** Discovery describes available data rather than disclosing its contents. */
 export const DISCOVERY_SHAPES = ["schema", "stream_list", "connector_list", "stream_metadata"] as const;
 export const PERMISSION_REFUSALS = ["grant_invalid", "grant_revoked", "grant_expired", "field_not_granted", "grant_stream_not_allowed"] as const;
@@ -39,9 +41,9 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
   const rawCount = `CAST(${field("record_count", backend)} AS TEXT)`;
   const countGuard = backend === "postgres" ? `${rawCount} ~ '^[0-9]{1,15}$'` : `length(${rawCount}) BETWEEN 1 AND 15 AND ${rawCount} NOT GLOB '*[^0-9]*'`;
   const records = `CASE WHEN ${countGuard} THEN CAST(${rawCount} AS BIGINT) END`;
-  const values: unknown[] = [first, end, subjectId, subjectId];
+  const values: unknown[] = [first, end, subjectId, subjectId, CONSOLE_OWNER_CLIENT_ID];
   let where = `e.occurred_at >= ? AND e.occurred_at < ? AND
-    (e.subject_id = ? OR g.subject_id = ?) AND ${client} IS NOT NULL`;
+    (e.subject_id = ? OR g.subject_id = ?) AND ${client} IS NOT NULL AND ${client} <> ?`;
   if (input.client_ids?.length) {
     where += ` AND ${client} IN (${input.client_ids.map(() => "?").join(",")})`; values.push(...input.client_ids);
   }
@@ -50,9 +52,21 @@ export function appHistorySql(input: AppHistoryInput, backend: HistoryBackend, s
   return { client, source, sourceKind, connection, shape, reason, records, values, where, from };
 }
 export async function readAppHistory(subjectId: string, input: AppHistoryInput, backend: HistoryBackend = historyBackend(), query?: HistoryQuery): Promise<AppHistory> {
-  const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(input, backend, subjectId);
+  const paging = !input.day && input.days ? appHistorySql({...input,first:"1970-01-01",last:"9999-12-30",before:undefined},backend,subjectId) : null;
+  const page = paging ? await historyDates(input,backend,query,paging.from,"e.occurred_at",`${paging.where} AND e.event_type IN ('disclosure.served','query.rejected',${accessTypes})`,paging.values) : null;
+  if (page?.empty) return {mode:"days",data:[],changes:[],identities:[],has_more:false,next_cursor:null,...page.dates};
+  const { client, source, sourceKind, connection, shape, reason, records, values, where, from } = appHistorySql(page?.input ?? input, backend, subjectId);
   if (input.day) {
     if (!input.client_ids?.length) throw new RangeError("A single day requires an app");
+    const discoveryOnly = `${shape} IN (${DISCOVERY_SHAPES.map(value=>`'${value}'`).join(",")})`;
+    const discoveryRows = await historyRows<AppReadEntry & { occurrences: number | string }>(`SELECT ${shape} AS shape,
+      ${source} AS source_id, ${sourceKind} AS source_kind, ${connection} AS connection_id,
+      coalesce(e.stream_id, ${field("requested_stream",backend)}) AS record_kind,
+      MAX(e.occurred_at) AS at, COUNT(*) AS occurrences ${from}
+      WHERE ${where} AND e.event_type='disclosure.served' AND ${discoveryOnly}
+      GROUP BY ${shape}, ${source}, ${sourceKind}, ${connection}, coalesce(e.stream_id, ${field("requested_stream",backend)})
+      ORDER BY MAX(e.occurred_at) DESC`,values,backend,query);
+    const discovery = discoveryRows.map((row,index)=>({...row,id:`discovery-${index}`,trace_id:"",client_id:input.client_ids?.[0] ?? "",records:null,metric:null,refused:false,reason:null,occurrences:Number(row.occurrences)}));
     const limit = historyLimit(input);
     let pageWhere = where;
     if (input.cursor) {
@@ -66,9 +80,10 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
       ${connection} AS connection_id, coalesce(e.stream_id, ${field("requested_stream", backend)}) AS record_kind,
       ${records} AS records, ${field("metric", backend)} AS metric, e.event_type, ${reason} AS reason
       ${from} WHERE ${pageWhere} AND e.event_type IN ('disclosure.served','query.rejected')
+      AND NOT (e.event_type='disclosure.served' AND coalesce(${shape},'') IN (${DISCOVERY_SHAPES.map(value=>`'${value}'`).join(",")}))
       ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT ?`, [...values, limit + 1], backend, query);
     const data = rows.map(({ event_type, ...row }) => ({ ...row, records: row.records === null ? null : Number(row.records), refused: event_type === "query.rejected" }));
-    return historyPage(data, limit, "reads", row => Buffer.from(JSON.stringify([row.at, row.id])).toString("base64url"));
+    return { ...historyPage(data, limit, "reads", row => Buffer.from(JSON.stringify([row.at, row.id])).toString("base64url")), discovery };
   }
   const day = historyDaySql("e.occurred_at", backend, input.offset);
   const disclosure = `e.event_type='disclosure.served' AND coalesce(${shape},'') NOT IN (${DISCOVERY_SHAPES.map(value => `'${value}'`).join(",")})`;
@@ -119,5 +134,5 @@ export async function readAppHistory(subjectId: string, input: AppHistoryInput, 
     try { if (Array.isArray(data.redirect_uris) && typeof data.redirect_uris[0] === "string") host = new URL(data.redirect_uris[0]).hostname; } catch { /* unknown address */ }
     return { client_id: id, client_name: typeof data.client_name === "string" ? data.client_name : "", return_host: host, returns_to_this_computer: host !== null && ["localhost","127.0.0.1","[::1]"].includes(host), domain_control_verified: false, sources: [], reads_last_7_days: 0 };
   });
-  return { mode: "days", identities, data: [...days.values()].sort((a,b) => b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id)), changes: decisions, has_more: false, next_cursor: null };
+  return { mode: "days", identities, data: [...days.values()].sort((a,b) => b.day.localeCompare(a.day) || (b.last_at ?? "").localeCompare(a.last_at ?? "") || a.client_id.localeCompare(b.client_id)), changes: decisions, has_more: Boolean(page?.dates.before_day), next_cursor: null, ...page?.dates };
 }
