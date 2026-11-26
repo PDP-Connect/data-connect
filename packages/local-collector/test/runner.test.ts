@@ -1303,14 +1303,14 @@ test("a held profile migration lock stops the migration with the lock path and t
 
 // A leftover lock may only block a migration that has something to do. Ordinary
 // profile work must go on.
-test("a leftover profile migration lock does not block looking up a profile that has no legacy file", () => {
+test("a leftover profile migration lock does not block a source lookup with an unrelated legacy file", () => {
   const profileDir = tempDirSync();
   writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
   const codexPath = writeProfile(profileDir, "codex", "token-codex", "dsrc_codex");
   const lockPath = join(profileDir, ".profile-migration.lock");
   writeFileSync(lockPath, `${spawnSync(process.execPath, ["-e", ""]).pid}\n`);
 
-  const lookup = findLocalCollectorProfiles({ profileDir, profileName: "codex" });
+  const lookup = findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_codex" });
 
   assert.deepEqual(
     lookup.matches.map((match) => match.path),
@@ -1318,6 +1318,18 @@ test("a leftover profile migration lock does not block looking up a profile that
   );
   assert.equal(existsSync(join(profileDir, "claude_code.env")), true, "the other connector's legacy file is not touched");
   assert.equal(existsSync(lockPath), true, "the leftover lock is not touched");
+});
+
+test("a source lookup still takes the migration lock for its own legacy file", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const lockPath = join(profileDir, ".profile-migration.lock");
+  writeFileSync(lockPath, `${spawnSync(process.execPath, ["-e", ""]).pid}\n`);
+
+  assert.throws(
+    () => findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_old" }),
+    (error: unknown) => String(error).includes(lockPath)
+  );
 });
 
 test("a leftover profile migration lock does not block when every legacy file needs no rename", () => {

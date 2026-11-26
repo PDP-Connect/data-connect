@@ -2393,12 +2393,18 @@ function safeProfileFileName(name: string): string {
  */
 export function migrateLegacyProfileFiles(
   profileDir: string,
-  options: { beforeInstall?: () => void; beforeRead?: () => void; profileName?: string | null | undefined } = {}
+  options: {
+    beforeInstall?: () => void;
+    beforeRead?: () => void;
+    profileName?: string | null | undefined;
+    sourceInstanceId?: string | null | undefined;
+  } = {}
 ): void {
   // The legacy spelling names the same profile, so it selects the same connector.
   const requested = options.profileName
     ? options.profileName.trim().replace(PROFILE_ENV_EXTENSION, "").replaceAll("_", "-")
     : null;
+  const requestedSource = options.sourceInstanceId?.trim() || null;
   const pending: LegacyProfileEntry[] = [];
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
     const current = definition.connector_id.replaceAll("_", "-");
@@ -2412,7 +2418,7 @@ export function migrateLegacyProfileFiles(
       currentPath: join(profileDir, `${current}.env`),
       legacyPath: join(profileDir, `${legacy}.env`),
     };
-    if (needsLegacyProfileRename(entry)) {
+    if (needsLegacyProfileRename(entry, requestedSource)) {
       pending.push(entry);
     }
   }
@@ -2439,7 +2445,7 @@ type LegacyProfileEntry = { current: string; currentPath: string; legacyPath: st
  * not ours to touch. A file that names no connector is reported here and left
  * in place, so it needs no lock either. The locked step reads the file again.
  */
-function needsLegacyProfileRename(entry: LegacyProfileEntry): boolean {
+function needsLegacyProfileRename(entry: LegacyProfileEntry, sourceInstanceId: string | null): boolean {
   let contents: string;
   try {
     contents = readFileSync(entry.legacyPath, "utf8");
@@ -2449,7 +2455,11 @@ function needsLegacyProfileRename(entry: LegacyProfileEntry): boolean {
     }
     throw error;
   }
-  const namedConnector = parseCollectorProfileEnv(contents).PDPP_COLLECTOR_CONNECTOR?.trim();
+  const env = parseCollectorProfileEnv(contents);
+  if (sourceInstanceId !== null && profileSourceInstanceId(env) !== sourceInstanceId) {
+    return false;
+  }
+  const namedConnector = env.PDPP_COLLECTOR_CONNECTOR?.trim();
   if (!namedConnector) {
     reportUnidentifiedLegacyProfile(entry);
     return false;
@@ -2653,7 +2663,7 @@ export function findLocalCollectorProfiles(input: {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
-  migrateLegacyProfileFiles(profileDir, { profileName: input.profileName });
+  migrateLegacyProfileFiles(profileDir, { profileName: input.profileName, sourceInstanceId });
   const files = input.profileName
     ? [safeProfileFileName(input.profileName)]
     : (() => {
