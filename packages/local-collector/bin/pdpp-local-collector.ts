@@ -59,7 +59,6 @@ import {
   acquireMigrationLock,
   collectorStateDirectory,
   defaultCollectorStateRoot,
-  type MigrationLock,
   releaseMigrationLock,
   resolveCollectorQueuePath,
 } from "../src/durable-state.ts";
@@ -1358,7 +1357,7 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  migrateLegacyProfileFiles(profileDir);
+  migrateLegacyProfileFiles(profileDir, { profileName: name });
   const path = join(profileDir, safeProfileFileName(name));
 
   if (!existsSync(path)) {
@@ -2394,40 +2393,78 @@ function safeProfileFileName(name: string): string {
  */
 export function migrateLegacyProfileFiles(
   profileDir: string,
-  hooks: { beforeInstall?: () => void; beforeRead?: () => void } = {}
+  options: { beforeInstall?: () => void; beforeRead?: () => void; profileName?: string | null | undefined } = {}
 ): void {
-  const pending = LOCAL_COLLECTOR_DEFINITIONS.flatMap((definition) => {
+  // The legacy spelling names the same profile, so it selects the same connector.
+  const requested = options.profileName
+    ? options.profileName.trim().replace(PROFILE_ENV_EXTENSION, "").replaceAll("_", "-")
+    : null;
+  const pending: LegacyProfileEntry[] = [];
+  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
     const current = definition.connector_id.replaceAll("_", "-");
     const legacy = current.replaceAll("-", "_");
-    const legacyPath = join(profileDir, `${legacy}.env`);
-    return legacy !== current && existsSync(legacyPath)
-      ? [{ current, currentPath: join(profileDir, `${current}.env`), legacyPath }]
-      : [];
-  });
+    // A lookup for one profile only needs that profile's own legacy file.
+    if (legacy === current || (requested !== null && requested !== current)) {
+      continue;
+    }
+    const entry = {
+      current,
+      currentPath: join(profileDir, `${current}.env`),
+      legacyPath: join(profileDir, `${legacy}.env`),
+    };
+    if (needsLegacyProfileRename(entry)) {
+      pending.push(entry);
+    }
+  }
+  // The lock guards renames only. A leftover lock must not block profile work
+  // that has no rename to do.
   if (pending.length === 0) {
     return;
   }
-  const lockPath = join(profileDir, ".profile-migration.lock");
-  let lock: MigrationLock;
-  try {
-    lock = acquireMigrationLock(lockPath);
-  } catch (error) {
-    throw new Error(
-      `could not take the lock to migrate the legacy profiles in ${profileDir}: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error }
-    );
-  }
+  const lock = acquireMigrationLock(join(profileDir, ".profile-migration.lock"));
   try {
     for (const entry of pending) {
-      migrateLegacyProfileFile(entry, hooks);
+      migrateLegacyProfileFile(entry, options);
     }
   } finally {
     releaseMigrationLock(lock);
   }
 }
 
+type LegacyProfileEntry = { current: string; currentPath: string; legacyPath: string };
+
+/**
+ * Read-only look at a legacy profile, without the lock: true when it names this
+ * connector, so the locked step may rename it. A file for another connector is
+ * not ours to touch. A file that names no connector is reported here and left
+ * in place, so it needs no lock either. The locked step reads the file again.
+ */
+function needsLegacyProfileRename(entry: LegacyProfileEntry): boolean {
+  let contents: string;
+  try {
+    contents = readFileSync(entry.legacyPath, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return false;
+    }
+    throw error;
+  }
+  const namedConnector = parseCollectorProfileEnv(contents).PDPP_COLLECTOR_CONNECTOR?.trim();
+  if (!namedConnector) {
+    reportUnidentifiedLegacyProfile(entry);
+    return false;
+  }
+  return namedConnector.replaceAll("_", "-") === entry.current;
+}
+
+function reportUnidentifiedLegacyProfile(entry: LegacyProfileEntry): void {
+  process.stderr.write(
+    `Profile ${entry.legacyPath} does not name its connector (PDPP_COLLECTOR_CONNECTOR), so it was not renamed to ${entry.currentPath}. If it holds a ${entry.current} credential, rename it yourself; otherwise leave it.\n`
+  );
+}
+
 function migrateLegacyProfileFile(
-  entry: { current: string; currentPath: string; legacyPath: string },
+  entry: LegacyProfileEntry,
   hooks: { beforeInstall?: () => void; beforeRead?: () => void }
 ): void {
   const { current, currentPath, legacyPath } = entry;
@@ -2444,9 +2481,7 @@ function migrateLegacyProfileFile(
   }
   const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
   if (!namedConnector) {
-    process.stderr.write(
-      `Profile ${legacyPath} does not name its connector (PDPP_COLLECTOR_CONNECTOR), so it was not renamed to ${currentPath}. If it holds a ${current} credential, rename it yourself; otherwise leave it.\n`
-    );
+    reportUnidentifiedLegacyProfile(entry);
     return;
   }
   if (namedConnector.replaceAll("_", "-") !== current) {
@@ -2487,7 +2522,7 @@ function migrateLegacyProfileFile(
  * current profile exists and names this connector: another collector renamed
  * it. Anything else means the credential is not where it should be.
  */
-function requireMigratedProfile(entry: { current: string; currentPath: string; legacyPath: string }): void {
+function requireMigratedProfile(entry: LegacyProfileEntry): void {
   let named: string | undefined;
   try {
     named = parseCollectorProfileEnv(readFileSync(entry.currentPath, "utf8")).PDPP_COLLECTOR_CONNECTOR?.trim();
@@ -2514,7 +2549,7 @@ function isFileExistsError(error: unknown): boolean {
 /** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */
 function existingCollectorProfilePath(name: string): string | null {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  migrateLegacyProfileFiles(profileDir);
+  migrateLegacyProfileFiles(profileDir, { profileName: name });
   const path = join(profileDir, safeProfileFileName(name));
   return existsSync(path) ? path : null;
 }
@@ -2601,7 +2636,7 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const fileName = safeProfileFileName(input.name);
-  migrateLegacyProfileFiles(profileDir);
+  migrateLegacyProfileFiles(profileDir, { profileName: input.name });
   const path = join(profileDir, fileName);
   if (!existsSync(path)) {
     return { path, removed: false };
@@ -2618,7 +2653,7 @@ export function findLocalCollectorProfiles(input: {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
-  migrateLegacyProfileFiles(profileDir);
+  migrateLegacyProfileFiles(profileDir, { profileName: input.profileName });
   const files = input.profileName
     ? [safeProfileFileName(input.profileName)]
     : (() => {

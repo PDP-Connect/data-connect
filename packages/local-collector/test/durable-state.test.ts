@@ -25,10 +25,12 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseArgs, resolveInspectionOptions } from "../bin/pdpp-local-collector.ts";
 import {
+  acquireMigrationLock,
   CollectorStateResolutionError,
   canonicalCollectorQueuePath,
   collectorStateDirectory,
   defaultCollectorStateRoot,
+  releaseMigrationLock,
   resolveCollectorQueuePath,
 } from "../src/durable-state.ts";
 import { LocalDeviceOutbox } from "../src/runner.ts";
@@ -517,6 +519,68 @@ test("a handoff lock whose owner has exited is not taken over: every collector s
     assert.equal(sourceSummary(underscorePath, SOURCE_A), 1);
   });
 });
+
+// The lock file is created before its marker is written. If publishing the
+// marker fails, the file is still this process's own and nobody else can have
+// taken it, so it must go; left behind it would refuse every later run.
+for (const [step, failure] of [
+  ["write", { writeSync: () => { throw new Error("injected write failure"); } }],
+  ["fsync", { fsyncSync: () => { throw new Error("injected fsync failure"); } }],
+] as const) {
+  test(`a handoff lock whose marker could not be ${step === "write" ? "written" : "synced"} is removed, and the next acquire succeeds`, () => {
+    withTempRoot(`pdpp-durable-state-lock-${step}-fail-`, (root) => {
+      const lockPath = join(root, "queue.handoff.lock");
+
+      assert.throws(() => acquireMigrationLock(lockPath, failure), new RegExp(`injected ${step} failure`));
+      assert.equal(existsSync(lockPath), false, "no lock file is left behind");
+
+      releaseMigrationLock(acquireMigrationLock(lockPath));
+      assert.equal(existsSync(lockPath), false);
+    });
+  });
+}
+
+// Whichever path refuses a held lock, the operator gets the lock path and the
+// remedy from one message source.
+test("a held lock on the queue path or the legacy-store path stops with the lock path and the remedy", () => {
+  withTempRoot("pdpp-durable-state-lock-message-", (root) => {
+    const queue = underscoreQueueFixture(join(root, "queue"));
+    seedOutbox(queue.underscorePath, SOURCE_A, "legacy-row");
+    writeFileSync(queue.lockPath, `${deadProcessId()}\n`);
+    assertLockRefusal(
+      () => resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot: queue.stateRoot }),
+      queue.lockPath
+    );
+
+    const stateRoot = join(root, "store", "user-state");
+    const installRoot = join(root, "store", "npx-temp-package");
+    const canonicalPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    seedOutbox(packageLegacyPath(installRoot, "collector-runner-queue.sqlite"), SOURCE_A, "legacy-pending");
+    mkdirSync(dirname(canonicalPath), { recursive: true });
+    writeFileSync(`${canonicalPath}.handoff.lock`, `${deadProcessId()}\n`);
+    assertLockRefusal(
+      () =>
+        resolveCollectorQueuePath({
+          connectorId: "claude-code",
+          moduleUrl: modulePath(installRoot),
+          sourceInstanceId: SOURCE_A,
+          stateRoot,
+        }),
+      `${canonicalPath}.handoff.lock`
+    );
+  });
+});
+
+function assertLockRefusal(run: () => unknown, lockPath: string): void {
+  assert.throws(
+    run,
+    (error: unknown) =>
+      error instanceof CollectorStateResolutionError &&
+      error.code === "legacy_state_migration_failed" &&
+      error.message.includes(lockPath) &&
+      error.message.includes("delete this file")
+  );
+}
 
 test("a collector releases only the handoff lock it took", () => {
   withTempRoot("pdpp-durable-state-lock-owner-", (root) => {

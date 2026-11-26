@@ -210,6 +210,9 @@ function migrateUnderscoreSpelledQueue(
   try {
     lock = acquireMigrationLock(lockPath);
   } catch (error) {
+    if (error instanceof CollectorStateResolutionError) {
+      throw error;
+    }
     // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
     throw new CollectorStateResolutionError(
       "legacy_state_migration_failed",
@@ -807,31 +810,67 @@ export interface MigrationLock {
 }
 
 /**
- * Take the single-owner lock for a migration. Creation is exclusive, so exactly
- * one process wins. When the file exists the call throws and names it. There is
- * deliberately no takeover of a lock whose owner has exited: two processes that
- * both read a dead owner could each remove the file and each take a fresh one,
- * or one could remove the other's fresh lock, and both would enter. The error
- * says whether the recorded owner is still running; if it is not, the operator
- * deletes the file.
+ * Another process holds a migration lock. This is the one message source for a
+ * refused lock: it names the lock file and says what to do, and every migration
+ * path lets it through unchanged.
  */
-export function acquireMigrationLock(path: string): MigrationLock {
+export class MigrationLockHeldError extends CollectorStateResolutionError {
+  readonly lockPath: string;
+
+  constructor(lockPath: string, options: ErrorOptions = {}) {
+    super(
+      "legacy_state_migration_failed",
+      `legacy state handoff is already in progress: ${lockPath} (${describeLockOwner(lockPath)})`,
+      options
+    );
+    this.name = "MigrationLockHeldError";
+    this.lockPath = lockPath;
+  }
+}
+
+/**
+ * Take the single-owner lock for a migration. Creation is exclusive, so exactly
+ * one process wins. When the file exists the call throws {@link MigrationLockHeldError}.
+ * There is deliberately no takeover of a lock whose owner has exited: two
+ * processes that both read a dead owner could each remove the file and each take
+ * a fresh one, or one could remove the other's fresh lock, and both would
+ * enter. The error says whether the recorded owner is still running; if it is
+ * not, the operator deletes the file.
+ *
+ * The file exists before its marker is written. If publishing the marker fails,
+ * the file is still this call's own (it created it exclusively), so it is
+ * removed before the error is rethrown; left behind it would refuse every later
+ * run. `io` lets tests inject those failures.
+ */
+export function acquireMigrationLock(
+  path: string,
+  io: { fsyncSync?: typeof fsyncSync; writeSync?: typeof writeSync } = {}
+): MigrationLock {
   const content = `${process.pid} ${randomUUID()}\n`;
+  let fd: number;
   try {
-    const fd = openSync(path, "wx", 0o600);
-    try {
-      writeSync(fd, content, undefined, "utf8");
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
+    fd = openSync(path, "wx", 0o600);
   } catch (error) {
-    if (!isAlreadyExistsError(error)) {
-      throw error;
+    if (isAlreadyExistsError(error)) {
+      throw new MigrationLockHeldError(path, { cause: error });
     }
-    throw new Error(`legacy state handoff is already in progress: ${path} (${describeLockOwner(path)})`, {
-      cause: error,
-    });
+    throw error;
+  }
+  let published = false;
+  try {
+    (io.writeSync ?? writeSync)(fd, content, undefined, "utf8");
+    (io.fsyncSync ?? fsyncSync)(fd);
+    closeSync(fd);
+    published = true;
+  } finally {
+    if (!published) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The descriptor may already be closed; the file is removed either way.
+      }
+      rmSync(path, { force: true });
+    }
   }
   return { content, path };
 }

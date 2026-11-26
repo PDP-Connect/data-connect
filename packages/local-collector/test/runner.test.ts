@@ -1289,6 +1289,54 @@ test("a profile migration lock whose owner has exited is not taken over; the col
   assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
 });
 
+test("a held profile migration lock stops the migration with the lock path and the remedy", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const lockPath = join(profileDir, ".profile-migration.lock");
+  writeFileSync(lockPath, `${spawnSync(process.execPath, ["-e", ""]).pid}\n`);
+
+  assert.throws(
+    () => migrateLegacyProfileFiles(profileDir),
+    (error: unknown) => String(error).includes(lockPath) && String(error).includes("delete this file")
+  );
+});
+
+// A leftover lock may only block a migration that has something to do. Ordinary
+// profile work must go on.
+test("a leftover profile migration lock does not block looking up a profile that has no legacy file", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const codexPath = writeProfile(profileDir, "codex", "token-codex", "dsrc_codex");
+  const lockPath = join(profileDir, ".profile-migration.lock");
+  writeFileSync(lockPath, `${spawnSync(process.execPath, ["-e", ""]).pid}\n`);
+
+  const lookup = findLocalCollectorProfiles({ profileDir, profileName: "codex" });
+
+  assert.deepEqual(
+    lookup.matches.map((match) => match.path),
+    [codexPath]
+  );
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), true, "the other connector's legacy file is not touched");
+  assert.equal(existsSync(lockPath), true, "the leftover lock is not touched");
+});
+
+test("a leftover profile migration lock does not block when every legacy file needs no rename", () => {
+  const profileDir = tempDirSync();
+  // Named for another connector, and named for none: neither is renamed.
+  writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir,
+    sourceInstanceId: "dsrc_codex",
+  });
+  writeFileSync(join(profileDir, ".profile-migration.lock"), `${spawnSync(process.execPath, ["-e", ""]).pid}\n`);
+
+  assert.doesNotThrow(() => findLocalCollectorProfiles({ profileDir }));
+});
+
 test("an operator profile named like a connector but for another connector is not renamed or deleted", () => {
   const profileDir = tempDirSync();
   // A profile an operator named `claude_code` for the codex connector.
