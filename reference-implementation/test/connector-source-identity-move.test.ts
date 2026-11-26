@@ -277,6 +277,16 @@ async function withDataDir(run: (dataDir: string) => Promise<void>): Promise<voi
 
 const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> }> = [
   {
+    name: "a matching declared legacy id moves retained data to the explicit current source",
+    run: async (backend) => {
+      await seedLegacyConnector(backend);
+      await registerConnector({ ...profileFor("1.0.0"), source: { id: DECLARED_SOURCE }, legacy_source_ids: [LEGACY_SOURCE] });
+      assert.equal((await retained()).id, DECLARED_SOURCE);
+      assert.deepEqual(await readReferences(backend), { grant: DECLARED_SOURCE, handle: DECLARED_SOURCE, member: DECLARED_SOURCE, unrelatedGrant: UNRELATED_SOURCE });
+      await assert.rejects(() => registerConnector({ ...profileFor("1.1.0"), source: { id: OTHER_SOURCE }, legacy_source_ids: [DECLARED_SOURCE] }), ALREADY_BOUND);
+    },
+  },
+  {
     name: "a verified package moves the legacy projection and every reference to the declared source",
     run: (backend) =>
       withDataDir(async (dataDir) => {

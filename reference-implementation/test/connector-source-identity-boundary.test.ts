@@ -35,7 +35,7 @@ import {
   getConnectorActivation,
   publishConnectorActivation,
 } from "../server/connector-install/activation-authority.ts";
-import type { ConnectorInstallRecord } from "../server/connector-install/index.ts";
+import { createConnectorInstallStore, type ConnectorInstallRecord } from "../server/connector-install/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -55,7 +55,6 @@ const ALREADY_BOUND = /already bound to source/;
 const CANONICAL_KEY_MESSAGE = /connector_id must match connector_key/;
 const INVALID_SOURCE_DECLARATION = /Invalid SourceDeclaration/;
 const KEY_MATCH_MESSAGE = /connector_id must match connector_key/;
-const NO_SOURCE_MESSAGE = /no source declaration/;
 const URL_KEY_MESSAGE = /is a URL with no connector_key/;
 
 /** The reviewed historical source identity of a shipped first-party connector. */
@@ -146,46 +145,31 @@ const PROVENANCE_VARIANTS: [string, Record<string, unknown>][] = [
   ["no provenance", {}],
 ];
 
-// Fresh first registration, unmapped custom key: provenance must not choose the source.
+// Provenance never chooses a source; a new connector can register without one.
 for (const [label, provenance] of PROVENANCE_VARIANTS) {
-  scenario(`a fresh custom key without a declaration is refused before any write (${label})`, async () => {
+  scenario(`a fresh key without an identity registers without minting one (${label})`, async () => {
     const key = "srcid-fresh-custom";
-    await assertRejectedWithoutWrite(
-      key,
-      () =>
-        registerConnector(
-          legacyManifest({
-            connector_id: key,
-            connector_key: key,
-            ...provenance,
-          }),
-          {
-            skipDerivedRepair: true,
-          }
-        ),
-      NO_SOURCE_MESSAGE
-    );
+    await registerConnector(legacyManifest({ connector_key: key, ...provenance }), { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor(key)), undefined);
   });
 }
 
-// Fresh key-only registration (no connector_id), unmapped custom key: refused, no fallback.
-scenario("a fresh key-only custom manifest without a declaration is refused before any write", async () => {
-  const key = "srcid-fresh-keyonly";
-  await assertRejectedWithoutWrite(
-    key,
-    () => registerConnector(legacyManifest({ connector_key: key, manifest_uri: DOC_ONE }), { skipDerivedRepair: true }),
-    NO_SOURCE_MESSAGE
-  );
+scenario("an unmapped registry URL alias registers its key without minting a source", async () => {
+  await registerConnector(legacyManifest({ connector_id: "https://registry.pdpp.dev/connectors/srcid-fresh-url", manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("srcid-fresh-url")), undefined);
 });
 
-// Unmapped registry-URL alias: a URL connector_id must not become the operational key or the source.
-scenario("an unmapped registry URL connector_id is refused and never becomes a source", async () => {
-  const url = "https://registry.pdpp.dev/connectors/srcid-fresh-url";
-  await assertRejectedWithoutWrite(
-    url,
-    () => registerConnector(legacyManifest({ connector_id: url, manifest_uri: DOC_ONE }), { skipDerivedRepair: true }),
-    NO_SOURCE_MESSAGE
-  );
+scenario("an explicit source.id is the current identity independently of provenance", async () => {
+  await registerConnector(legacyManifest({ connector_key: "srcid-current", source: { id: EXPLICIT_SOURCE }, manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("srcid-current")), EXPLICIT_SOURCE);
+});
+
+scenario("an uninstalled connector's retained registration still owns its current identity", async () => {
+  await publishConnectorActivation(installRecord("srcid-uninstalled", legacyManifest({ connector_key: "srcid-uninstalled", source: { id: EXPLICIT_SOURCE } })));
+  await createConnectorInstallStore().deactivateAndRemoveActivation!("srcid-uninstalled");
+  assert.equal(await getConnectorActivation("srcid-uninstalled"), null);
+  assert.ok(await storedFor("srcid-uninstalled"));
+  await assertRejectedWithoutWrite("srcid-claimant", () => registerConnector(legacyManifest({ connector_key: "srcid-claimant", source: { id: EXPLICIT_SOURCE } }), { skipDerivedRepair: true }), /already owned/);
 });
 
 // Causal guard: an explicit, valid declaration does not make an unknown URL an operational key.
@@ -226,8 +210,9 @@ for (const [label, provenance] of PROVENANCE_VARIANTS) {
   });
 }
 
-scenario("a fresh first-party key without a declared identity is refused", async () => {
-  await assertRejectedWithoutWrite("amazon", () => registerConnector(legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined }), { skipDerivedRepair: true }), NO_SOURCE_MESSAGE);
+scenario("a familiar key without a declaration gets no legacy identity", async () => {
+  await registerConnector(legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("amazon")), undefined);
 });
 
 scenario("pre-projection registration keeps no identity until a matching manifest declares one", () => {
@@ -730,19 +715,10 @@ scenario("a retained custom source for a mapped key survives a schema update wit
   assert.equal(await getConnectorActivation(key), null);
 });
 
-// Pure lookup: prototype names and unmapped names never resolve, and no key can be repointed through the exports.
-scenario("prototype and unmapped names never resolve to a declared source", async () => {
-  for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "srcid-not-mapped"]) {
-    assert.throws(() => normalizeConnectorManifestForStorage(legacyManifest({ connector_id: name, connector_key: name })), /no source declaration|connector_id is required/);
+scenario("prototype-shaped keys never acquire an implicit identity", () => {
+  for (const name of ["constructor", "toString", "valueOf", "srcid-not-mapped"]) {
+    assert.equal(normalizeConnectorManifestForStorage(legacyManifest({ connector_key: name, connector_id: name })).storedManifest.source_declaration, undefined);
   }
-  await assertRejectedWithoutWrite(
-    "constructor",
-    () =>
-      registerConnector(legacyManifest({ connector_id: "constructor", connector_key: "constructor" }), {
-        skipDerivedRepair: true,
-      }),
-    NO_SOURCE_MESSAGE
-  );
 });
 
 // Null and undefined mean "unspecified" (documented normalizer behavior), never a request for a map fallback.
@@ -752,23 +728,13 @@ async function assertAbsenceDeclaration(declaration: null | undefined): Promise<
     { skipDerivedRepair: true }
   );
   assert.equal(retainedSourceId(await storedFor("amazon")), firstPartySource("amazon"));
-  await assertRejectedWithoutWrite(
-    "srcid-null-unmapped",
-    () =>
-      registerConnector(
-        legacyManifest({
-          connector_id: "srcid-null-unmapped",
-          connector_key: "srcid-null-unmapped",
-          source_declaration: declaration,
-        }),
-        { skipDerivedRepair: true }
-      ),
-    NO_SOURCE_MESSAGE
-  );
+  const key = "srcid-null-unmapped";
+  await registerConnector(legacyManifest({ connector_key: key, source_declaration: declaration }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor(key)), undefined);
 }
 
 scenario(
-  "a null or undefined declaration is absence: mapped keys take the map, unmapped keys refuse, retained keys keep",
+  "a null or undefined declaration is absence: declared legacy identities apply, absent identities stay absent, retained keys keep",
   async () => {
     await assertAbsenceDeclaration(null);
     await assertAbsenceDeclaration(undefined);
@@ -986,30 +952,11 @@ scenario("an installer publish cannot rebind a retained source to an explicit di
   assert.equal(await getConnectorActivation(key), null, "no activation is written for a rejected publish");
 });
 
-// Installer, fresh: an unmapped custom key with provenance is refused before any registry or activation write.
-scenario("an installer publish refuses a fresh custom key without a declaration", async () => {
+scenario("an installer publish accepts a fresh key without minting an identity", async () => {
   const key = "srcid-install-fresh";
-  await assert.rejects(
-    () =>
-      publishConnectorActivation(
-        installRecord(
-          key,
-          legacyManifest({
-            connector_id: key,
-            connector_key: key,
-            manifest_uri: DOC_ONE,
-          })
-        )
-      ),
-    (error: unknown) => {
-      const err = error as { code?: unknown; message?: unknown };
-      assert.equal(err.code, INVALID_REQUEST);
-      assert.match(String(err.message), NO_SOURCE_MESSAGE);
-      return true;
-    }
-  );
-  assert.equal(await storedFor(key), null, "no registry row is written");
-  assert.equal(await getConnectorActivation(key), null, "no activation is written");
+  await publishConnectorActivation(installRecord(key, legacyManifest({ connector_key: key, manifest_uri: DOC_ONE })));
+  assert.equal(retainedSourceId(await storedFor(key)), undefined);
+  assert.ok(await getConnectorActivation(key));
 });
 
 test("SQLite: pre-projection stored registration updates without inventing an identity", async () => {

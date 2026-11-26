@@ -327,7 +327,7 @@ test("a managed profile requiring an unadvertised capability fails before spawn 
       managedDefinitionsFrom(managed),
       managedEntrypointIndex(managed)
     );
-    const connector = registry[CONNECTOR_ID];
+    const connector = registry[CONNECTOR_KEY];
     assert.ok(connector);
 
     await assert.rejects(
@@ -351,7 +351,7 @@ test("a managed profile requiring an unadvertised capability fails before spawn 
         assert.ok(error instanceof RuntimeCapabilityMismatchError);
         if (error instanceof RuntimeCapabilityMismatchError) {
           assert.equal(error.code, "runtime_capability_mismatch");
-          assert.equal(error.connectorId, CONNECTOR_ID);
+          assert.equal(error.connectorId, CONNECTOR_KEY);
           assert.deepEqual(error.missing, ["BLOB"]);
           assert.match(error.message, /missing capabilities \[BLOB\]/);
         }
@@ -371,7 +371,7 @@ test("a managed profile's advisory capability does not block placement when the 
       managedDefinitionsFrom(managed),
       managedEntrypointIndex(managed)
     );
-    const connector = registry[CONNECTOR_ID];
+    const connector = registry[CONNECTOR_KEY];
     assert.ok(connector);
 
     assert.deepEqual([...connector.protocol_capabilities], ["DETAIL_COVERAGE_KEY_SETS"]);
