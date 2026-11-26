@@ -13,7 +13,7 @@ export async function loadHistorySources(): Promise<HistorySource[]> {
   do {
     const page = await listConnectorSummaries({ profile: "identity_inventory", limit: 100, ...(cursor ? { cursor } : {}) });
     sources.push(...page.data.map(row => ({ id: row.connector_instance_id || row.connection_id, connector: row.connector_id,
-      name: connectionDisplayName(row.display_name, row.connector_display_name, row.connector_id), kinds: findManifestForConnectorId(manifests,row.connector_id)?.streams })));
+      name: connectionDisplayName(row.display_name, row.connector_display_name, row.connector_id), serviceName:row.connector_display_name ?? findManifestForConnectorId(manifests,row.connector_id)?.display_name, kinds: findManifestForConnectorId(manifests,row.connector_id)?.streams })));
     cursor = page.has_more ? page.next_cursor ?? undefined : undefined;
   } while (cursor);
   return sources;

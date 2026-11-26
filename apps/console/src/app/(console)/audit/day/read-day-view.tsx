@@ -23,7 +23,7 @@ export function groupReadLines(rows: AppReadEntry[]): AppReadEntry[] {
 }
 export function ReadDayRows({rows,sources,offset=0}:{rows:AppReadEntry[];sources:HistorySource[];offset?:number}) {
   return <ul className="divide-y divide-border">{groupReadLines(rows).map(row=><li className="flex items-start justify-between gap-4 py-4" key={row.id}>
-    <div className="min-w-0"><p>{readSentence(row,row.source_id ? sourceName(sources,row.connection_id ?? row.source_id,row.source_id) : null,historyKindName(sources,row.connection_id ?? row.source_id,row.record_kind).toLowerCase())}{(row.occurrences ?? 1)>1 ? ` · ${row.occurrences} times` : ""}{row.refused ? " · refused" : ""}</p>{row.refused ? <p className="text-[13px] text-muted-foreground">{refusalReason(row.reason) ?? "The app must correct its request before trying again."}</p> : null}</div>
+    <div className="min-w-0"><p>{readSentence(row,row.source_id ? sourceName(sources,row.connection_id ?? row.source_id,row.source_id) : null,historyKindName(sources,row.connection_id ?? row.source_id,row.record_kind))}{(row.occurrences ?? 1)>1 ? ` · ${row.occurrences} times` : ""}{row.refused ? " · refused" : ""}</p>{row.refused ? <p className="text-[13px] text-muted-foreground">{refusalReason(row.reason) ?? "The app must correct its request before trying again."}</p> : null}</div>
     <span className="shrink-0 text-[13px] text-muted-foreground">{clockLabel(row.at,offset)}</span>
   </li>)}</ul>;
 }

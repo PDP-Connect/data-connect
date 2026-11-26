@@ -21,5 +21,5 @@ export async function loadSyncDay(params: Record<string,string | undefined>) {
   const start=practice ? Number(params.cursor ?? 0) : 0;
   const rows = practice ? history.data.slice(start,start+50) : history.data;
   const more = history.has_more || start+rows.length < history.data.length;
-  return { name:sourceName(sources,params.connection_id ?? "practice-source-0",history.data[0]?.connector_id),day,offset,rows,demo:params.demo,fixture:params.fixture,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/syncs/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
+  return { name:sourceName(sources,params.connection_id ?? "practice-source-0",history.data[0]?.connector_id),day,offset,rows,sources,demo:params.demo,fixture:params.fixture,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/syncs/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
 }

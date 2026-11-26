@@ -9,3 +9,9 @@ test("a known connection gets its account name; a service-only read does not pic
  assert.equal(sourceName(sources,null,"gmail"),"Gmail");
  assert.equal(sourceName(sources,"gmail"),"Gmail");
 });
+
+test("service-only activity uses the same authored service name as source inventory",()=>{
+ const sources=[{id:"budget",connector:"ynab",name:"Work budget",serviceName:"YNAB"},{id:"chat",connector:"whatsapp_web",name:"Work messages",serviceName:"WhatsApp"}];
+ assert.equal(sourceName(sources,null,"ynab"),"YNAB");
+ assert.equal(sourceName(sources,null,"whatsapp_web"),"WhatsApp");
+});

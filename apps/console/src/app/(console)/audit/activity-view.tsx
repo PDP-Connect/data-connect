@@ -16,7 +16,7 @@ export function appDayHref(row: NamedAppDay, demo?: string, connection?: string)
 }
 export function ReadDayLines({ row, sources, linked=false, demo }: { row: NamedAppDay; sources: HistorySource[]; linked?:boolean;demo?:string }) {
   const ranked = row.sources.map(source => ({ reads: source.reads, href:appDayHref(row,demo,source.connection_id ?? source.source_id), text: `${sourceName(sources,source.connection_id ?? source.source_id,source.source_id)} · ${source.reads} time${source.reads===1?"":"s"}${source.records === null ? "" : ` · ${source.records.toLocaleString("en-US")} record${source.records===1?"":"s"}`}` }));
-  if (row.across_sources) ranked.push({ reads: row.across_sources, href:appDayHref(row,demo), text: `Searched across your data sources · ${row.across_sources} times` });
+  if (row.across_sources) ranked.push({ reads: row.across_sources, href:appDayHref(row,demo), text: `Searched across your data sources · ${row.across_sources} time${row.across_sources===1?"":"s"}` });
   const lines = ranked.sort((a,b)=>b.reads-a.reads).map(line=>line);
   return <div className="mt-1 text-[13px] text-muted-foreground">{lines.slice(0,4).map(line => <p key={line.text}>{linked ? <Link className="text-primary hover:underline" href={line.href}>{line.text}</Link> : line.text}</p>)}{lines.length > 4 ? <p>and {lines.length-4} more</p> : null}</div>;
 }

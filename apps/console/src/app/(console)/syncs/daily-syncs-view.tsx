@@ -16,8 +16,8 @@ export function syncCause(cause: string | null, name: string): string | null {
   return result.known ? result.sentence : null;
 }
 export function syncDaySentence(row: SyncDay, name: string, missingNames: string[] = []): string {
-  const missing = row.missing?.length ? ` · some ${missingNames.length ? missingNames.join(", ").toLowerCase() : "records"} didn't come` : "";
-  if (!row.ran) return `Not checked · could not start ${row.could_not_start} times`;
+  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : "";
+  if (!row.ran) return `Not checked · could not start ${row.could_not_start} time${row.could_not_start===1?"":"s"}`;
   if (row.last_outcome === "failed") {
     const cause = resolveSyncCause(row.evidence ?? {reason:row.cause},name).sentence;
     return `Failed${row.failed > 1 ? ` ${row.failed} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start} could not start` : ""}${missing}`;
