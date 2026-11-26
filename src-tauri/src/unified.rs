@@ -3735,7 +3735,7 @@ mod pending_credential_handoff_tests {
 /// identical to an owner editing the file -- the watcher restarted the
 /// entire managed stack roughly every 60 seconds, forever, for as long as
 /// remote access was on. Confirmed live 2026-09-22: this is why remote
-/// access was left OFF on Tim's machine. Same defect FAMILY as #208 (a
+/// access was left OFF on the owner's machine. Same defect FAMILY as #208 (a
 /// health check tearing down what it observes) and the pre-#218
 /// `wait_for_console` (a timeout tearing down what it observes) -- here the
 /// observer and the actor are two different watchers sharing one file, and
@@ -4278,7 +4278,7 @@ fn owner_credential_reveal_cookie(url: &tauri::Url, value: &str) -> Result<Cooki
 /// the webview -- including a plain `<a>` click with no `target="_blank"`
 /// needed, unlike `on_new_window` (which only fires for `window.open()`,
 /// confirmed NOT to fire for anchor activation on WebKitGTK by an actual
-/// click in Tim's real build: a plain `target="_blank"` anchor did nothing,
+/// click in a real build: a plain `target="_blank"` anchor did nothing,
 /// twice, across two design rounds). `on_navigation` has no such gap: it is
 /// the same hook Tauri's own docs recommend for navigation allowlisting,
 /// and it requires no trusted user-gesture context the way `window.open()`

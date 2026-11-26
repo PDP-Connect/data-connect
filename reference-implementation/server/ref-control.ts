@@ -4366,8 +4366,8 @@ function normalizeLabelForContainment(value: string): string {
  * Append `qualifier` to `label` unless the label already says it.
  *
  * Containment is normalized (case- and punctuation-insensitive) so a label the
- * owner already qualified by hand is never doubled — "peregrine Codex" stays
- * "peregrine Codex", not "peregrine Codex Codex".
+ * owner already qualified by hand is never doubled — "workstation Codex" stays
+ * "workstation Codex", not "workstation Codex Codex".
  */
 function qualifyLabel(label: string, qualifier: string, join: string): string {
   const trimmedQualifier = qualifier.trim();
@@ -4390,7 +4390,7 @@ function qualifyLabel(label: string, qualifier: string, join: string): string {
  *   1. A local-device source's stored `display_name` is whatever the owner typed
  *      into the enrollment form's free-text field, passed through verbatim as
  *      `--device-label`. Nothing ever composed the connector name into it, so
- *      the owner typed "peregrine Codex" by hand but only "peregrine" for
+ *      the owner typed "workstation Codex" by hand but only "workstation" for
  *      Signal — a bare hostname saying nothing about WHAT it collects.
  *      (Owner: "it should have been called 'signal' then".)
  *
@@ -4403,7 +4403,7 @@ function qualifyLabel(label: string, qualifier: string, join: string): string {
  * the label carries the connector, then whatever distinguishes this connection
  * from its siblings of the same connector:
  *
- *   - device-backed  →  "<device> <Connector>"        e.g. "peregrine Signal"
+ *   - device-backed  →  "<device> <Connector>"        e.g. "workstation Signal"
  *   - account-backed →  "<Connector> - <account>"     e.g. "H-E-B - a@b.com"
  *
  * The account identifier is the manifest-declared, NON-SECRET identity field
@@ -6236,7 +6236,7 @@ export function buildConnectorFreshness({
  * A dead-lettered row has exhausted its retries and will never drain on its
  * own; only an owner-run recovery can move it. That makes it a *settled* fact
  * about lost records, NOT evidence that the collector stopped working. The two
- * were conflated: one permanently-rejected record out of 10,001 (peregrine
+ * were conflated: one permanently-rejected record out of 10,001 (workstation
  * Claude Code, 2026-08-22) forced `backlog_open: 1` -> heartbeat `blocked` ->
  * outbox `stalled`, which disqualified the freshness heartbeat and rendered a
  * 2.5-million-record source as RED "can't collect - freshness has not been

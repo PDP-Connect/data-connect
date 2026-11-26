@@ -800,8 +800,8 @@ test("GET inspect/ngrok reports unavailable without a managed desktop host, and 
   }
 });
 
-// A remote-originated reconfiguration that could strand the owner: Tim's
-// exact scenario, where the settings page is itself reachable only because
+// A remote-originated reconfiguration that could strand the owner: the
+// lock-out scenario, where the settings page is itself reachable only because
 // remote access is already on. `remoteContract` below is the one place in
 // this file that declares a real `referenceOrigin`, matched against the
 // `host` header these tests send, so `isRemoteOriginRequest` genuinely

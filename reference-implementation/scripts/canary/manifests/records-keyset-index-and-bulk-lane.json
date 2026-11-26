@@ -105,7 +105,7 @@
       "kind": "http_health",
       "id": "health-probe",
       "description": "The reference server must answer. /owner/login returns 200 unauthenticated and is server-rendered, so a 200 proves the app is serving rather than that a port is open.",
-      "url": "https://pdpp.vivid.fish/owner/login",
+      "url": "/owner/login",
       "expectStatus": 200,
       "blocking": true
     }

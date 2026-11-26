@@ -135,7 +135,7 @@ export const CLOUDFLARED_DOWNLOAD_URL =
  * The `missing` copy leads with the automatic action, not the manual
  * escape hatch -- confirmed live this mattered: an earlier version led
  * with "cloudflared is not installed... if it fails, you can install
- * cloudflared yourself instead" in one flowing sentence, and Tim clicked
+ * cloudflared yourself instead" in one flowing sentence, and an owner clicked
  * the manual-install link without reading past "not installed", then
  * installed cloudflared by hand via apt before ever letting the automatic
  * download run. The fix this component embeds now: state the automatic
@@ -212,7 +212,7 @@ export function CloudflareTunnelDomainRequirement() {
  * didn't have: before this, the only guidance was a single link to
  * Cloudflare's own walkthrough plus two bare form fields, which assumes the
  * owner already knows what a tunnel token or a public hostname route is.
- * Written for someone who has never created a Cloudflare tunnel, per Tim's
+ * Written for someone who has never created a Cloudflare tunnel, per the
  * standing bar that this has to work for an owner who cannot ask an agent
  * what to paste.
  *
@@ -220,7 +220,7 @@ export function CloudflareTunnelDomainRequirement() {
  * (`remote-access-setting.tsx`), not rendered unconditionally: confirmed
  * live that an always-visible five-step walkthrough, ahead of the fields
  * it explains, is exactly the "wall of text" an owner skims past without
- * reading (Tim: "that page is a wall of text"). The one fact that cannot
+ * reading (owner feedback: the page read as a wall of text). The one fact that cannot
  * collapse along with these steps -- the domain requirement -- is its own
  * component, `CloudflareTunnelDomainRequirement` above, rendered
  * unconditionally at the same call site.
@@ -353,11 +353,11 @@ export function CloudflareTunnelTokenStatus({ token }: { token: string }) {
  * `start()` (`src-tauri/src/remote_access_cloudflare.rs`) already watches
  * cloudflared's stdout for: "Registered tunnel connection". Exists because
  * the alternative -- what this option had until now -- is the exact failure
- * mode Tim flagged: after saving, the settings page shows "Waiting for the
+ * mode an owner hit: after saving, the settings page shows "Waiting for the
  * provider to report an address…" and NEVER checks again unless the owner
  * manually reloads the page (confirmed by reading `RemoteAccessSetting`'s
  * load effect: it runs once, on mount, with no polling). That single-shot
- * spinner is what stalled Tim for hours on the ngrok path; this exists so
+ * spinner is what stalled an owner for hours on the ngrok path; this exists so
  * Cloudflare does not repeat it.
  */
 export type CloudflareTunnelConnectionStatus =

@@ -87,7 +87,7 @@ export interface RedactedStderr {
  * `LONG_OPAQUE_RE` is an ENTROPY heuristic, not a PII control: it redacts any
  * >=24-char alnum run because raw API keys look like that. Categorical reason
  * tokens look like that too. Production 2026-08-18: HEB connection
- * `cin_c875ca3ec8b6ce2c283a4288` recorded
+ * `cin_9d2b4f6a8c0e1357b9d1f3a5` recorded
  * `connector_error_json.message = "heb_session_failed: [REDACTED]"` — the
  * literal string `[REDACTED]` was the entire cause. The eaten token was a
  * PII-free categorical constant (`login_form_never_appeared`, 25 chars);
@@ -96,7 +96,7 @@ export interface RedactedStderr {
  *
  * Shape alone CANNOT fix this, and that is the load-bearing finding. A tighter
  * "alphabetic snake_case" rule admits `login_form_never_appeared` but also
- * admits `tim_nunamaker_gmail_com` — a personal name is alphabetic snake_case
+ * admits `jane_doe_example_com` — a personal name is alphabetic snake_case
  * too. No regex separates a declared reason from a name, because the
  * difference is PROVENANCE, not spelling.
  *

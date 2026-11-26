@@ -1229,7 +1229,7 @@ export function RemoteAccessSetting({
                   tunnel, but rendering it unconditionally, ahead of the
                   fields it explains, is exactly the "wall of text" an
                   owner skims past without reading -- confirmed live this
-                  mattered (Tim: "that page is a wall of text"). Collapsed
+                  mattered (owner feedback: the page read as a wall of text). Collapsed
                   by default so the visible surface for someone who already
                   knows what to do is just the two fields below; the full
                   steps are one click away, not a scroll away. */}

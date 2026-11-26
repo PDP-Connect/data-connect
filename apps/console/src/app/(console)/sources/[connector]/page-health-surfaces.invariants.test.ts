@@ -169,7 +169,7 @@ test("owner confirmation is reachable from the connection detail page through st
 // `run_id` forever. So an `add_info` chip with a validated sync target still
 // linked to a concluded run — the owner clicked "Complete the requested action"
 // and nothing happened, because the run that owned the interaction had ended
-// and taken the interaction with it (production: ChatGPT chaka.dondo@gmail.com,
+// and taken the interaction with it (production: ChatGPT alex.roe@example.com,
 // three consecutive `expired` records each still carrying a run id).
 //
 // A validated target is necessary but NOT sufficient. `running` must gate it.

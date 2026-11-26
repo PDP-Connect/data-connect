@@ -51,10 +51,10 @@ test("attributeSearchHit accepts the deprecated connector_instance_id alias", ()
 });
 
 test("attributeSearchHit deduces the single visible connection of a connector type", () => {
-  const visible = [summary({ connection_id: "conn-only", connector_id: "github", display_name: "Tim's GitHub" })];
+  const visible = [summary({ connection_id: "conn-only", connector_id: "github", display_name: "Alex's GitHub" })];
   const result = attributeSearchHit({ connector_id: "github" }, visible);
   assert.equal(result.connectionId, "conn-only");
-  assert.equal(result.connectionDisplayName, "Tim's GitHub");
+  assert.equal(result.connectionDisplayName, "Alex's GitHub");
 });
 
 test("attributeSearchHit refuses to pick an arbitrary first connection when ambiguous", () => {

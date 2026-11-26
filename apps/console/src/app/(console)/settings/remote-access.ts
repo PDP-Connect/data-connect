@@ -163,7 +163,7 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     provider: "cloudflare_tunnel",
     ngrokMode: null,
     label: "Cloudflare Tunnel",
-    // The exact line Tim's own confusion traces to: he read an earlier
+    // The exact line an owner's confusion traces to: they read an earlier
     // version of this description, went to the Cloudflare dashboard, typed
     // a made-up hostname, and only THERE learned Cloudflare needed a domain
     // he already owned -- "i thought cloudflare would give me a random
@@ -179,7 +179,7 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     // DataConnect downloads and verifies it automatically now (see
     // `ensure_cloudflared_available`, `remote_access_cloudflare.rs`), so
     // stating it as a requirement here was actively misleading -- this
-    // exact line is what sent Tim to install cloudflared manually via apt
+    // exact line is what sent an owner to install cloudflared manually via apt
     // before ever opening this option, defeating the feature that exists
     // specifically to remove that step.
     planNote:

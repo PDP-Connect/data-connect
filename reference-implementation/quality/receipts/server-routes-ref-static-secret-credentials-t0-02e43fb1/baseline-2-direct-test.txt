@@ -1,5 +1,5 @@
 # hone work server-routes-ref-static-secret-credentials-t0-02e43fb1 — baseline rung 'direct-test'
-# command: cd /home/tnunamak/.tmp/hone-quality-0823/reference-implementation && node scripts/run-tests.ts
+# command: cd reference-implementation && node scripts/run-tests.ts
 # expect: all tests pass; 0 fail; no new skips (skip counts compared baseline vs post)
 # timeout: 1800s (engine-default)
 # exit: 1  duration: 883s  verdict: FAIL (exit 1 (expected 0))
