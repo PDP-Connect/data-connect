@@ -1437,6 +1437,19 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         return null;
       }
 
+      // Startup failure is actionable; capacity waits below remain skips.
+      if (runNowResult.status === "surface_failed") {
+        const failure = runNowResult.browser_surface_failure;
+        persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+        return recordAndNotifyDurably({
+          ...buildManagedRunTerminalRecord(connectorId, connectorInstanceId, startedAt, runNowResult, attempt),
+          error: failure
+            ? `browser_surface_failed: ${failure.code}: ${failure.message}`
+            : "browser_surface_failed: surface_failed",
+          failureReason: runNowResult.failure_reason ?? "surface_start_failed",
+        });
+      }
+
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {
         return recordAndNotify(
           buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId)
