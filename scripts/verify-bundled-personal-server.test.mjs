@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   truncateSync,
   writeFileSync,
@@ -824,6 +825,49 @@ describe("hdiutil mount retries", () => {
     expect(probes).toEqual([mountRoot])
     expect(fake.calls).toEqual([["hdiutil", detachArgs]])
     expect(fake.pauses).toEqual([])
+  })
+
+  describe("with the default mount probe", () => {
+    it("stops after one detach error when the mount path is gone", () => {
+      const parent = mkdtempSync(join(tmpdir(), "dmg-probe-"))
+      const gone = join(parent, "volume")
+      const fake = fakeHdiutil(Infinity, () => "No such file or directory")
+      try {
+        expect(() =>
+          detachDmg(gone, fake.runCommand, fake.pause)
+        ).not.toThrow()
+        expect(fake.calls).toEqual([["hdiutil", ["detach", gone]]])
+      } finally {
+        rmSync(parent, { recursive: true, force: true })
+      }
+    })
+
+    it("stops after one detach error when only the empty directory remains", () => {
+      const leftover = mkdtempSync(join(tmpdir(), "dmg-probe-"))
+      const fake = fakeHdiutil(Infinity, () => "Resource busy")
+      try {
+        expect(() =>
+          detachDmg(leftover, fake.runCommand, fake.pause)
+        ).not.toThrow()
+        expect(fake.calls).toEqual([["hdiutil", ["detach", leftover]]])
+      } finally {
+        rmSync(leftover, { recursive: true, force: true })
+      }
+    })
+
+    // /dev is its own filesystem on Linux and macOS, so it stands in for a
+    // volume that is still mounted.
+    it.skipIf(statSync("/dev").dev === statSync("/").dev)(
+      "keeps retrying while the path is still a separate filesystem",
+      () => {
+        const fake = fakeHdiutil(Infinity, () => "Resource busy")
+
+        expect(() =>
+          detachDmg("/dev", fake.runCommand, fake.pause)
+        ).toThrow("hdiutil detach")
+        expect(fake.calls).toHaveLength(3)
+      }
+    )
   })
 
   it("tries detach -force last and lists every attempt if the volume stays busy", () => {

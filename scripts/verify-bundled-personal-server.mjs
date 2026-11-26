@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, rmdirSync, rmSync } from "node:fs"
 import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import {
@@ -833,7 +833,8 @@ function verifyMacArtifacts(
     )
   } finally {
     if (attached) detachDmg(mountRoot)
-    rmSync(mountRoot, { recursive: true, force: true })
+    // Empty once detached; never traverse what might still be the mounted image.
+    rmdirSync(mountRoot)
   }
 }
 
