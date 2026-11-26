@@ -8,14 +8,65 @@ import { assistantInstructions } from "./assistant-instructions.ts";
 import { CopyAddress } from "./copy-address.tsx";
 export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[] }) {
   const newest = apps[0];
-  return <>
-    <PageHeader title="Connect an app" />
-    <p className="mb-6 text-muted-foreground">Give your assistant the address below. It will then ask you, on a DataConnect page, what it may read.</p>
-    {needsRemoteAccess(origin) ? <div className="mb-6 rounded-md border border-warning p-4"><p>ChatGPT and Claude can't reach this DataConnect yet. Its address only works on your own network.</p><Link href="/settings#remote-access">Set up remote access</Link><p className="mt-2 text-[13px] text-muted-foreground">Apps on this computer, such as Claude Code, can already use the address below.</p></div> : null}
-    <Section title="1. Copy your address"><CopyAddress address={`${origin.replace(/\/+$/, "")}/mcp`} /></Section>
-    <Section title="2. Add it to your assistant"><div className="grid gap-6 sm:grid-cols-2">{assistantInstructions.map((assistant) => <section key={assistant.name}><h3 className="pdpp-title">{assistant.name}</h3><ol className="list-decimal space-y-2 pl-5 text-[13px]">{assistant.steps.map((step) => <li key={step}>{step}</li>)}</ol><a className="mt-2 inline-block text-[13px] text-muted-foreground" href={assistant.help} rel="noreferrer" target="_blank">{assistant.name}'s help</a></section>)}</div></Section>
-    <Section title="3. Say what it may read"><p>Your assistant opens a DataConnect page. Tick what it may read and press Allow.</p></Section>
-    <Section title="Did it work?"><p>{newest ? apps.length > 1 ? `${newest.name} and ${apps.length - 1} other apps are connected.` : `${newest.name} is connected. It can read ${newest.sources.join(", ")}.` : "No app is connected yet."}</p>{newest ? <Link href="/grants">See your apps</Link> : null}<p className="mt-3 text-[13px] text-muted-foreground">Now ask it something only your data can answer, for example: “What did I spend on groceries last month?”</p></Section>
-    <Link className="text-[13px] text-muted-foreground" href="/connect/technical">Technical details</Link>
-  </>;
+  return (
+    <>
+      <PageHeader title="Connect an app" />
+      <p className="mb-6 text-muted-foreground">
+        Give your assistant the address below. It will then ask you, on a DataConnect page, what it may read.
+      </p>
+      {needsRemoteAccess(origin) ? (
+        <div className="mb-6 rounded-md border border-warning p-4">
+          <p>ChatGPT and Claude can't reach this DataConnect yet. Its address only works on your own network.</p>
+          <Link href="/settings#remote-access">Set up remote access</Link>
+          <p className="mt-2 text-[13px] text-muted-foreground">
+            Apps on this computer, such as Claude Code, can already use the address below.
+          </p>
+        </div>
+      ) : null}
+      <Section title="1. Copy your address">
+        <CopyAddress address={`${origin.replace(/\/+$/, "")}/mcp`} />
+      </Section>
+      <Section title="2. Add it to your assistant">
+        <div className="grid gap-6 sm:grid-cols-2">
+          {assistantInstructions.map((assistant) => (
+            <section key={assistant.name}>
+              <h3 className="pdpp-title">{assistant.name}</h3>
+              <ol className="list-decimal space-y-2 pl-5 text-[13px]">
+                {assistant.steps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+              <a
+                className="mt-2 inline-block text-[13px] text-muted-foreground"
+                href={assistant.help}
+                rel="noreferrer"
+                target="_blank"
+              >
+                {assistant.name}'s help
+              </a>
+            </section>
+          ))}
+        </div>
+      </Section>
+      <Section title="3. Say what it may read">
+        <p>Your assistant opens a DataConnect page. Tick what it may read and press Allow.</p>
+      </Section>
+      <Section title="Did it work?">
+        <p>
+          {newest
+            ? apps.length > 1
+              ? `${newest.name} and ${apps.length - 1} other apps are connected.`
+              : `${newest.name} is connected. It can read ${newest.sources.join(", ")}.`
+            : "No app is connected yet."}
+        </p>
+        {newest ? <Link href="/grants">See your apps</Link> : null}
+        <p className="mt-3 text-[13px] text-muted-foreground">
+          Now ask it something only your data can answer, for example: “What did I spend on groceries last month?”
+        </p>
+      </Section>
+      <Link className="text-[13px] text-muted-foreground" href="/connect/technical">
+        Technical details
+      </Link>
+    </>
+  );
 }

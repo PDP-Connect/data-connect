@@ -12,10 +12,14 @@ import { appSourceName } from "./app-access.ts";
 export function PendingApprovalRow({
   approval,
   appName,
+  place,
+  reviewHref,
   denyAction,
 }: {
   approval: PendingApproval;
   appName: string;
+  place?: string;
+  reviewHref?: string;
   connectorIcons?: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   denyAction: (formData: FormData) => void | Promise<void>;
 }) {
@@ -24,6 +28,7 @@ export function PendingApprovalRow({
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">
         <p className="text-[15px] font-medium text-foreground">{appName}</p>
+        {place ? <p className="text-[13px] text-muted-foreground">{place}</p> : null}
         <p className="mt-1 text-[13px] text-muted-foreground">
           {approval.grant_preview?.source ? `Wants to read ${appSourceName(approval.grant_preview.source)}` : "Wants to read your data"}
         </p>
@@ -32,7 +37,7 @@ export function PendingApprovalRow({
       <div className="flex flex-wrap items-start gap-2">
         <Link
           className={buttonVariants({ size: "sm", variant: "ghost" })}
-          href={`/grants/approvals/${encodeURIComponent(approval.approval_id)}`}
+          href={reviewHref || `/grants/approvals/${encodeURIComponent(approval.approval_id)}`}
         >
           Review
         </Link>

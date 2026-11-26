@@ -1,4 +1,5 @@
 import { SourceApps, SourceAppsList } from "./source-apps.tsx";
+import { groupGrantAccessByApp } from "../../grants/app-access.ts";
 import { buildAppPractice } from "../../grants/app-practice.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -482,7 +483,7 @@ export default async function ConnectorPage({
       dangerError={sp.error}
       dangerMessage={sp.message}
       model={model}
-      apps={practiceModel ? <SourceAppsList apps={buildAppPractice("one").apps} connectionId={model.connectionId} /> : <Suspense fallback={null}><SourceApps connectionId={model.connectorInstanceId ?? model.connectionId} /></Suspense>}
+      apps={practiceModel ? <SourceAppsList apps={sp.demo === "apps-some" ? groupGrantAccessByApp(buildAppPractice("one").registrations.map((app) => ({ ...app, sources: app.sources.map((row) => ({ ...row, source: { ...row.source, connection_id: model.connectionId, connector_id: model.connectorId, id: model.connectorId } })) }))) : []} connectionId={model.connectionId} /> : <Suspense fallback={null}><SourceApps connectionId={model.connectorInstanceId ?? model.connectionId} /></Suspense>}
       otherAccounts={otherAccounts}
       now={now}
       updateDemo={updateDemo}

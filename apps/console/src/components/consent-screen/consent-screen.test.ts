@@ -211,7 +211,7 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
 });
 
 test("address proof controls the verified label", () => {
-  assert.match(CLIENT_SOURCE, /client.trust !== "unverified" && Boolean\(client.domain\)/);
+  assert.match(CLIENT_SOURCE, /client.trust === "domain"/);
   assert.match(CLIENT_SOURCE, /styles.verified/);
 });
 

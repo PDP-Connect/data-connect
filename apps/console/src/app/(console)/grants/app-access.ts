@@ -9,17 +9,21 @@ export interface AppAccess {
   grantIds: string[];
   hrefId: string;
   lastRead: string | null;
+  neverRead?: boolean;
   name: string;
   place: string;
   verified: boolean;
   packageIds: string[];
   sources: string[];
-  sourceAccess: import("../lib/ref-client.ts").AppAccessSource[];
+  sourceAccess: (import("../lib/ref-client.ts").AppAccessSource & { name?: string; neverRead?: boolean })[];
+  readsAllSources?: boolean;
+  showPlace?: boolean;
   since: string | null;
   expiresAt: string | null;
   stoppedAt: string | null;
   stoppedReason: "removed" | "expired" | null;
-  state: "reading" | "stopped";
+  state: "reading" | "stopped" | "waiting";
+  pendingId?: string;
   status: string | null;
 }
 
@@ -33,14 +37,16 @@ export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[
   return label ? `${label[0]?.toUpperCase()}${label.slice(1)}` : label;
 }
 
-export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(children: readonly T[]): T[] {
+export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(
+  children: readonly T[]
+): T[] {
   return children.filter((child) => child.grant_status === "active" && child.member_status === "active");
 }
 
 /** Index app display names from grant and owner-client reads by client id. */
 export function appNamesByClientId(
   grants: readonly Pick<GrantSummary, "client" | "client_id">[],
-  clients: readonly OwnerIssuedClient[] = [],
+  clients: readonly OwnerIssuedClient[] = []
 ): Map<string, string> {
   const names = new Map<string, string>();
   for (const grant of grants) {
@@ -69,18 +75,42 @@ export function pendingApprovalAppName(clientName: string | null | undefined): s
 }
 
 /** Complete registrations only: access comes from permissions, never event outcomes. */
-export function groupGrantAccessByApp(registrations: readonly import("../lib/ref-client.ts").AppAccess[], now = Date.now()): AppAccess[] {
+export function groupGrantAccessByApp(
+  registrations: readonly import("../lib/ref-client.ts").AppAccess[],
+  now = Date.now(),
+  pending: readonly import("../lib/ref-client.ts").PendingApproval[] = [],
+  sourceNames: ReadonlyMap<string, string> = new Map()
+): AppAccess[] {
   const groups = new Map<string, AppAccess>();
   for (const registration of registrations) {
     const name = registration.client_name.trim();
-    const place = registration.returns_to_this_computer ? "this computer" : registration.return_host || "no address given";
-    const key = name || registration.return_host || registration.returns_to_this_computer
-      ? JSON.stringify([name, place]) : registration.client_id;
+    const place = registration.returns_to_this_computer
+      ? "this computer"
+      : registration.return_host || "no address given";
+    const key =
+      name || registration.return_host || registration.returns_to_this_computer
+        ? JSON.stringify([name, place])
+        : registration.client_id;
     let app = groups.get(key);
     if (!app) {
-      app = { clientIds: [], grantIds: [], hrefId: "", lastRead: null, name: name || (place === "no address given" ? UNKNOWN_APP_NAME : place), place,
-        verified: true, packageIds: [], sources: [], sourceAccess: [], since: null, expiresAt: null,
-        stoppedAt: null, stoppedReason: null, state: "stopped", status: "Removed" };
+      app = {
+        clientIds: [],
+        grantIds: [],
+        hrefId: "",
+        lastRead: null,
+        name: name || (place === "no address given" ? UNKNOWN_APP_NAME : place),
+        place,
+        verified: true,
+        packageIds: [],
+        sources: [],
+        sourceAccess: [],
+        since: null,
+        expiresAt: null,
+        stoppedAt: null,
+        stoppedReason: null,
+        state: "stopped",
+        status: "Removed",
+      };
       groups.set(key, app);
     }
     app.clientIds.push(registration.client_id);
@@ -89,18 +119,40 @@ export function groupGrantAccessByApp(registrations: readonly import("../lib/ref
       const inForce = row.in_force && (!row.expires_at || Date.parse(row.expires_at) > now);
       const identity = JSON.stringify(row.source);
       const previous = app.sourceAccess.find((item) => JSON.stringify(item.source) === identity);
-      if (!previous) app.sourceAccess.push({ ...row, in_force: inForce, kinds: [...row.kinds], grant_ids: [...row.grant_ids], active_grant_ids: inForce ? [...row.active_grant_ids] : [], package_ids: [...row.package_ids] });
+      if (!previous)
+        app.sourceAccess.push({
+          ...row,
+          name: sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source",
+          in_force: inForce,
+          kinds: [...row.kinds],
+          grant_ids: [...row.grant_ids],
+          active_grant_ids: inForce ? [...row.active_grant_ids] : [],
+          package_ids: [...row.package_ids],
+        });
       else {
         const wasInForce = previous.in_force;
         previous.in_force ||= inForce;
         previous.kinds = [...new Set([...previous.kinds, ...row.kinds])];
         previous.grant_ids = [...new Set([...previous.grant_ids, ...row.grant_ids])];
-        previous.active_grant_ids = [...new Set([...previous.active_grant_ids, ...(inForce ? row.active_grant_ids : [])])];
+        previous.active_grant_ids = [
+          ...new Set([...previous.active_grant_ids, ...(inForce ? row.active_grant_ids : [])]),
+        ];
         previous.package_ids = [...new Set([...previous.package_ids, ...row.package_ids])];
         if (row.first_issued_at < previous.first_issued_at) previous.first_issued_at = row.first_issued_at;
-        if (row.last_read_at && (!previous.last_read_at || row.last_read_at > previous.last_read_at)) previous.last_read_at = row.last_read_at;
-        if (row.stopped_at && (!previous.stopped_at || row.stopped_at > previous.stopped_at)) { previous.stopped_at = row.stopped_at; previous.stopped_reason = row.stopped_reason; }
-        if (inForce) previous.expires_at = !wasInForce ? row.expires_at : !previous.expires_at || !row.expires_at ? null : previous.expires_at > row.expires_at ? previous.expires_at : row.expires_at;
+        if (row.last_read_at && (!previous.last_read_at || row.last_read_at > previous.last_read_at))
+          previous.last_read_at = row.last_read_at;
+        if (row.stopped_at && (!previous.stopped_at || row.stopped_at > previous.stopped_at)) {
+          previous.stopped_at = row.stopped_at;
+          previous.stopped_reason = row.stopped_reason;
+        }
+        if (inForce)
+          previous.expires_at = !wasInForce
+            ? row.expires_at
+            : !previous.expires_at || !row.expires_at
+              ? null
+              : previous.expires_at > row.expires_at
+                ? previous.expires_at
+                : row.expires_at;
       }
       app.grantIds = [...new Set([...app.grantIds, ...row.grant_ids])];
     }
@@ -111,35 +163,64 @@ export function groupGrantAccessByApp(registrations: readonly import("../lib/ref
     app.state = current.length ? "reading" : "stopped";
     app.status = current.length ? null : "Removed";
     const visible = current.length ? current : app.sourceAccess;
-    app.sources = [...new Set(visible.map((row) => appSourceName(row.source) || "Data source"))];
+    app.sources = [...new Set(visible.map((row) => row.name || appSourceName(row.source) || "Data source"))];
+    app.readsAllSources =
+      sourceNames.size > 0 &&
+      [...sourceNames.keys()].every((id) => current.some((row) => row.source.connection_id === id));
     app.since = visible.map((row) => row.first_issued_at).sort()[0] || null;
-    app.lastRead = visible.flatMap((row) => row.last_read_at ? [row.last_read_at] : []).sort().at(-1) || null;
-    app.expiresAt = current.length && current.every((row) => row.expires_at) ? current.map((row) => row.expires_at as string).sort().at(-1) || null : null;
-    const stopped = app.sourceAccess.filter((row) => row.stopped_at).sort((a, b) => (b.stopped_at || "").localeCompare(a.stopped_at || ""))[0];
+    app.lastRead =
+      visible
+        .flatMap((row) => (row.last_read_at ? [row.last_read_at] : []))
+        .sort()
+        .at(-1) || null;
+    app.expiresAt =
+      current.length && current.every((row) => row.expires_at)
+        ? current
+            .map((row) => row.expires_at as string)
+            .sort()
+            .at(-1) || null
+        : null;
+    const stopped = app.sourceAccess
+      .filter((row) => row.stopped_at)
+      .sort((a, b) => (b.stopped_at || "").localeCompare(a.stopped_at || ""))[0];
     app.stoppedAt = stopped?.stopped_at || null;
-    app.stoppedReason = stopped?.stopped_reason || (app.sourceAccess.some((row) => row.expires_at && Date.parse(row.expires_at) <= now) ? "expired" : "removed");
+    app.stoppedReason =
+      stopped?.stopped_reason ||
+      (app.sourceAccess.some((row) => row.expires_at && Date.parse(row.expires_at) <= now) ? "expired" : "removed");
   }
-  return [...groups.values()].sort((a, b) => (b.lastRead || "").localeCompare(a.lastRead || "") || a.name.localeCompare(b.name));
-}
-
-export function splitAppAccessGroups(apps: readonly AppAccess[]): {
-  other: AppAccess[];
-  reading: AppAccess[];
-  stopped: AppAccess[];
-} {
-  const reading: AppAccess[] = [];
-  const stopped: AppAccess[] = [];
-  const other: AppAccess[] = [];
-  for (const app of apps) {
-    if (app.status === null) reading.push(app);
-    else if (app.status === "Removed") stopped.push(app);
-    else other.push(app);
-  }
-  return { other, reading, stopped };
+  for (const app of groups.values()) app.showPlace = [...groups.values()].some((other) => other !== app && other.name === app.name);
+  const waiting = pending.map((request): AppAccess => {
+    const known = [...groups.values()].find((app) => app.clientIds.includes(request.client_id || ""));
+    return {
+      clientIds: request.client_id ? [request.client_id] : [],
+      grantIds: [],
+      hrefId: request.approval_id,
+      name: known?.name || UNKNOWN_APP_NAME,
+      place: known?.place || "no address given",
+      verified: known?.verified || false,
+      packageIds: [],
+      sources: request.grant_preview?.source ? [appSourceName(request.grant_preview.source) || "your data"] : [],
+      sourceAccess: [],
+      since: request.created_at,
+      expiresAt: null,
+      lastRead: null,
+      stoppedAt: null,
+      stoppedReason: null,
+      state: "waiting",
+      status: "Waiting for you",
+      pendingId: request.approval_id,
+    };
+  });
+  return [
+    ...waiting,
+    ...[...groups.values()].sort(
+      (a, b) => (b.lastRead || "").localeCompare(a.lastRead || "") || a.name.localeCompare(b.name)
+    ),
+  ];
 }
 
 export function formatAppLastRead(value: string | null, now = Date.now()): string {
-  if (!value) return "No reads yet";
+  if (!value) return "Has not read anything yet";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, now);
 }

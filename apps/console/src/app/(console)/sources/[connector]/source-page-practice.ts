@@ -10,6 +10,7 @@ import {
 import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
+  "apps-some", "apps-none",
   "unmeasured-completeness",
 	"unknown-count",
   "atlas",

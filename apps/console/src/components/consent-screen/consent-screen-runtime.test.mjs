@@ -98,7 +98,7 @@ function assertPlainCopy(original) {
 
 test("verified state uses one trust line and plain consumer actions", () => {
   const verifiedModel = structuredClone(model);
-  verifiedModel.client.trust = "verified";
+  verifiedModel.client.trust = "domain";
   verifiedModel.client.domain = "spotify.example";
   const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: verifiedModel, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
   assert.ok(view.getByRole("heading", { name: `${verifiedModel.client.name} wants to read your data` }));
@@ -162,7 +162,7 @@ test("the demo model provides stable normal, trust, and many-source render state
   const unverified = buildConsentDemoModel("not-verified");
   const many = buildConsentDemoModel("many");
   assert.equal(normal.client.trust, "domain");
-  assert.equal(verified.client.trust, "verified");
+  assert.equal(verified.client.trust, "domain");
   assert.equal(unverified.client.trust, "unverified");
   assert.equal(many.sources.length, 12);
   for (const demoModel of [normal, verified, unverified, many]) {
@@ -566,4 +566,17 @@ test("Everything below posts the same decision as ticking each data source", asy
     cleanup(); return posted;
   }
   assert.deepEqual(await decide(true), await decide(false));
+});
+
+test("operator registration alone cannot borrow the domain-control mark", () => {
+  const registered = buildConsentDemoModel("normal");
+  registered.client.trust = "verified"; registered.client.domain = "app.example";
+  const view = render(createElement(ConsentScreen, { model: registered, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  assert.equal(view.queryByText("Verified"), null); assert.ok(view.getByText("not verified"));
+});
+test("a missing retention promise is omitted instead of attributed to the app", () => {
+  const missing = buildConsentDemoModel("normal");
+  missing.retention = `${missing.client.name} did not say how long it keeps the data it receives.`;
+  const view = render(createElement(ConsentScreen, { model: missing, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
+  assert.equal(view.queryByText(/It says it keeps what it reads/), null);
 });

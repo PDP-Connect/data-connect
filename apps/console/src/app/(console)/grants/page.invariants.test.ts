@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 test("Apps reads the complete list and keeps records on the technical route", () => {
-  assert.match(read("./load-apps.ts"), /groupGrantAccessByApp\(list.data\)/);
+  assert.match(read("./load-apps.ts"), /groupGrantAccessByApp\(list.data,/);
   assert.doesNotMatch(read("./page.tsx"), /listGrants|<details|IcSelect/);
   assert.match(read("./page.tsx"), /href="\/grants\/technical"/);
   assert.match(read("./technical/page.tsx"), /listGrants\(filters\)/);

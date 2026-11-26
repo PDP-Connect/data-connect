@@ -14,7 +14,7 @@ const LOADING_FILE = `${HERE}loading.tsx`;
 
 const STANDING_OVERVIEW_RENDER = /<StandingOverview\b/;
 const HOME_READS =
-  /listGrants\(\{ limit: HOME_GRANT_LIMIT \}\)[\s\S]*listTraces\(\{ limit: 6 \}\)[\s\S]*listPendingApprovals\(\)[\s\S]*listOwnerIssuedClients\(\)/;
+  /listAppAccess\(\)[\s\S]*listTraces\(\{ limit: 6 \}\)[\s\S]*listPendingApprovals\(\)[\s\S]*listOwnerIssuedClients\(\)/;
 const BOUNDED_SOURCE_READ =
   /loadConnectorSummaryPage\(pageState,[\s\S]*listConnectorSummaries\(\{ \.\.\.opts, includeFleetHealth: false \}\)/;
 const SOFT_READS = /function safeRead[\s\S]*rethrowControlFlow\(err\)[\s\S]*return \{ issue, value: fallback \}/;
@@ -52,7 +52,7 @@ test("Home renders Needs you, Data sources, then Apps that can read your data", 
   const overview = await readFile(OVERVIEW_FILE, "utf8");
   const needs = overview.indexOf("Needs you");
   const sources = overview.indexOf("Data sources");
-  const apps = overview.indexOf("Apps that can read your data");
+  const apps = overview.indexOf("can read your data");
 
   // DIRECTION.md, Home: the page leads with the items that need the person.
   assert.ok(needs >= 0 && needs < sources);

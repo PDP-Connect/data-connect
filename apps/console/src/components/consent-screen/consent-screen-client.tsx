@@ -177,7 +177,7 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
 }
 
 function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
-  const verified = client.trust !== "unverified" && Boolean(client.domain);
+  const verified = client.trust === "domain";
   return (
     <header className={styles.consentHeader}>
       {/* `client.logo` is an AS-cached, same-origin URL — never the client's
@@ -334,6 +334,7 @@ function SourceRow({
   hidden,
   active,
   searching,
+  initiallyOpen = false,
   onToggleStream,
   onToggleField,
   onToggleSource,
@@ -353,6 +354,7 @@ function SourceRow({
   fieldSelection: FieldSelectionState;
   ranges: Record<string, { since: string; until: string }>;
   searching: boolean;
+  initiallyOpen?: boolean;
   selection: SelectionState;
   setRange: (sourceId: string, streamName: string, key: "since" | "until", value: string) => void;
   source: ConsentSourceModel;
@@ -367,8 +369,7 @@ function SourceRow({
   // <details> disclosure idiom as the per-stream narrowing one level down.
   // While a search is active, force every visible match open — a collapsed
   // row would hide the very stream text that matched the query.
-  const initiallyOpen = source.streams.some((s) => s.selected);
-  const [isOpen, setIsOpen] = useState(initiallyOpen);
+  const [isOpen, setIsOpen] = useState(initiallyOpen || source.streams.some((s) => s.selected));
 
   return (
     <details
@@ -473,6 +474,8 @@ export function ConsentScreen({
   demoOnly = false,
   model,
   rejectAction,
+  openKinds = false,
+  dataConnectHost,
 }: {
   /**
    * Records the approval and resolves to the client redirect the browser must
@@ -484,6 +487,8 @@ export function ConsentScreen({
   demoOnly?: boolean;
   model: ConsentScreenModel;
   rejectAction: () => Promise<ConsentActionResult>;
+  openKinds?: boolean;
+  dataConnectHost?: string;
 }) {
   const [selection, setSelection] = useState<SelectionState>(() => initialSelection(model.sources));
   const [fieldSelection, setFieldSelection] = useState<FieldSelectionState>(() => initialFieldSelection(model.sources));
@@ -696,10 +701,10 @@ export function ConsentScreen({
 
   return (
     <div className={styles.page} data-hydrated={hydrated ? "true" : "false"}>
-      <div className={styles.railFooter}><img alt="" height={20} width={20} src="/icon" /><span>DataConnect</span></div>
+      <div className={styles.railFooter}><img alt="" height={20} width={20} src="/icon" /><span>DataConnect</span>{dataConnectHost ? <span className="pdpp-caption">{dataConnectHost}</span> : null}</div>
       <ConsentHeader client={model.client} />
       {model.purpose.description ? <p className="pdpp-body">It says it will: {plainCopy(model.purpose.description)}</p> : null}
-      {model.retention ? <p className="pdpp-caption">It says it keeps what it reads: {plainCopy(model.retention)}</p> : null}
+      {model.retention && !model.retention.includes("did not say how long") ? <p className="pdpp-caption">It says it keeps what it reads: {plainCopy(model.retention)}</p> : null}
       <div className={styles.grid}>
         <div className={styles.body}>
           <section aria-labelledby="records-heading" className={styles.recordsSection}>
@@ -765,6 +770,7 @@ export function ConsentScreen({
                       onToggleStream={(streamName) => toggleStream(source.id, streamName)}
                       ranges={ranges}
                       searching={Boolean(query)}
+                      initiallyOpen={openKinds}
                       selection={selection}
                       setRange={setRange}
                       source={source}

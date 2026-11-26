@@ -9,7 +9,12 @@ import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
-import { type CimdClientDocument, type AppAccess, listCimdClientDocuments, listAppAccess } from "../../lib/ref-client.ts";
+import {
+  type CimdClientDocument,
+  type AppAccess,
+  listCimdClientDocuments,
+  listAppAccess,
+} from "../../lib/ref-client.ts";
 import { AppAccessList } from "../../grants/app-access-list.tsx";
 import { groupGrantAccessByApp } from "../../grants/app-access.ts";
 import { needsRemoteAccess } from ".././remote-access.ts";
@@ -172,12 +177,15 @@ function ClientIdentityList({
                 </summary>
                 <div className="mt-2 rounded-md border border-border-strong p-3">
                   <p className="pdpp-caption text-foreground">
-                    {identity.client_name ?? "This app"} will lose its saved setup and access issued through it will stop working.
+                    {identity.client_name ?? "This app"} will lose its saved setup and access issued through it will
+                    stop working.
                   </p>
                   <form action={deleteCimdClientIdentityAction} className="mt-3">
                     <input name="document_id" type="hidden" value={identity.document_id} />
                     <input name="confirm_delete" type="hidden" value="yes" />
-                    <IcButton size="sm" type="submit" variant="destructive">Remove identity</IcButton>
+                    <IcButton size="sm" type="submit" variant="destructive">
+                      Remove identity
+                    </IcButton>
                   </form>
                 </div>
               </details>
@@ -250,12 +258,12 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
   let origin: string;
   let identities: CimdClientDocument[] = [];
   let registrations: AppAccess[] = [];
-  let grantsHaveMore = false;
-  let grantsUnavailable = false;
   if (process.env.NODE_ENV !== "production" && (params.demo === "atlas" || params.demo === "empty")) {
     origin = "https://pdpp.example.test";
     if (params.demo === "atlas") {
-      registrations = (await (await import("../../grants/grants-demo-data.ts")).createAppAccessDemoDataSource().listAppAccess()).data;
+      registrations = (
+        await (await import("../../grants/grants-demo-data.ts")).createAppAccessDemoDataSource().listAppAccess()
+      ).data;
       identities = [
         {
           client_id: "https://pdpp.example.test/oauth/clients/cli-demo",
@@ -280,8 +288,6 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
       origin = resolvedOrigin;
       identities = resolvedIdentities.data;
       registrations = resolvedGrants?.data ?? [];
-      grantsHaveMore = resolvedGrants?.has_more ?? false;
-      grantsUnavailable = resolvedGrants === null;
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
@@ -339,7 +345,9 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
         {needsRemoteAccess(origin) ? (
           <p className="text-[13px] text-muted-foreground">
             This address is only available on this network. Set up{" "}
-            <Link className="text-primary underline-offset-2 hover:underline" href="/settings#remote-access">Remote access</Link>{" "}
+            <Link className="text-primary underline-offset-2 hover:underline" href="/settings#remote-access">
+              Remote access
+            </Link>{" "}
             to use it elsewhere.
           </p>
         ) : null}
@@ -364,26 +372,41 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
           Other apps
         </summary>
         <ul className="divide-y divide-border/70 border-border/70 border-y">
-          {otherEntries.map((entry) => <CopyRow key={entry.title} {...entry} />)}
+          {otherEntries.map((entry) => (
+            <CopyRow key={entry.title} {...entry} />
+          ))}
         </ul>
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href={dashboardRoutes.section.addSource}>Add a data source</Link>
-          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/deployment/tokens">Owner credentials</Link>
+          <Link
+            className="text-[13px] text-primary underline-offset-2 hover:underline"
+            href={dashboardRoutes.section.addSource}
+          >
+            Add a data source
+          </Link>
+          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/deployment/tokens">
+            Owner credentials
+          </Link>
         </div>
         <details className="mt-4 border-t border-border pt-3">
-          <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+          <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Details
+          </summary>
           <Section title="Connection details">
             <p className="pdpp-caption text-muted-foreground">
-              Use the address for ChatGPT, Claude.ai, and remote MCP clients. Browser clients use PKCE; some clients use the device-code flow.
-              Claude Code adds a remote Streamable HTTP MCP server. Codex uses the same endpoint without a separate bearer token.
+              Use the address for ChatGPT, Claude.ai, and remote MCP clients. Browser clients use PKCE; some clients use
+              the device-code flow. Claude Code adds a remote Streamable HTTP MCP server. Codex uses the same endpoint
+              without a separate bearer token.
             </p>
             <p className="pdpp-caption mt-3 text-muted-foreground">
-              Owner credentials stay out of ordinary MCP setup. Assistants use the scoped OAuth flow at <code className="font-mono">/mcp</code>.
-              That flow returns a scoped client token, never the owner bearer. Trusted local access for the owner uses a separate flow.
+              Owner credentials stay out of ordinary MCP setup. Assistants use the scoped OAuth flow at{" "}
+              <code className="font-mono">/mcp</code>. That flow returns a scoped client token, never the owner bearer.
+              Trusted local access for the owner uses a separate flow.
             </p>
           </Section>
           <Section title="Stable local client identity">
-            <p className="pdpp-caption mb-3 text-muted-foreground">Create one only when a local app needs a fixed identity. The return address must match the app's callback.</p>
+            <p className="pdpp-caption mb-3 text-muted-foreground">
+              Create one only when a local app needs a fixed identity. The return address must match the app's callback.
+            </p>
             <div className="grid gap-4">
               <ClientIdentityForm />
               <ClientIdentityList identities={identities} selectedId={selected?.document_id ?? null} />
@@ -391,8 +414,15 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
             <SelectedIdentityCommands mcpUrl={targets.mcpUrl} selected={selected} targets={targets} />
           </Section>
           <Section title="Owner credentials">
-            <p className="pdpp-caption text-muted-foreground">Owner credentials are for your own trusted tools. Assistants use the address above.</p>
-            <Link className="mt-2 inline-block text-[13px] text-primary underline-offset-2 hover:underline" href="/deployment/tokens">Manage owner credentials</Link>
+            <p className="pdpp-caption text-muted-foreground">
+              Owner credentials are for your own trusted tools. Assistants use the address above.
+            </p>
+            <Link
+              className="mt-2 inline-block text-[13px] text-primary underline-offset-2 hover:underline"
+              href="/deployment/tokens"
+            >
+              Manage owner credentials
+            </Link>
           </Section>
         </details>
       </details>

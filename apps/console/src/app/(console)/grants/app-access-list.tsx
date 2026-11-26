@@ -23,10 +23,10 @@ export function AppAccessList({ apps, demo, stopped = false }: { apps: readonly 
     <ul className="divide-y divide-border border-y border-border">{visible.map((app) => <li key={app.hrefId}>
       <Link className="block py-4" href={`/grants/${encodeURIComponent(app.hrefId)}${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}>
         <span className="block text-[15px] font-medium">{app.name}</span>
-        {!app.verified || apps.some((other) => other !== app && other.name === app.name) ? <span className="block text-[13px] text-muted-foreground">{app.place}{!app.verified ? " · not verified" : ""}</span> : null}
+        {!app.verified || app.showPlace || apps.some((other) => other !== app && other.name === app.name) ? <span className="block text-[13px] text-muted-foreground">{app.place}{!app.verified ? " · not verified" : ""}</span> : null}
         {stopped ? <span className="block text-[13px] text-muted-foreground">{app.stoppedReason === "expired" ? "Ended" : "Removed"}{app.stoppedAt ? ` ${formatAppLastRead(app.stoppedAt)}` : ""}</span> : <>
-          <span className="block text-[13px] text-muted-foreground">Can read {sourcePhrase(app.sources)}</span>
-          <span className="block text-[13px] text-muted-foreground">{app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}` : "Has not read anything yet"}{app.expiresAt ? ` · ${accessEnd(app.expiresAt)}` : ""}</span>
+          <span className="block text-[13px] text-muted-foreground">Can read {app.readsAllSources ? "all your data sources" : sourcePhrase(app.sources)}</span>
+          <span className="block text-[13px] text-muted-foreground">{app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}` : app.neverRead ? "Has not read anything yet" : ""}{app.expiresAt ? `${app.lastRead || app.neverRead ? " · " : ""}${accessEnd(app.expiresAt)}` : ""}</span>
         </>}
       </Link>
     </li>)}</ul>

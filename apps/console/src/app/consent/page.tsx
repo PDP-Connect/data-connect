@@ -19,9 +19,9 @@
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
+import { getAsInternalUrl, getReferencePublicOrigin, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
-import { ConsentScreen, ConsentUnavailable } from "@/components/consent-screen/consent-screen-client.tsx";
+import { ConsentScreen, ConsentUnavailable, ConsentFinished } from "@/components/consent-screen/consent-screen-client.tsx";
 import { resolveConsentDemoState } from "@/components/consent-screen/consent-screen-demo.ts";
 import type {
   ConsentActionResult,
@@ -66,6 +66,8 @@ export default async function ConsentPage({
 }) {
   const params = await searchParams;
   const demo = resolveConsentDemoState(params.demo, process.env.NODE_ENV);
+  if (demo === "answered") return <ConsentUnavailable kind="answered" />;
+  if (demo === "allowed" || demo === "denied") return <ConsentFinished appName="ChatGPT" allowed={demo === "allowed"} />;
   if (demo === "expired") {
     return <ConsentUnavailable kind="expired" />;
   }
@@ -87,6 +89,7 @@ export default async function ConsentPage({
       <ConsentScreen
         acceptAction={acceptDemoAction}
         demoOnly
+        openKinds={demo === "kinds-open"}
         model={demoModel}
         rejectAction={rejectDemoAction}
       />
@@ -118,5 +121,6 @@ export default async function ConsentPage({
     return rejectConsentChallenge(challenge);
   }
 
-  return <ConsentScreen acceptAction={acceptAction} model={model} rejectAction={rejectAction} />;
+  const origin = await getReferencePublicOrigin().catch(() => null);
+  return <ConsentScreen acceptAction={acceptAction} model={model} rejectAction={rejectAction} dataConnectHost={origin ? new URL(origin).host : undefined} />;
 }

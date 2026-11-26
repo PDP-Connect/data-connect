@@ -28,3 +28,16 @@ test("every merged registration must be verified; kinds union without mutating i
   const before = structuredClone([a, b]); const app = groupGrantAccessByApp([a, b])[0]!;
   assert.equal(app.verified, false); assert.deepEqual(app.sourceAccess[0]?.kinds, ["messages", "threads"]); assert.deepEqual([a, b], before);
 });
+test("waiting requests use the same app identity without claiming permission", () => {
+  const rows = groupGrantAccessByApp([registration()], Date.now(), [{ object: "approval", approval_id: "request", batch: false, kind: "consent", created_at: "2026-11-25T00:00:00Z", client_id: "one" }]);
+  assert.equal(rows.filter((row) => row.state === "waiting").length, 1);
+  const waiting = rows.find((row) => row.state === "waiting");
+  assert.equal(waiting?.name, "ChatGPT"); assert.deepEqual(waiting?.grantIds, []);
+});
+test("connection names and the all-sources phrase come only from a complete inventory", () => {
+  const names = new Map([["mail", "Gmail (work)"]]);
+  const [app] = groupGrantAccessByApp([registration()], Date.now(), [], names);
+  assert.deepEqual(app?.sources, ["Gmail (work)"]); assert.equal(app?.readsAllSources, true);
+  names.set("personal-mail", "Gmail (personal)");
+  assert.equal(groupGrantAccessByApp([registration()], Date.now(), [], names)[0]?.readsAllSources, false);
+});

@@ -3,10 +3,10 @@
 
 import type { ConsentScreenModel } from "./consent-screen-model.ts";
 
-export type ConsentDemoState = "normal" | "verified" | "not-verified" | "many";
-export type ConsentDemoPageState = ConsentDemoState | "expired" | "error";
+export type ConsentDemoState = "normal" | "verified" | "not-verified" | "many" | "one" | "some" | "empty" | "kinds-open";
+export type ConsentDemoPageState = ConsentDemoState | "expired" | "error" | "answered" | "allowed" | "denied";
 
-const DEMO_STATES: readonly ConsentDemoPageState[] = ["normal", "verified", "not-verified", "many", "expired", "error"];
+const DEMO_STATES: readonly ConsentDemoPageState[] = ["normal", "verified", "not-verified", "many", "one", "some", "empty", "kinds-open", "expired", "error", "answered", "allowed", "denied"];
 
 export function resolveConsentDemoState(value: unknown, environment: string): ConsentDemoPageState | null {
   if (environment === "production" || typeof value !== "string") return null;
@@ -69,7 +69,7 @@ function sourceModel(name: string, index: number): ConsentScreenModel["sources"]
 
 export function buildConsentDemoModel(state: ConsentDemoState): ConsentScreenModel {
   const many = state === "many";
-  const clientDomain = "assistant.example";
+  const clientDomain = "chatgpt.com";
   return {
     accessMode: { supported: ["offline"], value: "offline" },
     challenge: "demo-only",
@@ -77,14 +77,14 @@ export function buildConsentDemoModel(state: ConsentDemoState): ConsentScreenMod
       domain: clientDomain,
       id: "demo-app",
       logo: null,
-      monogram: "A",
-      name: "Personal Assistant",
+      monogram: "C",
+      name: "ChatGPT",
       policyLinks: [
         { href: "https://assistant.example/privacy", label: "Privacy policy" },
         { href: "https://assistant.example/terms", label: "Terms of service" },
       ],
       returnTo: "chatgpt.com",
-      trust: state === "verified" ? "verified" : state === "not-verified" || many ? "unverified" : "domain",
+      trust: state === "verified" ? "domain" : state === "not-verified" || many ? "unverified" : "domain",
     },
     grantExpiry: {
       defaultId: "90d",
@@ -97,6 +97,6 @@ export function buildConsentDemoModel(state: ConsentDemoState): ConsentScreenMod
     purpose: { code: "personal-assistant", description: "Read your records to answer questions you ask." },
     retention: "This app keeps the data it reads only as long as needed to answer you.",
     reviewDigest: "demo-only",
-    sources: (many ? DATA_SOURCES : DATA_SOURCES.slice(0, 2)).map(sourceModel),
+    sources: (state === "empty" ? [] : many ? DATA_SOURCES : DATA_SOURCES.slice(0, state === "one" ? 1 : 2)).map(sourceModel).map((source, index) => state === "some" && index === 0 ? { ...source, streams: source.streams.map((stream) => ({ ...stream, selected: true })) } : source),
   };
 }

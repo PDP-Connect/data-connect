@@ -13,16 +13,11 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { DeveloperModeRequestLink } from ".././developer-mode-gate.tsx";
 import { ServerUnreachable } from "../../components/shell.tsx";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
-import {
-  type GrantSummary,
-  getGrantTimeline,
-  type ListResponse,
-  listGrants,
-} from "../../lib/ref-client.ts";
+import { type GrantSummary, getGrantTimeline, type ListResponse, listGrants } from "../../lib/ref-client.ts";
 import { listConnectorManifests } from "../../lib/rs-client.ts";
 import { clientCaption } from ".././client-caption.ts";
 
-import { appSourceName } from "../app-access.ts";
+import { appNamesByClientId, UNKNOWN_APP_NAME, appSourceName } from "../app-access.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -85,7 +80,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
         return (
           <RecordroomShellWithPalette>
             <PageHeader title="Technical details for apps" />
-      <p className="text-muted-foreground">Ids, records and logs for whoever is helping you with a problem.</p>
+            <p className="text-muted-foreground">Ids, records and logs for whoever is helping you with a problem.</p>
             <ServerUnreachable />
           </RecordroomShellWithPalette>
         );
@@ -94,17 +89,77 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     }
   }
 
+  const names = appNamesByClientId(result.data);
+  const filterApps = [
+    ...new Map(
+      result.data.flatMap((grant) =>
+        grant.client_id ? [[grant.client_id, names.get(grant.client_id) || UNKNOWN_APP_NAME] as const] : []
+      )
+    ).entries(),
+  ];
+  const filterSources = [
+    ...new Map(
+      result.data.flatMap((grant) =>
+        grant.source ? [[grant.source.id, appSourceName(grant.source) || "Data source"] as const] : []
+      )
+    ).entries(),
+  ];
   return (
     <RecordroomShellWithPalette>
       <PageHeader title="Technical details for apps" />
       <p className="text-muted-foreground">Ids, records and logs for whoever is helping you with a problem.</p>
       <div className="mt-5 border-t border-border pt-3">
-        
         <div className="flex flex-wrap items-center gap-4 border-b border-border py-2">
-          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/grants/packages">Packages</Link>
+          <Link className="text-[13px] text-primary underline-offset-2 hover:underline" href="/grants/packages">
+            Packages
+          </Link>
           <DeveloperModeRequestLink />
         </div>
-        <form action="/grants/technical" className="flex flex-wrap items-end gap-2 border-b border-border py-3" method="get">
+        <form action="/grants/technical" method="get" className="flex flex-wrap items-end gap-3 py-3">
+          {params.q ? <input name="q" type="hidden" value={params.q} /> : null}
+          {params.status ? <input name="status" type="hidden" value={params.status} /> : null}
+          <label htmlFor="technical-app">
+            App
+            <IcSelect
+              id="technical-app"
+              name="client_id"
+              defaultValue={params.client_id || ""}
+              options={filterApps.map(([value, label]) => ({ value, label }))}
+              placeholder="All apps"
+            />
+          </label>
+          <label htmlFor="technical-kind">
+            Kind
+            <IcSelect
+              id="technical-kind"
+              name="source_kind"
+              defaultValue={params.source_kind || ""}
+              options={[
+                { value: "connector", label: "Data source" },
+                { value: "provider_native", label: "Built-in source" },
+              ]}
+              placeholder="All kinds"
+            />
+          </label>
+          <label htmlFor="technical-source">
+            Data source
+            <IcSelect
+              id="technical-source"
+              name="source_id"
+              defaultValue={params.source_id || ""}
+              options={filterSources.map(([value, label]) => ({ value, label }))}
+              placeholder="All data sources"
+            />
+          </label>
+          <IcButton type="submit" variant="ghost">
+            Filter
+          </IcButton>
+        </form>
+        <form
+          action="/grants/technical"
+          className="flex flex-wrap items-end gap-2 border-b border-border py-3"
+          method="get"
+        >
           {params.demo ? <input name="demo" type="hidden" value={params.demo} /> : null}
           {params.cursor ? <input name="cursor" type="hidden" value={params.cursor} /> : null}
           {params.client_id ? <input name="client_id" type="hidden" value={params.client_id} /> : null}
@@ -112,51 +167,118 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
           {params.source_id ? <input name="source_id" type="hidden" value={params.source_id} /> : null}
           <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
             Search access
-            <input className="h-10 rounded-[6px] border border-border bg-background px-3 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" defaultValue={params.q ?? ""} name="q" placeholder="ID contains…" type="search" />
+            <input
+              className="h-10 rounded-[6px] border border-border bg-background px-3 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              defaultValue={params.q ?? ""}
+              name="q"
+              placeholder="ID contains…"
+              type="search"
+            />
           </label>
           <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-state">
             State
-            <IcSelect defaultValue={params.status ?? ""} id="access-filter-state" name="status" options={[{ label: "Active", value: "issued" }, { label: "Removed", value: "revoked" }, { label: "Not allowed", value: "denied" }, { label: "Failed", value: "failed" }, { label: "Waiting", value: "pending" }]} placeholder="Any state" />
+            <IcSelect
+              defaultValue={params.status ?? ""}
+              id="access-filter-state"
+              name="status"
+              options={[
+                { label: "Active", value: "issued" },
+                { label: "Removed", value: "revoked" },
+                { label: "Not allowed", value: "denied" },
+                { label: "Failed", value: "failed" },
+                { label: "Waiting", value: "pending" },
+              ]}
+              placeholder="Any state"
+            />
           </label>
-          <IcButton size="sm" type="submit" variant="ghost">Filter</IcButton>
-          {params.q || params.status || params.client_id || params.source_kind || params.source_id ? <Link className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants/technical">Clear filters</Link> : null}
+          <IcButton size="sm" type="submit" variant="ghost">
+            Filter
+          </IcButton>
+          {params.q || params.status || params.client_id || params.source_kind || params.source_id ? (
+            <Link
+              className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground"
+              href="/grants/technical"
+            >
+              Clear filters
+            </Link>
+          ) : null}
         </form>
         {params.q || params.status || params.client_id || params.source_kind || params.source_id ? (
           <p className="border-b border-border py-2 text-[13px] text-muted-foreground">
-            Filtered results{params.status ? ` · state ${params.status}` : ""}{params.q ? ` · search ${params.q}` : ""}{params.client_id ? " · app selected" : ""}{params.source_kind ? " · data source kind selected" : ""}{params.source_id ? " · data source selected" : ""}
+            Filtered results{params.status ? ` · state ${params.status}` : ""}
+            {params.q ? ` · search ${params.q}` : ""}
+            {params.client_id ? " · app selected" : ""}
+            {params.source_kind ? " · data source kind selected" : ""}
+            {params.source_id ? " · data source selected" : ""}
           </p>
         ) : null}
-        <p className="py-2 text-[13px] text-muted-foreground">{result.data.length} {result.has_more ? "on this page" : "shown"}</p>
+        <p className="py-2 text-[13px] text-muted-foreground">
+          {result.data.length} {result.has_more ? "on this page" : "shown"}
+        </p>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
           <DataList>
             {result.data.length === 0 ? (
               <li className="px-3 py-4 text-[13px] text-muted-foreground">No access records yet.</li>
-            ) : result.data.map((grant) => {
-              const id = grant.grant_id;
-              return <li key={id}><GrantRow connectorIcons={connectorIcons} detailHref={`/grants/${encodeURIComponent(id)}/technical`} grant={grant} href={listHref(params, { peek: id })} peeked={params.peek === id} /></li>;
-            })}
+            ) : (
+              result.data.map((grant) => {
+                const id = grant.grant_id;
+                return (
+                  <li key={id}>
+                    <GrantRow
+                      connectorIcons={connectorIcons}
+                      detailHref={`/grants/${encodeURIComponent(id)}/technical`}
+                      grant={grant}
+                      href={listHref(params, { peek: id })}
+                      peeked={params.peek === id}
+                    />
+                  </li>
+                );
+              })
+            )}
           </DataList>
           {params.peek && peekEnvelope ? (
-            <PeekPane closeHref={listHref(params, { peek: undefined })} cliCommand={`pdpp ref grant timeline ${params.peek}`} openHref={`/grants/${encodeURIComponent(params.peek)}/technical`} title={`Access ${params.peek}`}>
+            <PeekPane
+              closeHref={listHref(params, { peek: undefined })}
+              cliCommand={`pdpp ref grant timeline ${params.peek}`}
+              openHref={`/grants/${encodeURIComponent(params.peek)}/technical`}
+              title={`Access ${params.peek}`}
+            >
               <div className="mb-3 flex flex-wrap gap-2">
-                {pivotsFromEnvelope(peekEnvelope).filter((pivot) => pivot.kind !== "grant").map((pivot) => (
-                  <Link className="underline-offset-2 hover:underline" href={pivot.kind === "trace" ? dashboardRoutes.trace(pivot.id) : dashboardRoutes.run(pivot.id)} key={`${pivot.kind}:${pivot.id}`}>
-                    {pivot.kind} {pivot.id} →
-                  </Link>
-                ))}
+                {pivotsFromEnvelope(peekEnvelope)
+                  .filter((pivot) => pivot.kind !== "grant")
+                  .map((pivot) => (
+                    <Link
+                      className="underline-offset-2 hover:underline"
+                      href={pivot.kind === "trace" ? dashboardRoutes.trace(pivot.id) : dashboardRoutes.run(pivot.id)}
+                      key={`${pivot.kind}:${pivot.id}`}
+                    >
+                      {pivot.kind} {pivot.id} →
+                    </Link>
+                  ))}
               </div>
               <p className="mb-2 text-muted-foreground">{peekEnvelope.events.length} events</p>
               <PeekTimeline events={peekEnvelope.events} />
             </PeekPane>
           ) : params.peek ? (
-            <PeekPane closeHref={listHref(params, { peek: undefined })} openHref={`/grants/${encodeURIComponent(params.peek)}/technical`} title={`Access ${params.peek}`}>
+            <PeekPane
+              closeHref={listHref(params, { peek: undefined })}
+              openHref={`/grants/${encodeURIComponent(params.peek)}/technical`}
+              title={`Access ${params.peek}`}
+            >
               <p className="text-muted-foreground">Access not found.</p>
             </PeekPane>
-          ) : <PeekEmpty />}
+          ) : (
+            <PeekEmpty />
+          )}
         </div>
         {result.has_more && result.next_cursor ? (
           <div className="py-4 text-right">
-            <Link className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 text-[13px] text-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={listHref(params, { cursor: result.next_cursor, peek: undefined })}>Next →</Link>
+            <Link
+              className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 text-[13px] text-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={listHref(params, { cursor: result.next_cursor, peek: undefined })}
+            >
+              Next →
+            </Link>
           </div>
         ) : null}
       </div>
@@ -189,7 +311,11 @@ function GrantRow({
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           {connectorId ? (
-            <ConnectorMark {...(grant.connector_id ? { connectorId: grant.connector_id } : { sourceId: grant.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={grantRowLabel(grant)} />
+            <ConnectorMark
+              {...(grant.connector_id ? { connectorId: grant.connector_id } : { sourceId: grant.source?.id ?? "" })}
+              icon={connectorIcons[connectorId]}
+              name={grantRowLabel(grant)}
+            />
           ) : null}
           <span className="truncate font-medium text-foreground">{grantRowLabel(grant)}</span>
           <StatusBadge status={grant.status} vocabulary={GRANT_LIFECYCLE_VOCABULARY} />
