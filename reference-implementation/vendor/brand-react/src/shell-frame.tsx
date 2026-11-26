@@ -101,9 +101,9 @@ export const NAV_GROUPS: NavGroup[] = [
         section: "settings",
         children: [
           { label: "Notifications", href: "/notifications" },
-          { label: "Server", href: "/deployment" },
-          { label: "Collectors on your devices", href: "/device-exporters", labelBefore: "Experimental" },
-          { label: "Webhooks", href: "/event-subscriptions", labelBefore: "Experimental" },
+          { label: "Server", href: "/deployment", labelBefore: "Advanced" },
+          { label: "Collectors on your devices", href: "/device-exporters", labelBefore: "Advanced" },
+          { label: "Webhooks", href: "/event-subscriptions", labelBefore: "Advanced" },
         ],
       },
     ],

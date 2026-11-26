@@ -93,6 +93,8 @@ const EXPECTED_SECTION_BY_ROUTE: Record<string, "data-sources" | "apps" | "setti
   "/schedules": "data-sources",
   "/search": null,
   "/settings": "settings",
+  "/settings/packages": "settings",
+  "/settings/technical": "settings",
   "/sources": "data-sources",
   "/sources/[connector]": "data-sources",
   "/sources/[connector]/[stream]": "data-sources",
@@ -316,4 +318,12 @@ test("floating record panels use the shared popover fill and shadow", async () =
     assert.equal(declaration(block, "background"), "var(--popover)", selector);
     assert.equal(declaration(block, "box-shadow"), "var(--shadow-floating)", selector);
   }
+});
+
+test("Settings groups Server and device tools under Advanced", async () => {
+  const frame = await readFile(FRAME, "utf8");
+  assert.match(frame, /label: "Server", href: "\/deployment", labelBefore: "Advanced"/);
+  assert.match(frame, /label: "Collectors on your devices", href: "\/device-exporters", labelBefore: "Advanced"/);
+  assert.match(frame, /label: "Webhooks", href: "\/event-subscriptions", labelBefore: "Advanced"/);
+  assert.doesNotMatch(frame, /labelBefore: "Experimental"/);
 });
