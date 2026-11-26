@@ -79,7 +79,7 @@ function bodyHash(records: unknown): string {
     .digest("hex");
 }
 
-/** The manifest the server registers for a local-collector connector (see `readReferenceLocalConnectorCatalogManifest`). */
+/** The manifest the server registers for a local-collector connector (see `pinnedLocalCollectorManifest`). */
 function enrollmentManifest(connectorId: string, profile: Record<string, unknown>) {
   return { ...profile, connector_id: connectorId, display_name: profile.display_name || connectorId };
 }

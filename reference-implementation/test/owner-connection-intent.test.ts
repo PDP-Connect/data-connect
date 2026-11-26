@@ -36,13 +36,16 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { __setLocalCollectorProfilesDirectoryForTest } from "../server/local-collector-profiles.ts";
 import { startServer } from "../server/index.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -106,6 +109,26 @@ async function withServer(fn: (ctx: { asUrl: string; rsUrl: string }) => Promise
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+  }
+}
+
+async function withBrokenCodexProfile(
+  profileState: "tampered" | "missing",
+  fn: () => Promise<void>
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+  const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+  copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+  if (profileState === "tampered") {
+    const bytes = readFileSync(new URL("codex.json", sourceDirectory));
+    writeFileSync(join(directory, "codex.json"), Buffer.concat([bytes, Buffer.from(" ")]));
+  }
+  __setLocalCollectorProfilesDirectoryForTest(directory);
+  try {
+    await fn();
+  } finally {
+    __setLocalCollectorProfilesDirectoryForTest(null);
+    rmSync(directory, { force: true, recursive: true });
   }
 }
 
@@ -443,6 +466,42 @@ test("owner-agent initiates a local-collector connection and receives a real enr
     assert.equal(auditData(audit).display_name_supplied, true);
     // Audit must NOT carry the minted enrollment code anywhere.
     assert.equal(JSON.stringify(audit).includes(body.next_step.enrollment_code ?? ""), false);
+  });
+});
+
+test("owner-agent reports a tampered local profile without consulting the registry or claiming proof", async () => {
+  await withBrokenCodexProfile("tampered", async () => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const ownerToken = await issueOwnerToken(asUrl);
+      await registerConnector(asUrl, loadPackageManifest("codex"));
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, { connector_id: "codex" });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 201);
+      assert.equal(body.proof_gate, null);
+      assert.equal(
+        body.next_step?.reason,
+        "The installed local connector profile failed verification. Reinstall the local collector to repair it."
+      );
+      assert.notEqual(body.next_step?.kind, "enroll_local_collector");
+    });
+  });
+});
+
+test("owner-agent reports a missing profile with a present pin as invalid instead of consulting the registry", async () => {
+  await withBrokenCodexProfile("missing", async () => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const ownerToken = await issueOwnerToken(asUrl);
+      await registerConnector(asUrl, loadPackageManifest("codex"));
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, { connector_id: "codex" });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 201);
+      assert.equal(body.proof_gate, null);
+      assert.equal(
+        body.next_step?.reason,
+        "The installed local connector profile is missing and could not be verified. Reinstall the local collector to repair it."
+      );
+      assert.notEqual(body.next_step?.kind, "enroll_local_collector");
+    });
   });
 });
 

@@ -38,6 +38,7 @@ import { type DeviceAttemptContext, fingerprintDeviceAttemptManifest } from "../
 import { parseDeviceScopeRequest, resolveEnrollmentScope } from "../enrollment-scope-narrowing.ts";
 import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
+import type { PinnedLocalCollectorManifestResult } from "../local-collector-profiles.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
 import {
@@ -532,7 +533,11 @@ export interface MountRefDeviceExportersContext {
   enqueueDeviceIndexMaintenance: (connectorInstanceId: string, operation: () => Promise<void>) => Promise<void>;
 
   // Catalog entry registration at enroll time
-  ensureReferenceConnectorCatalogEntry: (connectorId: string, displayName: string | null) => Promise<void>;
+  ensureReferenceConnectorCatalogEntry: (
+    connectorId: string,
+    displayName: string | null,
+    pin: PinnedLocalCollectorManifestResult
+  ) => Promise<void>;
   generateReferenceSecret: (prefix: string, bytes: number) => string;
 
   // ID generation
@@ -582,7 +587,13 @@ export interface MountRefDeviceExportersContext {
   // `null` for connectors not in the local-collector catalog. Mirrors the
   // intent route so the enroll path classifies a local-collector connector even
   // before any registered connector manifest exists.
-  readReferenceLocalConnectorCatalogManifest: (connectorId: string) => SourceKindManifestLike | null;
+  readReferenceLocalConnectorCatalogManifestResult: (connectorId: string) => PinnedLocalCollectorManifestResult;
+  logInvalidPinnedLocalConnectorProfile: (diagnostic: {
+    connectorKey: string;
+    expectedDigest: string | null;
+    observedDigest: string | null;
+    reasonCategory: string;
+  }) => void;
   requireDeviceExporterCredential: MiddlewareHandler;
   // Auth middleware
   requireOwnerSession: MiddlewareHandler;
@@ -642,6 +653,17 @@ function deviceExporterSourceBindingIdentity(
   return { kind, local_binding_name: localBindingName };
 }
 
+// One rule for every enrollment write (mint, redeem, rotate): none happens
+// while the connector's pinned local profile is invalid. Each request reads the
+// pin once and passes that result to every check, so no write sees a state a
+// concurrent reinstall changed mid-request. A refused rotation leaves the
+// device's current credential working.
+function assertPinUsable(pin: PinnedLocalCollectorManifestResult): void {
+  if (pin.kind === "invalid_pin") {
+    throw Object.assign(new Error(pin.reason), { code: "local_collector_profile_repair_required" });
+  }
+}
+
 // Resolve the manifest for a connector being enrolled, then derive the enrolled
 // source kind from its bindings. Resolves the local-collector catalog first (so
 // claude-code/codex classify before any registered manifest exists), then falls
@@ -653,10 +675,11 @@ function deviceExporterSourceBindingIdentity(
 async function resolveEnrollmentSourceKind(
   ctx: MountRefDeviceExportersContext,
   connectorKey: string,
+  localResult: PinnedLocalCollectorManifestResult,
   requestedSourceKind?: string | null
 ): Promise<EnrolledSourceKind> {
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  const manifest = localManifest ?? (await ctx.getConnectorManifest(connectorKey));
+  assertPinUsable(localResult);
+  const manifest = localResult.kind === "verified" ? localResult.manifest : await ctx.getConnectorManifest(connectorKey);
   return resolveEnrolledSourceKind({ connectorId: connectorKey, manifest, requestedSourceKind });
 }
 
@@ -690,7 +713,8 @@ async function handleIdempotentReEnroll(
   res: RouteResponse,
   enrollment: ReEnrollableEnrollment,
   boundDeviceId: string | null,
-  now: Date
+  now: Date,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<"handled" | "not_handled"> {
   if (!boundDeviceId) {
     // No device bound yet for this code: not a recoverable retry target.
@@ -719,6 +743,9 @@ async function handleIdempotentReEnroll(
     return "not_handled";
   }
 
+  // Only a proven same-binding retry reaches the credential write, so any
+  // other replay keeps its existing response in a repair state.
+  assertPinUsable(pin);
   const credentialId = ctx.generateSpineId("dcred");
   const deviceToken = ctx.generateReferenceSecret("ldt", 32);
   await ctx.deviceExporterStore.rotateDeviceCredential({
@@ -779,6 +806,10 @@ async function handleIdempotentReEnroll(
 // enroll path should not reach the writer fence at all; this is defense-in-depth.
 // See decouple-device-enrollment-from-ingest-writer-admission design D3.
 function respondEnrollError(ctx: MountRefDeviceExportersContext, res: RouteResponse, err: unknown): void {
+  if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+    ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+    return;
+  }
   if ((err as { code?: unknown } | null)?.code === "connector_instance_busy") {
     res.setHeader("Retry-After", "2");
     ctx.pdppError(
@@ -844,7 +875,8 @@ async function performFirstEnrollment(
   body: Record<string, unknown>,
   enrollment: ReEnrollableEnrollment,
   now: Date,
-  effectiveScope: CollectionScope | null
+  effectiveScope: CollectionScope | null,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<void> {
   const collectorProtocolVersion = ctx.readCollectorProtocolHeader(req.headers);
   const candidateDeviceId = ctx.generateSpineId("dexp");
@@ -875,7 +907,7 @@ async function performFirstEnrollment(
   // adopted by a browser-collector enrollment sharing the same
   // owner/connector/binding, since the identity decision would have no way
   // to distinguish them.
-  const sourceKind = await resolveEnrollmentSourceKind(ctx, enrollConnectorKey);
+  const sourceKind = await resolveEnrollmentSourceKind(ctx, enrollConnectorKey, pin);
 
   const resolved = await ctx.deviceExporterStore.resolveOrCreateEnrollmentDevice({
     candidateDeviceId,
@@ -893,7 +925,7 @@ async function performFirstEnrollment(
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const sourceInstanceId = resolved.sourceInstanceId;
 
-  await ctx.ensureReferenceConnectorCatalogEntry(enrollConnectorKey, enrollment.displayName || displayName);
+  await ctx.ensureReferenceConnectorCatalogEntry(enrollConnectorKey, enrollment.displayName || displayName, pin);
   const sourceBindingIdentity = deviceExporterSourceBindingIdentity(enrollment.localBindingId, sourceKind);
   const connectorInstance = await ctx.createRequestConnectorInstanceStore().upsertForEnrollment({
     connectorId: enrollConnectorKey,
@@ -1015,7 +1047,7 @@ async function performFirstEnrollment(
       ctx.hashDeviceSecret(requireNonEmptyString(body.enrollment_code, "enrollment_code"))
     );
     if (winningEnrollment?.deviceId === deviceId) {
-      const retry = await handleIdempotentReEnroll(ctx, res, enrollment, deviceId, now);
+      const retry = await handleIdempotentReEnroll(ctx, res, enrollment, deviceId, now, pin);
       if (retry === "handled") {
         return;
       }
@@ -1073,9 +1105,18 @@ async function resolveConnectorMaximumStalenessSeconds(
   connectorId: string
 ): Promise<number | null> {
   const connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  if (localManifest) {
-    return extractManifestMaximumStalenessSeconds(localManifest);
+  const localResult = ctx.readReferenceLocalConnectorCatalogManifestResult(connectorKey);
+  if (localResult.kind === "verified") {
+    return extractManifestMaximumStalenessSeconds(localResult.manifest);
+  }
+  if (localResult.kind === "invalid_pin") {
+    ctx.logInvalidPinnedLocalConnectorProfile({
+      connectorKey,
+      expectedDigest: localResult.expectedDigest,
+      observedDigest: localResult.observedDigest,
+      reasonCategory: localResult.reasonCategory,
+    });
+    return null;
   }
   try {
     const manifest = await ctx.getConnectorManifest(connectorKey);
@@ -2006,6 +2047,7 @@ export function mountRefDeviceExporterEnrollmentCodes(app: AppLike, ctx: MountRe
         await resolveEnrollmentSourceKind(
           ctx,
           enrollConnectorKey,
+          ctx.readReferenceLocalConnectorCatalogManifestResult(enrollConnectorKey),
           typeof body.source_kind === "string" ? body.source_kind : null
         );
         const now = new Date();
@@ -2064,6 +2106,10 @@ export function mountRefDeviceExporterEnrollmentCodes(app: AppLike, ctx: MountRe
           object: "device_exporter_enrollment_code",
         });
       } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+          ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+          return;
+        }
         ctx.handleError(res, err);
       }
     }
@@ -2090,12 +2136,13 @@ async function respondIfConsumedCodeReplay(
   ctx: MountRefDeviceExportersContext,
   res: RouteResponse,
   enrollment: ReEnrollableEnrollment,
-  now: Date
+  now: Date,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<boolean> {
   if (enrollment.status !== "consumed") {
     return false;
   }
-  const retry = await handleIdempotentReEnroll(ctx, res, enrollment, enrollment.deviceId, now);
+  const retry = await handleIdempotentReEnroll(ctx, res, enrollment, enrollment.deviceId, now, pin);
   if (retry === "handled") {
     return true;
   }
@@ -2153,11 +2200,16 @@ export function mountRefDeviceExporterEnroll(app: AppLike, ctx: MountRefDeviceEx
           return;
         }
 
-        if (await respondIfConsumedCodeReplay(ctx, res, enrollment, now)) {
+        // The one pin read for this request: both the retry path and first
+        // redemption validate and register from this result.
+        const enrollConnectorKey = ctx.canonicalConnectorKey(enrollment.connectorId) ?? enrollment.connectorId;
+        const pin = ctx.readReferenceLocalConnectorCatalogManifestResult(enrollConnectorKey);
+
+        if (await respondIfConsumedCodeReplay(ctx, res, enrollment, now, pin)) {
           return;
         }
 
-        await performFirstEnrollment(ctx, req, res, body, enrollment, now, scopeVerdict.effective);
+        await performFirstEnrollment(ctx, req, res, body, enrollment, now, scopeVerdict.effective, pin);
       } catch (err) {
         respondEnrollError(ctx, res, err);
       }

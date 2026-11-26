@@ -227,7 +227,8 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import {
-  pinnedLocalCollectorManifest,
+  type PinnedLocalCollectorManifestResult,
+  readPinnedLocalCollectorManifest,
   readLocalCollectorArtifactDigest,
   readLocalCollectorRelease,
 } from "./local-collector-profiles.ts";
@@ -1708,25 +1709,15 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 // catalog row, the connector_instances row, and the record storage target all
 // use the canonical key (`claude-code`) so a legacy-alias enroll cannot fork
 // the connector type away from its canonical identity.
-function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
-  const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
-  try {
-    return pinnedLocalCollectorManifest(connectorId);
-  } catch {
-    return {
-      connector_id: connectorKey,
-      display_name: connectorKey,
-      streams: [],
-    };
-  }
-}
-
 async function ensureReferenceConnectorCatalogEntry(
   connectorId: string,
-  connectorDisplayName: string | null | undefined
+  connectorDisplayName: string | null | undefined,
+  localCollectorResult: PinnedLocalCollectorManifestResult
 ) {
-  const localCollectorManifest = readReferenceLocalConnectorCatalogManifest(connectorId);
-  if (localCollectorManifest) {
+  if (localCollectorResult.kind === "invalid_pin") {
+    throw Object.assign(new Error(localCollectorResult.reason), { code: "local_collector_profile_repair_required" });
+  }
+  if (localCollectorResult.kind === "verified") {
     // Persist the catalog row + advance generations, but SKIP retrieval-index
     // backfill. Enroll is a control-plane op; the backfill enters the
     // connector-instance writer-admission fence (withConnectorInstanceWrite →
@@ -1735,7 +1726,7 @@ async function ensureReferenceConnectorCatalogEntry(
     // index); real retrieval-index maintenance happens on the ingest write path
     // and on any manifest (re)registration. See
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
-    await registerConnector(localCollectorManifest, {
+    await registerConnector(localCollectorResult.manifest, {
       backfillRetrievalIndexes: false,
       // The server's own shipped manifest: a trusted publication, so it may
       // supersede the accepted content recorded for its version.
@@ -6616,7 +6607,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     prepareDeviceFinalRecords,
     putSyncState,
     readCollectorProtocolHeader,
-    readReferenceLocalConnectorCatalogManifest,
+    readReferenceLocalConnectorCatalogManifestResult: readPinnedLocalCollectorManifest,
+    logInvalidPinnedLocalConnectorProfile: (diagnostic: {
+      connectorKey: string;
+      expectedDigest: string | null;
+      observedDigest: string | null;
+      reasonCategory: string;
+    }) => app.fastify.log.warn(diagnostic, "local collector profile pin failed verification"),
     requireDeviceExporterCredential,
     requireOwnerSession: ownerAuth.requireOwnerSession,
     sanitizeDeviceExporterDiagnostic,
@@ -8012,7 +8009,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleError,
     hashDeviceSecret,
     pdppError,
-    readReferenceLocalConnectorCatalogManifest,
+    readReferenceLocalConnectorCatalogManifestResult: readPinnedLocalCollectorManifest,
     requireOwner,
     requireToken,
     resolveEnrollBaseUrl: resolveAsIssuerBase,
