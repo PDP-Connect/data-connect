@@ -222,7 +222,7 @@ test("normal state renders Spotify's declared record label and description", asy
   const playlists = manifest.streams.find((stream) => stream.name === "playlists");
   assert.ok(view.getByText(playlists.display.detail));
   // Consent brief: show the selected record count before the two decisions.
-  assert.match(view.container.querySelector("aside").textContent, /will be able to read 1 data sources/);
+  assert.match(view.container.querySelector("aside").textContent, /will be able to read 1 data source/);
   assertPlainCopy(view.container);
 });
 
@@ -256,9 +256,9 @@ test("field titles label controls without exposing raw names", async () => {
   const stream = titledModel.sources[0].streams[0];
   const panel = view
     .getByRole("checkbox", { name: `Share ${stream.label} from Spotify` })
-    .parentElement.querySelector("div");
+    .parentElement;
   await act(async () => {
-    panel.open = true;
+    fireEvent.click(within(panel).getByRole("button", { name: "Limit what it sees" }));
   });
   assert.ok(within(panel).getByRole("checkbox", { name: /Playlist owner/ }));
   assert.ok(within(panel).getByText("Playlist owner"));
@@ -289,9 +289,9 @@ async function journey() {
   const saved = model.sources[0].streams.find((stream) => stream.name === "saved_tracks");
   const panel = view
     .getByRole("checkbox", { name: `Share ${saved.label} from Spotify` })
-    .parentElement.querySelector("div");
+    .parentElement;
   await act(async () => {
-    panel.open = true;
+    fireEvent.click(within(panel).getByRole("button", { name: "Limit what it sees" }));
   });
   return {
     view,
@@ -524,7 +524,7 @@ for (const button of ["Allow", "Don't allow"]) test(`a successful ${button} foll
   }
 });
 
-test("a failed decision shows the action message and leaves both decisions usable", async () => {
+test("a failed decision gives a plain next step and leaves both decisions usable", async () => {
   let accepted = 0;
   let rejected = 0;
   const failure = { ok: false, message: "Choose an end date in the future." };
@@ -537,13 +537,13 @@ test("a failed decision shows the action message and leaves both decisions usabl
   await act(async () => {
     fireEvent.click(view.getByRole("button", { name: "Allow" }));
   });
-  assert.equal(view.getByRole("alert").textContent, failure.message);
+  assert.match(view.getByRole("alert").textContent, /Go back to .* and try again/);
   assert.equal(view.getByRole("button", { name: "Allow" }).disabled, false);
   assert.equal(view.getByRole("button", { name: "Don't allow" }).disabled, false);
   await act(async () => {
     fireEvent.click(view.getByRole("button", { name: "Don't allow" }));
   });
-  assert.equal(view.getByRole("alert").textContent, failure.message);
+  assert.match(view.getByRole("alert").textContent, /Go back to .* and try again/);
   assert.deepEqual({ accepted, rejected }, { accepted: 1, rejected: 1 });
   assertPlainCopy(view.container);
 });
@@ -552,7 +552,7 @@ test("no connected data sources says to connect one, then return to the app", ()
   const empty = structuredClone(model);
   empty.sources = [];
   const view = render(createElement(ConsentScreen, { acceptAction: async () => ({ ok: true, redirectUrl: "" }), model: empty, rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
-  assert.ok(view.getByText(/You have no data in DataConnect yet/));
+  assert.ok(view.getByText(/You have no data sources yet/));
   assert.equal(view.queryByRole("button", { name: "Allow" }), null);
 });
 
@@ -579,4 +579,28 @@ test("a missing retention promise is omitted instead of attributed to the app", 
   missing.retention = `${missing.client.name} did not say how long it keeps the data it receives.`;
   const view = render(createElement(ConsentScreen, { model: missing, acceptAction: async () => ({ ok: true, redirectUrl: "" }), rejectAction: async () => ({ ok: true, redirectUrl: "" }) }));
   assert.equal(view.queryByText(/It says it keeps what it reads/), null);
+});
+
+test("no data sources keeps denial and add-source actions without duration or a tick prompt", async()=>{
+ const empty=buildConsentDemoModel("empty");let denied=0;
+ const view=render(createElement(ConsentScreen,{model:empty,acceptAction:async()=>assert.fail("cannot allow empty data"),rejectAction:async()=>{denied++;return {ok:true,redirectUrl:""};}}));
+ assert.equal(view.queryByRole("button",{name:"Allow"}),null);
+ assert.equal(view.queryByRole("heading",{name:"How long"}),null);
+ assert.equal(view.queryByText("Tick at least one data source."),null);
+ assert.ok(view.getByRole("link",{name:"Add a data source"}).className.includes("pdpp-btn"));
+ await act(async()=>fireEvent.click(view.getByRole("button",{name:"Don't allow"})));
+ assert.equal(denied,1);
+ assert.ok(view.getByText("DataConnect"));
+});
+test("Limit what it sees hides narrowing until pressed and preserves the decision for unchanged ticks",async()=>{
+ const sample=structuredClone(model); sample.sources=sample.sources.slice(0,1);sample.sources[0].streams=sample.sources[0].streams.slice(0,1);sample.sources[0].streams[0].selected=true; sample.sources[0].streams[0].fields=[{name:"id",required:true,label:"Record identifier"},{name:"title",required:false,label:"Title"}]; const decisions=[];
+ const view=render(createElement(ConsentScreen,{model:sample,openKinds:true,acceptAction:async value=>{decisions.push(value);return {ok:false,message:"Try again."};},rejectAction:async()=>({ok:true,redirectUrl:""})}));
+ const controls=view.getAllByRole("button",{name:"Limit what it sees"});
+ assert.equal(view.queryByText("Choose fields to share"),null);
+ await act(async()=>fireEvent.click(view.getByRole("button",{name:"Allow"})));
+ await act(async()=>fireEvent.click(controls[0]));
+ assert.ok(view.getByText("Choose fields to share"));
+ assert.equal(view.queryByText("Record identifier"),null);
+ await act(async()=>fireEvent.click(view.getByRole("button",{name:"Allow"})));
+ assert.equal(JSON.stringify(decisions[0]),JSON.stringify(decisions[1]));
 });
