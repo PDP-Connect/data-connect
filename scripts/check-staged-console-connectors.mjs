@@ -5,18 +5,16 @@
 // modules it needs, using only files inside the stage.
 //
 // The console bundles reference-implementation/server/polyfill-connectors-
-// runtime.ts. If that module cannot resolve the conformance roster, the
-// production-ready list it exports is empty and nothing fails loudly: the
-// runtime module treats a missing package as "package absent". A build machine
-// always has the package in its checkout, so the probe blocks every
+// runtime.ts. If that module cannot resolve a connector package module, nothing
+// fails loudly: the runtime module treats a missing package as "package
+// absent", so credential checks quietly fall back to their defaults. A build
+// machine always has the package in its checkout, so the probe blocks every
 // resolution that leaves the stage, the same as on an owner's machine.
-// Whether the owner can add a browser connector no longer depends on the
-// roster; the server decides it from the selected artifact.
 //
 // The probe runs in a child process with the launcher's cwd (the directory of
 // server.js, see writeLauncher in ensure-console-stack.js). It installs every
 // server chunk into the bundle's webpack runtime, evaluates the modules that
-// require the roster, and reports what they resolved. Evaluation takes a few
+// require the credential probe, and reports what they resolved. Evaluation takes a few
 // milliseconds and starts no server.
 
 import { spawnSync } from "node:child_process"
@@ -27,13 +25,14 @@ import { fileURLToPath } from "node:url"
 import { isMainModule } from "./is-main-module.js"
 
 const PACKAGE_PREFIX = "@pdpp/polyfill-connectors/"
-const ROSTER_SPECIFIER = `${PACKAGE_PREFIX}connector-conformance-roster`
+// Only the bundled polyfill-connectors-runtime.ts names this subpath, so it
+// selects the modules to evaluate.
+const CREDENTIAL_PROBE_SPECIFIER = `${PACKAGE_PREFIX}credential-probe`
 // The subpaths whose members the console bundle reads. Keep in step with
 // CONSOLE_CONNECTOR_PACKAGE_MODULES in ensure-console-stack.js.
 const REQUIRED_CONSOLE_CONNECTOR_SPECIFIERS = [
-  ROSTER_SPECIFIER,
   `${PACKAGE_PREFIX}static-secret-credential-capture`,
-  `${PACKAGE_PREFIX}credential-probe`,
+  CREDENTIAL_PROBE_SPECIFIER,
 ]
 const RESULT_PREFIX = "[check-staged-console-connectors] result "
 
@@ -88,29 +87,23 @@ async function probe(serverDirectory, stageRoot) {
     }
   }
   const moduleIds = Object.keys(webpackRequire.m).filter(id =>
-    String(webpackRequire.m[id]).includes(JSON.stringify(ROSTER_SPECIFIER))
+    String(webpackRequire.m[id]).includes(
+      JSON.stringify(CREDENTIAL_PROBE_SPECIFIER)
+    )
   )
   // Evaluating each module records which package subpaths it resolved.
   for (const id of moduleIds) {
     webpackRequire(id)
   }
-
-  let productionReady = []
-  if (resolutions[ROSTER_SPECIFIER]) {
-    const roster = await import(resolutions[ROSTER_SPECIFIER])
-    productionReady = Object.keys(roster.PRODUCTION_READY_CONNECTORS ?? {})
-  }
   return {
     moduleIds,
-    productionReady,
     resolutions,
   }
 }
 
 /**
  * Throws unless the staged console under `stageRoot` resolves the connector
- * package modules it needs from inside the stage, reads a non-empty
- * PRODUCTION_READY_CONNECTORS.
+ * package modules it needs from inside the stage.
  */
 export function assertStagedConsoleConnectors({
   stageRoot,
@@ -140,15 +133,12 @@ export function assertStagedConsoleConnectors({
   const result = JSON.parse(line.slice(RESULT_PREFIX.length))
   const problems = []
   if (result.moduleIds.length === 0) {
-    problems.push(`no bundled module requires ${ROSTER_SPECIFIER}`)
+    problems.push(`no bundled module requires ${CREDENTIAL_PROBE_SPECIFIER}`)
   }
   for (const specifier of REQUIRED_CONSOLE_CONNECTOR_SPECIFIERS) {
     if (!result.resolutions[specifier]) {
       problems.push(`${specifier} does not resolve inside the stage`)
     }
-  }
-  if (result.productionReady.length === 0) {
-    problems.push("PRODUCTION_READY_CONNECTORS is empty")
   }
   if (problems.length > 0) {
     throw new Error(

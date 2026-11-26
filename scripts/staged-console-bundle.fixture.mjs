@@ -54,10 +54,8 @@ exports.modules = {
         throw error
       }
     }
-    const roster = optional("@pdpp/polyfill-connectors/connector-conformance-roster")
     optional("@pdpp/polyfill-connectors/static-secret-credential-capture")
     optional("@pdpp/polyfill-connectors/credential-probe")
-    exports.productionReady = Object.keys(roster?.PRODUCTION_READY_CONNECTORS ?? {})
   },
 }
 `
@@ -65,7 +63,7 @@ exports.modules = {
 }
 
 /**
- * Writes package.json and the three modules the console bundle reads into
+ * Writes package.json and the two modules the console bundle reads into
  * `packageDirectory` (an `@pdpp/polyfill-connectors` directory).
  */
 export function writeConnectorPackageModules(packageDirectory) {
@@ -77,8 +75,6 @@ export function writeConnectorPackageModules(packageDirectory) {
         name: "@pdpp/polyfill-connectors",
         type: "module",
         exports: {
-          "./connector-conformance-roster":
-            "./src/connector-conformance-roster.js",
           "./credential-probe": "./src/credential-probe.js",
           "./static-secret-credential-capture":
             "./src/static-secret-credential-capture.js",
@@ -87,10 +83,6 @@ export function writeConnectorPackageModules(packageDirectory) {
       null,
       2
     )}\n`
-  )
-  writeFileSync(
-    join(packageDirectory, "src", "connector-conformance-roster.js"),
-    'export const PRODUCTION_READY_CONNECTORS = { reddit: { testFile: "reddit.test.ts" } }\n'
   )
   writeFileSync(
     join(packageDirectory, "src", "credential-probe.js"),
