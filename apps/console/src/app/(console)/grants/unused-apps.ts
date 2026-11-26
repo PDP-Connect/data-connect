@@ -3,7 +3,7 @@
 import type { AppAccess } from "./app-access.ts";
 export function unusedApps(apps: readonly AppAccess[], now = Date.now()): AppAccess[] {
   return apps.filter(
-    (app) => app.state === "reading" && (!app.lastRead || Date.parse(app.lastRead) < now - 30 * 86_400_000)
+    (app) => app.state === "reading" && Boolean(app.since) && Date.parse(app.since as string) < now - 30 * 86_400_000 && (!app.lastRead || Date.parse(app.lastRead) < now - 30 * 86_400_000)
   );
 }
 export async function removeUnusedApps(
@@ -17,4 +17,9 @@ export async function removeUnusedApps(
     ? []
     : apps.filter((app) => !result.failedGrantIds || app.grantIds.some((id) => result.failedGrantIds?.includes(id)));
   return { ...result, failedNames: failed.map((app) => app.name) };
+}
+
+/** Count the actual data sources behind an all-accounts row. */
+export function appSourceCount(app: AppAccess): number {
+  return new Set(app.sourceAccess.filter(source=>source.in_force).flatMap(source=>source.connection_ids?.length ? source.connection_ids : [source.source.connection_id ?? JSON.stringify(source.source)])).size;
 }

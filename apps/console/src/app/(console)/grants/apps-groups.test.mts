@@ -50,11 +50,12 @@ mock.module("next/navigation", {
   },
 });
 let calls: unknown[] = [];
+let response: {ok:boolean;message:string|null;failedGrantIds?:string[]}={ok:true,message:null};
 mock.module("./remove-app-action.ts", {
   namedExports: {
     removeAppAction: (input: unknown) => {
       calls.push(input);
-      return Promise.resolve({ ok: true, message: null });
+      return Promise.resolve(response);
     },
   },
 });
@@ -64,6 +65,7 @@ const { buildAppPractice } = await import("./app-practice.ts");
 afterEach(() => {
   cleanup();
   calls = [];
+  response={ok:true,message:null};
 });
 after(() => dom.window.close());
 
@@ -83,19 +85,23 @@ test("one search filters unused, stopped and waiting apps", () => {
   assert.equal(view.queryByText("Waiting practice"), null);
   assert.equal(view.queryByText("ChatGPT"), null);
 });
-test("bulk removal waits for confirmation and sends exactly the unused group", async () => {
+test("bulk removal starts empty and names exactly the chosen apps", async () => {
   const { apps } = buildAppPractice("forty-eight");
   const view = render(React.createElement(AppsGroups, { apps }));
-  fireEvent.click(view.getByRole("button", { name: "Remove access for all 34" }));
-  assert.equal(calls.length, 0);
-  await React.act(async () => fireEvent.click(view.getByRole("button", { name: "Remove access for 34 apps" })));
-  assert.deepEqual(calls, [
-    {
-      client_ids: apps
-        .filter((app) => !app.lastRead || Date.parse(app.lastRead) < Date.now() - 30 * 86_400_000)
-        .flatMap((app) => app.clientIds),
-    },
-  ]);
+  fireEvent.click(view.getByRole("button", { name: "Choose apps to remove" }));
+  const ticks = view.getAllByRole("checkbox");
+  assert.ok(ticks.every(tick => !(tick as HTMLInputElement).checked));
+  assert.equal((view.getByRole("button", { name: "Remove access for 0 apps" }) as HTMLButtonElement).disabled, true);
+  fireEvent.click(ticks[0]!);
+  fireEvent.click(ticks[2]!);
+  fireEvent.click(view.getByRole("button", { name: "Remove access for 2 apps" }));
+  const question = view.getByRole("alertdialog");
+  const chosen = [ticks[0]!,ticks[2]!].map(tick=>apps.find(app=>app.hrefId===(tick as HTMLInputElement).value)!);
+  for (const app of chosen) { assert.ok(question.textContent?.includes(app.name)); }
+  assert.equal(question.querySelectorAll("li").length,2);
+  assert.equal(calls.length,0);
+  await React.act(async()=>fireEvent.click(question.querySelector("button")!));
+  assert.deepEqual(calls,[{client_ids:chosen.flatMap(app=>app.clientIds)}]);
 });
 test("merged waiting requests put Cancel and every request in the same question", () => {
   const { approvals } = buildAppPractice("waiting-three");
@@ -112,4 +118,24 @@ test("merged waiting requests put Cancel and every request in the same question"
   const question = view.getByRole("alertdialog");
   assert.ok(question.contains(view.getByRole("button", { name: "Cancel" })));
   assert.equal(JSON.parse(question.querySelector<HTMLInputElement>('input[name="requests"]')!.value).length, 3);
+});
+
+test("partial failure names remaining access and retry always reopens the named question",async()=>{
+  const {apps}=buildAppPractice("forty-eight");
+  const view=render(React.createElement(AppsGroups,{apps}));
+  fireEvent.click(view.getByRole("button",{name:"Choose apps to remove"}));
+  const ticks=view.getAllByRole("checkbox");
+  fireEvent.click(ticks[0]!);fireEvent.click(ticks[1]!);
+  const failed=apps.find(app=>app.hrefId===(ticks[0] as HTMLInputElement).value)!;
+  response={ok:false,message:"Some access could not be removed.",failedGrantIds:failed.grantIds};
+  fireEvent.click(view.getByRole("button",{name:"Remove access for 2 apps"}));
+  await React.act(async()=>fireEvent.click(view.getByRole("alertdialog").querySelector("button")!));
+  assert.ok(view.getByRole("alert").textContent?.includes(failed.name));
+  const question=view.getByRole("alertdialog");
+  const cancel=[...question.querySelectorAll("button")].find(button=>button.textContent==="Cancel")!;
+  fireEvent.click(cancel);
+  assert.equal(view.queryByRole("alertdialog"),null);
+  await React.act(async()=>fireEvent.click(view.getByRole("button",{name:"Try again"})));
+  assert.equal(calls.length,1);
+  assert.ok(view.getByRole("alertdialog"));
 });

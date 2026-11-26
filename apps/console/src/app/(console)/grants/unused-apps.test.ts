@@ -36,3 +36,14 @@ test("an unavailable removal reports every targeted app without including used a
     apps.map((app) => app.name)
   );
 });
+
+test("newly allowed and unknown-age apps never enter bulk removal", () => {
+  const now = Date.parse("2026-11-26T12:00:00Z");
+  const base = buildAppPractice("one").apps[0]!;
+  const apps = [
+    { ...base, since: "2026-11-26T00:00:00Z", lastRead: null },
+    { ...base, since: null, lastRead: null },
+    { ...base, since: "2026-09-01T00:00:00Z", lastRead: null },
+  ];
+  assert.deepEqual(unusedApps(apps, now), [apps[2]]);
+});

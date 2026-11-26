@@ -9,7 +9,7 @@ import { useState } from "react";
 import type { AppAccess } from "./app-access.ts";
 import { AppAccessList } from "./app-access-list.tsx";
 import { removeAppAction } from "./remove-app-action.ts";
-import { removeUnusedApps, unusedApps } from "./unused-apps.ts";
+import { appSourceCount, removeUnusedApps, unusedApps } from "./unused-apps.ts";
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: The three access states share one filter and one removal state; keeping the composition together makes their boundaries visible.
 export function AppsGroups({
   apps,
@@ -23,12 +23,15 @@ export function AppsGroups({
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [choosing, setChoosing] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string[]>([]);
   const [removed, setRemoved] = useState<string[]>([]);
   const reading = apps.filter((app) => app.state === "reading" && !removed.includes(app.hrefId));
   const unused = unusedApps(reading);
+  const chosen = unused.filter(app => selected.includes(app.hrefId)).sort((a,b) => (a.since || "").localeCompare(b.since || ""));
   const recent = reading.filter((app) => !unused.includes(app));
   const matches = (app: AppAccess) => `${app.name} ${app.place}`.toLowerCase().includes(query.trim().toLowerCase());
   const stopped = apps
@@ -38,17 +41,17 @@ export function AppsGroups({
     setBusy(true);
     setFailed([]);
     try {
-      const result = await removeUnusedApps(unused, demo ? () => Promise.resolve({ ok: true, message: null }) : removeAppAction);
+      const result = await removeUnusedApps(chosen, demo ? () => Promise.resolve({ ok: true, message: null }) : removeAppAction);
       setFailed(result.failedNames);
       if (result.ok) {
         setConfirm(false);
-        setRemoved((previous) => [...previous, ...unused.map((app) => app.hrefId)]);
+        setRemoved((previous) => [...previous, ...chosen.map((app) => app.hrefId)]);
       }
       if (!demo) {
         router.refresh();
       }
     } catch {
-      setFailed(unused.map((app) => app.name));
+      setFailed(chosen.map((app) => app.name));
     } finally {
       setBusy(false);
     }
@@ -79,27 +82,28 @@ export function AppsGroups({
           {recent.length ? <AppAccessList apps={recent} demo={demo} query={query} /> : null}
           {unused.length ? (
             <div className="mt-6 space-y-3">
-              <Text as="h3" className="pdpp-title">
+              <h3 className="pdpp-title text-foreground">
                 Not used in the last 30 days · {unused.length}
-              </Text>
+              </h3>
               <Text as="p">
                 Don't recognise an app, or no longer use it? Remove its access. It keeps anything it already read.
               </Text>
-              <IcButton onClick={() => setConfirm(true)} variant="destructive">
-                Remove access for all {unused.length}
-              </IcButton>
+              {choosing ? <div className="flex flex-wrap gap-2">
+                <IcButton onClick={() => setSelected(unused.map(app=>app.hrefId))} variant="ghost">Tick all</IcButton>
+                <IcButton onClick={() => {setChoosing(false);setSelected([]);setConfirm(false);}} variant="ghost">Cancel</IcButton>
+                <IcButton disabled={!chosen.length || busy} onClick={() => setConfirm(true)} variant="destructive">Remove access for {chosen.length} apps</IcButton>
+              </div> : <IcButton onClick={() => { setChoosing(true); setSelected([]); }} variant="ghost">Choose apps to remove</IcButton>}
               {confirm ? (
                 <div
                   aria-label="Remove unused apps"
                   className="space-y-3 rounded-md border border-border p-3"
                   role="alertdialog"
                 >
-                  <Text as="p">
-                    Remove access for {unused.length} apps you have not used in the last 30 days? They keep anything
-                    they already read.
-                  </Text>
+                  <Text as="p">Remove access for {chosen.length} apps?</Text>
+                  <ul>{chosen.map(app=><li key={app.hrefId}>{app.name}{app.place && app.place !== "no address given" ? ` · ${app.place}` : ""} · {appSourceCount(app)} data source{appSourceCount(app)===1?"":"s"}</li>)}</ul>
+                  <Text as="p">They keep anything they already read.</Text>
                   <IcButton disabled={busy} onClick={remove} variant="destructive">
-                    Remove access for {unused.length} apps
+                    Remove access for {chosen.length} apps
                   </IcButton>
                   <IcButton disabled={busy} onClick={() => setConfirm(false)} variant="ghost">
                     Cancel
@@ -109,13 +113,13 @@ export function AppsGroups({
               {failed.length ? (
                 <div className="text-destructive" role="alert">
                   <Text as="p">Access could not be removed for {failed.join(", ")}.</Text>
-                  <IcButton disabled={busy} onClick={remove} variant="ghost">
+                  <IcButton disabled={busy} onClick={() => setConfirm(true)} variant="ghost">
                     Try again
                   </IcButton>
                 </div>
               ) : null}
-              <AppAccessList apps={showAll ? unused.filter(matches) : unused.filter(matches).slice(0, 5)} demo={demo} />
-              {!showAll && unused.filter(matches).length > 5 ? (
+              {choosing ? <ul>{unused.filter(matches).map(app=><li className="flex items-center gap-3 py-3" key={app.hrefId}><input aria-label={`Remove ${app.name}`} checked={selected.includes(app.hrefId)} onChange={event=>setSelected(previous=>event.target.checked?[...previous,app.hrefId]:previous.filter(id=>id!==app.hrefId))} type="checkbox" value={app.hrefId} /><Text>{app.name}{app.place && app.place !== "no address given" ? ` · ${app.place}` : ""}</Text></li>)}</ul> : <AppAccessList apps={showAll ? unused.filter(matches) : unused.filter(matches).slice(0, 5)} demo={demo} />}
+              {!(choosing || showAll ) && unused.filter(matches).length > 5 ? (
                 <IcButton onClick={() => setShowAll(true)} variant="ghost">
                   Show all {unused.filter(matches).length}
                 </IcButton>
