@@ -4,7 +4,7 @@
 import { IcButton } from "@pdpp/brand-react"
 import { useState, type ComponentProps } from "react"
 import { EnrollmentForm } from "./enrollment-form.tsx"
-export function CollectorSetup(props: ComponentProps<typeof EnrollmentForm>) {
+export function CollectorSetup(props: ComponentProps<typeof EnrollmentForm> & { practice?: boolean }) {
   const [open, setOpen] = useState(Boolean(props.defaultConnectorId))
   return (
     <section className="grid gap-3">

@@ -30,7 +30,7 @@ export function CollectorList({
       {groups.map((group, index) =>
         group.devices.length ? (
           <section key={group.title} className="grid gap-2">
-            <h2>
+            <h2 className="text-lg">
               {group.title} · {group.devices.length}
             </h2>
             <ul className="divide-y divide-border/70 border-y border-border/70">

@@ -32,6 +32,7 @@ export function EnrollmentForm({
   collectorConnectorIds,
   referenceBaseUrl,
   defaultConnectorId,
+  practice = false,
 }: {
   /**
    * Enrollment keys of the connectors this server can enroll a local collector
@@ -49,6 +50,7 @@ export function EnrollmentForm({
    * leaves the field empty.
    */
   defaultConnectorId?: string;
+  practice?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(createEnrollmentCodeAction, { ok: null });
   const [showOtherConnectors, setShowOtherConnectors] = useState(false);
@@ -85,7 +87,7 @@ export function EnrollmentForm({
           <IcInput name="display_name" placeholder="the owner's laptop" />
         </ToolbarField>
         <input name="expires_in_seconds" type="hidden" value="900" />
-        <IcButton disabled={pending} type="submit">
+        <IcButton disabled={pending || practice} type="submit">
           {pending ? "Creating…" : "Create setup code"}
         </IcButton>
       </form>
