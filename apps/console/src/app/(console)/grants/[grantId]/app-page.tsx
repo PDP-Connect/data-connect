@@ -8,9 +8,18 @@ import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { appSourceName, formatAppLastRead, type AppAccess } from "../app-access.ts";
 import { useAppRemoval } from "./use-app-removal.ts";
+import { RecentReading } from "./recent-reading.tsx";
 const date = (value: string) =>
   new Date(value).toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
-export function AppPage({ app, demo }: { app: AppAccess; demo?: string }) {
+export function AppPage({
+  app,
+  demo,
+  recent,
+}: {
+  app: AppAccess;
+  demo?: string;
+  recent?: Parameters<typeof RecentReading>[0];
+}) {
   const removal = useAppRemoval(
     app.clientIds,
     Boolean(demo),
@@ -176,6 +185,7 @@ export function AppPage({ app, demo }: { app: AppAccess; demo?: string }) {
           </ul>
         </Section>
       ) : null}
+      {recent ? <RecentReading {...recent} demo={demo} /> : null}
       <Link
         className="mt-6 inline-block text-[13px] text-muted-foreground"
         href={`/grants/${encodeURIComponent(app.hrefId)}/technical${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}
