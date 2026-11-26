@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PoolClient } from "pg";
+import { executeAsPolyfillConnectorDetail } from "../operations/as-polyfill-connector-detail/index.ts";
 import { executeAsPolyfillConnectorRegister } from "../operations/as-polyfill-connector-register/index.ts";
 import {
   __setRegisterConnectorPhaseHookForTest,
@@ -123,6 +124,17 @@ async function storedFor(connectorKey: string): Promise<Record<string, unknown> 
   return ((await getConnectorManifest(connectorKey)) as Record<string, unknown> | null) ?? null;
 }
 
+async function storedManifestBytes(connectorKey: string): Promise<string | undefined> {
+  return isPostgresStorageBackend()
+    ? (await getPostgresPool().query<{ manifest: string }>(
+        "SELECT manifest::text FROM connectors WHERE connector_id = $1",
+        [connectorKey]
+      )).rows[0]?.manifest
+    : getDb()
+        .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
+        .get<{ manifest: string }>(connectorKey)?.manifest;
+}
+
 async function storedConnectorRowFor(connectorKey: string): Promise<{
   connector_id: string;
   created_at: string;
@@ -193,6 +205,70 @@ scenario("an explicit source.id is the current identity independently of provena
 });
 
 for (const path of ["registration", "activation"] as const) {
+  for (const moved of [false, true]) {
+    scenario(`an unchanged registry GET projection round-trips through ${path} byte-identically (retained move: ${moved})`, async () => {
+      const key = "srcid-projection-roundtrip";
+      const history = "urn:source:projection-roundtrip-history";
+      if (moved) {
+        await registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [history], manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+      }
+      const manifest = legacyManifest({
+        connector_key: key,
+        source: { id: EXPLICIT_SOURCE },
+        manifest_uri: DOC_ONE,
+        ...(moved ? { legacy_source_ids: [history], version: "1.1.0" } : {}),
+      });
+      if (path === "registration") {
+        await registerConnector(manifest, { skipDerivedRepair: true });
+      } else {
+        await publishConnectorActivation(installRecord(key, manifest));
+      }
+      const before = await storedManifestBytes(key);
+      const rowBefore = await storedConnectorRowFor(key);
+      const detail = await executeAsPolyfillConnectorDetail({ connectorId: key }, { getConnectorManifest });
+      assert.equal(detail.outcome, "success");
+      if (detail.outcome !== "success") throw new Error("registry GET failed");
+      assert.equal(
+        (detail.envelope.source_declaration as { publisher: { id: string } }).publisher.id,
+        "https://pdpp.dev/reference-implementation"
+      );
+      // Object member order is not declaration content.
+      const returned = {
+        ...detail.envelope,
+        source_declaration: Object.fromEntries(
+          Object.entries(detail.envelope.source_declaration as Record<string, unknown>).reverse()
+        ),
+      };
+      if (path === "registration") {
+        const result = await postRegister(returned);
+        assert.equal(result.outcome, "success", JSON.stringify(result));
+      } else {
+        await publishConnectorActivation(installRecord(key, returned));
+      }
+      assert.equal(await storedManifestBytes(key), before, "the stored JSON bytes are unchanged");
+      assert.deepEqual(await storedConnectorRowFor(key), rowBefore);
+      assert.deepEqual(detail.envelope, await storedFor(key), "admission does not mutate the caller's declaration");
+    });
+  }
+
+  scenario(`a changed manifest with its old registry projection is refused through ${path}`, async () => {
+    const key = "srcid-stale-projection";
+    await registerConnector(legacyManifest({ connector_key: key, source: { id: EXPLICIT_SOURCE } }), { skipDerivedRepair: true });
+    const before = await storedManifestBytes(key);
+    const rowBefore = await storedConnectorRowFor(key);
+    const detail = await executeAsPolyfillConnectorDetail({ connectorId: key }, { getConnectorManifest });
+    assert.equal(detail.outcome, "success");
+    if (detail.outcome !== "success") throw new Error("registry GET failed");
+    const changed = { ...detail.envelope, version: "2.0.0" };
+    await assert.rejects(
+      () => path === "registration" ? postRegister(changed) : publishConnectorActivation(installRecord(key, changed)),
+      /publisher.*reserved.*remove source_declaration/
+    );
+    assert.equal(await storedManifestBytes(key), before);
+    assert.deepEqual(await storedConnectorRowFor(key), rowBefore);
+    assert.equal(await getConnectorActivation(key), null);
+  });
+
   scenario(`an explicit declaration cannot claim the reserved projection publisher through ${path}`, async () => {
     const key = "srcid-reserved-publisher";
     const declaration = { ...explicitDeclaration(key, EXPLICIT_SOURCE), publisher: { id: "https://pdpp.dev/reference-implementation" } };
