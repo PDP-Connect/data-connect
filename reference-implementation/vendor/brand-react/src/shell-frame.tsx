@@ -171,7 +171,7 @@ export function navSectionForPathname(pathname: string): NavSection | null {
   ) {
     return "data-sources";
   }
-  if (path === "/connect") {
+  if (path === "/connect" || path === "/connect/technical") {
     return "apps";
   }
   if (
