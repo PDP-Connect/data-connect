@@ -18,7 +18,9 @@ export async function serviceReadinessAction(connectorKey: string): Promise<Read
   await requireDashboardAccess("/sources/add");
   const read = await readAddSourceCatalog();
   const entry = findCatalogEntry(read, connectorKey);
-  if (!entry) return { state: "waiting" };
+  // A catalog read that failed for now lists no packages, so a service known only
+  // from its package is missing: nothing shows it is underway, so ask for a retry.
+  if (!entry) return read.catalogTransientlyUnavailable ? { state: "retry" } : { state: "waiting" };
   const card = sourceSetupCardModel(entry, read.lifecycleFor(entry), read.catalogTransientlyUnavailable);
   if (card.packageAvailabilityUnknown) return { state: "retry" };
   if (!card.setupAction) return { state: "waiting" };
