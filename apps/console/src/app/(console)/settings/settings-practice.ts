@@ -198,7 +198,7 @@ export function buildSettingsPractice(
     disclosures: {},
   };
 	const request: typeof requestReachability = async (path, body) => {
-		if (path === "/catalog") return { ok: true, data: catalog };
+		if (path === "/catalog" || path.startsWith("/catalog?")) return { ok: true, data: catalog };
 		if (path === "/state") return { ok: true, data: state };
 		if (path === "/host-settings")
 			return {
