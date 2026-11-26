@@ -112,6 +112,7 @@ import {
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createInstanceIdentityProvider } from "./instance-identity.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
+import { describeRunConfigFailure } from "./connector-run-config.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
@@ -10065,7 +10066,7 @@ function createReferenceSchedulerManager({
               : null;
           return {
             checkpoint_summary: checkpointSummary,
-            connector_error: connectorError,
+            connector_error: connectorError ?? describeRunConfigFailure(terminalData.reason),
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
             run_id: handle.run_id,
