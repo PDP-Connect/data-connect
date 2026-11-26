@@ -1958,7 +1958,7 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
   }
 });
 
-test("runCollectorConnector flags an unrecognized coverage status as unaccounted", async () => {
+test("runCollectorConnector keeps coverage-status record data opaque", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
     const fixture = await writeFixtureConnector({
@@ -1993,12 +1993,10 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
       sourceInstanceId: "src-unaccounted",
     });
 
-    // An unknown status from a future tool release surfaces as unaccounted,
-    // so declared-stream success cannot read as complete.
+    // Record contents do not define a runtime coverage verdict.
     assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.completeness?.fullyAccounted, false);
-    assert.deepEqual(result.completeness?.unaccountedStores, ["mystery"]);
-    assert.equal(result.completeness?.countsByStatus.unaccounted, 1);
+    assert.equal(result.recordsQueued, 1);
+    assert.equal("completeness" in result, false);
   } finally {
     await harness.close();
   }
