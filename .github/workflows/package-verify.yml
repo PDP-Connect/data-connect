@@ -18,6 +18,10 @@ name: package-verify
 # - local-collector: both of the above, plus polyfill-connectors and
 #   reference-implementation. It vendors their code, and its smoke test
 #   starts the reference server.
+# - read-core, cli, mcp-server (under reference-implementation/vendor/):
+#   reference-implementation and the shared test runners in scripts/. The
+#   cli tests also spawn local-collector, so cli follows its inputs too.
+#   mcp-server packs cli and read-core from source as its siblings.
 #
 # Every package also depends on the root package.json, package-lock.json,
 # and .npmrc (install and toolchain versions) and on this workflow file.
@@ -82,24 +86,34 @@ jobs:
           protocol=false
           runtime=false
           collector=false
+          readcore=false
+          cli=false
+          mcp=false
           while IFS= read -r path; do
             case "$path" in
               package.json|package-lock.json|.npmrc|.github/workflows/package-verify.yml|\
               packages/connector-protocol/*)
-                protocol=true; runtime=true; collector=true ;;
+                protocol=true; runtime=true; collector=true; readcore=true; cli=true; mcp=true ;;
               packages/collector-runtime/*)
-                runtime=true; collector=true ;;
-              packages/local-collector/*|packages/polyfill-connectors/*|reference-implementation/*)
-                collector=true ;;
+                runtime=true; collector=true; cli=true; mcp=true ;;
+              packages/local-collector/*|packages/polyfill-connectors/*)
+                collector=true; cli=true; mcp=true ;;
+              reference-implementation/*)
+                collector=true; readcore=true; cli=true; mcp=true ;;
+              scripts/test-scratch/*|scripts/run-node-tests.mjs)
+                readcore=true; cli=true; mcp=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files.txt"
 
-          # Order matters: the jobs below verify in this order, matching
-          # npm-release's quality job.
+          # Workspace paths, in verify order: each package after the packages
+          # it depends on.
           packages=""
-          [[ "${protocol}" == "true" ]] && packages+="connector-protocol "
-          [[ "${runtime}" == "true" ]] && packages+="collector-runtime "
-          [[ "${collector}" == "true" ]] && packages+="local-collector "
+          [[ "${protocol}" == "true" ]] && packages+="packages/connector-protocol "
+          [[ "${runtime}" == "true" ]] && packages+="packages/collector-runtime "
+          [[ "${collector}" == "true" ]] && packages+="packages/local-collector "
+          [[ "${readcore}" == "true" ]] && packages+="reference-implementation/vendor/read-core "
+          [[ "${cli}" == "true" ]] && packages+="reference-implementation/vendor/cli "
+          [[ "${mcp}" == "true" ]] && packages+="reference-implementation/vendor/mcp-server "
           packages="${packages% }"
 
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
@@ -110,11 +124,14 @@ jobs:
     needs: classify
     if: needs.classify.outputs.packages != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # mcp-server's artifact receipt binds a merge-base with a fixed
+          # commit, which a shallow clone does not have.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -133,7 +150,7 @@ jobs:
           set -euo pipefail
           for package in ${PACKAGES}; do
             echo "::group::verify ${package}"
-            npm run --workspace "packages/${package}" verify
+            npm run --workspace "${package}" verify
             echo "::endgroup::"
           done
 

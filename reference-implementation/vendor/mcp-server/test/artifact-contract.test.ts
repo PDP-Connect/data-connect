@@ -57,6 +57,7 @@ const UNDECLARED_THIRD_PARTY_IMPORT = /imports "left-pad".*not declared in depen
 function manifest(overrides: Partial<PackageManifest> = {}): PackageManifest {
   return {
     name: "@pdpp/mcp-server",
+    version: "0.0.0",
     bin: { "pdpp-mcp-server": "./dist/bin/pdpp-mcp-server.js" },
     exports: { ".": "./dist/src/index.js", "./server": "./dist/src/server.js" },
     files: ["dist/", "README.md"],
@@ -85,7 +86,7 @@ function receipt(): ArtifactReceipt {
     tarballSha256: "tarball",
     workingTreeClean: true,
     node: { version: "v25.8.2", execPath: "/node" },
-    packageManager: { npmVersion: "11.18.0", pnpmVersion: "10.33.0" },
+    packageManager: { npmVersion: "11.18.0" },
     exports: [],
     bins: [],
     commands: [],
