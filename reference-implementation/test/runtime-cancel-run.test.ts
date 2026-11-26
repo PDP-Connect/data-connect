@@ -165,7 +165,13 @@ interface FreshDb {
 function openFreshDb(): FreshDb {
   closeDb();
   const dir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-"));
-  initDb(join(dir, "pdpp.sqlite"));
+  try {
+    initDb(join(dir, "pdpp.sqlite"));
+  } catch (error) {
+    // No caller holds `dir` yet, so no teardown can remove it.
+    rmSync(dir, { force: true, recursive: true });
+    throw error;
+  }
   return { dir, handle: getDb() };
 }
 
