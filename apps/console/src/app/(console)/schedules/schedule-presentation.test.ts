@@ -31,3 +31,26 @@ test("a paused data source without a schedule says Paused alone", () => {
 test("collector schedule sentences name the device when the server supplies it", () => {
   assert.equal(scheduleSentence(buildSchedulePractice("mixed")![5]!, Date.now(), "Work computer"), "Syncs from Work computer when that computer runs it");
 });
+
+test("automatic timing stays honest when the next run is not known", () => {
+  const source = buildSchedulePractice("mixed")![0]!;
+  assert.match(scheduleSentence({ ...source, schedule: { ...source.schedule!, next_due_at: null } }), /next sync time is not known/);
+});
+test("the current standard interval is marked even when it is recommended", () => {
+  const source = buildSchedulePractice("mixed")![0]!;
+  assert.match(scheduleChoices(source).find(row => row.seconds === 86400)!.label, /recommended.*now/);
+});
+
+test("paused sources without a schedule explain how to resume", async () => {
+  const { pausedScheduleReason } = await import("./schedule-presentation.ts")
+  const source = {
+    ...buildSchedulePractice("mixed")![3]!,
+    status: "paused",
+  } as never
+  assert.match(pausedScheduleReason(source)!, /Choose a sync frequency/)
+})
+
+test("a known next sync is shown in the schedule sentence", () => {
+  const source = buildSchedulePractice("mixed")![0]!;
+  assert.match(scheduleSentence(source), /next sync in about 3 hours/);
+});

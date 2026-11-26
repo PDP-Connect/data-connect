@@ -14,7 +14,7 @@ export function scheduleSentence(source: RefConnectorSummary, now = Date.now(), 
   if (schedule.next_due_at) {
     const hours = Math.round((Date.parse(schedule.next_due_at) - now) / 3_600_000);
     sentence += hours > 0 ? ` · next sync in about ${hours} ${hours === 1 ? "hour" : "hours"}` : " · next sync due soon";
-  }
+  } else sentence += " · next sync time is not known";
   return sentence;
 }
 export function scheduleChoices(source: RefConnectorSummary) {
@@ -23,7 +23,7 @@ export function scheduleChoices(source: RefConnectorSummary) {
   const current = source.schedule?.interval_seconds;
   const seconds = [...new Set([3600, 21_600, 86_400, 604_800, ...(current ? [current] : []), ...(recommended ? [recommended] : [])])]
     .filter((value) => value >= recommended || value === current).sort((a, b) => a - b);
-  return [...seconds.map((value) => ({ seconds: value, label: `${formatIntervalWords(value)}${value === recommended ? " (recommended)" : value === current && ![3600, 21_600, 86_400, 604_800].includes(value) ? " (now)" : ""}` })), { seconds: null, label: "Only when I press Sync now" }];
+  return [...seconds.map((value) => ({ seconds: value, label: `${formatIntervalWords(value)}${value === recommended ? " (recommended)" : ""}${value === current ? " (now)" : ""}` })), { seconds: null, label: "Only when I press Sync now" }];
 }
 export function buildSchedulePractice(state: string): RefConnectorSummary[] | null {
   if (state === "none") return [];
@@ -35,9 +35,16 @@ export function buildSchedulePractice(state: string): RefConnectorSummary[] | nu
       connection_id: `practice-${index}`, connector_id: "sample", connector_display_name: "Sample", display_name: ["Calendar", "Reading list", "Notes", "Recipes", "Bookmarks", "Work computer"][index % 6],
       source_kind: index === 5 && state === "mixed" ? "local_device" : "account",
       refresh_policy: { recommended_interval_seconds: index === 2 ? 21_600 : interval },
-      schedule: index === 3 && state === "mixed" ? null : { enabled: !paused, effective_mode: paused ? "paused" : "automatic", interval_seconds: interval, jitter_seconds: 0, next_due_at: null },
+      schedule: index === 3 && state === "mixed" ? null : { enabled: !paused, effective_mode: paused ? "paused" : "automatic", interval_seconds: interval, jitter_seconds: 0, next_due_at: !paused && index < 2 ? new Date(Date.now() + (index === 0 ? 3 : 1) * 3_600_000).toISOString() : null },
       connection_health: { axes: { attention: "none", coverage: "complete", freshness: "fresh", outbox: "idle" }, badges: { stale: false, syncing: false }, last_success_at: null, lateness: { state: "on_time" }, next_action: null, next_attempt_at: null, reason_code: null, state: "healthy", unknown_reasons: [] }, manifest_version: null, next_action: null,
       streams: [], total_records: 0, freshness: {}, last_run: null, last_successful_run: null,
     } as unknown as RefConnectorSummary;
   });
+}
+
+export function pausedScheduleReason(source: RefConnectorSummary): string | null {
+  if (scheduleSentence(source) !== "Paused") return null;
+  if (source.source_kind === "local_device") return "Resume it on the device that sends this data.";
+  if (!source.schedule) return "Choose a sync frequency to resume automatic syncs.";
+  return null;
 }

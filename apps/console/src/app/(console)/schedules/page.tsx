@@ -82,7 +82,7 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
       <SchedulesPoller enabled={hasActiveRun} />
       <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeading />
-        <p className="mb-6 text-muted-foreground">{summaries.length} data sources · {summaries.filter((s) => s.source_kind !== "local_device" && s.schedule?.enabled).length} sync by themselves{page.hasMore ? " on this page" : ""}.</p>
+        {summaries.length > 0 ? <p className="mb-6 text-muted-foreground">{summaries.length} data sources · {summaries.filter((s) => s.source_kind !== "local_device" && s.schedule?.enabled).length} sync by themselves{page.hasMore ? " on this page" : ""}.</p> : null}
         {summaries.length > 0 ? (
           <ul className="border-t border-border/70">
             {summaries.map((summary) => (

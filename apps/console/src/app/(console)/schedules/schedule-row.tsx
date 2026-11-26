@@ -15,7 +15,7 @@ import type { RefConnectorSummary, RefSchedule } from "../lib/ref-client.ts";
 import { sourceStatusWords } from "../lib/source-status-words.ts";
 import { activeScheduleRunId, scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
-import { scheduleChoices, scheduleSentence } from "./schedule-presentation.ts";
+import { pausedScheduleReason, scheduleChoices, scheduleSentence } from "./schedule-presentation.ts";
 import { formatIntervalWords } from "./schedule-cadence-words.ts";
 import { deleteScheduleAction, pauseScheduleAction, resumeScheduleAction, upsertScheduleAction } from "./actions.ts";
 
@@ -266,6 +266,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref, deviceName, pres
         <div className="grid gap-1">
           <Link className="text-foreground hover:underline" href={recordsHref}>{displayName}</Link>
           <p className="text-sm text-muted-foreground">{scheduleSentence(summary, observedAt, deviceName)}</p>
+          {pausedScheduleReason(summary) ? <p className="text-sm text-muted-foreground">{pausedScheduleReason(summary)}</p> : null}
         </div>
         {!localDevice ? <div className="flex gap-2">
           <IcButton disabled={isPending} onClick={() => setEditState(editState === "editing" ? "idle" : "editing")} size="sm" variant="ghost">Change</IcButton>
@@ -273,7 +274,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref, deviceName, pres
         </div> : null}
       </div>
       {editState === "editing" ? <div className="grid justify-items-start gap-1 py-3" aria-label="How often to sync">
-        {scheduleChoices(summary).map((choice) => <IcButton key={choice.seconds ?? "manual"} disabled={isPending || practice} aria-pressed={choice.seconds === (schedule?.interval_seconds ?? null)} variant="ghost" size="sm" onClick={() => choice.seconds === null ? setConfirmingDelete(true) : handleSave(`${choice.seconds}s`)}>{choice.label}</IcButton>)}
+        {scheduleChoices(summary).map((choice) => <IcButton key={choice.seconds ?? "manual"} disabled={isPending || practice} aria-pressed={choice.seconds === (schedule?.interval_seconds ?? null)} variant="ghost" size="sm" onClick={() => choice.seconds === null ? setConfirmingDelete(true) : handleSave(`${choice.seconds}s`)}>{choice.label}{choice.seconds === null && !schedule ? " (now)" : ""}</IcButton>)}
         <IcButton variant="ghost" size="sm" onClick={() => setEditState("idle")}>Cancel</IcButton>
       </div> : null}
       {confirmingDelete ? <div role="alertdialog" aria-label="Stop automatic syncs" className="grid gap-2 py-3">
