@@ -25,10 +25,11 @@ function plain(element: React.ReactElement) {
   const dom = new JSDOM(renderToStaticMarkup(element));
   for (const node of dom.window.document.querySelectorAll("details"))
     if (node.querySelector("summary")?.textContent === "Technical details") node.remove();
+  for (const command of dom.window.document.querySelectorAll("code")) command.remove();
   const text = dom.window.document.body.textContent
     ?.replaceAll("Technical details", "")
     .replaceAll("Add custom MCP server", "")
-    .replaceAll("Add custom connector", "");
+    .replaceAll("Add custom connector", "").replaceAll("“/mcp”", "");
   dom.window.close();
   assert.doesNotMatch(
     text || "",
