@@ -3485,19 +3485,15 @@ test("first redemption reads the local pin once, so a pin change mid-request can
         syncBuiltinESMExports();
         __setLocalCollectorProfilesDirectoryForTest(null);
       }
-      assert.ok(pinReads >= 1, "the seam must be exercised");
-      const deviceCount = selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters").n;
-      if (response.status === 201) {
-        assert.equal(deviceCount, 1, "a successful redemption has exactly one identity");
-        assert.equal(
-          selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters WHERE device_id = ?", stringField(bodyOf(response), "device_id")).n,
-          1,
-          "the response names the identity that was written"
-        );
-      } else {
-        assert.equal(response.status, 409);
-        assert.equal(deviceCount, 0, "a refused redemption writes no identity");
-      }
+      // One read means the request never sees the corrupted pin, so it succeeds.
+      assert.equal(pinReads, 1, "one redemption reads the pin record once");
+      assert.equal(response.status, 201);
+      assert.equal(selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters").n, 1);
+      assert.equal(
+        selectRow<{ n: number }>("SELECT COUNT(*) AS n FROM device_exporters WHERE device_id = ?", stringField(bodyOf(response), "device_id")).n,
+        1,
+        "the response names the identity that was written"
+      );
     });
   } finally {
     __setLocalCollectorProfilesDirectoryForTest(null);
