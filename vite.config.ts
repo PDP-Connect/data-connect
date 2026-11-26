@@ -73,6 +73,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/docker-core-first-boot.test.ts",
       "scripts/forced-release.test.ts",
       "scripts/release-atomicity.test.ts",
+      "scripts/release-checkout-history.test.ts",
       "scripts/package-verify-classifier.test.ts",
       "scripts/pin-lockstep-dependencies.test.ts",
       "scripts/railway-mcp-query-smoke.test.ts",
