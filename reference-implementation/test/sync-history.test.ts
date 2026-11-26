@@ -80,7 +80,7 @@ test("SQLite sync days use the person's UTC distance and keep attempts separate"
     await check("sqlite");
   } finally { closeDb(); }
 });
-test("Postgres sync days and paging match the SQLite fixture", { skip: !process.env.PDPP_TEST_POSTGRES_URL }, async () => {
+test("Postgres sync days and paging match the SQLite fixture", { skip: process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, async () => {
   await withTemporaryPostgresDatabase({
     connectionString: process.env.PDPP_TEST_POSTGRES_URL as string,
     databaseName: `dc_hist_test_${randomUUID().replaceAll("-", "")}`,

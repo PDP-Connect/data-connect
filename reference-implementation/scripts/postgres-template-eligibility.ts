@@ -35,6 +35,11 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/active-run-summary-zero-spine.test.ts",
   "test/agent-cli.test.ts",
   "test/agent-connect-absent-only-expiry.test.ts",
+  // Application queries use seeded storage; none of these tests exercise schema bootstrap.
+  "test/app-access.test.ts",
+  "test/app-history.test.ts",
+  "test/sync-history.test.ts",
+  "test/web-push-key-config-postgres.test.ts",
   "test/approval-review-seam.test.ts",
   "test/auth-consent-device-postgres-path.test.ts",
   // Uses Postgres as a fixture for process-kill recovery of auth rows, not as the subject of schema bootstrap.

@@ -163,7 +163,7 @@ test("SQLite resolves newest stored names, package names, and safe address fallb
 });
 
 test("Postgres resolves newest stored names, package names, and safe address fallbacks", {
-  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  skip: process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   const connectionString = process.env.PDPP_TEST_POSTGRES_URL;
   assert.ok(connectionString);
@@ -308,7 +308,7 @@ test("app access reads permission state, not the successful read outcome", async
 });
 
 test("Postgres app access equals SQLite for the same persisted fixtures", {
-  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  skip: process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   let expected: AppAccess[];
   try {
@@ -561,7 +561,7 @@ test("a multi-connection permission attributes reads to the right connection and
 });
 
 test("Postgres app removal preserves sibling package access, audit fields, tokens and registration", {
-  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  skip: process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   await withTemporaryPostgresDatabase(
     {
@@ -620,7 +620,7 @@ async function checkMergedSources(write: Write, list: () => Promise<AppAccess[]>
 test('SQLite merges service-only access using the owner connection inventory and removes exactly its permissions',async()=>{
   initDb();try{await checkMergedSources(async(sql,values)=>getDb().prepare(sql).run(...values),()=>spine.listAppAccessSqlite('merge_owner',NOW));}finally{closeDb();}
 });
-test('Postgres merges service-only access using the owner connection inventory and removes exactly its permissions',{skip:!process.env.PDPP_TEST_POSTGRES_URL},async()=>{
+test('Postgres merges service-only access using the owner connection inventory and removes exactly its permissions',{skip:process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset"},async()=>{
   await withTemporaryPostgresDatabase({connectionString:process.env.PDPP_TEST_POSTGRES_URL!,databaseName:`dc_merge_${randomUUID().replaceAll('-','')}`,closeConnections:closePostgresStorage},async databaseUrl=>{
     await initPostgresStorage({backend:'postgres',databaseUrl});
     await checkMergedSources(async(sql,values)=>{let i=0;return postgresQuery(sql.replaceAll('?',()=>`$${++i}`),values);},()=>postgresListAppAccess('merge_owner',NOW));

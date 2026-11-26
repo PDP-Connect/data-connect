@@ -92,7 +92,7 @@ test("SQLite app days exclude discovery, retain unknown source reads and separat
   try { await fixture(async (sql, values) => getDb().prepare(sql).run(...values)); await check("sqlite"); }
   finally { closeDb(); }
 });
-test("Postgres app days and single reads match the SQLite fixture", { skip: !process.env.PDPP_TEST_POSTGRES_URL }, async () => {
+test("Postgres app days and single reads match the SQLite fixture", { skip: process.env.PDPP_TEST_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, async () => {
   await withTemporaryPostgresDatabase({ connectionString: process.env.PDPP_TEST_POSTGRES_URL as string,
     databaseName: `dc_hist_test_${randomUUID().replaceAll("-", "")}`, closeConnections: closePostgresStorage }, async databaseUrl => {
       await initPostgresStorage({ backend: "postgres", databaseUrl });
