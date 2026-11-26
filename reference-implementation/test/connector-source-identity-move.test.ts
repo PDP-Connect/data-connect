@@ -4,11 +4,10 @@
 /**
  * Moving a legacy-projected source identity to a published declaration.
  *
- * A connector registered before source declarations existed retains the reference implementation's
- * legacy projection, whose `source.id` is the connector's `manifest_uri`. When the installer verifies a
- * package that names itself with that same `manifest_uri` and declares a different source, the retained
- * identity moves to the declared one, and the grants, grant package members and pairwise handles that
- * name the old id move with it in the same transaction. Every other identity change stays refused.
+ * A historical projection may move under the same connector key when the admitted manifest names
+ * the old identity as legacy, or the installer verifies the new declaration. Document provenance
+ * never decides eligibility. Grants, package members and pairwise handles move together, and an
+ * already-current or already-moved identity cannot be rebound.
  *
  * Runs on SQLite, and on PostgreSQL 18 when PDPP_TEST_POSTGRES_URL is set.
  */
@@ -29,7 +28,7 @@ import { getConnectorActivation } from "../server/connector-install/activation-a
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
+import { COLLECTION_PROFILE_URI, snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
@@ -43,6 +42,7 @@ const CONFIG_DIGEST = `sha256:${"e".repeat(64)}`;
 const ALREADY_BOUND = /already bound to source/;
 const SHARED = /also retains/;
 const HANDLE_TAKEN = /pairwise handle is already issued/;
+const PROFILE_KEY_MISMATCH = /Connector profile identity does not match the catalog target/;
 
 type Backend = "sqlite" | "postgres";
 
@@ -253,8 +253,8 @@ const UNMOVED: References = {
 };
 
 /** The connector as an instance registered it before declarations: the legacy projection of its manifest. */
-async function seedLegacyConnector(backend: Backend): Promise<void> {
-  await registerConnector({ ...profileFor("0.9.0"), legacy_source_ids: [LEGACY_SOURCE] });
+async function seedLegacyConnector(backend: Backend, manifestUri = LEGACY_SOURCE): Promise<void> {
+  await registerConnector({ ...profileFor("0.9.0", manifestUri), legacy_source_ids: [LEGACY_SOURCE] });
   assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
   await seedReferences(backend);
 }
@@ -277,6 +277,71 @@ async function withDataDir(run: (dataDir: string) => Promise<void>): Promise<voi
 }
 
 const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> }> = [
+  {
+    name: "a same-key update cannot overwrite an admitted current source.id",
+    run: async () => {
+      await registerConnector({ ...profileFor("1.0.0"), source: { id: DECLARED_SOURCE } });
+      const previous = await getConnectorManifest(KEY);
+      const keyOnlyUpdate = profileFor("1.1.0");
+      delete keyOnlyUpdate.manifest_uri;
+      await assert.rejects(() => registerConnector({ ...keyOnlyUpdate, source: { id: OTHER_SOURCE } }), ALREADY_BOUND);
+      assert.deepEqual(await getConnectorManifest(KEY), previous);
+    },
+  },
+  {
+    name: "a declared historical alias moves independently of document provenance",
+    run: async (backend) => {
+      await seedLegacyConnector(backend, "https://documents.example/legacy-profile.json");
+      await registerConnector({
+        ...profileFor("1.0.0", "https://documents.example/current-profile.json"),
+        legacy_source_ids: [LEGACY_SOURCE],
+        source: { id: DECLARED_SOURCE },
+      });
+      assert.equal((await retained()).id, DECLARED_SOURCE);
+      assert.deepEqual(await readReferences(backend), {
+        grant: DECLARED_SOURCE,
+        handle: DECLARED_SOURCE,
+        member: DECLARED_SOURCE,
+        unrelatedGrant: UNRELATED_SOURCE,
+      });
+    },
+  },
+  {
+    name: "a verified declaration moves a historical identity independently of document provenance",
+    run: (backend) => withDataDir(async (dataDir) => {
+      await seedLegacyConnector(backend, "https://documents.example/legacy-profile.json");
+      const declared = versionWith("1.0.0", DECLARED_SOURCE, "https://documents.example/current-profile.json");
+      const { service } = serviceFor(dataDir, [declared]);
+      await service.install(KEY, declared.entry.digest);
+      assert.equal((await retained()).id, DECLARED_SOURCE);
+      assert.deepEqual(await readReferences(backend), {
+        grant: DECLARED_SOURCE,
+        handle: DECLARED_SOURCE,
+        member: DECLARED_SOURCE,
+        unrelatedGrant: UNRELATED_SOURCE,
+      });
+    }),
+  },
+  {
+    name: "a current source remains immutable after an update omits source.id",
+    run: async () => {
+      await registerConnector({ ...profileFor("1.0.0"), source: { id: DECLARED_SOURCE } });
+      const keyOnlyUpdate = profileFor("1.1.0");
+      delete keyOnlyUpdate.manifest_uri;
+      await registerConnector(keyOnlyUpdate);
+      const afterUpdate = await getConnectorManifest(KEY) as {
+        source_declaration?: { extensions?: Record<string, { declared_source_id?: string }> };
+      };
+      assert.equal(afterUpdate.source_declaration?.extensions?.[COLLECTION_PROFILE_URI]?.declared_source_id, DECLARED_SOURCE);
+      await assert.rejects(() => registerConnector({
+        ...profileFor("1.2.0"),
+        legacy_source_ids: [DECLARED_SOURCE],
+        source: { id: OTHER_SOURCE },
+      }), ALREADY_BOUND);
+      assert.equal((await retained()).id, DECLARED_SOURCE);
+      assert.deepEqual(await getConnectorManifest(KEY), afterUpdate);
+    },
+  },
   {
     name: "a verified move without incoming history retains ownership of the moved-from identity",
     run: (backend) => withDataDir(async (dataDir) => {
@@ -380,13 +445,21 @@ const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> 
       }),
   },
   {
-    name: "a verified package that names a different implementation does not move the identity",
+    name: "a verified package for a different connector key does not move the identity",
     run: (backend) =>
       withDataDir(async (dataDir) => {
         await seedLegacyConnector(backend);
-        const foreign = versionWith("1.0.0", DECLARED_SOURCE, "https://implementations.example/connectors/elsewhere");
+        const profile = { ...profileFor("1.0.0"), connector_id: "elsewhere", connector_key: "elsewhere" };
+        const profileBytes = JSON.stringify(profile, null, 2);
+        const base = versionWith("1.0.0", DECLARED_SOURCE);
+        const foreign: Version = {
+          ...base,
+          entry: { ...base.entry, digest: `sha256:${createHash("sha256").update(profileBytes).digest("hex")}` },
+          profileBytes,
+          sidecar: JSON.stringify(declarationFor(profile, DECLARED_SOURCE), null, 2),
+        };
         const { service } = serviceFor(dataDir, [foreign]);
-        await assert.rejects(() => service.install(KEY, foreign.entry.digest), ALREADY_BOUND);
+        await assert.rejects(() => service.install(KEY, foreign.entry.digest), PROFILE_KEY_MISMATCH);
         assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
         assert.deepEqual(await readReferences(backend), UNMOVED);
       }),

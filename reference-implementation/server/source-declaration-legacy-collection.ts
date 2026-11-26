@@ -207,10 +207,10 @@ export function snapshotContentAddressedSourceDeclarationFromLegacyConnectorMani
   });
 }
 
-/** Retain moved-from source ids in the canonical declaration snapshot. */
-export function retainCollectionLegacySourceIds(
+/** Retain the admitted current-id fact and moved-from history in the canonical snapshot. */
+export function retainCollectionSourceIdentity(
   declarationValue: unknown,
-  sourceIds: readonly string[]
+  facts: { readonly declaredSourceId?: string; readonly legacySourceIds?: readonly string[] }
 ): SourceDeclaration {
   const declaration = snapshotSourceDeclaration(declarationValue) as unknown as JsonObject;
   const extensions = isObject(declaration.extensions) ? declaration.extensions : {};
@@ -218,11 +218,10 @@ export function retainCollectionLegacySourceIds(
   const existing = Array.isArray(collection.legacy_source_ids)
     ? collection.legacy_source_ids.filter((value): value is string => typeof value === "string")
     : [];
-  const legacySourceIds = [...new Set([...existing, ...sourceIds])].sort();
-  if (
-    legacySourceIds.length === existing.length &&
-    existing.every((id) => legacySourceIds.includes(id))
-  ) {
+  const legacySourceIds = [...new Set([...existing, ...(facts.legacySourceIds ?? [])])].sort();
+  const historyUnchanged = legacySourceIds.length === existing.length && existing.every((id) => legacySourceIds.includes(id));
+  const currentUnchanged = facts.declaredSourceId === undefined || facts.declaredSourceId === collection.declared_source_id;
+  if (historyUnchanged && currentUnchanged) {
     return declaration as unknown as SourceDeclaration;
   }
 
@@ -230,7 +229,11 @@ export function retainCollectionLegacySourceIds(
     ...declaration,
     extensions: {
       ...extensions,
-      [COLLECTION_PROFILE_URI]: { ...collection, legacy_source_ids: legacySourceIds },
+      [COLLECTION_PROFILE_URI]: {
+        ...collection,
+        ...(facts.declaredSourceId === undefined ? {} : { declared_source_id: facts.declaredSourceId }),
+        ...(legacySourceIds.length === 0 ? {} : { legacy_source_ids: legacySourceIds }),
+      },
     },
   };
   const version = declaration.declaration_version;
