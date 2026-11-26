@@ -53,6 +53,7 @@ declare module "fastify" {
 }
 
 import { publicManifests, referenceManifests } from "@pdpp/reference-contract";
+import { CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX } from "../operations/ref-connectors-list/pagination.ts";
 import {
   applyRequestValidation,
   applyResponseValidation,
@@ -350,9 +351,14 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
       ignoreTrailingSlash: false,
       // `qs.parse` decodes PDPP's nested bracket shape
       // (filter[field][gte]=..., expand[]=..., expand_limit[rel]=...) per
-      // Core §8. Depth bounded to 8 + arrayLimit 64 to close the DoS surface
-      // that Express 5's default `simple` parser was tightening.
-      querystringParser: (str) => qs.parse(str, { arrayLimit: 64, depth: 8 }),
+      // Core §8. Depth bounded to 8 and arrayLimit bounded to close the DoS
+      // surface that Express 5's default `simple` parser was tightening. Past
+      // arrayLimit qs returns a numeric-keyed object instead of an array. The
+      // largest repeated set the API accepts is the connector_id scope of
+      // GET /_ref/connectors; one more value still parses as an array, so an
+      // oversized set is refused by its size rule rather than by its shape.
+      querystringParser: (str) =>
+        qs.parse(str, { arrayLimit: CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX + 1, depth: 8 }),
     },
   });
 
