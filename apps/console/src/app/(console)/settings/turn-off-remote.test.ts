@@ -338,6 +338,29 @@ for (const late of ["a route", "no answer"] as const) {
   });
 }
 
+test("a superseded failed Check again read does not replace the later poll's notice", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let held: ((result: Result) => void) | null = null;
+  let hold = false;
+  const table: Record<string, Entry> = {
+    "/state": () => (hold ? new Promise<Result>((resolve) => (held = resolve)) : stateWith(route(REMOTE))),
+    "/routes/route-1/stop": () => { throw new TypeError("Failed to fetch"); },
+  };
+  await withScreen(REMOTE, table, async ({ press, text }) => {
+    await press(turnOffCase.label);
+    await press(/^Turn off$/);
+    hold = true;
+    await press(/^Check again$/);
+    assert.ok(held, "Check again is waiting on its state read");
+
+    hold = false;
+    await act(async () => t.mock.timers.tick(3_000));
+    await act(async () => (held as (result: Result) => void)(fail("reachability_unavailable")));
+
+    assert.doesNotMatch(text(), /couldn.t reach the host/i, "the older failure must not replace the newer successful read");
+  });
+});
+
 // The operation card's Try again reads the operation and /state together. The periodic poll reads
 // /state too; whichever read started later is the newer one, whatever order the answers arrive in.
 test("an older operation refresh that answers after a later poll does not overwrite it", async () => {

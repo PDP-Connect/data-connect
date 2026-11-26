@@ -486,6 +486,7 @@ export function RemoteAccessSetting({
         onPasswordMissing: () => {
           if (!isCurrent()) return;
           passwordMissingNow.current = true;
+          actionEpoch.current += 1;
           setState((current) => ({ ...current, passwordSet: false }));
         },
       });
@@ -801,8 +802,7 @@ export function RemoteAccessSetting({
   // Renews the proof before its window ends, with no click and no status change.
   // One read of /state under the same guard as a poll: its answer is applied only while the card is
   // mounted, no later read has landed and no action has started or ended since. Both rechecks use it.
-  async function readStateFenced() {
-    const ticket = beginStateRead();
+  async function readStateFenced(ticket = beginStateRead()) {
     const read = await request("/state");
     const applied = read.ok && applyState(ticket, read.data as State);
     return { read, applied };
@@ -897,13 +897,14 @@ export function RemoteAccessSetting({
     // clears or replaces that notice, so a late answer changes nothing.
     const record = (checked: "still-on" | "no-answer") =>
       setStopUnconfirmed((current) => (current === notice ? { ...notice, checked } : current));
+    const ticket = beginStateRead();
     try {
-      const { read, applied } = await readStateFenced();
+      const { read, applied } = await readStateFenced(ticket);
       if (!mounted.current) return;
-      if (!read.ok) record("no-answer");
+      if (!read.ok && claimStateRead(ticket)) record("no-answer");
       else if (applied) record("still-on");
     } catch {
-      if (mounted.current) record("no-answer");
+      if (claimStateRead(ticket)) record("no-answer");
     } finally {
       if (mounted.current) setCheckingStop(false);
     }
