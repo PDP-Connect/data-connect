@@ -111,6 +111,17 @@ test("blob upload guard accepts nullable instance, optional pointer and zero byt
   assert.ok(isBlobUploadPayload({ ...originalPayload, connectorInstanceId: "instance-1", jsonPath: "", sizeBytes: 0 }));
 });
 
+test("capture rejects a legacy field path before spooling or queue admission", async (t) => {
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
+  t.after(() => outbox.close());
+  const input = fixture(outbox);
+  const spoolWrites = t.mock.method(input.spool, "put");
+
+  await assert.rejects(captureBlobArtifact({ ...input, jsonPath: "legacy.field" }), /RFC 6901 JSON pointer/);
+  assert.equal(spoolWrites.mock.callCount(), 0);
+  assert.deepEqual(outbox.list(), []);
+});
+
 test("blob upload guard rejects malformed digest, byte count, instance or pointer", () => {
   for (const invalid of [
     { sha256: sha256.slice(1) },

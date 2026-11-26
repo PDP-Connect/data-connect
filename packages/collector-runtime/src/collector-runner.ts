@@ -31,7 +31,7 @@ import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
 import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
-import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
+import { type BlobUploadPayload, isBlobUploadPayload, isOptionalBlobJsonPointer } from "./local-device-blob-capture.ts";
 import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
 import {
   type EnrollmentExchangeResponse,
@@ -3022,6 +3022,9 @@ function destroyReadStream(stream: NodeJS.ReadableStream): void {
 
 function assertBlobUploadPayload(payload: unknown, id: string): BlobUploadPayload {
   if (!isBlobUploadPayload(payload)) {
+    if (isRecord(payload) && !isOptionalBlobJsonPointer(payload.jsonPath)) {
+      throw new OutboxPayloadShapeError(`blob_upload jsonPath must be an RFC 6901 JSON pointer: ${id}`);
+    }
     throw new OutboxPayloadShapeError(`malformed blob_upload payload: ${id}`);
   }
   return payload;

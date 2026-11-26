@@ -71,6 +71,9 @@ export interface CaptureBlobArtifactResult {
  * the existing row rather than creating a second upload of identical bytes.
  */
 export async function captureBlobArtifact(input: CaptureBlobArtifactInput): Promise<CaptureBlobArtifactResult> {
+  if (!isOptionalBlobJsonPointer(input.jsonPath)) {
+    throw new TypeError("blob_upload jsonPath must be an RFC 6901 JSON pointer");
+  }
   // 1. Bytes to durable local disk, hashed on the way in. No network.
   const entry = await input.spool.put(input.content);
 
@@ -107,6 +110,10 @@ export async function captureBlobArtifact(input: CaptureBlobArtifactInput): Prom
 const JSON_POINTER_PATTERN = /^(?:\/(?:[^~/]|~[01])*)*$/;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/i;
 
+export function isOptionalBlobJsonPointer(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && JSON_POINTER_PATTERN.test(value));
+}
+
 export function isBlobUploadPayload(value: unknown): value is BlobUploadPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -115,8 +122,7 @@ export function isBlobUploadPayload(value: unknown): value is BlobUploadPayload 
   return (
     typeof payload.connectorId === "string" &&
     (payload.connectorInstanceId === null || typeof payload.connectorInstanceId === "string") &&
-    (payload.jsonPath === undefined ||
-      (typeof payload.jsonPath === "string" && JSON_POINTER_PATTERN.test(payload.jsonPath))) &&
+    isOptionalBlobJsonPointer(payload.jsonPath) &&
     typeof payload.mimeType === "string" &&
     typeof payload.recordKey === "string" &&
     typeof payload.sha256 === "string" &&

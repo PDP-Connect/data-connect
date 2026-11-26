@@ -113,6 +113,32 @@ async function readAll(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("blob_upload drain", () => {
+  it("dead-letters a legacy field path with a pointer diagnostic and retains the bytes", async (t) => {
+    const h = makeHarness();
+    t.after(() => h.outbox.close());
+    const captured = await capture(h, Buffer.from("legacy artifact"));
+    const validRow = h.outbox.get(captured.outboxId);
+    assert.ok(validRow);
+    h.outbox.enqueue({
+      id: "legacy-row",
+      kind: "blob_upload",
+      payload: { ...(validRow.payload as object), jsonPath: "legacy.field" },
+      sourceInstanceId: "src-1",
+    });
+
+    const result = await drain(h, async (args) => {
+      await readAll(args.content);
+      return { sha256: args.sha256, size_bytes: args.sizeBytes };
+    });
+
+    assert.equal(result.sent, 1);
+    assert.equal(result.deadLettered, 1);
+    const legacy = h.outbox.get("legacy-row");
+    assert.equal(legacy?.status, "dead_letter");
+    assert.match(legacy?.last_error ?? "", /RFC 6901 JSON pointer/);
+    assert.ok(h.spool.has(captured.sha256));
+  });
+
   it("uploads the spooled bytes byte-exactly and retains the local copy after acknowledgement", async () => {
     const h = makeHarness();
     const body = randomBytes(256 * 1024);
