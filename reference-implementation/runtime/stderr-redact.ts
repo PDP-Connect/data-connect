@@ -139,9 +139,9 @@ export interface StderrRedactionOptions {
    * person wrote, such as an error code.
    *
    * The earlier objection to a shape rule was personal data:
-   * `tim_nunamaker_gmail_com` is snake_case too. This rule is not the
+   * `jane_doe_example_com` is snake_case too. This rule is not the
    * personal-data control and never was. The same name and address in their
-   * usual form (`Tim Nunamaker`, `tim.nunamaker@gmail.com`) never matched
+   * usual form (`Jane Doe`, `jane.doe@example.com`) never matched
    * `LONG_OPAQUE_RE` and pass through unchanged today. Redacting every long
    * error code to protect only the snake_case spelling of a name destroyed the
    * cause of every such failure and protected almost nothing.
