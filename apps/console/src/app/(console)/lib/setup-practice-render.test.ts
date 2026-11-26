@@ -108,7 +108,7 @@ test("every plain setup page practice state renders without folds, raw paths, co
     await import("../deployment/tokens/plain-token-list.tsx")
   const { buildTokenPractice, tokenGroups } =
     await import("../deployment/tokens/token-model.ts")
-  for (const state of ["none", "scripts", "created"]) {
+  for (const state of ["none", "scripts", "created", "many"]) {
     const model = buildTokenPractice(state)!
     verify(
       React.createElement(PlainTokenList, {
