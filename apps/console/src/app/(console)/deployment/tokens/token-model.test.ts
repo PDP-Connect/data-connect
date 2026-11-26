@@ -19,3 +19,11 @@ test("legacy technical token labels become plain script names", () => {
   assert.equal(groups[0]!.name, "Script or tool");
   assert.equal(groups[0]!.tokens.length, 1);
 });
+
+// Console-internal credentials are not script credentials. Every other stored owner credential remains reachable.
+test("exclude the console credential and retain all 90 legacy script credentials", () => {
+  const owners = Array.from({ length: 90 }, (_, i) => ({ id: `legacy-${i}`, label: "Backup tool", createdAt: "2026-11-24", expiresAt: null }));
+  const consoleToken = { id: "current-console", label: "DataConnect console", createdAt: "2026-11-24", expiresAt: null };
+  const groups = tokenGroups([], {}, [...owners, consoleToken]);
+  assert.deepEqual(groups.flatMap(group => group.tokens.map(token => token.id)).sort(), owners.map(token => token.id).sort());
+});

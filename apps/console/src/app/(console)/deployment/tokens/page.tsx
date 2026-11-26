@@ -1,18 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { SupportCopy } from "../../components/support-copy.tsx";
-import { IcButton, IcInput } from "@pdpp/brand-react"
-import { CopyButton } from "@pdpp/operator-ui/components/copy-button"
+import { IcButton, IcInput, buttonVariants } from "@pdpp/brand-react"
 import { PageHeader } from "@pdpp/operator-ui/components/primitives"
 import Link from "next/link"
 import { RecordroomShellWithPalette } from "../../components/recordroom-shell-with-palette.tsx"
 import { takeOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts"
-import {
-  listOwnerClientTokens,
-  listOwnerIssuedClients,
-} from "../../lib/ref-client.ts"
-import { loadOwnerSessionInventory } from "../../settings/owner-sessions-data.ts"
 import { issueOwnerTokenAction } from "./actions.ts"
+import { loadTokenGroups } from "./token-data.ts"
+import { CopyButton as LabeledCopyButton } from "../../settings/on-card.tsx"
 import { PlainTokenList } from "./plain-token-list.tsx"
 import {
   buildTokenPractice,
@@ -42,33 +38,8 @@ export default async function TokensPage({
   if (practice)
     groups = tokenGroups(practice.clients, practice.details, practice.owners)
   else {
-    const [clients, inventory] = await Promise.all([
-      listOwnerIssuedClients(),
-      loadOwnerSessionInventory()
-        .then(inventory => ({ inventory, failed: false }))
-        .catch(() => ({ inventory: null, failed: true })),
-    ])
-    inventoryFailed = inventory.failed
-    const details = Object.fromEntries(
-      await Promise.all(
-        clients.data.map(
-          async client =>
-            [
-              client.client_id,
-              (
-                await listOwnerClientTokens(client.client_id).catch(() => ({
-                  data: [],
-                }))
-              ).data,
-            ] as const
-        )
-      )
-    )
-    groups = tokenGroups(
-      clients.data,
-      details,
-      inventory.inventory?.bearers ?? []
-    )
+    try { groups = await loadTokenGroups(); }
+    catch { groups = []; inventoryFailed = true; }
   }
   const created = practice?.created ?? flow?.token
   return (
@@ -102,14 +73,15 @@ export default async function TokensPage({
         ) : null}
         {created ? (
           <section className="grid gap-3">
+            <h2>{flow?.name || (practice ? "Backup script" : "Your new token")}</h2>
             <div className="flex items-start gap-2">
               <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all rounded-md border border-border p-3">
                 {created}
               </pre>
-              <CopyButton ariaLabel="Copy token" value={created} />
+              <LabeledCopyButton label="Copy token" text={created} />
             </div>
             <p>Copy it now. You won’t see it again.</p>
-            <Link className="min-h-11 py-2 underline" href="/deployment/tokens">
+            <Link className={buttonVariants({ variant: "default" })} href="/deployment/tokens">
               Done
             </Link>
           </section>

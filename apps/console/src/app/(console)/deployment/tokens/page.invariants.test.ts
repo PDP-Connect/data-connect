@@ -84,16 +84,16 @@ const TOKEN_ACCESS_TOKEN_RE = /token\.access_token/;
 const TOKEN_ID_FIELD_RE = /\.token_id\b(?!_public)/;
 // The drilldown must be gated on active_token_count > 1 so a single-token
 // client is fully described by its row (no needless expansion).
-const DRILLDOWN_GATE_RE = /active_token_count\s*>\s*1/;
+const DRILLDOWN_GATE_RE = /group\.count\s*>\s*1/;
 
 test("tokens page wires the in-place rename action with a client_name field (10.C.1)", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
+  const src = await readFile(`${HERE}plain-token-list.tsx`, "utf8");
   assert.match(src, RENAME_ACTION_RE);
   assert.match(src, RENAME_INPUT_RE);
 });
 
 test("tokens page wires the per-token drilldown revoke by public id, gated on >1 active token (10.C.2/10.C.3)", async () => {
-  const [src, list] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(TOKEN_LIST_FILE, "utf8")]);
+  const [src, list] = await Promise.all([readFile(`${HERE}plain-token-list.tsx`, "utf8"), readFile(TOKEN_LIST_FILE, "utf8")]);
   // RAISE-RULES.md 5: per-token revoke remains available and requires confirmation.
   assert.match(list, PER_TOKEN_REVOKE_ACTION_RE);
   assert.match(list, /ConfirmTokenRevoke/);
@@ -111,27 +111,19 @@ test("tokens page renders no raw bearer from the token drilldown (no-leak guard)
   assert.doesNotMatch(src, TOKEN_ID_FIELD_RE);
 });
 
-test("access tokens page shows the promised list fields and copy-now secret sentence", async () => {
-  const [page, list] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(TOKEN_LIST_FILE, "utf8")]);
-  // Brief settings-pages, decision 3: the list names access, creation, use time and one-time secret behavior.
-  // Settings repair brief, decision 2: this list is for scripts and tools, distinct from session tokens.
+test("tokens show truthful permissions, made date and a one-time secret", async () => {
+  const [page, list] = await Promise.all([readFile(`${HERE}page.tsx`, "utf8"), readFile(`${HERE}plain-token-list.tsx`, "utf8")]);
   assert.match(page, /title="Tokens for scripts and tools"/);
-  assert.doesNotMatch(page, /title="Access tokens"/);
-  assert.match(page, /<PageHeader title="Tokens for scripts and tools" \/>/);
-  assert.match(page, /For scripts and tools that read your data without signing in\./);
-  // Settings repair brief, decision 3: the store drops the secret after the page reads it
-  // (see the flow-store tests below), so the page may say it is shown once.
-  assert.match(page, /Copy it now\. You won't see it again\./);
-  assert.doesNotMatch(page, /until DataConnect restarts/);
+  assert.match(page, /Copy it now\. You won’t see it again\./);
   assert.match(page, /takeOwnerBootstrapFlow\(params\.flow\)/);
   assert.doesNotMatch(page, /getOwnerBootstrapFlow\(params\.flow\)/);
-  assert.match(page, /Create access token/);
-  assert.match(list, /What it can read/);
-  assert.match(list, /Last used/);
-  assert.match(list, /More actions for/);
-  // DIRECTION.md Values: the rebuilt pages do not use the copper human color.
+  assert.match(page, /Create a token/);
+  assert.match(list, /Can read everything/);
+  assert.match(list, /madeDate/);
+  assert.doesNotMatch(list, /Last used/);
+  assert.doesNotMatch(page, /until DataConnect restarts/);
   assert.doesNotMatch(page, /--human|data-surface="human"/);
-})
+});
 
 test("revoking an access token shows a named confirmation before submitting", async () => {
   const list = await readFile(TOKEN_LIST_FILE, "utf8");

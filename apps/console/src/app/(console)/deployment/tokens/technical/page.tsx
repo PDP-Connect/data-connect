@@ -3,36 +3,19 @@
 
 import {
   buttonVariants,
-  IcButton,
-  IcInput,
   IcTimestamp,
 } from "@pdpp/brand-react"
-import { formatRelative } from "@pdpp/display"
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button"
 import { Callout, PageHeader } from "@pdpp/operator-ui/components/primitives"
 import Link from "next/link"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
-import { ServerUnreachable } from "../../../components/server-unreachable.tsx"
 import {
   buildOwnerBootstrapExamples,
   takeOwnerBootstrapFlow,
 } from "../../../lib/operator-bootstrap.ts"
 import {
   getReferencePublicOrigin,
-  ReferenceServerUnreachableError,
 } from "../../../lib/owner-token.ts"
-import {
-  listOwnerClientTokens,
-  listOwnerIssuedClients,
-  type OwnerClientToken,
-  type OwnerIssuedClient,
-} from "../../../lib/ref-client.ts"
-import { issueOwnerTokenAction, renameOwnerTokenAction } from "../actions.ts"
-import {
-  ConfirmTokenRevoke,
-  TokenAccessList,
-  type AccessTokenRow,
-} from "../token-access-list.tsx"
 
 export const dynamic = "force-dynamic"
 
@@ -127,65 +110,6 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
  * Single card that holds both the issuance form and the issued-token result.
  * SLVP convention (GitHub/Stripe/Vercel/Linear) — operator's eye stays on one
  * surface across the create-then-copy transition.
- */
-function IssueCard({ flow }: { flow: FlowState | null }) {
-  return (
-    <section className="mb-6 border-b border-border/70 pb-5">
-      <form action={issueOwnerTokenAction} className="flex flex-col gap-2">
-        <label className="flex min-w-0 flex-col gap-1" htmlFor="token-name">
-          <span className="text-[13px] font-medium text-foreground">Name</span>
-        </label>
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
-          <IcInput
-            className="min-h-11 min-w-0 flex-1"
-            defaultValue=""
-            id="token-name"
-            name="name"
-            placeholder="e.g. Backup script"
-            type="text"
-          />
-          <IcButton
-            className="min-h-11 w-full sm:w-auto"
-            size="sm"
-            type="submit"
-            variant="default"
-          >
-            Create access token
-          </IcButton>
-        </div>
-      </form>
-
-      {flow?.token ? (
-        <div className="mt-4 border-border/60 border-t pt-4">
-          <div className="mb-2 text-[13px] font-medium text-foreground">
-            <span>{flow.name ?? "Unnamed token"}</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <pre className="break-all rounded-md border border-border/80 bg-muted/30 p-3 text-[13px] text-foreground">
-                {flow.token}
-              </pre>
-            </div>
-            <CopyButton ariaLabel="Copy access token" value={flow.token} />
-          </div>
-          {/* takeOwnerBootstrapFlow (lib/operator-bootstrap.ts) drops the token
-              from the flow store once this page has read it, so a reload of
-              this address does not show it again. */}
-          <p className="mt-2 text-[13px] text-muted-foreground">
-            Copy it now. You won't see it again.
-          </p>
-        </div>
-      ) : null}
-    </section>
-  )
-}
-
-/**
- * Flat transcript of the device flow that just ran. Numbered, no nested
- * cards, no re-execute buttons (the steps already ran). Operators inspecting
- * the wire don't need to drive each step again — they need to see what
- * happened. Introspection runs once at issuance (actions.ts), because the
- * server drops the token after this page first shows it.
  */
 function TranscriptStep({
   index,
@@ -367,122 +291,6 @@ function OwnerScopeCallout() {
  * revoke that targets exactly that bearer (not the whole client). The
  * `token_id_public` is a non-reversible digest, never a usable bearer.
  */
-function TokenDrilldown({
-  clientId,
-  tokens,
-}: {
-  clientId: string
-  tokens: OwnerClientToken[]
-}) {
-  return (
-    <details className="mt-2 rounded-md border border-border/70 bg-muted/20">
-      <summary className="cursor-pointer select-none px-3 py-2 font-medium text-xs">
-        Show individual tokens ({tokens.length})
-      </summary>
-      <ul className="divide-y divide-border/60 border-border/60 border-t">
-        {tokens.map(token => (
-          <li
-            className="flex flex-col gap-1.5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-            key={token.token_id_public}
-          >
-            <div className="min-w-0">
-              <div className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-2 text-muted-foreground">
-                <span>
-                  issued <IcTimestamp value={token.created_at} />
-                </span>
-                <span aria-hidden>·</span>
-                <span>
-                  {token.expires_at ? (
-                    <>
-                      expires <IcTimestamp value={token.expires_at} />
-                    </>
-                  ) : (
-                    "no expiry"
-                  )}
-                </span>
-                <span aria-hidden>·</span>
-                <code className="font-mono text-xs">
-                  {token.token_id_public}
-                </code>
-              </div>
-            </div>
-            <ConfirmTokenRevoke
-              clientId={clientId}
-              tokenIdPublic={token.token_id_public}
-            />
-          </li>
-        ))}
-      </ul>
-    </details>
-  )
-}
-
-function TokensListSection({
-  tokens,
-  tokenDetailsByClient,
-}: {
-  tokens: OwnerIssuedClient[]
-  tokenDetailsByClient: Map<string, OwnerClientToken[]>
-}) {
-  const rows: AccessTokenRow[] = tokens.map(token => {
-    const detailTokens = tokenDetailsByClient.get(token.client_id) ?? []
-    const showDrilldown =
-      token.active_token_count > 1 && detailTokens.length > 0
-    return {
-      ...token,
-      createdLabel: formatTokenTime(token.created_at),
-      lastUsedLabel: "Not available",
-      details: (
-        <details className="mt-2 min-w-0 rounded-[6px] border border-border p-3">
-          <summary className="min-h-11 cursor-pointer select-none text-[13px] text-muted-foreground">
-            Details
-          </summary>
-          <div className="grid gap-3 border-t border-border/70 pt-3">
-            <p className="break-all font-mono text-[12px] text-muted-foreground">
-              {token.client_id}
-            </p>
-            <p className="text-[13px] text-muted-foreground">
-              {token.active_token_count} active token
-              {token.active_token_count === 1 ? "" : "s"}
-            </p>
-            <form
-              action={renameOwnerTokenAction}
-              className="flex flex-wrap items-center gap-2"
-            >
-              <input name="client_id" type="hidden" value={token.client_id} />
-              <IcInput
-                aria-label={`Rename ${token.client_name ?? "access token"}`}
-                className="min-h-11 min-w-0 flex-1"
-                defaultValue={token.client_name ?? ""}
-                name="client_name"
-                placeholder="Access token name"
-                type="text"
-              />
-              <IcButton size="sm" type="submit" variant="ghost">
-                Rename
-              </IcButton>
-            </form>
-            {showDrilldown ? (
-              <TokenDrilldown
-                clientId={token.client_id}
-                tokens={detailTokens}
-              />
-            ) : null}
-          </div>
-        </details>
-      ),
-    }
-  })
-  return <TokenAccessList tokens={rows} />
-}
-
-function formatTokenTime(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? "Not available"
-    : formatRelative(date, Date.now())
-}
-
 function FlowInspector({
   flow,
   examples,
@@ -542,36 +350,6 @@ export default async function DeploymentTokensPage({
   const format: ReproduceFormat = params.reproduce === "cli" ? "cli" : "curl"
   const entrypoint = await getReferencePublicOrigin()
 
-  let tokens: OwnerIssuedClient[]
-  const tokenDetailsByClient = new Map<string, OwnerClientToken[]>()
-  try {
-    const resp = await listOwnerIssuedClients()
-    tokens = resp.data
-    // Only clients with more than one active token get a per-token drilldown;
-    // a single-token client is fully described by its row.
-    const multiTokenClients = tokens.filter(t => t.active_token_count > 1)
-    await Promise.all(
-      multiTokenClients.map(async client => {
-        try {
-          const detail = await listOwnerClientTokens(client.client_id)
-          tokenDetailsByClient.set(client.client_id, detail.data)
-        } catch {
-          // A per-client drilldown failure must not break the whole page; the
-          // row still renders its aggregate count without the expansion.
-        }
-      })
-    )
-  } catch (err) {
-    if (err instanceof ReferenceServerUnreachableError) {
-      return (
-        <RecordroomShellWithPalette>
-          <PageHeader title="Tokens for scripts and tools" />
-          <ServerUnreachable />
-        </RecordroomShellWithPalette>
-      )
-    }
-    throw err
-  }
 
   return (
     <RecordroomShellWithPalette>
@@ -617,12 +395,7 @@ export default async function DeploymentTokensPage({
         <InlineNotice message="Access token renamed." />
       ) : null}
 
-      <IssueCard flow={flow} />
-
-      <TokensListSection
-        tokenDetailsByClient={tokenDetailsByClient}
-        tokens={tokens}
-      />
+      <Link className="underline" href="/deployment/tokens">Create and manage tokens</Link>
 
       <details className="mt-6 border-t border-border/70 pt-4">
         <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground">

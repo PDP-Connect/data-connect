@@ -30,7 +30,7 @@ export function tokenGroups(
   owners: OwnerBearerView[]
 ): TokenGroup[] {
   const covered = new Set<string>()
-  const groups: TokenGroup[] = clients.map(client => {
+  const groups: TokenGroup[] = clients.filter(client => client.client_id !== "dataconnect-console").map(client => {
     const tokens = (details[client.client_id] ?? []).map(token => {
       covered.add(token.token_id_public)
       return {
@@ -51,7 +51,7 @@ export function tokenGroups(
   })
   const byName = new Map<string, TokenGroup>()
   for (const token of owners) {
-    if (covered.has(token.id)) continue
+    if (covered.has(token.id) || token.label === "DataConnect console" || token.label === "dataconnect-console") continue
     const name = scriptName(token.label)
     let group = byName.get(name)
     if (!group) {
@@ -77,7 +77,7 @@ export function madeDate(value: string) {
     : `Made ${date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}`
 }
 export function buildTokenPractice(state: string) {
-  if (!["none", "scripts", "created"].includes(state)) return null
+  if (!["none", "scripts", "created", "many"].includes(state)) return null
   const clients: OwnerIssuedClient[] =
     state === "none"
       ? []
@@ -86,7 +86,7 @@ export function buildTokenPractice(state: string) {
             client_id: "practice-backup",
             client_name: "Backup script",
             created_at: "2026-11-24T10:00:00Z",
-            active_token_count: 3,
+            active_token_count: state === "many" ? 73 : 3,
           },
           {
             client_id: "practice-notes",

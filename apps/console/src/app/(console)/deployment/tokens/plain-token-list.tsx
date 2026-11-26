@@ -111,6 +111,18 @@ function TokenRow({
   practice: boolean
 }) {
   const [show, setShow] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+  const [groupError, setGroupError] = useState<string | null>(null)
+  const router = useRouter()
+  async function removeAll() {
+    try {
+      for (const token of group.tokens) {
+        const result = await revokeOwnerBearerAction(token.id);
+        if (!result.ok) throw Error(result.message || "Removal failed");
+      }
+      router.refresh(); setRemove(false);
+    } catch (cause) { setGroupError(cause instanceof Error ? cause.message : "Removal failed"); }
+  }
   const [rename, setRename] = useState(false)
   const [remove, setRemove] = useState(false)
   return (
@@ -138,7 +150,7 @@ function TokenRow({
                 size="sm"
                 onClick={() => setRemove(true)}
               >
-                Remove
+                {group.count > 1 ? `Remove all ${group.count}` : "Remove"}
               </IcButton>
             </>
           ) : group.count === 1 && group.tokens[0] ? (
@@ -148,6 +160,7 @@ function TokenRow({
               practice={practice}
             />
           ) : null}
+          {!group.clientId && group.count > 1 ? <IcButton variant="ghost" onClick={() => setRemove(true)}>Remove all {group.count}</IcButton> : null}
           {group.count > 1 ? (
             <IcButton variant="ghost" size="sm" onClick={() => setShow(!show)}>
               {show ? "Hide them" : "Show them"}
@@ -172,6 +185,8 @@ function TokenRow({
           </IcButton>
         </form>
       ) : null}
+      {remove && !group.clientId ? <div role="alertdialog" aria-label={`Remove ${group.name}`}><p>Remove all {group.count} tokens for {group.name}? Anything using them stops working at once.</p><IcButton disabled={practice} onClick={removeAll}>Remove all {group.count}</IcButton><IcButton variant="ghost" onClick={() => setRemove(false)}>Cancel</IcButton></div> : null}
+      {groupError ? <div role="status"><p>Some tokens could not be removed. Refresh this page to check before trying again.</p><IcButton variant="ghost" onClick={() => navigator.clipboard.writeText(groupError)}>Copy details for support</IcButton></div> : null}
       {remove && group.clientId ? (
         <div role="alertdialog" aria-label={`Remove ${group.name}`}>
           <p>Remove {group.name}? Anything using it stops working at once.</p>
@@ -179,7 +194,7 @@ function TokenRow({
             <form action={revokeOwnerTokenAction}>
               <input type="hidden" name="client_id" value={group.clientId} />
               <IcButton disabled={practice} type="submit" size="sm">
-                Remove
+                {group.count > 1 ? `Remove all ${group.count}` : "Remove"}
               </IcButton>
             </form>
             <IcButton
@@ -194,7 +209,7 @@ function TokenRow({
       ) : null}
       {show ? (
         <ul className="divide-y divide-border pl-4">
-          {group.tokens.map((token, index) => (
+          {(showAll ? group.tokens : group.tokens.slice(0, 5)).map((token, index) => (
             <li
               className="flex items-center justify-between gap-3 py-3"
               key={token.id}
@@ -209,6 +224,7 @@ function TokenRow({
               />
             </li>
           ))}
+          {!showAll && group.tokens.length > 5 ? <li><IcButton variant="ghost" onClick={() => setShowAll(true)}>Show all {group.count}</IcButton></li> : null}
         </ul>
       ) : null}
       {group.incomplete ? (
