@@ -38,3 +38,12 @@ test("a lost route reads Needs your action", () => {
 test("a route the owner turned off reads Off", () => {
   assert.equal(remoteAccessWords(state([route({ state: "released", cleanup: { state: "confirmed" }, stopRequested: true })], null)), "Off")
 })
+
+test("when the card cannot read remote access, the row gives the card's own first sentence", async () => {
+  const { remoteAccessRowWords } = await import("./remote-access-summary.ts")
+  const { publicError } = await import("./reachability-errors.ts")
+  assert.equal(remoteAccessRowWords({ ok: false, ...publicError("service_unreachable") }), "DataConnect's background service isn't running")
+  assert.equal(remoteAccessRowWords({ ok: false, ...publicError(undefined) }), "Could not check")
+  assert.equal(remoteAccessRowWords({ ok: false, ...publicError("not_a_known_code") }), "Could not check")
+  assert.equal(remoteAccessRowWords({ ok: true, data: state([], null) }), "Off")
+})

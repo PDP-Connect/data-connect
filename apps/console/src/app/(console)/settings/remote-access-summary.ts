@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The one line Settings shows for Remote access. It uses the card's own words
 // (routeHeadline, proofLine) on the routes the card would list; it adds none.
+import { ERROR_MESSAGES, GENERIC_ERROR } from "./reachability-errors.ts";
 import { listedRoutes, proofLine, routeAttention, routeHeadline, type RouteDisplayInput } from "./route-display.ts";
 
 type SummaryRoute = RouteDisplayInput & { handle: { id: string; kind?: string }; stopRequested?: boolean };
@@ -33,4 +34,12 @@ export function remoteAccessWords(state: RemoteAccessSummaryState, now = Date.no
   const headline = headlineOf(route);
   if (headline !== "On") return headline;
   return `On · ${proofLine(route, now).split(" · ")[0]}`;
+}
+
+// The row's words for one read of the card's route. A failure the card names (for example the background
+// service not running) gives the card's own first sentence; an unnamed one gives "Could not check".
+export function remoteAccessRowWords(result: { ok: true; data: unknown } | { ok: false; code: string; message: string }): string {
+  if (result.ok) return remoteAccessWords(result.data as RemoteAccessSummaryState);
+  const named = Object.hasOwn(ERROR_MESSAGES, result.code) && ERROR_MESSAGES[result.code] !== GENERIC_ERROR;
+  return named ? (result.message.match(/^[^.]*/)?.[0] ?? "Could not check") : "Could not check";
 }
