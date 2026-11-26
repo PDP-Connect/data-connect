@@ -20,6 +20,17 @@ test("validateDoneError returns null when DONE.error is absent", () => {
   assert.equal(validateDoneError("failed", null), null);
 });
 
+test("portable DONE basis can cite more than 64 earlier observations without inventing a schema limit", () => {
+  // Sections 5.8 and 5.10 allow a basis over emitted ids; 64 is the minimum
+  // supported observation count, not a maximum basis length.
+  const basis = Array.from({ length: 65 }, (_, index) => `observation_${index}`);
+  const result = validateDoneError("failed", { message: "failed", retryable: false, basis }, {
+    strict: true, observationDeclared: true, hasEmittedId: (id) => basis.includes(id), idLedgerOverflowed: false,
+  });
+  assert.ok(!(result instanceof Error), "valid earlier ids must not be rejected by an invented 64-id cap");
+  assert.deepEqual(result?.basis, basis);
+});
+
 test("validateDoneError rejects terminal error details on succeeded DONE envelopes", () => {
   const result = validateDoneError("succeeded", { message: "failed anyway" });
 
