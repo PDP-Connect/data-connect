@@ -265,7 +265,7 @@ function DeleteForm({
 	const [open, setOpen] = useState(initialOpen);
 	const [typed, setTyped] = useState("");
 	const confirmed = neverConnected || typed === displayName;
-	const label = neverConnected ? `Remove ${displayName}` : "Delete and erase the records";
+	const label = neverConnected ? "Delete it" : "Delete and erase the records";
 	const sentence = neverConnected ? `Takes ${displayName} off your list. There is nothing to erase.` : sourceRemovalCopy.delete(displayName);
 	const close = () => {
 		setOpen(false);

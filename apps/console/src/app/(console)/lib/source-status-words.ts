@@ -109,10 +109,7 @@ function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
 }
 
 export function sourceNeverConnected(source: RefConnectorSummary): boolean {
-  return source.source_visibility === "setup_failed" &&
-    source.total_records === 0 &&
-    (source.total_records_state === "known_zero" || source.total_records_state === "known") &&
-    !lastSuccessfulSync(source);
+  return source.source_visibility === "setup_failed";
 }
 
 // These are the two exact CTAs authored only by the unmeasured-completeness
@@ -138,7 +135,7 @@ function lifecycleRow(
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null };
   if (projection.renderedStatus.kind === "setup_failed") {
     return sourceNeverConnected(source)
-      ? { row: 2, words: `${source.display_name} was never connected.`, tone: "faint", action: action("continue_setup", "Try again", true) }
+      ? { row: 2, words: `${source.display_name} was never connected.`, tone: "faint", action: action("continue_setup", "Set up again", true) }
       : { row: 2, words: "Setup never completed", tone: "faint", action: action("continue_setup", "Continue setup", false) };
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };

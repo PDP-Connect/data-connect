@@ -341,9 +341,9 @@ test("a source that never connected offers only retry and removal", async () => 
   const document = (await renderDemo("status-2")).window.document;
   const text = document.body.textContent ?? "";
   assert.match(text, /Claude Code was never connected\./);
-  assert.match(text, /Try again/);
+  assert.match(text, /Set up again/);
   assert.match(text, /Takes Claude Code workstation off your list\. There is nothing to erase\./);
-  assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again/);
+  assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again|Manage|Apps that can read this|Also connected/);
 });
 
 test("management questions show their sentence once with compact confirmation controls", async () => {
@@ -463,3 +463,5 @@ test("positive kinds never carry the whole-kind failure sentence", async () => {
     if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some could not be copied/);
   }
 });
+
+ test("archives carry no sync timeline", async () => { assert.doesNotMatch(visibleOutsideDetails(await renderDemo("archive-leftover")), /Last updated|Recent syncs/); });

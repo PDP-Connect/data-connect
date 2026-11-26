@@ -9,6 +9,12 @@ import { isUpToDateRow, sourceStateSentence, sourceStatusWords, type SourceStatu
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 const SUCCESS = "2026-11-24T10:00:00.000Z";
 
+test("a retired setup shell is never connected even with unavailable counts and leftover kinds", () => {
+  const value = source({ source_visibility: "setup_failed", status: "revoked", total_records_state: "unobserved", total_records: 0, streams: ["messages"], last_successful_run: null, connection_health: health({ last_success_at: null }) });
+  assert.equal(sourceStateSentence(value, { now: NOW, name: "Northwind" }).text, "Northwind was never connected.");
+  assert.equal(sourceStatusWords(value, { now: NOW }).action?.label, "Set up again");
+});
+
 test("a device with zero waiting records has no send-failure state", () => {
   const value = source({ source_kind: "local_device", local_device_progress: { records_pending: 0 } as RefConnectorSummary["local_device_progress"], owner_state: { resolver: "needs_owner" } as RefConnectorSummary["owner_state"], rendered_verdict: verdict("Some records stuck", [requiredAction({ surface: { kind: "local_device" } })]) });
   assert.doesNotMatch(sourceStateSentence(value, { now: NOW, name: "Northwind", unsentRecords: 0 }).text, /could not send|stuck/);
@@ -130,7 +136,7 @@ function fixture(row: SourceStatusRow): RefConnectorSummary {
 
 test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
-test("row 2 words a setup that never completed", () => assertRow(2, "Setup never completed", "faint", { kind: "continue_setup", label: "Continue setup", filled: false }));
+test("row 2 words a setup that never completed", () => assertRow(2, "Example source was never connected.", "faint", { kind: "continue_setup", label: "Set up again", filled: true }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
 test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs to get ready again", "attention", { kind: "install", label: "Get it ready", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
@@ -305,7 +311,7 @@ test("needsYou is true exactly on the rows where the person must act", () => {
     const result = sourceStatusWords(fixture(row as SourceStatusRow), { now: NOW });
     // DIRECTION.md, "One status table": row 2 does not count as needs-you.
     assert.equal(result.needsYou, [4, 5, 6, 8, 9].includes(row), `row ${row}`);
-    if (result.action && row !== 16) assert.equal(result.action.filled, result.needsYou, `row ${row}`);
+    if (result.action && row !== 16 && row !== 2) assert.equal(result.action.filled, result.needsYou, `row ${row}`);
   }
 });
 
@@ -478,12 +484,12 @@ test("only the sole unmeasured-completeness maintainer cause gets the plain sync
   assert.match(sourceStateSentence({ ...base, connection_health: health({ last_success_at: null }) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
 });
 
-test("never connected requires failed setup, a known zero count and no successful sync", () => {
+test("retired setup visibility is authoritative despite leftover measurement evidence", () => {
   const base = source({ source_visibility: "setup_failed", total_records: 0, total_records_state: "known_zero", connection_health: health({ last_success_at: null }) });
   assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Northwind was never connected.");
-  assert.equal(sourceStatusWords(base, { now: NOW }).action?.label, "Try again");
-  for (const change of [{ total_records: 1 }, { total_records_state: "unknown" as const }, { connection_health: health() }, { source_visibility: "active" as const }]) {
-    assert.doesNotMatch(sourceStateSentence({ ...base, ...change }, { now: NOW, name: "Northwind" }).text, /was never connected/);
+  assert.equal(sourceStatusWords(base, { now: NOW }).action?.label, "Set up again");
+  for (const change of [{ total_records: 1 }, { total_records_state: "unknown" as const }, { connection_health: health() }]) {
+    assert.match(sourceStateSentence({ ...base, ...change }, { now: NOW, name: "Northwind" }).text, /was never connected/);
   }
 });
 

@@ -893,12 +893,12 @@ function ConnectorPageView({
         }
       />
 
-      {otherAccounts}
+      {!neverConnected ? otherAccounts : null}
       <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
 
       <div className="min-w-0 max-w-full" id="source-device-steps" />
 
-      {!/synced|syncing|imported|last updated|last successful sync/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="pdpp-body mb-6 text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
+      {!archived && !neverConnected && !/synced|syncing|imported|last updated|last successful sync/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="pdpp-body mb-6 text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
       <Suspense fallback={null}>
         <SourceUpdateSlot demoModel={updateDemo} displayName={serviceName} updates={updates} version={null} />
       </Suspense>
@@ -910,9 +910,9 @@ function ConnectorPageView({
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
         </div> : null}
       </Section> : null}
-      {apps}
+      {!neverConnected ? apps : null}
       {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} /> : null}
-      <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} />
+      {!archived && !neverConnected ? <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
               config={configuration}
@@ -921,7 +921,7 @@ function ConnectorPageView({
               revisions={configRevisions}
             />
           ) : null}
-          <Section title="Manage">
+          <SourceManage neverConnected={neverConnected}>
             {!neverConnected ? <RenameConnection
               connectionId={renameSelector}
               currentLabel={connectionLabelSeed}
@@ -948,11 +948,15 @@ function ConnectorPageView({
               inactive={revoked || archived || oneTime}
               neverConnected={neverConnected}
             />
-          </Section>
+          </SourceManage>
 
       <p className="mb-8 text-sm text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? `?demo=${encodeURIComponent(practiceState)}` : ""}`}>Technical details</Link></p>
     </RecordroomShellWithPalette>
   );
+}
+
+function SourceManage({ neverConnected, children }: { neverConnected: boolean; children: ReactNode }) {
+  return neverConnected ? <>{children}</> : <Section title="Manage">{children}</Section>;
 }
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
@@ -1014,12 +1018,13 @@ function recordDateLabel(value: string | null): string | null {
 
 async function OtherAccounts({ connectionId, connectorInstanceId, connectorId }: { connectionId: string; connectorInstanceId: string | null; connectorId: string }) {
   const accounts = await listConnectionsByConnector(connectorId).catch(() => []);
-  const others = accounts.filter((account) => account.connector_instance_id !== connectionId && account.connector_instance_id !== connectorInstanceId && account.status !== "revoked");
+  const others = accounts.filter((account) => account.connector_instance_id !== connectionId && account.connector_instance_id !== connectorInstanceId && account.status !== "revoked" && Boolean(account.display_name?.trim()) && account.display_name !== "this data source");
   if (others.length === 0) return null;
   return <OtherAccountsLine accounts={others.map((account) => ({ connectionId: account.connector_instance_id, displayName: connectionDisplayName(account.display_name, null, connectorId) }))} />;
 }
 
 function OtherAccountsLine({ accounts }: { accounts: readonly { connectionId: string; displayName: string }[] }) {
+  accounts = accounts.filter((account) => account.displayName.trim() && account.displayName !== "this data source");
   if (accounts.length === 0) return null;
   return <p className="mb-6 text-sm text-muted-foreground">Also connected: {accounts.map((account, index) => <span key={account.connectionId}>
     {index ? ", " : ""}<Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(account.connectionId)}`}>{account.displayName}</Link>
