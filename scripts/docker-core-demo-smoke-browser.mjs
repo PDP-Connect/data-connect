@@ -110,7 +110,11 @@ try {
     await page.waitForURL(`**/sources/add/${connector}`);
     await page.getByTestId("program-command").waitFor({ state: "visible", timeout: 60_000 });
     const installed = await inspectActiveConnector(createConnectorInstallStore(), connector);
-    assert.equal(installed.status, "active", `${connector} must have a verified active install`);
+    assert.equal(
+      installed.status,
+      "active",
+      `${connector} must have a verified active install; status=${installed.status}; reason=${"reason" in installed ? installed.reason : "none"}`
+    );
     await page.getByRole("link", { name: "Add a data source", exact: true }).click();
     await page.waitForURL("**/sources/add");
     await page.getByTestId("add-source-list").waitFor({ state: "visible" });
