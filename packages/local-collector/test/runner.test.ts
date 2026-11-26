@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -87,7 +87,7 @@ import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, Collector
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 
 const CLAUDE_CODE_DIGEST_DIR = (
-  COLLECTION_PROFILE_PINS.find((pin) => pin.connectorId === "claude_code")?.digest ?? ""
+  COLLECTION_PROFILE_PINS.find((pin) => pin.connectorId === "claude-code")?.digest ?? ""
 ).replace(":", "-");
 
 const FRESH_DEVICE_TOKEN_PATTERN = /PDPP_LOCAL_DEVICE_TOKEN="fresh-token"/;
@@ -125,22 +125,22 @@ test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
 
 test("bundled connectors registry contains every local connector with a pinned Collection Profile", () => {
   assert.deepEqual([...BUNDLED_CONNECTOR_IDS].sort(), [
-    "apple_photos",
-    "claude_code",
+    "apple-photos",
+    "claude-code",
     "codex",
-    "google_takeout",
+    "google-takeout",
     "imessage",
   ]);
-  assert.ok(BUNDLED_CONNECTORS.claude_code);
+  assert.ok(BUNDLED_CONNECTORS["claude-code"]);
   assert.ok(BUNDLED_CONNECTORS.codex);
   assert.ok(BUNDLED_CONNECTORS.imessage);
-  assert.ok(BUNDLED_CONNECTORS.google_takeout);
-  assert.ok(BUNDLED_CONNECTORS.apple_photos);
-  // google_messages has a local-collector definition, but data-connectors does
+  assert.ok(BUNDLED_CONNECTORS["google-takeout"]);
+  assert.ok(BUNDLED_CONNECTORS["apple-photos"]);
+  // google-messages has a local-collector definition, but data-connectors does
   // not publish a signed Collection Profile for it (it needs gmcli, and the
   // artifact builder has no tool layer yet), so there is nothing to install.
-  assert.deepEqual([...UNPINNED_CONNECTOR_IDS], ["google_messages"]);
-  assert.equal(BUNDLED_CONNECTORS.google_messages, undefined);
+  assert.deepEqual([...UNPINNED_CONNECTOR_IDS], ["google-messages"]);
+  assert.equal(BUNDLED_CONNECTORS["google-messages"], undefined);
 });
 
 test("an unpinned connector is refused by name, not as an unknown id", () => {
@@ -162,7 +162,7 @@ test("an unpinned connector is refused by name, not as an unknown id", () => {
     (error: unknown) =>
       error instanceof CollectorUsageError &&
       /connector 'google-messages' has no published, signed Collection Profile yet/.test(error.message) &&
-      /Supported: claude_code, codex, google_takeout, imessage, apple_photos\./.test(error.message)
+      /Supported: claude-code, codex, google-takeout, imessage, apple-photos\./.test(error.message)
   );
 });
 
@@ -593,9 +593,7 @@ test("doctor --exit-code turns a dead-lettered outbox into a non-zero status", a
     outbox.deadLetter({ error: "bounded error", holder: "worker-a", id: claim.id, leaseEpoch: claim.lease_epoch });
 
     const options = parseArgs(["doctor", "--queue", path, "--source-instance-id", "src-1", "--exit-code"]);
-    const doctor = buildLocalOutboxDoctor(
-      inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE })
-    );
+    const doctor = buildLocalOutboxDoctor(inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE }));
     assert.equal(doctor.status, "critical");
     assert.equal(doctorExitCode(doctor.status), 1);
   } finally {
@@ -973,7 +971,7 @@ test("local collector retry-dead-letters does not retry terminal commit bytes", 
   const payload = {
     collection_boundary: "unscoped",
     commit_id: "old-terminal-commit",
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: "cin-1",
     device_id: "device-1",
     run_id: "old-run",
@@ -1046,10 +1044,10 @@ test("local collector status resolves the matching source-instance profile queue
     outbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     [
       "PDPP_REFERENCE_BASE_URL=https://pdpp.example.com",
-      "PDPP_COLLECTOR_CONNECTOR=claude_code",
+      "PDPP_COLLECTOR_CONNECTOR=claude-code",
       "PDPP_LOCAL_DEVICE_ID=device-1",
       "PDPP_LOCAL_DEVICE_TOKEN=token-1",
       "PDPP_SOURCE_INSTANCE_ID=dsrc_laptop",
@@ -1128,10 +1126,11 @@ test("local collector inspection refuses a missing named profile instead of usin
   }
 });
 
-test("normalizeConnectorId lowercases and folds hyphens to underscores", () => {
-  assert.equal(normalizeConnectorId("claude-code"), "claude_code");
-  assert.equal(normalizeConnectorId("CLAUDE_CODE"), "claude_code");
-  assert.equal(normalizeConnectorId("  Claude-Code  "), "claude_code");
+test("normalizeConnectorId lowercases and folds underscores to hyphens", () => {
+  assert.equal(normalizeConnectorId("claude-code"), "claude-code");
+  assert.equal(normalizeConnectorId("claude_code"), "claude-code");
+  assert.equal(normalizeConnectorId("CLAUDE_CODE"), "claude-code");
+  assert.equal(normalizeConnectorId("  Claude_Code  "), "claude-code");
   assert.equal(normalizeConnectorId("codex"), "codex");
 });
 
@@ -1139,14 +1138,14 @@ test("writeLocalCollectorProfile writes a profile .env that findLocalCollectorPr
   const profileDir = tempDirSync();
   const path = writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-42",
     deviceToken: "token-42",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_setup",
   });
-  assert.equal(path, join(profileDir, "claude_code.env"));
+  assert.equal(path, join(profileDir, "claude-code.env"));
   assert.equal(existsSync(path), true);
 
   const lookup = findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_setup" });
@@ -1154,10 +1153,130 @@ test("writeLocalCollectorProfile writes a profile .env that findLocalCollectorPr
   const [profile] = lookup.matches;
   assert.ok(profile, "expected exactly one matching profile");
   assert.equal(profile.env.PDPP_REFERENCE_BASE_URL, "https://pdpp.example.com");
-  assert.equal(profile.env.PDPP_COLLECTOR_CONNECTOR, "claude_code");
+  assert.equal(profile.env.PDPP_COLLECTOR_CONNECTOR, "claude-code");
   assert.equal(profile.env.PDPP_LOCAL_DEVICE_ID, "device-42");
   assert.equal(profile.env.PDPP_LOCAL_DEVICE_TOKEN, "token-42");
   assert.equal(profile.source_instance_id, "dsrc_setup");
+});
+
+function writeProfile(profileDir: string, name: string, deviceToken: string, sourceInstanceId: string): string {
+  return writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: name,
+    deviceId: `device-${deviceToken}`,
+    deviceToken,
+    name,
+    profileDir,
+    sourceInstanceId,
+  });
+}
+
+test("a legacy underscore-named profile is renamed once to the hyphen name, keeping its contents and mode", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  assert.equal(legacyPath, join(profileDir, "claude_code.env"));
+  const body = readFileSync(legacyPath, "utf8");
+
+  // Any profile lookup runs the migration; the credential survives under the new name.
+  const byName = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" });
+  const currentPath = join(profileDir, "claude-code.env");
+  assert.equal(byName.matches.length, 1);
+  assert.equal(byName.matches[0]?.path, currentPath);
+  assert.equal(byName.matches[0]?.source_instance_id, "dsrc_old");
+  assert.equal(existsSync(legacyPath), false, "the legacy file is gone after the rename");
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(currentPath).mode & 0o777, 0o600);
+  }
+  assert.equal(findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_old" }).matches.length, 1);
+
+  // A second run has nothing to do.
+  assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 1);
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+});
+
+test("an underscore-named profile that duplicates the hyphen-named one is removed", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = join(profileDir, "claude-code.env");
+  writeFileSync(currentPath, readFileSync(legacyPath, "utf8"), { mode: 0o600 });
+  const matches = findLocalCollectorProfiles({ profileDir }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
+  assert.equal(existsSync(legacyPath), false);
+});
+
+test("an underscore-named profile that differs from the hyphen-named one is kept; the hyphen one wins", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const matches = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
+  assert.equal(matches[0]?.source_instance_id, "dsrc_new");
+  assert.equal(existsSync(legacyPath), true, "a differing file may hold another device's token, so it is not deleted");
+  assert.match(readFileSync(legacyPath, "utf8"), /token-old/);
+});
+
+test("an operator profile named like a connector but for another connector is not renamed or deleted", () => {
+  const profileDir = tempDirSync();
+  // A profile an operator named `claude_code` for the codex connector.
+  const operatorPath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir,
+    sourceInstanceId: "dsrc_codex",
+  });
+  const body = readFileSync(operatorPath, "utf8");
+  // Beside a real claude-code profile: listing must not delete the codex credential.
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  findLocalCollectorProfiles({ profileDir });
+  assert.equal(readFileSync(operatorPath, "utf8"), body);
+  assert.equal(existsSync(currentPath), true);
+  // Without a claude-code profile: it is not renamed onto the claude-code name either.
+  const alone = tempDirSync();
+  const alonePath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir: alone,
+    sourceInstanceId: "dsrc_codex",
+  });
+  findLocalCollectorProfiles({ profileDir: alone });
+  assert.equal(existsSync(alonePath), true);
+  assert.equal(existsSync(join(alone, "claude-code.env")), false);
+});
+
+test("logout removes a migrated legacy profile and stays idempotent; no underscore file is left to come back", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const removal = removeLocalCollectorProfile({ name: "claude-code", profileDir });
+  assert.equal(removal.removed, true);
+  assert.equal(removal.path, join(profileDir, "claude-code.env"));
+  assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+  assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 0);
+  assert.equal(
+    removeLocalCollectorProfile({ name: "claude-code", profileDir }).removed,
+    false,
+    "logout stays idempotent"
+  );
+});
+
+test("the profile migration touches connector names only, not operator-chosen profile names", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "my_work", "token-1", "dsrc_work");
+  assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "my-work" }).matches.length, 0);
+  assert.equal(existsSync(join(profileDir, "my_work.env")), true, "an operator-named profile is left alone");
 });
 
 test("writeLocalCollectorProfile restricts directory and file permissions to the owner (POSIX)", {
@@ -1221,10 +1340,10 @@ test("writeLocalCollectorProfile round-trips a base URL containing special chara
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: 'https://pdpp.example.com/path?x="y"&z=\\',
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_escape",
   });
@@ -1238,18 +1357,18 @@ test("removeLocalCollectorProfile deletes an existing profile and is idempotent 
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_remove",
   });
-  const first = removeLocalCollectorProfile({ name: "claude_code", profileDir });
+  const first = removeLocalCollectorProfile({ name: "claude-code", profileDir });
   assert.equal(first.removed, true);
   assert.equal(existsSync(first.path), false);
 
-  const second = removeLocalCollectorProfile({ name: "claude_code", profileDir });
+  const second = removeLocalCollectorProfile({ name: "claude-code", profileDir });
   assert.equal(second.removed, false);
 });
 
@@ -1257,10 +1376,10 @@ test("run without --queue fills device-id/device-token/connector from a matching
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-from-profile",
     deviceToken: "token-from-profile",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_run_profile",
   });
@@ -1271,7 +1390,7 @@ test("run without --queue fills device-id/device-token/connector from a matching
     const resolved = resolveRunProfileOptions(options);
     assert.equal(resolved.deviceId, "device-from-profile");
     assert.equal(resolved.deviceToken, "token-from-profile");
-    assert.equal(resolved.connector, "claude_code");
+    assert.equal(resolved.connector, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
@@ -1299,12 +1418,12 @@ test("run with device-id/device-token/connector supplied via flags never consult
       "--device-token",
       "token-1",
       "--connector",
-      "claude_code",
+      "claude-code",
     ]);
     const resolved = resolveRunProfileOptions(options);
     assert.equal(resolved.deviceId, "device-1");
     assert.equal(resolved.deviceToken, "token-1");
-    assert.equal(resolved.connector, "claude_code");
+    assert.equal(resolved.connector, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
@@ -1318,19 +1437,19 @@ test("logout removes the named profile and reports removed:false when absent", (
   const profileDir = tempDirSync();
   writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     deviceId: "device-1",
     deviceToken: "token-1",
-    name: "claude_code",
+    name: "claude-code",
     profileDir,
     sourceInstanceId: "dsrc_logout",
   });
   const previous = process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR;
   process.env.PDPP_LOCAL_COLLECTOR_PROFILE_DIR = profileDir;
   try {
-    const first = removeLocalCollectorProfile({ name: "claude_code" });
+    const first = removeLocalCollectorProfile({ name: "claude-code" });
     assert.equal(first.removed, true);
-    const second = removeLocalCollectorProfile({ name: "claude_code" });
+    const second = removeLocalCollectorProfile({ name: "claude-code" });
     assert.equal(second.removed, false);
   } finally {
     if (previous === undefined) {
@@ -1427,14 +1546,14 @@ const LOGOUT_CASES: Array<{
 for (const testCase of LOGOUT_CASES) {
   test(`runLogout: ${testCase.name}`, async () => {
     const profileDir = tempDirSync();
-    const profilePath = join(profileDir, "claude_code.env");
+    const profilePath = join(profileDir, "claude-code.env");
     if (testCase.seedProfile) {
       writeLocalCollectorProfile({
         baseUrl: "https://pdpp.example.com",
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         deviceId: "device-1",
         deviceToken: "token-1",
-        name: "claude_code",
+        name: "claude-code",
         profileDir,
         sourceInstanceId: "dsrc_logout",
       });
@@ -1444,7 +1563,7 @@ for (const testCase of LOGOUT_CASES) {
       const options: CliOptions = {
         baseUrl: "https://pdpp.example.com",
         command: "logout",
-        connector: "claude_code",
+        connector: "claude-code",
         ...(testCase.localOnly ? { localOnly: true } : {}),
         queuePath: "unused.sqlite",
       };
@@ -1494,10 +1613,10 @@ test("local collector recover dry-run loads the matching source-instance profile
     outbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     [
       "PDPP_REFERENCE_BASE_URL=https://pdpp.example.com",
-      "PDPP_COLLECTOR_CONNECTOR=claude_code",
+      "PDPP_COLLECTOR_CONNECTOR=claude-code",
       "PDPP_LOCAL_DEVICE_ID=device-1",
       "PDPP_LOCAL_DEVICE_TOKEN=token-1",
       "PDPP_SOURCE_INSTANCE_ID=dsrc_laptop",
@@ -1511,12 +1630,12 @@ test("local collector recover dry-run loads the matching source-instance profile
   try {
     const lookup = findLocalCollectorProfiles({ sourceInstanceId: "dsrc_laptop" });
     assert.equal(lookup.matches.length, 1);
-    assert.equal(lookup.matches[0]?.name, "claude_code");
+    assert.equal(lookup.matches[0]?.name, "claude-code");
 
     const result = await recoverLocalCollector(parseArgs(["recover", "--source-instance-id", "dsrc_laptop"]));
     assert.equal(result.object, "local_collector_recovery");
     assert.equal(result.dry_run, true);
-    assert.equal(result.profile.name, "claude_code");
+    assert.equal(result.profile.name, "claude-code");
     assert.equal(result.profile.source, "local_profile");
     assert.equal(result.db.exists, true);
     assert.equal(result.db.path, queuePath);
@@ -1555,7 +1674,7 @@ test("local collector recover respects explicit queue over the matching profile 
     explicitOutbox.close();
   }
   await writeFile(
-    join(profileDir, "claude_code.env"),
+    join(profileDir, "claude-code.env"),
     ["PDPP_SOURCE_INSTANCE_ID=dsrc_laptop", `PDPP_COLLECTOR_QUEUE=${profileQueuePath}`, ""].join("\n")
   );
 
@@ -2133,13 +2252,13 @@ test("run summary drained flag is true iff lifecycle_state is healthy_idle", () 
 
 // --- Connector adoption (tasks 5.1-5.4) ---
 
-test("pdpp-local-collector run --connector claude_code resolves to the bundled durable-outbox entrypoint", () => {
+test("pdpp-local-collector run --connector claude-code resolves to the bundled durable-outbox entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude_code",
+    "claude-code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2148,10 +2267,10 @@ test("pdpp-local-collector run --connector claude_code resolves to the bundled d
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
-  assert.equal(spec.command, BUNDLED_CONNECTORS.claude_code.command);
-  assert.deepEqual([...spec.args], [...BUNDLED_CONNECTORS.claude_code.args]);
-  assert.deepEqual([...spec.streams].sort(), [...BUNDLED_CONNECTORS.claude_code.streams].sort());
+  assert.equal(spec.connector_id, "claude-code");
+  assert.equal(spec.command, BUNDLED_CONNECTORS["claude-code"].command);
+  assert.deepEqual([...spec.args], [...BUNDLED_CONNECTORS["claude-code"].args]);
+  assert.deepEqual([...spec.streams].sort(), [...BUNDLED_CONNECTORS["claude-code"].streams].sort());
   assert.equal(spec.runtime_requirements.bindings.filesystem?.required, true);
 });
 
@@ -2161,7 +2280,7 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude_code",
+    "claude-code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2174,7 +2293,10 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
   // the package and the repository, so the child runs from the directory that
   // holds it.
   assert.equal(spec.command, process.execPath);
-  assert.equal(spec.args[0], join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs"));
+  assert.equal(
+    spec.args[0],
+    join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs")
+  );
   const executionRoot = resolveExecutionRoot(spec);
   assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
@@ -2196,13 +2318,13 @@ test("resolveExecutionRoot resolves a relative development entrypoint to the enc
   assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
 });
 
-test("pdpp-local-collector run --connector claude-code (hyphen) normalizes to the bundled claude_code entrypoint", () => {
+test("pdpp-local-collector run --connector claude_code (legacy underscore) normalizes to the bundled claude-code entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
     "http://127.0.0.1:7662",
     "--connector",
-    "claude-code",
+    "claude_code",
     "--device-id",
     "device-1",
     "--device-token",
@@ -2211,11 +2333,11 @@ test("pdpp-local-collector run --connector claude-code (hyphen) normalizes to th
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
-  assert.equal(spec.command, BUNDLED_CONNECTORS.claude_code.command);
+  assert.equal(spec.connector_id, "claude-code");
+  assert.equal(spec.command, BUNDLED_CONNECTORS["claude-code"].command);
 });
 
-test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to the bundled claude_code entrypoint", () => {
+test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to the bundled claude-code entrypoint", () => {
   const options = parseArgs([
     "run",
     "--base-url",
@@ -2230,12 +2352,12 @@ test("pdpp-local-collector run --connector CLAUDE_CODE (uppercase) normalizes to
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  assert.equal(spec.connector_id, "claude_code");
+  assert.equal(spec.connector_id, "claude-code");
 });
 
 test("pdpp-local-collector run reads connector id from PDPP_COLLECTOR_CONNECTOR", () => {
   const previous = process.env.PDPP_COLLECTOR_CONNECTOR;
-  process.env.PDPP_COLLECTOR_CONNECTOR = "claude_code";
+  process.env.PDPP_COLLECTOR_CONNECTOR = "claude-code";
   try {
     const options = parseArgs([
       "run",
@@ -2249,7 +2371,7 @@ test("pdpp-local-collector run reads connector id from PDPP_COLLECTOR_CONNECTOR"
       "src-claude",
     ]);
     const spec = buildConnectorSpec(options);
-    assert.equal(spec.connector_id, "claude_code");
+    assert.equal(spec.connector_id, "claude-code");
   } finally {
     if (previous === undefined) {
       delete process.env.PDPP_COLLECTOR_CONNECTOR;
@@ -2324,7 +2446,7 @@ test("pdpp-local-collector run refuses --command <bin> without the dev opt-in en
       "--base-url",
       "http://127.0.0.1:7662",
       "--connector",
-      "claude_code",
+      "claude-code",
       "--device-id",
       "device-1",
       "--device-token",
@@ -2376,7 +2498,7 @@ test("resolveConnectorProtocolCapabilities forces [] whenever entrypointCommand 
 
 test("pdpp-local-collector run --connector <bundled> --command <bin> declares [] protocol_capabilities regardless of the bundled connector's own declaration", () => {
   // Integration companion at the buildConnectorSpec level, using the real
-  // bundled claude_code connector (whose real protocol_capabilities is []
+  // bundled claude-code connector (whose real protocol_capabilities is []
   // today, so this alone would not distinguish a reverted ternary — the
   // unit test above pins the actual behavior difference; this confirms the
   // real CLI code path reaches resolveConnectorProtocolCapabilities with
@@ -2390,7 +2512,7 @@ test("pdpp-local-collector run --connector <bundled> --command <bin> declares []
       "--base-url",
       "http://127.0.0.1:7662",
       "--connector",
-      "claude_code",
+      "claude-code",
       "--device-id",
       "device-1",
       "--device-token",
@@ -2400,7 +2522,7 @@ test("pdpp-local-collector run --connector <bundled> --command <bin> declares []
       "--command",
       "/bin/cat",
     ]);
-    assert.ok(getBundledConnector("claude_code"), "expected claude_code to resolve as a bundled connector");
+    assert.ok(getBundledConnector("claude-code"), "expected claude-code to resolve as a bundled connector");
     const spec = buildConnectorSpec(options);
     assert.equal(spec.command, "/bin/cat");
     assert.deepEqual([...spec.protocol_capabilities], []);
@@ -2418,8 +2540,8 @@ test("buildLocalDeviceOutboxId namespaces ids by source instance so identical pa
   // devices / source instances, the durable outbox id must differ. This
   // protects the unique-key constraint on the local outbox row and keeps
   // multi-device local collection collision-safe.
-  const partsA = ["claude_code", 1, "batch-shared-id"];
-  const partsB = ["claude_code", 1, "batch-shared-id"];
+  const partsA = ["claude-code", 1, "batch-shared-id"];
+  const partsB = ["claude-code", 1, "batch-shared-id"];
   const idA = buildLocalDeviceOutboxId({ kind: "record_batch", parts: partsA, sourceInstanceId: "src-A" });
   const idB = buildLocalDeviceOutboxId({ kind: "record_batch", parts: partsB, sourceInstanceId: "src-B" });
   assert.notEqual(idA, idB, "same parts under different source instances must yield different ids");
@@ -2428,7 +2550,7 @@ test("buildLocalDeviceOutboxId namespaces ids by source instance so identical pa
   // same work on a re-run is idempotent (no duplicate row creation).
   const idAagain = buildLocalDeviceOutboxId({
     kind: "record_batch",
-    parts: ["claude_code", 1, "batch-shared-id"],
+    parts: ["claude-code", 1, "batch-shared-id"],
     sourceInstanceId: "src-A",
   });
   assert.equal(idA, idAagain);
@@ -2444,7 +2566,7 @@ test("LocalDeviceOutbox isolates rows across connection-scoped source instances"
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-A"],
+        parts: ["claude-code", 1, "batch-A"],
         sourceInstanceId: "src-A",
       }),
       kind: "record_batch",
@@ -2454,7 +2576,7 @@ test("LocalDeviceOutbox isolates rows across connection-scoped source instances"
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-B"],
+        parts: ["claude-code", 1, "batch-B"],
         sourceInstanceId: "src-B",
       }),
       kind: "record_batch",
@@ -2491,7 +2613,7 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
     outbox.enqueue({
       id: buildLocalDeviceOutboxId({
         kind: "record_batch",
-        parts: ["claude_code", 1, "batch-A"],
+        parts: ["claude-code", 1, "batch-A"],
         sourceInstanceId: "src-only-A",
       }),
       kind: "record_batch",
@@ -2556,7 +2678,7 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
     payload: {
       batchId: id,
       batchSeq: 1,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       deviceId: "device-1",
       // Shape mirrors buildLocalDeviceRecordEnvelope output: the outbox's
       // coverage scan reads $.records[*].stream.
@@ -3451,13 +3573,13 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
         baseUrl: "https://pdpp.example.com",
         code: "one-time-code",
         command: "setup",
-        connector: "claude_code",
+        connector: "claude-code",
         // Deliberately stale/wrong credentials on the input options, to
         // prove the sample pass uses the enrollment's fresh ones instead.
         deviceId: "stale-device",
         deviceToken: "stale-token",
         json: true,
-        profile: "claude_code",
+        profile: "claude-code",
         queuePath: "unused.sqlite",
         sample: 2,
       } as CliOptions,
@@ -3466,7 +3588,7 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
           calls.push("enroll");
           assert.equal(input.code, "one-time-code");
           return Promise.resolve({
-            connector_id: "claude_code",
+            connector_id: "claude-code",
             device_id: "fresh-device",
             device_token: "fresh-token",
             local_binding_name: "test-binding",
@@ -3477,7 +3599,7 @@ test("runSetup enrolls, writes a local profile, then runs a sample using the fre
           calls.push("sample");
           sampleOptionsSeen = sampleOptions;
           return Promise.resolve({
-            connector: "claude_code",
+            connector: "claude-code",
             note: "sampled",
             object: "local_collector_sample",
             records_seen: 2,
@@ -3520,15 +3642,15 @@ test("runSetup without --sample enrolls and writes the profile but never runs a 
         baseUrl: "https://pdpp.example.com",
         code: "one-time-code",
         command: "setup",
-        connector: "claude_code",
+        connector: "claude-code",
         json: true,
-        profile: "claude_code",
+        profile: "claude-code",
         queuePath: "unused.sqlite",
       } as CliOptions,
       {
         enroll: () =>
           Promise.resolve({
-            connector_id: "claude_code",
+            connector_id: "claude-code",
             device_id: "fresh-device",
             device_token: "fresh-token",
             local_binding_name: "test-binding",
@@ -4304,10 +4426,7 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     (process.listeners("SIGINT").at(-1) as () => void)();
 
     await assert.rejects(runPromise);
-    assert.ok(
-      recordEmitted,
-      `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`
-    );
+    assert.ok(recordEmitted, `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`);
     assert.equal(process.listenerCount("SIGINT"), beforeInt, "the handler must be removed once the run settles");
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });

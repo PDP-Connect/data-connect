@@ -93,13 +93,13 @@ const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
 const ENTRYPOINT = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"index.ts",
 );
 const FAKE_GMCLI = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"fixtures",
 	"fake-gmcli.mjs",
 );
@@ -744,7 +744,7 @@ test("finding 4 — behavioral: distinct reason code paths still surface their c
 });
 
 test("finding 2 — the chat-scan-limit reason has vetted display copy declared in this connector's own manifest, not in RI", async () => {
-	const manifestModule = await import("../../manifests/google_messages.json", {
+	const manifestModule = await import("../../manifests/google-messages.json", {
 		with: { type: "json" },
 	});
 	const manifest = manifestModule.default as {

@@ -52,7 +52,7 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
  * signed manifest named.
  */
 export interface CollectionProfilePin {
-  /** The local collector's id for the connector (`claude_code`). */
+  /** The local collector's id for the connector: its manifest key (`claude-code`). */
   readonly connectorId: string;
   /** The artifact's connector key; also the GHCR repository leaf (`claude-code`). */
   readonly connectorKey: string;

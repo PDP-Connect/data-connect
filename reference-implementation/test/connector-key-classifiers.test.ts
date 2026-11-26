@@ -15,7 +15,7 @@
  *     (and a trailing slash) down to the bare key.
  *   - connectorKeyFromManifest: connector_key → connector_id → explicit fallback
  *     → null; canonicalized; blanks skipped.
- *   - enrollmentKeyForCanonicalKey: identity except `claude-code` → `claude_code`.
+ *   - canonicalConnectorKey leaves a retired underscore id (`claude_code`) as it is.
  *   - displayNameForConnector: manifest.display_name → manifest.name → the key.
  *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: the claim in
  *     the connector's own manifest (`capabilities.proven`), never a key list.
@@ -34,7 +34,6 @@ import {
   classifyConnectorIntentModality,
   connectorKeyFromManifest,
   displayNameForConnector,
-  enrollmentKeyForCanonicalKey,
   isLocalCollectorProven,
   isProviderAuthLifecycleProven,
   isStaticSecretLiveProven,
@@ -76,17 +75,12 @@ test("connectorKeyFromManifest: falls back connector_id -> explicit fallback -> 
   assert.equal(connectorKeyFromManifest({}, null), null, "null fallback => null");
 });
 
-// --- enrollmentKeyForCanonicalKey -------------------------------------------
+// --- retired ids ------------------------------------------------------------
 
-test("enrollmentKeyForCanonicalKey: maps claude-code to claude_code, else identity", () => {
-  assert.equal(enrollmentKeyForCanonicalKey("claude-code"), "claude_code", "the one special case");
-  assert.equal(
-    enrollmentKeyForCanonicalKey("https://registry.pdpp.dev/connectors/claude-code"),
-    "claude_code",
-    "canonicalizes first, then maps"
-  );
-  assert.equal(enrollmentKeyForCanonicalKey("codex"), "codex", "other keys unchanged");
-  assert.equal(enrollmentKeyForCanonicalKey("gmail"), "gmail");
+test("canonicalConnectorKey: a retired underscore id is not rewritten to its current key", () => {
+  assert.equal(canonicalConnectorKey("claude_code"), "claude_code");
+  assert.equal(canonicalConnectorKey("claude-code"), "claude-code");
+  assert.equal(connectorKeyFromManifest({ connector_key: "claude_code" }), "claude_code");
 });
 
 // --- displayNameForConnector ------------------------------------------------

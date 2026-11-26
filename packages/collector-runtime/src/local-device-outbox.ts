@@ -702,6 +702,58 @@ export class LocalDeviceOutbox {
     }
   }
 
+  /**
+   * Rewrite the stored payload of every row of one source instance whose
+   * top-level connector id (`connectorId` or `connector_id`, whichever the
+   * row's kind uses) equals `connectorId`, in one transaction.
+   *
+   * `rewrite` receives each matching row's kind and parsed payload and returns
+   * the replacement payload. The row's `body_hash` follows the new payload;
+   * its status, attempt count, lease and error are left as they are. Rows that
+   * already succeeded are skipped unless their kind is named in
+   * `alsoSucceededKinds`, for kinds a later run still reads back.
+   *
+   * Selection is by connector id, so a second call with the same arguments
+   * finds nothing once the first has committed. Returns the number of rows
+   * rewritten.
+   */
+  rewriteStoredPayloads(input: {
+    alsoSucceededKinds?: readonly LocalDeviceOutboxKind[];
+    connectorId: string;
+    rewrite: (row: { kind: LocalDeviceOutboxKind; payload: unknown }) => unknown;
+    sourceInstanceId: string;
+  }): number {
+    const succeededKinds = input.alsoSucceededKinds ?? [];
+    const succeededClause = succeededKinds.length > 0 ? `OR kind IN (${succeededKinds.map(() => "?").join(", ")})` : "";
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const ids = this.#db
+        .prepare(
+          `SELECT id
+             FROM local_device_outbox
+            WHERE source_instance_id = ?
+              AND (status != 'succeeded' ${succeededClause})
+              AND (json_extract(payload_json, '$.connectorId') = ?
+                   OR json_extract(payload_json, '$.connector_id') = ?)
+            ORDER BY rowid`
+        )
+        .all(input.sourceInstanceId, ...succeededKinds, input.connectorId, input.connectorId)
+        .map((row) => (row as { id: string }).id);
+      const read = this.#db.prepare("SELECT kind, payload_json FROM local_device_outbox WHERE id = ?");
+      const write = this.#db.prepare("UPDATE local_device_outbox SET payload_json = ?, body_hash = ? WHERE id = ?");
+      for (const id of ids) {
+        const row = read.get(id) as { kind: LocalDeviceOutboxKind; payload_json: string };
+        const payload = input.rewrite({ kind: row.kind, payload: JSON.parse(row.payload_json) as unknown });
+        write.run(JSON.stringify(payload), hashCanonicalJson(payload), id);
+      }
+      this.#db.exec("COMMIT");
+      return ids.length;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   #selectDeadLetterIds(input: {
     clauses: readonly string[];
     errorClassPattern?: RegExp;

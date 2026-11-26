@@ -137,8 +137,8 @@
  * COVERAGE_DIAGNOSTICS: this connector reports one coverage row (store
  * "gmcli_archive") describing whether gmcli is installed, paired, and
  * queryable — emitted BEFORE any early-return SKIP_RESULT path, mirroring
- * apple_photos's "always leave durable, honest coverage evidence" rule
- * (see apple_photos/index.ts's COVERAGE_DIAGNOSTICS header comment).
+ * apple-photos's "always leave durable, honest coverage evidence" rule
+ * (see apple-photos/index.ts's COVERAGE_DIAGNOSTICS header comment).
  */
 
 import { spawn } from "node:child_process";
@@ -928,7 +928,7 @@ function runConnectorGuarded(): void {
 		return;
 	}
 	runConnector({
-		name: "google_messages",
+		name: "google-messages",
 		validateRecord,
 		collect,
 	});

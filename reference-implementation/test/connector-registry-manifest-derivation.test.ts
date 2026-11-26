@@ -74,14 +74,10 @@ import {
   classifyConnectorSetupModality,
 } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey, REGISTRY_CONNECTOR_PREFIX } from "../server/connector-key.ts";
-import {
-  FIRST_PARTY_CONNECTOR_KEYS,
-  LEGACY_LOCAL_ALIASES,
-} from "../server/generated/connector-registry.generated.ts";
+import { FIRST_PARTY_CONNECTOR_KEYS } from "../server/generated/connector-registry.generated.ts";
 
 const trackedRegistry = {
   FIRST_PARTY_CONNECTOR_KEYS,
-  LEGACY_LOCAL_ALIASES,
 };
 
 const riRoot = fileURLToPath(new URL("..", import.meta.url));

@@ -13,7 +13,6 @@ import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts"
 import {
   canonicalConnectorKey as serverCanonicalConnectorKey,
   canonicalConnectorKeyFromManifest,
-  legacyLocalAliasMap,
 } from "./connector-key.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
@@ -389,30 +388,6 @@ export function connectorKeyFromManifest(manifest: ConnectorManifestLike, fallba
     return fromManifest;
   }
   return typeof fallback === "string" && fallback.trim() ? canonicalConnectorKey(fallback) : null;
-}
-
-// Two canonical keys have a registry-URL slug that differs from the
-// connector directory / bundled-registry id (LOCAL_COLLECTOR_DEFINITIONS is
-// keyed by `connector_id`, which uses underscores for both): claude-code and
-// google-takeout. Every other bundled connector's canonical key already
-// equals its directory name.
-//
-// Derived from connector-key.ts's legacyLocalAliasMap() (legacy snake_case ->
-// canonical hyphenated key) by inverting it, rather than hand-maintaining a
-// second copy of the same mapping — that second copy had already diverged
-// from a third one in auth.ts. See
-// docs/inbox/report-connector-knowledge-clusters-bc.md. `codex` maps to
-// itself in legacyLocalAliasMap() and is intentionally excluded here (no
-// entry needed for an identity mapping).
-const HYPHENATED_CANONICAL_KEY_ALIASES: Readonly<Record<string, string>> = Object.fromEntries(
-  Object.entries(legacyLocalAliasMap())
-    .filter(([legacyKey, canonicalKey]) => legacyKey !== canonicalKey)
-    .map(([legacyKey, canonicalKey]) => [canonicalKey, legacyKey])
-);
-
-export function enrollmentKeyForCanonicalKey(canonicalKey: string): string {
-  const key = canonicalConnectorKey(canonicalKey);
-  return HYPHENATED_CANONICAL_KEY_ALIASES[key] ?? key;
 }
 
 export function displayNameForConnector(connectorKey: string, manifest?: ConnectorManifestLike | null): string {
@@ -1104,7 +1079,7 @@ export function buildConnectionSetupPlan(args: {
     deploymentArgs.deploymentEnv = args.deploymentEnv;
   }
   const deploymentReadiness = buildDeploymentReadiness(deploymentArgs);
-  const enrollmentKey = enrollmentKeyForCanonicalKey(connectorKey);
+  const enrollmentKey = connectorKey;
   // Synchronous validation only applies to static-secret connectors with a
   // registered probe. Everything else activates at first sync.
   const validationMode: CredentialValidationMode =

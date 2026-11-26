@@ -18,7 +18,7 @@ const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
 const INDEX_PATH = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"index.ts",
 );
 const SOURCE = readFileSync(INDEX_PATH, "utf8");

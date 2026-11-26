@@ -25,7 +25,6 @@ import {
   canonicalConnectorKey,
   classifyConnectorIntentModality,
   connectorKeyFromManifest,
-  enrollmentKeyForCanonicalKey,
   manualUploadSetupFromManifest,
   type StaticSecretSetupFieldLike,
   staticSecretCredentialCaptureFromManifest,
@@ -464,7 +463,7 @@ export function buildConnectorCatalog(
     if (plan.enrollmentKey) {
       entry.enrollmentKey = plan.enrollmentKey;
     } else if (entry.disposition === "local_collector_enroll" || entry.disposition === "browser_collector_manual") {
-      entry.enrollmentKey = enrollmentKeyForCanonicalKey(connectorKey);
+      entry.enrollmentKey = connectorKey;
     }
     entries.push(entry);
   }

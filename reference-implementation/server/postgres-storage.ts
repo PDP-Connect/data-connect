@@ -16,6 +16,12 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { type Pool as PgPool, Pool, type PoolClient, type QueryResultRow } from "pg";
 import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  type ConnectorIdRenameResult,
+  describeConnectorIdRename,
+  migrateRenamedConnectorIdsPostgres,
+} from "./connector-id-rename-migration.ts";
+import {
   hashKey,
   makeConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey,
@@ -3972,6 +3978,7 @@ async function bootstrapPostgresSchemaOnce({
     // A migration that reads a missing ledger table would have to guess its
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
+    await migratePostgresRenamedConnectorIds(client, { log });
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
@@ -7268,6 +7275,44 @@ async function coalesceExactPostgresLocalDeviceBindingDuplicates(client: PoolCli
       }
       throw err;
     }
+  }
+}
+
+/**
+ * One-time rename of connector ids that older collectors spelled with
+ * underscores. The receipt makes later boots skip the scan; a failure leaves
+ * the receipt `blocked`, never `complete`, so the next boot tries again.
+ */
+async function migratePostgresRenamedConnectorIds(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<void> {
+  const claim = await claimPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
+    leaseDurationMs: PG_LOCAL_DEVICE_MIGRATION_LEASE_MS,
+    leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
+    nowIso: new Date().toISOString(),
+  });
+  if (!claim) {
+    return;
+  }
+  let result: ConnectorIdRenameResult;
+  try {
+    result = await migrateRenamedConnectorIdsPostgres(client);
+  } catch (err) {
+    try {
+      await blockPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
+        error: err instanceof Error ? err.message : String(err),
+        nowIso: new Date().toISOString(),
+      });
+    } catch {
+      // A ledger write failure must not hide the original migration error.
+    }
+    throw err;
+  }
+  await completePostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, { nowIso: new Date().toISOString() });
+  const summary = describeConnectorIdRename(result);
+  if (summary) {
+    log(`[PDPP] ${summary}`);
   }
 }
 

@@ -136,8 +136,8 @@ test("proven static-secret source supports self-service add-another-account with
 
 test("supported local collector supports self-service add and routes to enrollment", () => {
   // The manifest claims a proven local collector.
-  const map = buildSourceAddSupport([localCollectorManifest("claude_code")]);
-  const support = resolveSourceAddSupport(map, "claude_code");
+  const map = buildSourceAddSupport([localCollectorManifest("claude-code")]);
+  const support = resolveSourceAddSupport(map, "claude-code");
   assert.ok(support);
   assert.equal(support.support, "self_service");
   assert.ok(support.action);
@@ -209,7 +209,7 @@ test("every support state carries an owner-safe label with no developer jargon",
   const map = buildSourceAddSupport([
     staticSecretManifest("ynab"),
     browserBoundManifest("some_browser_source"),
-    localCollectorManifest("claude_code"),
+    localCollectorManifest("claude-code"),
   ]);
   for (const support of map.values()) {
     assert.doesNotMatch(support.supportLabel, DEV_JARGON_RE);

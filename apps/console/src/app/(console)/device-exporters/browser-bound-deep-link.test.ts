@@ -6,7 +6,7 @@
  * device-exporters enrollment page.
  *
  * The Sources "Add source" catalog deep-links the supported local-collector set
- * (`?connector=claude_code`/`codex`) into this form.
+ * (`?connector=claude-code`/`codex`) into this form.
  * Browser-bound sources must not be prefilled here: the old proof path required
  * a PDPP source checkout and is not an owner-usable setup flow. They render an
  * honest packaged-path-pending notice until the dashboard browser flow ships.

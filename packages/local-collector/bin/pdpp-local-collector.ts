@@ -17,7 +17,7 @@
  *
  *   run        Run a bundled filesystem-class connector (Claude Code or
  *              Codex) under the collector runtime. The published surface
- *              accepts `--connector claude_code|codex` only; `--command
+ *              accepts `--connector claude-code|codex` only; `--command
  *              <bin>` is refused unless
  *              `PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1` is set, which
  *              is the monorepo development opt-in.
@@ -32,6 +32,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -144,13 +145,13 @@ export const BUNDLED_CONNECTOR_VERSIONS: Readonly<Record<string, string>> =
 
 /**
  * Normalize an operator-typed connector id to the registry's canonical form:
- * lowercase, hyphens folded to underscores. Connector ids are always
- * `snake_case` (`claude_code`), but `--connector claude-code` or
- * `CLAUDE_CODE` is an unambiguous, natural typo — refusing it with an opaque
- * "not bundled" error is a discoverability tax, not a safety boundary.
+ * lowercase, underscores folded to hyphens. Connector ids are manifest keys
+ * (`claude-code`), but operators may still type the old `--connector
+ * claude_code` spelling, or `CLAUDE-CODE`. Converting it here means the old
+ * spelling is never sent to the server, which no longer accepts it.
  */
 export function normalizeConnectorId(connectorId: string): string {
-  return connectorId.trim().toLowerCase().replaceAll("-", "_");
+  return connectorId.trim().toLowerCase().replaceAll("_", "-");
 }
 
 /**
@@ -514,7 +515,7 @@ Advanced / low-level:
                                    exist; --force compacts anyway (VACUUM is lossless either way).
 
 Public connectors: ${BUNDLED_CONNECTOR_IDS.join(", ")}. Connector ids are case-insensitive
-and hyphens normalize to underscores (claude-code == claude_code).
+and underscores normalize to hyphens (claude_code == claude-code).
 Connection id is the stable source identity for one device/account/home binding;
 enrollment responses currently return it as source_instance_id.
 Browser-bound connectors stay in the monorepo until each has its own
@@ -1347,8 +1348,8 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const fileName = safeProfileFileName(name);
-  const path = join(profileDir, fileName);
+  migrateLegacyProfileFiles(profileDir);
+  const path = join(profileDir, safeProfileFileName(name));
 
   if (!existsSync(path)) {
     return {
@@ -2343,9 +2344,56 @@ function safeProfileFileName(name: string): string {
   return PROFILE_ENV_EXTENSION.test(trimmed) ? trimmed : `${trimmed}.env`;
 }
 
+/**
+ * One-time migration of profile files written before connector ids were
+ * manifest keys. A profile named after its connector used the underscore
+ * spelling (`claude_code.env`); the same profile is now `claude-code.env`.
+ * For each bundled connector this renames the underscore-named file to the
+ * hyphen name. The filename alone does not authorize that: an operator may
+ * have chosen `claude_code` as the name of a profile for another connector, so
+ * a file whose `PDPP_COLLECTOR_CONNECTOR` names a different connector is left
+ * alone. When a hyphen-named file already exists, the underscore-named file is
+ * removed only if it is byte-identical to it (a duplicate); a different file
+ * is left in place and reported, because it may hold another device's token.
+ * A second run finds nothing to do. Nothing reads an underscore-named file
+ * anywhere else: lookup, `connect`'s overwrite guard, `logout` and discovery
+ * all see only the hyphen name. The rename keeps the file's contents and
+ * mode, so a stored device token keeps working. Operator-chosen profile names
+ * are never touched.
+ */
+function migrateLegacyProfileFiles(profileDir: string): void {
+  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+    const current = definition.connector_id.replaceAll("_", "-");
+    const legacy = current.replaceAll("-", "_");
+    if (legacy === current) {
+      continue;
+    }
+    const legacyPath = join(profileDir, `${legacy}.env`);
+    if (!existsSync(legacyPath)) {
+      continue;
+    }
+    const legacyContents = readFileSync(legacyPath, "utf8");
+    const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
+    if (namedConnector && namedConnector.replaceAll("_", "-") !== current) {
+      continue;
+    }
+    const currentPath = join(profileDir, `${current}.env`);
+    if (!existsSync(currentPath)) {
+      renameSync(legacyPath, currentPath);
+    } else if (readFileSync(currentPath, "utf8") === legacyContents) {
+      rmSync(legacyPath);
+    } else {
+      process.stderr.write(
+        `Profile ${legacyPath} differs from ${currentPath}; leaving it in place. Remove it if it is stale.\n`
+      );
+    }
+  }
+}
+
 /** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */
 function existingCollectorProfilePath(name: string): string | null {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
+  migrateLegacyProfileFiles(profileDir);
   const path = join(profileDir, safeProfileFileName(name));
   return existsSync(path) ? path : null;
 }
@@ -2432,6 +2480,7 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const fileName = safeProfileFileName(input.name);
+  migrateLegacyProfileFiles(profileDir);
   const path = join(profileDir, fileName);
   if (!existsSync(path)) {
     return { path, removed: false };
@@ -2448,6 +2497,7 @@ export function findLocalCollectorProfiles(input: {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
+  migrateLegacyProfileFiles(profileDir);
   const files = input.profileName
     ? [safeProfileFileName(input.profileName)]
     : (() => {

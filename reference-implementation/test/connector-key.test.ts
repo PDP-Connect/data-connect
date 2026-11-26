@@ -4,9 +4,9 @@
 /**
  * Unit tests for the canonical connector-key helpers.
  *
- * These pin the registry-URL to key normalization, the legacy
- * local-collector alias mapping, and the rule that no connector list decides
- * a key: a connector this repository does not ship resolves like one it does.
+ * These pin the registry-URL to key normalization and the rule that no
+ * connector list decides a key: a connector this repository does not ship
+ * resolves like one it does, and a retired underscore id is not rewritten.
  */
 
 import assert from "node:assert/strict";
@@ -23,9 +23,7 @@ import {
   firstPartyConnectorKeys,
   isConnectorKey,
   isInternalConnectorId,
-  isLegacyLocalAlias,
   isRegistryUrlConnectorId,
-  legacyLocalAliasMap,
 } from "../server/connector-key.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,35 +121,19 @@ test("canonicalConnectorKey passes native bare slugs through", () => {
   }
 });
 
-test("canonicalConnectorKey maps legacy snake_case local aliases to canonical hyphenated keys", () => {
-  // Pin the exact alias set so a silent expansion of the generated table
-  // (which would create new owner-visible aliases) breaks the test. The set
-  // is generated from LOCAL_COLLECTOR_DEFINITIONS cross-referenced against
-  // each connector's manifest connector_key — see
-  // connector-registry.generated.ts — so it includes one entry per bundled
-  // local-collector connector, identity mappings included.
-  assert.deepEqual(legacyLocalAliasMap(), {
-    apple_photos: "apple-photos",
-    claude_code: "claude-code",
-    codex: "codex",
-    google_messages: "google-messages",
-    google_takeout: "google-takeout",
-    imessage: "imessage",
-  });
-  assert.equal(canonicalConnectorKey("claude_code"), "claude-code");
-  assert.equal(canonicalConnectorKey("codex"), "codex");
-  assert.equal(canonicalConnectorKey("google_takeout"), "google-takeout");
-  assert.equal(canonicalConnectorKey("apple_photos"), "apple-photos");
-  assert.equal(canonicalConnectorKey("google_messages"), "google-messages");
-  assert.equal(canonicalConnectorKey("imessage"), "imessage");
-  assert.equal(isLegacyLocalAlias("claude_code"), true);
-  assert.equal(isLegacyLocalAlias("codex"), true);
-  assert.equal(isLegacyLocalAlias("google_takeout"), true);
-  assert.equal(isLegacyLocalAlias("apple_photos"), true);
-  assert.equal(isLegacyLocalAlias("google_messages"), true);
-  assert.equal(isLegacyLocalAlias("imessage"), true);
-  assert.equal(isLegacyLocalAlias("gmail"), false);
-  assert.equal(isLegacyLocalAlias(""), false);
+test("canonicalConnectorKey does not rewrite a retired underscore id to its current key", () => {
+  // The four ids older collectors spelled with underscores are plain unknown
+  // ids now: nothing at runtime maps one to the other, and a lookup under the
+  // old id finds nothing (see retired-connector-id-lookup.test.ts).
+  for (const retired of ["apple_photos", "claude_code", "google_messages", "google_takeout"]) {
+    assert.equal(canonicalConnectorKey(retired), retired);
+    assert.equal(isConnectorKey(retired), true, "still a well-formed key, just not a registered connector");
+    assert.ok(!firstPartyConnectorKeys().includes(retired), `${retired} is not a vendored connector key`);
+  }
+  for (const current of ["apple-photos", "claude-code", "google-messages", "google-takeout"]) {
+    assert.equal(canonicalConnectorKey(current), current);
+    assert.ok(firstPartyConnectorKeys().includes(current), `${current} is a vendored connector key`);
+  }
 });
 
 test("bundled local-collector connector ids all resolve to a canonical key the manifest catalog also resolves (alias/canonical equivalence)", async () => {
@@ -181,8 +163,15 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
     );
     assert.ok(
       bundleIdCanonicalKey,
-      `${definition.connector_id}: bundle connector_id must canonicalize (add a LEGACY_LOCAL_ALIASES entry if it uses a directory-name id distinct from its manifest's connector_key)`
+      `${definition.connector_id}: bundle connector_id must canonicalize`
     );
+    if (definition.connector_id.replaceAll("_", "-") === manifestCanonicalKey) {
+      // The pinned @pdpp/polyfill-connectors tarball still bundles the four
+      // underscore spellings. The server no longer rewrites them, so the only
+      // acceptable gap is the underscore spelling of the manifest key; refresh
+      // the pin and this branch goes dead.
+      continue;
+    }
     assert.equal(
       bundleIdCanonicalKey,
       manifestCanonicalKey,
@@ -233,7 +222,8 @@ test("canonicalConnectorKey leaves a URL on another host as it is", () => {
 
 test("canonicalConnectorKey trims surrounding whitespace before lookup", () => {
   assert.equal(canonicalConnectorKey("  gmail  "), "gmail");
-  assert.equal(canonicalConnectorKey("\tclaude_code\n"), "claude-code");
+  assert.equal(canonicalConnectorKey("\tclaude-code\n"), "claude-code");
+  assert.equal(canonicalConnectorKey("\tclaude_code\n"), "claude_code", "trims, and does not rewrite a retired id");
 });
 
 test("isRegistryUrlConnectorId reports the URL shape for any slug", () => {
@@ -401,18 +391,6 @@ test("isInternalConnectorId identifies test/stub/internal connector ids", () => 
   assert.equal(isInternalConnectorId(undefined), false);
   assert.equal(isInternalConnectorId(""), false);
   assert.equal(isInternalConnectorId(42), false);
-});
-
-test("legacy aliases have one idempotent key in bare and registry forms", () => {
-  for (const [alias, key] of Object.entries(legacyLocalAliasMap())) {
-    for (const value of [alias, key, `${REGISTRY_PREFIX}${alias}`, `${REGISTRY_PREFIX}${alias}/`, `${REGISTRY_PREFIX}${key}`]) {
-      assert.equal(canonicalConnectorKey(value), key, value);
-      assert.equal(canonicalConnectorKey(canonicalConnectorKey(value)), key, value);
-      assert.equal(canonicalConnectorKeyFromManifest({ connector_id: value }), key, value);
-    }
-    assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}${alias}`), key);
-    assert.equal(canonicalConnectorKeyFromManifest({ connector_key: alias }), key);
-  }
 });
 
 test("a non-registry URL connector_id keeps its spelling as the key", () => {

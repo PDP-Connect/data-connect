@@ -25,16 +25,15 @@ function enrollable(connectorKey: string, enrollmentKey: string): LocalCollector
 }
 
 test("a connector the server offers for enrollment resolves, whatever its key", () => {
-  const templates = [enrollable("brand-new-notes-app", "brand-new-notes-app"), enrollable("claude-code", "claude_code")];
-  assert.deepEqual(localCollectorEnrollmentKeys(templates), ["brand-new-notes-app", "claude_code"]);
+  const templates = [enrollable("brand-new-notes-app", "brand-new-notes-app"), enrollable("claude-code", "claude-code")];
+  assert.deepEqual(localCollectorEnrollmentKeys(templates), ["brand-new-notes-app", "claude-code"]);
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "brand-new-notes-app"), "brand-new-notes-app");
 });
 
 test("a connector resolves by enrollment key, canonical key, or registry URL", () => {
-  const templates = [enrollable("claude-code", "claude_code")];
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude_code"), "claude_code");
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude-code"), "claude_code");
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/claude-code"), "claude_code");
+  const templates = [enrollable("claude-code", "claude-code")];
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude-code"), "claude-code");
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/claude-code"), "claude-code");
 });
 
 test("a connector without the local-collector-enroll disposition does not resolve", () => {
@@ -47,6 +46,33 @@ test("a connector without the local-collector-enroll disposition does not resolv
   assert.deepEqual(localCollectorEnrollmentKeys(templates), []);
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "amazon"), null);
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "signal"), null);
+});
+
+test("resolver rejects templates with no plan, no enrollment key, or a blank enrollment key", () => {
+  const templates: LocalCollectorTemplate[] = [
+    { connector_key: "no-plan" },
+    { connector_key: "no-key", setup_plan: { catalog_disposition: "local_collector_enroll" } },
+    { connector_key: "null-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: null } },
+    { connector_key: "empty-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "" } },
+    { connector_key: "blank-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "   " } },
+  ];
+  assert.deepEqual(localCollectorEnrollmentKeys(templates), []);
+  for (const id of ["no-plan", "no-key", "null-key", "empty-key", "blank-key"]) {
+    assert.equal(resolveLocalCollectorEnrollmentKey(templates, id), null, id);
+    assert.equal(resolveLocalCollectorEnrollmentKey(templates, `https://registry.pdpp.dev/connectors/${id}`), null, id);
+  }
+});
+
+test("canonical key and enrollment key are separate forms; an unadvertised alias does not resolve", () => {
+  const templates = [enrollable("notes-app", "notes-collector")];
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-collector"), "notes-collector");
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-app"), "notes-collector");
+  assert.equal(
+    resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/notes-app"),
+    "notes-collector"
+  );
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes"), null);
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-app-legacy"), null);
 });
 
 test("empty and missing ids do not resolve", () => {
@@ -78,7 +104,7 @@ test("the shipped manifests that claim local collection enroll, and the others d
   }
   const keys = localCollectorEnrollmentKeys(templates);
   assert.deepEqual([...keys].sort(), [...claimed].sort());
-  for (const expected of ["claude_code", "codex", "google_takeout", "imessage", "apple_photos", "google_messages"]) {
+  for (const expected of ["claude-code", "codex", "google-takeout", "imessage", "apple-photos", "google-messages"]) {
     assert.ok(keys.includes(expected), `${expected} must be enrollable`);
   }
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "amazon"), null);

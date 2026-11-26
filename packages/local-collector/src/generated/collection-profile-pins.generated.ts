@@ -12,7 +12,7 @@ import type { CollectionProfilePin } from "../managed/collection-profiles.ts";
 /** The Collection Profile releases this collector installs, in definition order. */
 export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.freeze([
   {
-    "connectorId": "claude_code",
+    "connectorId": "claude-code",
     "connectorKey": "claude-code",
     "version": "0.3.0",
     "digest": "sha256:5b8866392bb11f24cbc3827e37e96faae9b30c8863d7d82bf9cd21aa2e636c82",
@@ -28,7 +28,7 @@ export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.f
     "entrypointSha256": "sha256:0ae6336d89b88d50ae6a13d11e62d4b844a623d76cfeb7f83dcd29c889764b3b"
   },
   {
-    "connectorId": "google_takeout",
+    "connectorId": "google-takeout",
     "connectorKey": "google-takeout",
     "version": "0.1.0",
     "digest": "sha256:38d4bd1312073b167b668cad1701ebc78fea8cf9c19a0edb37a98d11fd660562",
@@ -44,7 +44,7 @@ export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.f
     "entrypointSha256": "sha256:aee91cec10278cca82acc000d504420f2135eac2e44838d3b4693d08db5f3d84"
   },
   {
-    "connectorId": "apple_photos",
+    "connectorId": "apple-photos",
     "connectorKey": "apple-photos",
     "version": "0.1.0",
     "digest": "sha256:0952cef101b05b5416d0ea0620ee12c857f493bae547ce71119a243131741415",

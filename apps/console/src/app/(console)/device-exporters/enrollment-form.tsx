@@ -10,8 +10,8 @@ import { useActionState, useState } from "react";
 import { pdppLocalCollectorEnrollCommand, pdppLocalCollectorRunCommand } from "@/lib/pdpp-cli-command.ts";
 import { createEnrollmentCodeAction } from "./actions.ts";
 
-const MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS = ["imessage", "apple_photos"] as const;
-const EXTERNAL_TOOL_LOCAL_COLLECTOR_CONNECTORS = ["google_messages", "signal"] as const;
+const MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS = ["imessage", "apple-photos"] as const;
+const EXTERNAL_TOOL_LOCAL_COLLECTOR_CONNECTORS = ["google-messages", "signal"] as const;
 
 function isMacosOnlyLocalCollectorConnector(connectorId: string): boolean {
   return (MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS as readonly string[]).includes(connectorId);
@@ -35,7 +35,7 @@ export function EnrollmentForm({
   referenceBaseUrl: string;
   /**
    * Optional connector key to prefill the `connector_id` field. The Connect
-   * "Add source" entry point deep-links here with `?connector=claude_code`
+   * "Add source" entry point deep-links here with `?connector=claude-code`
    * (or `codex`) so the supported-connector path is a real, ready-to-submit flow
    * rather than landing the owner on an empty form. The page validates the value
    * against the supported set before passing it; an unsupported/absent value
@@ -69,7 +69,7 @@ export function EnrollmentForm({
     >
       <form action={formAction} className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-end">
         <ToolbarField label="Connector id">
-          <IcInput defaultValue={defaultConnectorId} name="connector_id" placeholder="claude_code" required />
+          <IcInput defaultValue={defaultConnectorId} name="connector_id" placeholder="claude-code" required />
         </ToolbarField>
         <ToolbarField label="Local binding">
           <IcInput name="local_binding_name" placeholder="personal-laptop" required />
@@ -102,7 +102,7 @@ export function EnrollmentForm({
               className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2"
               data-testid="collector-macos-requirements"
             >
-              {state.code.connector_id === "apple_photos" ? (
+              {state.code.connector_id === "apple-photos" ? (
                 <p className="pdpp-caption text-foreground">
                   <strong>Requires a physical Mac and a manual export.</strong> First, in Photos.app on the Mac with
                   your library: select the photos/albums you want, then{" "}

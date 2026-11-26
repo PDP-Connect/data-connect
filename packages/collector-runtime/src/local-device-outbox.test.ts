@@ -519,7 +519,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
   const replacementId = "src-terminal:new-terminal";
   const terminalIdentity = {
     collection_boundary: "scope-1",
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: "cin-1",
     device_id: "device-1",
     run_id: "run-old",
@@ -566,7 +566,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
       () =>
         outbox.retireDeadLetteredTerminalCommits({
           collectionBoundary: "scope-1",
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           connectorInstanceId: "cin-1",
           replacementId,
           sourceInstanceId: "src-terminal",
@@ -586,7 +586,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     assert.equal(
       outbox.retireDeadLetteredTerminalCommits({
         collectionBoundary: "scope-1",
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         connectorInstanceId: "cin-1",
         replacementId,
         sourceInstanceId: "src-terminal",

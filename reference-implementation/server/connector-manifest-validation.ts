@@ -2206,9 +2206,6 @@ export function validateConnectorManifest(
     throw invalidConnectorManifest("connector_key must be a non-empty slug-like key, not a URL", code);
   }
   const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
-  if (hasConnectorKey && canonicalConnectorKey(manifest.connector_key) !== (manifest.connector_key as string).trim()) {
-    throw invalidConnectorManifest("connector_key must use its canonical spelling, not a legacy alias", code);
-  }
   if (hasConnectorId && hasConnectorKey) {
     const connectorId = (manifest.connector_id as string).trim();
     const connectorKey = (manifest.connector_key as string).trim();

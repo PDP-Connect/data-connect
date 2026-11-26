@@ -162,51 +162,35 @@ test("terminal run commit resolves authorization before receipt lookup and passe
 });
 
 /**
- * Production defect, peregrine 2026-08-22: a terminal run commit dead-lettered
- * with `400 invalid_request` and blocked the Claude Code outbox for five days
- * (1 dead_letter behind 10,000 succeeded uploads).
+ * A device configured with an old underscore connector id
+ * (`PDPP_COLLECTOR_CONNECTOR=claude_code`) used to be rewritten to
+ * `claude-code` on both sides. The server no longer rewrites ids: the old
+ * spelling is an unknown connector, so it does not match the stored binding
+ * and the ordinary binding check refuses it.
  *
- * The device is configured `PDPP_COLLECTOR_CONNECTOR=claude_code` and sends
- * that spelling verbatim. The server canonicalized only ITS OWN side to
- * `claude-code` and then required the device to have sent that exact string.
- * The record-batch leg compares with `sameConnectorType`, which canonicalizes
- * BOTH sides — which is why 10,000 batches from the same device on the same
- * run succeeded while this one guard rejected the commit.
- *
- * The pre-existing cases here all use `codex`, which canonicalizes to itself,
- * and stub `canonicalConnectorKey: () => "codex"` — a constant that cannot
- * express a mismatch. This case uses the REAL canonicalizer so the alias is
- * actually exercised.
+ * Uses the REAL canonicalizer: it returns the old id unchanged. The commit
+ * store must not be reached.
  */
-test("a device sending the legacy connector alias still commits: both sides are canonicalized", async () => {
+test("a device sending an old connector id is refused by the binding check and commits nothing", async () => {
   const capture = responseCapture();
-  let committed: ResolvedTerminalRunCommit | null = null;
+  let errored: { code: string; message: string | undefined; param: string | undefined; status: number } | null = null;
+  let storeReached = false;
   await handleLocalDeviceTerminalRunCommit({
     ctx: {
       canonicalConnectorKey,
-      commitTerminalRun: (commitInput) => {
-        committed = commitInput;
-        return Promise.resolve({
-          replayed: false,
-          response: {
-            commit_id: commitInput.commitId,
-            envelope_hash: commitInput.envelopeHash,
-            object: "device_terminal_run_commit",
-            run_id: commitInput.runId,
-            terminal_event_id: "evt-alias",
-          },
-        });
+      commitTerminalRun: () => {
+        storeReached = true;
+        return Promise.reject(new Error("the commit store must not be reached for an old id"));
       },
       emitSpineEvent: () => Promise.resolve(),
       handleError: (_res, error) => {
         throw error;
       },
-      pdppError: (_res, status, code, message) => {
-        throw new Error(`unexpected ${status}:${code} ${message}`);
+      pdppError: (_res, status, code, message, param) => {
+        errored = { code, message, param, status };
       },
     },
     req: {
-      // The exact spelling the peregrine collector emits.
       body: validBody({ connector_id: "claude_code" }),
       deviceExporter: { deviceId: "dev-1" },
       params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
@@ -218,32 +202,27 @@ test("a device sending the legacy connector alias still commits: both sides are 
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
-  assert.equal(capture.snapshot().status, 201, "the legacy alias must not be rejected as an invalid binding");
-  assert.ok(committed);
-  assert.equal(
-    (committed as ResolvedTerminalRunCommit).connectorId,
-    "claude-code",
-    "the committed binding is stored canonically regardless of which spelling the device sent"
-  );
+  const refusal = errored as { code: string; message: string | undefined; status: number } | null;
+  assert.equal(refusal?.status, 400);
+  assert.equal(refusal?.code, "invalid_request");
+  assert.doesNotMatch(refusal?.message ?? "", /claude-code/, "the refusal does not name a replacement key");
+  assert.equal(storeReached, false);
 });
 
 /**
- * Production defect, run 652780f6-3316-4e90-9c53-835cfb0af483: the alias fix
- * above made the GUARD alias-tolerant but left the HASH INPUT canonicalized.
- * The collector hashes the envelope it actually sent (`claude_code`); the
- * server rehashed a rewritten envelope (`claude-code`), so the two hashes
- * never matched and the collector dead-lettered every terminal commit
- * forever — 34 dead letters / 0 succeeded for claude_code, against
- * 182 succeeded / 0 dead letters for codex, whose key canonicalizes to
- * itself and therefore never diverged.
+ * Production defect, run 652780f6-3316-4e90-9c53-835cfb0af483: the server
+ * rehashed an envelope whose connector id it had rewritten to the canonical
+ * key, while the collector hashed the envelope it actually sent. The two
+ * hashes never matched and the collector dead-lettered every terminal commit.
  *
- * The 201 assertion in the alias test above cannot catch this: the request is
- * accepted, and only the returned hash is wrong. This case pins the hash.
+ * A registry-URL spelling still canonicalizes to the bare key, so it can still
+ * diverge from the stored binding. The 201 alone cannot catch this: the
+ * request is accepted and only the returned hash is wrong. This case pins it.
  */
 test("the envelope hash is computed over the connector id the device SENT, not the canonicalized one", async () => {
   const capture = responseCapture();
   let committed: ResolvedTerminalRunCommit | null = null;
-  const sentBody = validBody({ connector_id: "claude_code" });
+  const sentBody = validBody({ connector_id: "https://registry.pdpp.dev/connectors/claude-code" });
   await handleLocalDeviceTerminalRunCommit({
     ctx: {
       canonicalConnectorKey,
@@ -256,7 +235,7 @@ test("the envelope hash is computed over the connector id the device SENT, not t
             envelope_hash: commitInput.envelopeHash,
             object: "device_terminal_run_commit",
             run_id: commitInput.runId,
-            terminal_event_id: "evt-alias-hash",
+            terminal_event_id: "evt-url-hash",
           },
         });
       },
@@ -293,18 +272,18 @@ test("the envelope hash is computed over the connector id the device SENT, not t
   const rewrittenHash = createHash("sha256")
     .update(canonicalTerminalRunCommitJson({ ...sentBody, connector_id: "claude-code", version: 1 }))
     .digest("hex");
-  assert.notEqual(clientHash, rewrittenHash, "the alias and canonical spellings must actually hash differently");
+  assert.notEqual(clientHash, rewrittenHash, "the URL and bare-key spellings must actually hash differently");
   assert.equal(
     resolved.envelopeHash,
     clientHash,
-    "the server must rehash the bytes the device sent; canonicalizing the hash input dead-letters every underscore alias"
+    "the server must rehash the bytes the device sent; canonicalizing the hash input dead-letters every URL-spelled connector id"
   );
 
   // Storage identity stays canonical — only the hash input follows the wire.
   assert.equal(resolved.connectorId, "claude-code");
 });
 
-test("an identity-alias connector still hashes correctly — the alias fix does not disturb the working path", async () => {
+test("a bare-key connector id still hashes correctly — the URL case does not disturb the working path", async () => {
   const capture = responseCapture();
   let committed: ResolvedTerminalRunCommit | null = null;
   const sentBody = validBody({ connector_id: "codex" });
@@ -377,8 +356,8 @@ test("an unrelated connector id is still rejected — canonicalizing both sides 
     },
     req: {
       // `codex` is a real key that canonicalizes to itself — and is NOT this
-      // source's connector. Without this control, mapping every unknown value
-      // through the alias table could silently accept a foreign binding.
+      // source's connector. Without this control, accepting every unknown value
+      // could silently accept a foreign binding.
       body: validBody({ connector_id: "codex" }),
       deviceExporter: { deviceId: "dev-1" },
       params: { deviceId: "dev-1", sourceInstanceId: "src-1" },

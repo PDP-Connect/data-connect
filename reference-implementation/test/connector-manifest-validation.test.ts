@@ -64,7 +64,7 @@ const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of kn
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "../server/connector-key.ts";
+import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 
 import {
   invalidConnectorManifest,
@@ -877,22 +877,12 @@ test("a connector_id on another host that differs from connector_key is refused 
   );
 });
 
-test("accepted legacy id forms derive one key and explicit keys must be canonical", () => {
-  for (const [alias, key] of Object.entries(legacyLocalAliasMap())) {
-    for (const connectorId of [alias, key, `${REGISTRY_URL_PREFIX}${alias}`, `${REGISTRY_URL_PREFIX}${alias}/`, `${REGISTRY_URL_PREFIX}${key}`]) {
-      for (const identity of [{ connector_id: connectorId }, { connector_id: connectorId, connector_key: key }]) {
-        const manifest = manifestWithIdentity(identity);
-        assert.doesNotThrow(() => validateConnectorManifest(manifest), connectorId);
-        assert.equal(canonicalConnectorKeyFromManifest(manifest), key, connectorId);
-      }
-    }
-    if (alias !== key) {
-      for (const identity of [{ connector_key: alias }, { connector_id: `${REGISTRY_URL_PREFIX}${alias}`, connector_key: alias }]) {
-        assert.throws(
-          () => validateConnectorManifest(manifestWithIdentity(identity)),
-          /connector_key must use its canonical spelling/
-        );
-      }
+test("registry and bare id forms derive one key", () => {
+  for (const connectorId of ["gmail", `${REGISTRY_URL_PREFIX}gmail`, `${REGISTRY_URL_PREFIX}gmail/`]) {
+    for (const identity of [{ connector_id: connectorId }, { connector_id: connectorId, connector_key: "gmail" }]) {
+      const manifest = manifestWithIdentity(identity);
+      assert.doesNotThrow(() => validateConnectorManifest(manifest), connectorId);
+      assert.equal(canonicalConnectorKeyFromManifest(manifest), "gmail", connectorId);
     }
   }
 });

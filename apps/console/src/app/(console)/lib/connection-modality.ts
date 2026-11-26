@@ -27,10 +27,7 @@
  * that same plan.
  */
 
-import {
-  canonicalConnectorKey as sharedCanonicalConnectorKey,
-  enrollmentKeyForCanonicalKey as sharedEnrollmentKeyForCanonicalKey,
-} from "pdpp-reference-implementation/connection-setup-plan";
+import { canonicalConnectorKey as sharedCanonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
 
 /**
  * Connector creation modalities the console understands, matching the backend
@@ -48,20 +45,6 @@ export type ConnectionAddModality = "local_collector" | "browser_bound" | "api_n
  */
 export function canonicalConnectorKey(connectorId: string): string {
   return sharedCanonicalConnectorKey(connectorId);
-}
-
-/**
- * Map a canonical bare connector key to the enrollment-form key the
- * device-exporter deep-link expects. Two local-collector slugs diverge today:
- * manifests use `claude-code` and `google-takeout` (hyphen), but the proven
- * enrollment path and the bundled-connector registry
- * (`LOCAL_COLLECTOR_DEFINITIONS`, keyed by `connector_id`) use `claude_code`
- * and `google_takeout` (underscore). Every other connector's bare key already
- * equals its enrollment key. Keeping this mapping here means the catalog
- * never mints a `?connector=` value the enrollment form would reject.
- */
-export function enrollmentKeyForCanonicalKey(canonicalKey: string): string {
-  return sharedEnrollmentKeyForCanonicalKey(canonicalKey);
 }
 
 /**

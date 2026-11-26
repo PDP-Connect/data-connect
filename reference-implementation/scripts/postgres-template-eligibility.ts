@@ -238,6 +238,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-semantic-scope-index-idempotence.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
+  // Runs the retired-id rename and its ledger receipt on a from-scratch database.
+  "test/retired-connector-id-migration-postgres.test.ts",
   "test/rs-opaque-cursors.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",

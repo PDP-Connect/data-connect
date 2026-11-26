@@ -2218,7 +2218,7 @@ test("enrollment against an owner-deleted binding fails closed with a typed 409,
 test("device exporter enrollment keeps connector type display names separate from device labels", async () => {
   await withServer(async ({ asUrl }) => {
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       display_name: "simon@192.168.1.7 Claude Code",
       local_binding_name: "simon-laptop",
     });
@@ -2234,14 +2234,12 @@ test("device exporter enrollment keeps connector type display names separate fro
     );
     assert.equal(enrollResp.status, 201);
 
-    // The owner may enroll with the legacy snake_case alias (`claude_code`),
-    // but the catalog row, instance row, and storage key are canonicalized to
-    // `claude-code` so the connector type has one identity. The enroll
-    // response echoes the canonical key. See canonicalize-connector-keys
-    // design Decision 7.
+    // The connector type has one identity, its manifest key (`claude-code`).
+    // The enroll response echoes it, and no row exists under the old
+    // underscore spelling.
     assert.equal(bodyOf(enrollResp).connector_id, "claude-code");
-    const legacyAliasRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
-    assert.equal(legacyAliasRow, undefined, "legacy alias MUST NOT be registered as a connector row");
+    const oldIdRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
+    assert.equal(oldIdRow, undefined, "an old id MUST NOT be registered as a connector row");
 
     const connectorRow = mustExist(
       typedDb()
@@ -2263,6 +2261,113 @@ test("device exporter enrollment keeps connector type display names separate fro
       "instance row must exist"
     );
     assert.equal(instanceRow.display_name, "simon@192.168.1.7 Claude Code");
+  });
+});
+
+test("enrollment-codes rejects an old connector id and registers no connector row", async () => {
+  await withServer(async ({ asUrl }) => {
+    const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "claude_code",
+      local_binding_name: "simon-laptop",
+    });
+    assert.equal(codeResp.status, 400);
+    assert.equal(errorCode(codeResp), "invalid_request");
+    assert.equal(errorOf(codeResp).param, "connector_id");
+    assert.equal(
+      getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code"),
+      undefined,
+      "an old id MUST NOT be registered as a connector row"
+    );
+  });
+});
+
+// A collector from before the connector-id rename still sends the underscore
+// spelling. The server has no rename step: the old id is an unknown connector,
+// and each device route that carries a connector_id refuses it with the
+// route's ordinary binding error.
+function assertOldConnectorIdRefused(response: JsonResponse): void {
+  assert.equal(response.status, 400);
+  assert.equal(errorCode(response), "invalid_request");
+  assert.doesNotMatch(errorMessage(response), /claude-code/, "the refusal does not name a replacement key");
+}
+
+test("ingest-batches refuses an old connector id as an unknown connector", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-batch", "claude-code");
+    assert.equal(device.connector_id, "claude-code");
+    const batch = makeBatch(device, "batch-retired-id", "v1");
+
+    const retired = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      { ...batch, connector_id: "claude_code" },
+      authHeaders(device.device_token)
+    );
+    assertOldConnectorIdRefused(retired);
+
+    const current = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      batch,
+      authHeaders(device.device_token)
+    );
+    assert.ok(
+      current.status < 300,
+      `the current key is accepted, got ${current.status}: ${JSON.stringify(current.body)}`
+    );
+  });
+});
+
+test("terminal-collection refuses an old connector id as an unknown connector", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-collection", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-collection`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      connector_id: "claude-code",
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      streams: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+    };
+
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
+    assertOldConnectorIdRefused(retired);
+
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is accepted: ${JSON.stringify(current.body)}`
+    );
+  });
+});
+
+test("terminal-run-commits refuses an old connector id as an unknown connector and commits nothing", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-commit", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-run-commits`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      collection_boundary: "unscoped",
+      commit_id: "commit-retired-1",
+      connector_id: "claude-code",
+      connector_instance_id: device.connector_instance_id,
+      device_id: device.device_id,
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      state_delta: {},
+      terminal_facts: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version: 1,
+    };
+
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
+    assertOldConnectorIdRefused(retired);
+
+    // Had the refused request stored its commit, this same commit id would now be a replay or a conflict.
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is a first commit: ${JSON.stringify(current.body)}`
+    );
   });
 });
 
