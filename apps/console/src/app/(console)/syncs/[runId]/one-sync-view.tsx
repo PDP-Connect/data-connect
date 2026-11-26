@@ -6,7 +6,7 @@ import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { clockLabel, sentenceDayLabel, startedAgo, personDay } from "../../history/day-cut.ts";
 import { StopCopying } from "../../connect/status/[connectionId]/stop-copying.tsx";
 import { copiedRecords, resolveSyncCause } from "../../lib/sync-cause.ts";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@pdpp/brand-react";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { durationWords, recordKindName, type OneSyncModel } from "./one-sync-model.ts";
 export function OneSyncView({ model, offset, practice = false }: { model: OneSyncModel; offset: number; practice?: boolean }) {
@@ -26,7 +26,7 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
     {m.outcome === "syncing" ? <StopCopying name={m.name} runId={m.id} preview={practice} /> : null}
     {m.outcome === "needs_you" ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(m.id)}/stream`}>Continue</Link> : null}
     {m.assistance?.kind === "credentials" && m.assistance.responseContract === "response_required" && m.assistance.ownerAction === "provide_value" ? <RunInteractionForm fields={m.assistance.fields} interactionId={m.assistance.id} kind={m.assistance.kind} message={m.assistance.message} runId={m.id} serviceName={m.name} heading={false} preview={practice} /> : null}
-    {m.trigger ? <p className="mb-6 text-[13px] text-muted-foreground">{m.trigger === "manual" ? "You started it." : m.trigger === "scheduled" ? "Started by the schedule." : m.trigger === "retry" ? "A second try after a failure." : ""}</p> : null}
+    {m.trigger ? <p className="mb-6 text-[13px] text-muted-foreground">{m.trigger === "manual" ? "You started it." : m.trigger === "scheduled" ? "Automatic" : m.trigger === "retry" ? "A second try after a failure." : ""}</p> : null}
     </div>
     {m.kinds?.some(kind => kind.count > 0) ? <Section title="What it brought"><ul className="divide-y divide-border">{m.kinds.filter(kind=>kind.count>0).map(kind => <li className="py-3" key={kind.kind}><Link className="flex justify-between gap-4" href={`/sources/${encodeURIComponent(m.connection ?? m.connector)}/${encodeURIComponent(kind.kind)}`}><span>{m.kindNames?.[kind.kind] ?? recordKindName(kind.kind)}</span><span>{copiedRecords(kind.count)}</span></Link></li>)}</ul></Section> : m.total !== null && (["finished","stopped","interrupted"].includes(m.outcome) || m.total > 0) ? <p className="my-6">{m.total === 0 ? "Nothing to copy." : `Copied ${m.total.toLocaleString("en-US")} record${m.total === 1 ? "" : "s"}.`}</p> : null}
     {m.missing.length ? <Section title="Didn't come">{m.missing.map(row => <div className="py-3" key={row.name}><p>{row.name}</p><p>DataConnect could not copy this.</p>{row.canRetry ? <p>It will try again the next time DataConnect checks {m.name}.</p> : null}</div>)}</Section> : null}
