@@ -29,7 +29,7 @@ test("every transitional entry is a shipped first-party connector that owns its 
   for (const [connectorKey, keys] of Object.entries(UNDECLARED_TUNING_ENVIRONMENT)) {
     assert.ok(shipped.has(connectorKey), `${connectorKey} is not a shipped first-party connector`);
     for (const key of keys) {
-      assert.ok(ownsTuningKey(connectorKey, key), `${key} is not owned by ${connectorKey}`);
+      assert.ok(ownsTuningKey(connectorKey, key, []), `${key} is not owned by ${connectorKey}`);
     }
   }
 });
@@ -78,7 +78,7 @@ test("the reference server reads no key inside a first-party connector tuning na
         .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
         .join("\n");
       for (const [key] of code.matchAll(/\bPDPP_[A-Z0-9_]+\b/g)) {
-        const owner = vendoredKeys.find((connectorKey) => ownsTuningKey(connectorKey, key));
+        const owner = vendoredKeys.find((connectorKey) => ownsTuningKey(connectorKey, key, []));
         if (owner !== undefined && !owned.has(key)) {
           collisions.push(`${relative(REFERENCE_ROOT, file)}: ${key} (namespace of ${owner})`);
         }

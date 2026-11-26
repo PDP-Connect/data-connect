@@ -73,6 +73,7 @@ const BACKGROUND_SAFE_MANIFEST = {
 function composePlatformEnvironment(sourceEnv: NodeJS.ProcessEnv): Record<string, string> {
   return composeConnectorChildEnvironment({
     explicitRunEnv: {},
+    installedConnectorKeys: [],
     manifest: {},
     platform: "win32",
     sourceEnv,
@@ -347,6 +348,7 @@ test("connector fragments reject platform and run controls in every casing", () 
     } satisfies ConnectorConnectionEnvironment,
     connectorId: "test-connector",
     explicitRunEnv: {},
+    installedConnectorKeys: [],
     manifest: {},
     platform: "linux",
     sourceEnv: {},
@@ -366,6 +368,7 @@ test("connector fragments reject platform and run controls in every casing", () 
             } satisfies ConnectorConnectionEnvironment,
             connectorId: "test-connector",
             explicitRunEnv: {},
+            installedConnectorKeys: [],
             manifest: {},
             platform: "linux",
             sourceEnv: {},
