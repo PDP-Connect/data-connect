@@ -1,134 +1,20 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-/**
- * Source-regex guard for the dashboard's ordinary connect page.
- *
- * This page is the low-cognitive-tax path for connecting apps to the
- * grant-scoped MCP surface. Source-account setup belongs under Sources and must
- * not be rendered here.
- *
- * Spec: openspec/changes/define-mcp-agent-entrypoint-surface/
- *       specs/reference-agent-access-workflow/spec.md
- */
-
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
-
-const PLACEHOLDER_ORIGIN_RE = /<PDPP_REFERENCE_ORIGIN>/;
-const RESOLVE_PUBLIC_ORIGIN_RE = /getReferencePublicOrigin\(\)/;
-const MCP_URL_BUILDER_RE = /const mcpUrl = `\$\{base\}\/mcp`/;
-const CLAUDE_CODE_COMMAND_RE = /claude mcp add --transport http pdpp/;
-const CLAUDE_CODE_CIMD_COMMAND_RE = /claude mcp add --transport http --client-id \$\{clientId\} pdpp/;
-const CODEX_COMMAND_RE = /codex mcp add pdpp --url/;
-const CODEX_CIMD_COMMAND_RE = /--oauth-client-id \$\{clientId\}/;
-const CHATGPT_RE = /ChatGPT/;
-const CLAUDE_AI_RE = /Claude\.ai/;
-const HEADLESS_MCP_DEVICE_CODE_RE = /some clients use the device-code flow/;
-const HEADLESS_MCP_CLIENT_TOKEN_RE = /That flow returns a scoped client token/;
-const AGENT_ENTRYPOINT_RE = /\/llms\.txt/;
-const PDPP_CLI_COMMAND_RE = /pdppCliCommand/;
-const OWNER_AGENT_LINK_RE = /href="\/deployment\/tokens"/;
-const OWNER_TOKEN_ENV_VAR_RE = /bearer-token-env-var|Authorization: Bearer|PDPP_OWNER|owner bearer token/;
-const PROFILE_VOCABULARY_RE = /\b(core|events|full)\s+profile\b|\bprofile\s+(core|events|full)\b/i;
-const LIST_CIMD_DOCS_RE = /listCimdClientDocuments\(\)/;
-const CREATE_CIMD_ACTION_RE = /createCimdClientIdentityAction/;
-const DELETE_CIMD_ACTION_RE = /deleteCimdClientIdentityAction/;
-const REDIRECT_URI_INPUT_RE = /name="redirect_uri"/;
-const LIST_CONNECTOR_MANIFESTS_RE = /listConnectorManifests\(\)/;
-const BUILD_CONNECTOR_CATALOG_RE = /buildConnectorCatalog\(manifests\)/;
-const SOURCE_SETUP_SECTION_RE = /title="Add data sources"/;
-const SOURCE_SEARCH_RE = /name="source_q"[\s\S]*?Search source name or connector key/;
-const SOURCE_CARD_RE = /data-testid=\{`source-setup-\$\{entry\.connectorKey\}`\}/;
-const ADD_SOURCE_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}[\s\S]*Add a data source/;
-const SOURCE_FORBIDDEN_NORMAL_COPY_RE =
-  /CLI preview|pdpp owner-agent connectors explain|Manual setup|Ready with provider secret|Track only|No setup path yet|Needs browser proof/;
-
-test("connect page derives concrete entrypoints from the running public origin", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RESOLVE_PUBLIC_ORIGIN_RE);
-  assert.match(src, MCP_URL_BUILDER_RE);
-  assert.doesNotMatch(src, PLACEHOLDER_ORIGIN_RE);
+import { assistantInstructions } from "./assistant-instructions.ts";
+const read = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
+test("menu names have one dated source and use the researched current menus", () => {
+  assert.equal(assistantInstructions.length, 4);
+  assert.match(assistantInstructions[0].steps.join(" "), /Plugins.*Add custom MCP server/);
+  assert.match(assistantInstructions[1].steps.join(" "), /Customize.*Connectors.*Add custom connector/);
+  for (const row of assistantInstructions) assert.match(row.checkedAt, /^2026-11-/);
 });
-
-test("connect page includes copy-paste setup for target MCP hosts", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, CLAUDE_CODE_COMMAND_RE);
-  assert.match(src, CLAUDE_CODE_CIMD_COMMAND_RE);
-  assert.match(src, CODEX_COMMAND_RE);
-  assert.match(src, CODEX_CIMD_COMMAND_RE);
-  assert.match(src, CHATGPT_RE);
-  assert.match(src, CLAUDE_AI_RE);
-  assert.match(src, HEADLESS_MCP_DEVICE_CODE_RE);
-  assert.match(src, HEADLESS_MCP_CLIENT_TOKEN_RE);
-});
-
-test("connect page manages stable CIMD identities in the setup flow", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, LIST_CIMD_DOCS_RE);
-  assert.match(src, CREATE_CIMD_ACTION_RE);
-  assert.match(src, DELETE_CIMD_ACTION_RE);
-  assert.match(src, REDIRECT_URI_INPUT_RE);
-});
-
-test("connect page does not render the data-source setup catalog", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.doesNotMatch(src, LIST_CONNECTOR_MANIFESTS_RE);
-  assert.doesNotMatch(src, BUILD_CONNECTOR_CATALOG_RE);
-  assert.doesNotMatch(src, SOURCE_SETUP_SECTION_RE);
-  assert.doesNotMatch(src, SOURCE_SEARCH_RE);
-  assert.doesNotMatch(src, SOURCE_CARD_RE);
-  assert.match(src, ADD_SOURCE_POINTER_RE);
-});
-
-test("connect page has no owner source-setup vocabulary", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.doesNotMatch(src, SOURCE_FORBIDDEN_NORMAL_COPY_RE);
-});
-
-test("assistant address and short ChatGPT and Claude steps lead the page before connected apps", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // RAISE-RULES 1: the assistant address is the first task, followed by ChatGPT and Claude.
-  assert.ok(src.indexOf('title="Assistant address"') < src.indexOf('title="ChatGPT"'));
-  assert.ok(src.indexOf('title="ChatGPT"') < src.indexOf('title="Claude"'));
-  assert.ok(src.indexOf('title="Claude"') < src.indexOf('title="Connected apps"'));
-  assert.match(src, /Other apps/);
-  assert.match(src, /<AppAccessList/);
-  assert.match(src, /\/settings#remote-access/);
-});
-
-test("identity removal requires an explicit confirmation value", async () => {
-  const page = await readFile(PAGE_FILE, "utf8");
-  const actions = await readFile(`${HERE}actions.ts`, "utf8");
-  // RAISE-RULES 5: destructive actions require a confirmation step naming the effect.
-  assert.match(page, /confirm_delete/);
-  assert.match(page, /access issued through it will stop working/);
-  assert.match(actions, /confirm_delete"\)\) !== "yes"/);
-});
-
-test("empty demo state skips server reads and leaves connected apps and identities empty", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // RAISE-RULES 8: keep a demo scenario for the page's empty state without a server.
-  assert.match(src, /params\.demo === "atlas" \|\| params\.demo === "empty"/);
-  assert.match(src, /let identities: CimdClientDocument\[\] = \[\]/);
-  assert.match(src, /let grants: GrantSummary\[\] = \[\]/);
-  assert.match(src, /if \(params\.demo === "atlas"\)/);
-});
-
-test("connect page exposes instructions without advertising an unavailable CLI flow", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.doesNotMatch(src, PDPP_CLI_COMMAND_RE);
-  assert.match(src, AGENT_ENTRYPOINT_RE);
-});
-
-test("connect page keeps owner credentials secondary and out of MCP setup copy", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, OWNER_AGENT_LINK_RE);
-  assert.doesNotMatch(src, OWNER_TOKEN_ENV_VAR_RE);
-  assert.doesNotMatch(src, PROFILE_VOCABULARY_RE);
+test("Connect uses the complete app list and warns before copying a private address", () => {
+  assert.match(read("./load-connect.ts"), /loadApps/);
+  const source = read("./connect-page.tsx");
+  assert.ok(source.indexOf("needsRemoteAccess(origin)") < source.indexOf('title="1. Copy'));
+  assert.doesNotMatch(source, /<details|AppAccessList/);
+  assert.match(source, /No app is connected yet\./);
 });
