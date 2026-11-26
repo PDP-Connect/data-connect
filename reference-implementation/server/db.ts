@@ -6526,8 +6526,11 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
 }
 
 function buildSqliteSchemaInTransaction(raw: SqliteDatabase, opts: InitDbOptions): void {
-  // The caller holds BEGIN IMMEDIATE across schema probes and DDL. Only
-  // acquiring that outer write lock needs a busy retry.
+  // The caller holds BEGIN IMMEDIATE across schema probes and DDL. The busy
+  // retry in buildSqliteSchema wraps this whole body, not only the lock
+  // acquisition: a transient failure anywhere inside it (body, onSchemaMigration
+  // callbacks, commit) rolls the unit back and runs it again, so a callback can
+  // run more than once for one successful bootstrap.
   raw.exec(SCHEMA);
   // The red-stage table may already contain random handles. Add metadata in
   // place so those exact issued mappings remain readable as legacy rows.
@@ -7133,30 +7136,55 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   const raw = (restoredMemorySchema
     ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
     : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
-  sqliteStoreCacheGeneration += 1;
-  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
-  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+  // This function owns `raw` until it assigns `db`. Closing it on a failure
+  // before that point is the only way it is ever closed: `closeDb()` cannot
+  // reach a handle that was never published. A previous handle belongs to its
+  // caller (see `detachDb()`) and is not touched here.
+  try {
+    sqliteStoreCacheGeneration += 1;
+    sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
+    raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
 
-  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
-  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
-  // invalid on in-memory DBs.
-  if (path !== ":memory:") {
-    raw.pragma("journal_mode = WAL");
-    raw.pragma("synchronous = NORMAL");
-    raw.pragma("temp_store = MEMORY");
-    raw.pragma("mmap_size = 268435456");
-    raw.pragma("cache_size = -65536");
-  }
+    // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
+    // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
+    // invalid on in-memory DBs.
+    if (path !== ":memory:") {
+      raw.pragma("journal_mode = WAL");
+      raw.pragma("synchronous = NORMAL");
+      raw.pragma("temp_store = MEMORY");
+      raw.pragma("mmap_size = 268435456");
+      raw.pragma("cache_size = -65536");
+    }
 
-  const vectorIndexKind = loadVectorExtension(raw);
+    const vectorIndexKind = loadVectorExtension(raw);
 
-  // SQLite connection settings are not part of a serialized database. The
-  // schema-building path restores foreign_keys during its migrations; a
-  // deserialized connection must restore it explicitly.
-  if (restoredMemorySchema || restoredFileSchema) {
-    sqliteSchemaSnapshotRestores += 1;
-    raw.pragma("foreign_keys = ON");
+    // SQLite connection settings are not part of a serialized database. The
+    // schema-building path restores foreign_keys during its migrations; a
+    // deserialized connection must restore it explicitly.
+    if (restoredMemorySchema || restoredFileSchema) {
+      sqliteSchemaSnapshotRestores += 1;
+      raw.pragma("foreign_keys = ON");
+      db = withCachedPrepare(raw);
+      Object.defineProperty(raw, "vectorIndexKind", {
+        configurable: false,
+        enumerable: true,
+        value: vectorIndexKind,
+        writable: false,
+      });
+      return db;
+    }
+
+    buildSqliteSchema(raw, opts);
+    if (
+      path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
+    ) {
+      sqliteMemorySchemaSnapshot = raw.serialize();
+    }
     db = withCachedPrepare(raw);
+    // Stamp the chosen vector-index backend onto the wrapped db so
+    // search-semantic.js can select without re-probing. The Proxy's
+    // get-handler falls through to Reflect for non-`prepare` properties,
+    // so direct property reads like `db.vectorIndexKind` work.
     Object.defineProperty(raw, "vectorIndexKind", {
       configurable: false,
       enumerable: true,
@@ -7164,24 +7192,12 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
       writable: false,
     });
     return db;
+  } catch (error) {
+    try {
+      raw.close();
+    } catch {
+      /* best-effort: report the bootstrap error, not the close error */
+    }
+    throw error;
   }
-
-  buildSqliteSchema(raw, opts);
-  if (
-    path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
-  ) {
-    sqliteMemorySchemaSnapshot = raw.serialize();
-  }
-  db = withCachedPrepare(raw);
-  // Stamp the chosen vector-index backend onto the wrapped db so
-  // search-semantic.js can select without re-probing. The Proxy's
-  // get-handler falls through to Reflect for non-`prepare` properties,
-  // so direct property reads like `db.vectorIndexKind` work.
-  Object.defineProperty(raw, "vectorIndexKind", {
-    configurable: false,
-    enumerable: true,
-    value: vectorIndexKind,
-    writable: false,
-  });
-  return db;
 }

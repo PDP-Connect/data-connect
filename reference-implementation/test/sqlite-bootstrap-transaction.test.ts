@@ -13,7 +13,25 @@ import Database from "./helpers/sqlite-driver.ts";
 
 const injectedFailure = new Error("injected late bootstrap failure");
 
-test("SQLite bootstrap rolls back the whole schema and restores foreign keys after a late failure", () => {
+type Connection = InstanceType<typeof Database>;
+
+/**
+ * Record every connection `initDb` touches. It calls `pragma` on the raw
+ * handle before anything can fail, so a failed bootstrap's handle is in the
+ * list even though `initDb` never returned it.
+ */
+function trackConnections(): { connections: Connection[]; restore(): void } {
+  const prototype = Database.prototype;
+  const original = prototype.pragma;
+  const connections: Connection[] = [];
+  prototype.pragma = function (this: Connection, ...args: Parameters<typeof original>) {
+    if (!connections.includes(this)) connections.push(this);
+    return original.apply(this, args);
+  } as typeof original;
+  return { connections, restore: () => { prototype.pragma = original; } };
+}
+
+test("SQLite bootstrap rolls back the whole schema, restores foreign keys and closes its handle after a late failure", () => {
   const dir = mkdtempSync(join(tmpdir(), "sqlite-bootstrap-transaction-"));
   const path = join(dir, "test.sqlite");
   const seed = new Database(path, { timeout: 1000 });
@@ -21,24 +39,43 @@ test("SQLite bootstrap rolls back the whole schema and restores foreign keys aft
   const before = seed.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
   seed.close();
   const prototype = Database.prototype;
-  const original = prototype.exec;
-  let failedConnection: InstanceType<typeof Database> | undefined;
+  const originalExec = prototype.exec;
+  const originalClose = prototype.close;
+  const tracker = trackConnections();
+  let failedConnection: Connection | undefined;
+  // initDb closes the failed handle, so read its state at the moment it closes.
+  let stateAtClose:
+    | { foreignKeys: unknown; schema: unknown; preserved: unknown }
+    | undefined;
   prototype.exec = function (sql: string) {
     if (sql.includes("CREATE TRIGGER stamp_terminal_manifest_generation")) {
       failedConnection = this;
       throw injectedFailure;
     }
-    return original.call(this, sql);
+    return originalExec.call(this, sql);
+  };
+  prototype.close = function (this: Connection) {
+    if (this === failedConnection) {
+      stateAtClose = {
+        foreignKeys: this.pragma("foreign_keys", { simple: true }),
+        schema: this.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all(),
+        preserved: this.prepare("SELECT value FROM preserved").all(),
+      };
+    }
+    return originalClose.call(this);
   };
   try {
     assert.throws(() => initDb(path), (error) => error === injectedFailure);
     assert.ok(failedConnection);
-    assert.equal(failedConnection.pragma("foreign_keys", { simple: true }), 1);
-    assert.deepEqual(failedConnection.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all(), before);
-    assert.deepEqual(failedConnection.prepare("SELECT value FROM preserved").all(), [{ value: "keep" }]);
+    assert.ok(stateAtClose, "initDb must close the handle it could not publish");
+    assert.equal(stateAtClose.foreignKeys, 1);
+    assert.deepEqual(stateAtClose.schema, before);
+    assert.deepEqual(stateAtClose.preserved, [{ value: "keep" }]);
+    assert.deepEqual(tracker.connections.filter((connection) => connection.open), []);
   } finally {
-    prototype.exec = original;
-    failedConnection?.close();
+    prototype.exec = originalExec;
+    prototype.close = originalClose;
+    tracker.restore();
     closeDb();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -100,8 +137,11 @@ test("SQLite bootstrap refuses foreign-key violations before committing schema c
     INSERT INTO bootstrap_child VALUES (99);
   `);
   seed.close();
+  const tracker = trackConnections();
   try {
     assert.throws(() => initDb(path), /SQLite bootstrap failed foreign_key_check/);
+    assert.ok(tracker.connections.length > 0, "the test must observe the bootstrap connection");
+    assert.deepEqual(tracker.connections.filter((connection) => connection.open), []);
     const readback = new Database(path);
     try {
       assert.equal(readback.prepare("SELECT name FROM sqlite_master WHERE name = 'grants'").get(), undefined);
@@ -110,6 +150,34 @@ test("SQLite bootstrap refuses foreign-key violations before committing schema c
       readback.close();
     }
   } finally {
+    tracker.restore();
+    closeDb();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed SQLite bootstrap leaves the caller's previous handle open", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sqlite-bootstrap-previous-handle-"));
+  const bad = join(dir, "bad.sqlite");
+  const seed = new Database(bad);
+  seed.pragma("foreign_keys = OFF");
+  seed.exec(`
+    CREATE TABLE bootstrap_parent (id INTEGER PRIMARY KEY);
+    CREATE TABLE bootstrap_child (parent_id INTEGER REFERENCES bootstrap_parent(id));
+    INSERT INTO bootstrap_child VALUES (99);
+  `);
+  seed.close();
+  const previous = initDb(":memory:");
+  const tracker = trackConnections();
+  try {
+    assert.throws(() => initDb(bad), /SQLite bootstrap failed foreign_key_check/);
+    const failed = tracker.connections.filter((connection) => connection !== (previous as unknown));
+    assert.ok(failed.length > 0);
+    assert.deepEqual(failed.filter((connection) => connection.open), []);
+    assert.equal(previous.prepare("SELECT 1 AS one").get<{ one: number }>()?.one, 1);
+  } finally {
+    tracker.restore();
+    previous.close();
     closeDb();
     rmSync(dir, { recursive: true, force: true });
   }
