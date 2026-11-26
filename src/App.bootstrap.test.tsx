@@ -19,6 +19,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 // budget. Nothing in the graph reads the Tauri marker at import time; every
 // isTauriRuntime() check runs inside a hook or handler.
 import App from "./App"
+import { deriveIconUrls } from "./apps/icon-url"
 
 const invokedCommands: string[] = []
 
@@ -147,4 +148,22 @@ it("places valid four-digit early calendar years on the timeline", async () => {
   }] }, { maxRecords: 10, maxStreams: 1 })
   expect(result.dayGroups.map(group => group.dayKey)).toEqual(["0099-01-01", "0004-02-29"])
   expect(result.undatedRecords.map(record => record.recordId)).toEqual(["invalid"])
+})
+
+describe("app icon candidates", () => {
+  it("keeps an explicit icon first, deduplicates it, and resolves fallbacks at the app origin", () => {
+    expect(deriveIconUrls("https://app.example/workspace/home", "  https://app.example/favicon.ico  ")).toEqual([
+      "https://app.example/favicon.ico",
+      "https://app.example/icon.svg",
+      "https://app.example/icon.png",
+      "https://app.example/apple-touch-icon.png",
+    ])
+  })
+
+  it("retains a valid explicit icon when the app address cannot be resolved", () => {
+    expect(deriveIconUrls("not-an-app-url", "  https://icons.example/app.png  ")).toEqual([
+      "https://icons.example/app.png",
+    ])
+    expect(deriveIconUrls(null, "   ")).toEqual([])
+  })
 })
