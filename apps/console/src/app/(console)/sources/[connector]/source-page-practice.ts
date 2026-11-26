@@ -224,7 +224,7 @@ function buildPracticeModel(
   if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: "Northwind" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
   if (state === "settings-machine-change" || state === "settings-migration-choice" || state === "settings-long-list") {
     const base = buildPracticeModel("settings-question")!;
-    const revision = { ...base.configRevisions[0]!, is_explicit: state !== "settings-machine-change", origin: "agent" as const, set_by: state !== "settings-long-list" ? "migration" : "app:Sample app", source_of_change: "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
+    const revision = { ...base.configRevisions[0]!, is_explicit: state !== "settings-machine-change", origin: "agent" as const, set_by: state !== "settings-long-list" ? "migration" : "app:Sample app", source_of_change: state === "settings-long-list" ? "App request" : "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
     model.configuration = { ...base.configuration!, options_schema: { ...base.configuration!.options_schema!, options: [{ ...base.configuration!.options_schema!.options[0]!, option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
     model.configRevisions = [revision];
   }

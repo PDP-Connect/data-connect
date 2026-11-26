@@ -120,7 +120,7 @@ function ConfigEditor({
   const fieldErrors = useMemo(() => validateDraft(schema, draft), [schema, draft]);
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
   const proposal = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
-  const pending = proposal?.revision === dismissed || (proposal && !proposal.is_explicit && (proposal.origin === "migration" || proposal.source_of_change.startsWith("migration:"))) ? null : proposal;
+  const pending = proposal?.revision === dismissed || (proposal && (proposal.origin === "migration" || proposal.source_of_change.startsWith("migration:"))) ? null : proposal;
 
   const resetToSummary = useCallback(() => {
     setStep("edit");
@@ -270,7 +270,7 @@ function ConfigEditor({
         />
       ) : null}
 
-      {config.active_revision?.set_at ? <p className="pdpp-body text-muted-foreground">Last changed {formatRelative(new Date(config.active_revision.set_at), Date.now())}.</p> : null}
+      {config.active_revision?.set_at ? <p className="pdpp-body text-muted-foreground">{config.active_revision.origin === "migration" || config.active_revision.source_of_change.startsWith("migration:") ? `DataConnect updated this setting on ${new Date(config.active_revision.set_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}.` : `Last changed ${formatRelative(new Date(config.active_revision.set_at), Date.now())}.`}</p> : null}
     </ConfigShell>
   );
 }

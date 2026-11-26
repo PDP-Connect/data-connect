@@ -402,8 +402,7 @@ test("pending settings summarize codes and hide machine changes", async () => {
   const machine = await renderDemo("settings-machine-change");
   assert.doesNotMatch(visibleOutsideDetails(machine), /Awaiting your confirmation|migration:|C000/);
   const explicit = await renderDemo("settings-migration-choice");
-  assert.match(visibleOutsideDetails(explicit), /DataConnect asked to change this/);
-  assert.match(visibleOutsideDetails(explicit), /250 channels/);
+  assert.doesNotMatch(visibleOutsideDetails(explicit), /DataConnect asked to change this|Awaiting your confirmation/);
   assert.doesNotMatch(visibleOutsideDetails(explicit), /C000|migration:/);
   const app = await renderDemo("settings-long-list");
   assert.match(visibleOutsideDetails(app), /250 channels/);
