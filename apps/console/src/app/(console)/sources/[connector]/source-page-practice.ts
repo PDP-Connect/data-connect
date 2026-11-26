@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { AGREEMENT_STATES, agreementPractice } from "./agreement-practice.ts";
 import type { SourceStatusRow } from "../../lib/source-status-words.ts";
 import type { ConfigRevisionWire } from "./connection-config-view-model.ts";
 import {
@@ -10,6 +11,7 @@ import {
 import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
+  ...AGREEMENT_STATES.map(state => `agreement-${state}`),
   "apps-some", "apps-none", "summary-zero-held", "device-zero-pending", "device-no-steps",
   "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
@@ -247,7 +249,7 @@ function buildPracticeModel(
 
 
 export function buildSourcePracticeModel(state: string): ConnectorPageModel | null {
-  let model = buildPracticeModel(state);
+  let model = state.startsWith("agreement-") ? agreementPractice(state.slice(10)) : buildPracticeModel(state);
   if (!model) return null;
   if (state === "trouble-unknown") {
     const healthy = buildRecoveryDemoModel(19);
