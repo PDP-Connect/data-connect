@@ -18,14 +18,38 @@ import {
 } from "./owner-token.ts"
 import { verifyDashboardSession } from "./verify-session.ts"
 
-export async function exportRecoveryKitCode(): Promise<string> {
+/** The server refused the export; `code` is its stable error code (never carries the password). */
+export class RecoveryKitExportRefusedError extends Error {
+  readonly code: string
+  readonly status: number
+
+  constructor(code: string, status: number, message: string) {
+    super(message)
+    this.name = "RecoveryKitExportRefusedError"
+    this.code = code
+    this.status = status
+  }
+}
+
+function errorCodeOf(body: string): string | null {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } }).error?.code
+    return typeof code === "string" ? code : null
+  } catch {
+    return null
+  }
+}
+
+/** The owner types the password again for every export; it is sent once and not kept. */
+export async function exportRecoveryKitCode(password: string): Promise<string> {
   await verifyDashboardSession()
   const token = await getOwnerToken()
   let response: Response
   try {
     response = await fetch(`${getRsInternalUrl()}/v1/owner/recovery-kit/export`, {
       cache: "no-store",
-      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ password }),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       method: "POST",
     })
   } catch (err) {
@@ -34,6 +58,14 @@ export async function exportRecoveryKitCode(): Promise<string> {
   }
   if (!response.ok) {
     const body = await response.text()
+    const code = errorCodeOf(body)
+    if (code?.startsWith("owner_")) {
+      throw new RecoveryKitExportRefusedError(
+        code,
+        response.status,
+        describeErrorText(body, `recovery kit export refused (${response.status})`)
+      )
+    }
     throw new ResourceServerHttpError(
       "/v1/owner/recovery-kit/export",
       response.status,
