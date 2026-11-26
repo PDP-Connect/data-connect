@@ -170,7 +170,7 @@ test("canvas progress + spinner indicators are aria-hidden (decorative), with an
 
 // ─── W3: loading feedback at the point of attention (scrolled-down Load-more) ──
 //
-// THE BUG (Tim re-flagged, reproduced live): the only Load-more "animation" was
+// THE BUG (reproduced live): the only Load-more "animation" was
 // `rr-x-progress` — a 2px bar pinned to the TOP of the canvas at y:0. But the
 // scroll container is `.rr-content` (overflow-y:auto). So a scrolled-down owner
 // who clicks Load-more sees NO feedback: the bar is off-screen above them

@@ -79,7 +79,7 @@
 //!   ~62MB `cloudflare/cloudflared:latest` image on a fast connection;
 //!   untested on a slow one) on top of everything else.
 //!
-//! Tim's own assessment, independently confirmed by this investigation:
+//! The owner's own assessment, independently confirmed by this investigation:
 //! Docker is the MOST complex option here, not a shortcut -- strictly more
 //! moving parts (binary + daemon + host-network plumbing + a second orphan
 //! class + pull latency) than the native path it would be a fallback for,
@@ -1203,7 +1203,7 @@ mod tests {
     /// on connectivity. Instead, this only proves the NEGATIVE half of the
     /// preference decision -- that a present system binary is never
     /// consulted a second time and the closure is called at most once --
-    /// which is the actual bug class Tim's finding could have hidden (a
+    /// which is the actual bug class that finding could have hidden (a
     /// preference check that looks right but re-checks PATH after already
     /// deciding to download, potentially flip-flopping). The real download
     /// mechanics (checksum verification, extraction, caching) are already

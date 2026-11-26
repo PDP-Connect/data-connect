@@ -442,8 +442,8 @@ function validateMyDevicesOnlyConfig(config: RemoteAccessConfig): { ok: true; co
  * `owner-remote-access.ts`'s POST /config handler, paired with
  * `isRemoteOriginRequest` (`reachability-contract.ts`): if the request is
  * remote AND this returns true, the config change could strand the owner
- * with no path back except physical access to the machine -- Tim's exact
- * scenario.
+ * with no path back except physical access to the machine -- the exact
+ * lock-out scenario.
  *
  * `submittingCredential` has to be an explicit input, not inferred by
  * diffing `current` against `next`: neither `ngrok_authtoken_sealed` nor

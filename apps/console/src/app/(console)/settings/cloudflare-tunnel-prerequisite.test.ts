@@ -13,14 +13,11 @@ import {
 } from "./cloudflare-tunnel-prerequisite.tsx"
 import { offRemoteAccessConfig } from "./remote-access.ts"
 
-// The exact tunnel ID from Tim's own real Cloudflare dashboard tunnel
-// ("DataConnect Testing"), confirmed live 2026-09-21 -- using a real,
-// previously-observed ID here rather than an arbitrary one keeps this test
-// traceable to something that actually happened, not just plausible-looking
-// fiction.
+// A synthetic tunnel ID in the same shape as a real one (a UUID), so the
+// decoder is exercised on realistic input.
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 
-const REAL_TUNNEL_ID = "f0b57337-ae5b-493d-a9af-949a334f28b0"
+const SAMPLE_TUNNEL_ID = "3f6c1a52-9d7e-4b08-8c14-5a2e7b9d0c61"
 
 function encodeToken(payload: Record<string, unknown>): string {
   return btoa(JSON.stringify(payload))
@@ -29,14 +26,14 @@ function encodeToken(payload: Record<string, unknown>): string {
 test("decodes a well-formed token into its account and tunnel IDs", () => {
   const token = encodeToken({
     a: "0123456789abcdef0123456789abcdef",
-    t: REAL_TUNNEL_ID,
+    t: SAMPLE_TUNNEL_ID,
     s: "c29tZXNlY3JldA==",
   })
   const result = decodeCloudflareTunnelToken(token)
   assert.deepEqual(result, {
     ok: true,
     accountId: "0123456789abcdef0123456789abcdef",
-    tunnelId: REAL_TUNNEL_ID,
+    tunnelId: SAMPLE_TUNNEL_ID,
   })
 })
 
@@ -46,7 +43,7 @@ test("decodes correctly even with the optional endpoint field present", () => {
   // decoding either way.
   const token = encodeToken({
     a: "0123456789abcdef0123456789abcdef",
-    t: REAL_TUNNEL_ID,
+    t: SAMPLE_TUNNEL_ID,
     s: "c29tZXNlY3JldA==",
     e: "198.51.100.1:7844",
   })
@@ -58,7 +55,7 @@ test("never includes the secret field anywhere in a successful decode result", (
   const secret = "c29tZXNlY3JldA=="
   const token = encodeToken({
     a: "0123456789abcdef0123456789abcdef",
-    t: REAL_TUNNEL_ID,
+    t: SAMPLE_TUNNEL_ID,
     s: secret,
   })
   const result = decodeCloudflareTunnelToken(token)
@@ -112,7 +109,7 @@ test("rejects a whole install command pasted instead of just the token", () => {
   // --token <TOKEN>`) command, not a bare token by itself.
   const token = encodeToken({
     a: "0123456789abcdef0123456789abcdef",
-    t: REAL_TUNNEL_ID,
+    t: SAMPLE_TUNNEL_ID,
     s: "c29tZXNlY3JldA==",
   })
   const wholeCommand = `cloudflared service install ${token}`
