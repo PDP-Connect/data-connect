@@ -15,7 +15,7 @@ test("an old sync remains readable without retained events and does not invent k
   assert.equal(model?.kinds,null); assert.equal(model?.trigger,null); assert.equal(model?.connection,"mail-account");
 });
 test("the current handle's liveness overrides an older durable result",async()=>{
-  status={object:"run_status",connector_id:"gmail",connector_instance_id:"mail-account",failure:null,links:{timeline:""},records_permanently_rejected:null,started_at:row.started_at,completed_at:null,status:"active",terminal_reason:null,trace_id:null};
+  status={object:"run_status",connector_id:"gmail",connector_instance_id:"mail-account",failure:null,links:{timeline:""},record_outcomes: { permanently_rejected: null, unaccounted_by_stream: {} },started_at:row.started_at,completed_at:null,status:"active",terminal_reason:null,trace_id:null};
   const {loadOneSync}=await import("./load-one-sync.ts");
   assert.equal((await loadOneSync("old-sync",{})).model?.outcome,"syncing");
 });

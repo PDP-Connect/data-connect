@@ -217,7 +217,7 @@ function statusFor(status: RunStatusEnvelope["status"], failure: RunStatusEnvelo
     failure,
     links: { timeline: `/_ref/runs/${RUN_ID}/timeline` },
     object: "run_status",
-    records_permanently_rejected: 0,
+    record_outcomes: { permanently_rejected: 0, unaccounted_by_stream: {} },
     run_id: RUN_ID,
     started_at: "2026-11-25T11:58:00.000Z",
     status,
