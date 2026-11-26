@@ -11,13 +11,17 @@ import type {
 } from "../lib/ref-client.ts"
 import { pendingApprovalAppName } from "../grants/app-access.ts"
 import { disableSubscriptionAction } from "./disable-action.ts"
-import { webhookState } from "./webhook-model.ts"
+import { webhookHost, webhookNotice, type WebhookScope, webhookState } from "./webhook-model.ts"
 export function WebhookList({
   rows,
   names,
   practice = false,
+  peek,
+  detailError,
 }: {
-  rows: ClientEventSubscriptionSummary[]
+  peek?: ClientEventSubscriptionDetail | null;
+  detailError?: string;
+  rows: Array<ClientEventSubscriptionSummary & { scope?: WebhookScope }>
   names: Record<string, string>
   practice?: boolean
 }) {
@@ -35,12 +39,13 @@ export function WebhookList({
             }
           >
             <p>{pendingApprovalAppName(names[row.client_id])}</p>
-            <p className="text-sm text-muted-foreground">{row.callback_host}</p>
+            <p className="text-sm text-muted-foreground">{webhookHost(row.callback_host)}</p>
             <p className="text-sm text-muted-foreground">
-              Told when your records change
+              {webhookNotice(row.scope)}
             </p>
             <p className="text-sm text-muted-foreground">{webhookState(row)}</p>
           </Link>
+          {peek?.subscription_id === row.subscription_id ? <WebhookDetail row={peek} name={names[row.client_id]} error={detailError} practice={practice} returnTo="list" /> : null}
         </li>
       ))}
     </ul>
@@ -69,7 +74,7 @@ export function WebhookDetail({
       <p className="break-all text-sm text-muted-foreground">
         {row.callback_url}
       </p>
-      <p>Told when your records change</p>
+      <p>{webhookNotice(row.scope)}</p>
       {canStop ? (
         confirm ? (
           <form

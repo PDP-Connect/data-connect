@@ -11,3 +11,18 @@ test("webhooks cover empty and each state without protocol words", () => {
     "Stopped",
   ])
 })
+
+test("webhook notices describe the subscription scope rather than assuming every record", async () => {
+  const { webhookNotice, webhookHost } = await import("./webhook-model.ts")
+  assert.match(webhookNotice(undefined), /not known/)
+  assert.match(webhookNotice({ streams: [] }), /No record changes/)
+  assert.match(
+    webhookNotice({ streams: [{ name: "*" }] }),
+    /your records change/
+  )
+  assert.match(
+    webhookNotice({ streams: [{ name: "messages" }] }),
+    /selected records/
+  )
+  assert.equal(webhookHost("127.0.0.1:9"), "An address on this computer")
+})

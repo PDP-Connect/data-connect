@@ -38,3 +38,14 @@ export function buildWebhookPractice(
     pending_queue_count: 0,
   }))
 }
+
+export type WebhookScope = { streams?: Array<{ name: string }>; filters?: { streams?: readonly string[] } } | null;
+export function webhookNotice(scope: WebhookScope | undefined): string {
+  if (!scope || !Array.isArray(scope.streams)) return "What this app listens for is not known.";
+  const streams = scope.filters?.streams ?? scope.streams.map(stream => stream.name);
+  if (!streams.length) return "No record changes are selected.";
+  return streams.includes("*") ? "Told when your records change" : "Told when the selected records change";
+}
+export function webhookHost(host: string) {
+  return /^(?:localhost|127\.\d+\.\d+\.\d+|\[::1\])(?::\d+)?$/i.test(host) ? "An address on this computer" : host;
+}
