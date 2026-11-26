@@ -436,6 +436,10 @@ export function buildConnectorCatalog(
       connectorKey,
       configuredProviderAuthConnectorKeys,
       manifest,
+      // The caller of this pure projection hands in manifests it already took
+      // from the server's registered catalog or the shipped snapshot (tests and
+      // demo data). The live Add Source page does not come through here.
+      proofProvenance: "registered_catalog",
       ...(deploymentEnv ? { deploymentEnv } : {}),
     });
     const setupCopy = setupCopyFromManifest(manifest);

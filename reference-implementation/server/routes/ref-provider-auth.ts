@@ -31,7 +31,7 @@
 // Injectable interfaces allow deterministic test coverage without live provider
 // credentials (see spec requirement: "No live provider credentials").
 
-import { buildConnectionSetupPlan } from "../connection-setup-plan.ts";
+import { buildConnectionSetupPlan, type ProofProvenance } from "../connection-setup-plan.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -502,7 +502,13 @@ export function mountRefProviderAuthInitiate(app: AppLike, ctx: MountRefProvider
           configuredProviderAuthConnectorKeys?: readonly string[];
           deploymentEnv?: Readonly<Record<string, string | undefined>>;
           manifest: ConnectorManifestLike;
-        } = { connectorKey: connectorId, manifest };
+          proofProvenance: ProofProvenance;
+        } = {
+          connectorKey: connectorId,
+          manifest,
+          // `resolveRegisteredConnectorManifest` reads the registry only.
+          proofProvenance: "registered_catalog",
+        };
         if (ctx.configuredProviderAuthConnectorKeys) {
           setupPlanArgs.configuredProviderAuthConnectorKeys = ctx.configuredProviderAuthConnectorKeys;
         }
