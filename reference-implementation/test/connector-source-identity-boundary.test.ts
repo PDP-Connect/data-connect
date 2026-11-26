@@ -10,17 +10,16 @@
  *
  *   1. a retained declaration keeps its `source.id`; provenance cannot change it (the one exception,
  *      a verified package moving a legacy projection, is in connector-source-identity-move.test.ts);
- *   2. otherwise an explicit declaration is validated and used;
- *   3. otherwise a first-party key takes the reviewed legacy source identity from
- *      the manifest declaration, independent of the
- *      incoming provenance (`manifest_uri`) and alias (`connector_id`);
- *   4. otherwise the registration is refused before any write.
+ *   2. otherwise an explicit declaration or source.id supplies the current identity;
+ *   3. otherwise declared legacy_source_ids may supply a historical projection;
+ *   4. otherwise the key registers without minting a source identity.
  *
  * Covers both write paths.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { PoolClient } from "pg";
 import { executeAsPolyfillConnectorRegister } from "../operations/as-polyfill-connector-register/index.ts";
 import {
   __setRegisterConnectorPhaseHookForTest,
@@ -40,7 +39,12 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
-import { closePostgresStorage, initPostgresStorage } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  getPostgresPool,
+  initPostgresStorage,
+  isPostgresStorageBackend,
+} from "../server/postgres-storage.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
@@ -117,6 +121,30 @@ function retainedSourceId(stored: Record<string, unknown> | null): string | unde
 
 async function storedFor(connectorKey: string): Promise<Record<string, unknown> | null> {
   return ((await getConnectorManifest(connectorKey)) as Record<string, unknown> | null) ?? null;
+}
+
+async function storedConnectorRowFor(connectorKey: string): Promise<{
+  connector_id: string;
+  created_at: string;
+  manifest: Record<string, unknown>;
+} | null> {
+  const row = isPostgresStorageBackend()
+    ? (await getPostgresPool().query<{ connector_id: string; created_at: string; manifest: unknown }>(
+        "SELECT connector_id, created_at, manifest FROM connectors WHERE connector_id = $1",
+        [connectorKey]
+      )).rows[0]
+    : getDb()
+        .prepare("SELECT connector_id, created_at, manifest FROM connectors WHERE connector_id = ?")
+        .get<{ connector_id: string; created_at: string; manifest: string }>(connectorKey);
+  if (!row) {
+    return null;
+  }
+  const manifest = typeof row.manifest === "string" ? JSON.parse(row.manifest) : row.manifest;
+  return {
+    connector_id: row.connector_id,
+    created_at: row.created_at,
+    manifest: manifest as Record<string, unknown>,
+  };
 }
 
 async function assertRejectedWithoutWrite(
@@ -242,8 +270,95 @@ scenario("a declared legacy identity cannot equal another connector's current id
 });
 
 scenario("concurrent legacy identity claims by different keys commit exactly one", async () => {
-  const results = await Promise.allSettled(["srcid-owner-a", "srcid-owner-b"].map((key) => registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true })));
-  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  const keys = ["srcid-owner-a", "srcid-owner-b"];
+  const results = await Promise.allSettled(
+    keys.map((key) => registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }))
+  );
+  const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+  const loserIndex = results.findIndex((result) => result.status === "rejected");
+  assert.notEqual(winnerIndex, -1, "one legacy identity claimant commits");
+  assert.notEqual(loserIndex, -1, "the other claimant is rejected");
+  const loser = rejectionOf(results[loserIndex]) as { code?: unknown; message?: unknown };
+  assert.equal(loser.code, INVALID_REQUEST);
+  assert.match(String(loser.message), /already owned/);
+
+  const storedRows = await Promise.all(keys.map((key) => storedFor(key)));
+  assert.equal(storedRows.filter(Boolean).length, 1, "the source has exactly one persisted owner");
+  assert.deepEqual(storedRows[winnerIndex]?.legacy_source_ids, [EXPLICIT_SOURCE]);
+  assert.equal(storedRows[loserIndex], null, "the refused claimant has no connector row");
+});
+
+scenario("registration and activation cannot claim the same current identity for different keys", async () => {
+  const registrationKey = "srcid-race-register-owner";
+  const activationKey = "srcid-race-activation-owner";
+  let tasks: [Promise<unknown>, Promise<unknown>] | undefined;
+  let blocker: PoolClient | undefined;
+  let blockerHasLock = false;
+
+  try {
+    if (isPostgresStorageBackend()) {
+      const client = await getPostgresPool().connect();
+      blocker = client;
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
+      blockerHasLock = true;
+    }
+
+    tasks = [
+      explicitRegistration(registrationKey, EXPLICIT_SOURCE),
+      publishConnectorActivation(
+        installRecord(
+          activationKey,
+          legacyManifest({
+            connector_id: activationKey,
+            connector_key: activationKey,
+            source: { id: EXPLICIT_SOURCE },
+          })
+        )
+      ),
+    ];
+    if (blockerHasLock) {
+      await waitForOwnershipLockWaiters(2);
+    }
+
+    if (blockerHasLock && blocker) {
+      await blocker.query("COMMIT");
+      blockerHasLock = false;
+    }
+
+    const results = await Promise.allSettled(tasks);
+    const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+    const loserIndex = results.findIndex((result) => result.status === "rejected");
+    assert.notEqual(winnerIndex, -1, "one current identity claimant commits");
+    assert.notEqual(loserIndex, -1, "the other claimant is rejected");
+    const loser = rejectionOf(results[loserIndex]) as { code?: unknown; message?: unknown };
+    assert.equal(loser.code, INVALID_REQUEST);
+    assert.match(String(loser.message), /already owned/);
+
+    const storedRows = await Promise.all([storedFor(registrationKey), storedFor(activationKey)]);
+    assert.equal(storedRows.filter(Boolean).length, 1, "the current source has exactly one persisted owner");
+    const winnerKey = winnerIndex === 0 ? registrationKey : activationKey;
+    const loserKey = loserIndex === 0 ? registrationKey : activationKey;
+    assert.equal(retainedSourceId(storedRows[winnerIndex] ?? null), EXPLICIT_SOURCE);
+    assert.equal(storedRows[loserIndex], null, "the refused claimant has no connector row");
+
+    const winnerActivation = await getConnectorActivation(winnerKey);
+    const loserActivation = await getConnectorActivation(loserKey);
+    if (winnerKey === activationKey) {
+      assert.equal(retainedSourceId(winnerActivation?.canonicalManifest ?? null), EXPLICIT_SOURCE);
+    } else {
+      assert.equal(winnerActivation, null, "registration does not publish an activation");
+    }
+    assert.equal(loserActivation, null, "the refused claimant has no activation row");
+  } finally {
+    if (blockerHasLock) {
+      await blocker?.query("ROLLBACK");
+    }
+    blocker?.release();
+    if (tasks) {
+      await Promise.allSettled(tasks);
+    }
+  }
 });
 
 // Control: an explicit validated declaration is the supported route for a first-party key too.
@@ -314,6 +429,7 @@ scenario("an explicit different source identity cannot replace the retained one"
     }),
     { skipDerivedRepair: true }
   );
+  const before = await storedConnectorRowFor(key);
   await assert.rejects(
     () =>
       registerConnector(
@@ -337,6 +453,42 @@ scenario("an explicit different source identity cannot replace the retained one"
     retainedSourceId(await storedFor(key)),
     EXPLICIT_SOURCE,
     "the retained source must survive the rejected update"
+  );
+  assert.deepEqual(await storedConnectorRowFor(key), before, "a rejected update leaves the complete connector row unchanged");
+});
+
+scenario("a pre-projection retained key mismatch leaves the stored row unchanged", async () => {
+  const key = "amazon";
+  const preProjection = legacyManifest({ connector_id: key, connector_key: key, legacy_source_ids: undefined });
+  if (isPostgresStorageBackend()) {
+    await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)", [
+      key,
+      JSON.stringify(preProjection),
+    ]);
+  } else {
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)").run(key, JSON.stringify(preProjection));
+  }
+
+  const before = await storedConnectorRowFor(key);
+  assert.ok(before);
+  assert.equal(retainedSourceId(before.manifest), undefined, "the stored row predates source projection");
+  assert.throws(
+    () =>
+      normalizeConnectorManifestForStorage(
+        legacyManifest({ connector_id: "gmail", connector_key: "gmail" }),
+        retainedStorageContext(before.manifest)
+      ),
+    /does not match the retained connector key/
+  );
+  await assert.rejects(
+    () => registerConnector(legacyManifest({ connector_id: key, connector_key: "gmail" }), { skipDerivedRepair: true }),
+    CANONICAL_KEY_MESSAGE
+  );
+  assert.equal(await storedConnectorRowFor("gmail"), null, "a mismatched declaration publishes no other row");
+  assert.deepEqual(
+    await storedConnectorRowFor(key),
+    before,
+    "a rejected mismatched declaration cannot alter the retained row"
   );
 });
 
@@ -613,6 +765,33 @@ function explicitRegistration(key: string, sourceId: string, extra: Record<strin
     }),
     { skipDerivedRepair: true }
   );
+}
+
+async function waitForOwnershipLockWaiters(expectedCount: number): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const result = await getPostgresPool().query<{ pid: string }>(
+      `SELECT DISTINCT a.pid::text AS pid
+       FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+       WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
+         AND l.classid = (((hashtext('connector_source_ownership')::bigint >> 32) & 4294967295)::oid)
+         AND l.objid = ((hashtext('connector_source_ownership')::bigint & 4294967295)::oid)
+         AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+         AND a.datname = current_database()`
+    );
+    if (result.rows.length >= expectedCount) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`expected ${expectedCount} distinct PostgreSQL writers waiting for source ownership`);
+}
+
+function rejectionOf(result: PromiseSettledResult<unknown> | undefined): unknown {
+  if (result?.status !== "rejected") {
+    throw new Error("expected a rejected ownership claimant");
+  }
+  return result.reason;
 }
 
 // Causal replay of the unlocked interleaving (source-identity-boundary-r5 model, Locked = FALSE): both writers read
@@ -935,6 +1114,7 @@ scenario("an installer publish cannot rebind a retained source to an explicit di
     }),
     { skipDerivedRepair: true }
   );
+  const before = await storedConnectorRowFor(key);
   await assert.rejects(
     () =>
       publishConnectorActivation(
@@ -955,8 +1135,42 @@ scenario("an installer publish cannot rebind a retained source to an explicit di
       return true;
     }
   );
-  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE, "the registry keeps the retained source");
+  assert.deepEqual(await storedConnectorRowFor(key), before, "a rejected install leaves the complete connector row unchanged");
   assert.equal(await getConnectorActivation(key), null, "no activation is written for a rejected publish");
+});
+
+scenario("an installer cannot claim another connector's current source identity", async () => {
+  const ownerKey = "srcid-install-owner";
+  const claimantKey = "srcid-install-claimant";
+  await registerConnector(
+    legacyManifest({
+      connector_id: ownerKey,
+      connector_key: ownerKey,
+      source_declaration: explicitDeclaration(ownerKey, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const ownerBefore = await storedConnectorRowFor(ownerKey);
+  const claimantManifest = legacyManifest({
+    connector_id: claimantKey,
+    connector_key: claimantKey,
+    source: { id: EXPLICIT_SOURCE },
+  });
+  assert.equal(claimantManifest.source_declaration, undefined, "the incoming package has no explicit SourceDeclaration");
+
+  await assert.rejects(
+    () => publishConnectorActivation(installRecord(claimantKey, claimantManifest)),
+    (error: unknown) => {
+      const err = error as { code?: unknown; message?: unknown };
+      assert.equal(err.code, INVALID_REQUEST);
+      assert.match(String(err.message), /already owned/);
+      return true;
+    }
+  );
+
+  assert.deepEqual(await storedConnectorRowFor(ownerKey), ownerBefore, "the original owner row is unchanged");
+  assert.equal(await storedFor(claimantKey), null, "the refused package has no connector row");
+  assert.equal(await getConnectorActivation(claimantKey), null, "the refused package has no activation row");
 });
 
 scenario("an installer publish accepts a fresh key without minting an identity", async () => {
