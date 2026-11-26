@@ -93,16 +93,33 @@ export function Diagnostics({ children, label = "Details", note }: { children: R
 
 function CopyButton({ label, text }: { label: string; text: string }) {
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  async function copy() {
+    setFailed(null);
+    setCopied(false);
+    const clipboard = navigator.clipboard;
+    if (!clipboard) {
+      setFailed("Clipboard unavailable. Copy the text by hand.");
+      return;
+    }
+    try {
+      await clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      setFailed("Couldn't copy to the clipboard. Copy the text by hand.");
+    }
+  }
   return (
-    <Button
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => setCopied(true));
-      }}
-      type="button"
-      variant="outline"
-    >
-      {copied ? "Copied" : label}
-    </Button>
+    <>
+      <Button onClick={() => void copy()} type="button" variant="outline">
+        {copied ? "Copied" : label}
+      </Button>
+      {failed ? (
+        <span className="text-sm" role="status">
+          {failed}
+        </span>
+      ) : null}
+    </>
   );
 }
 

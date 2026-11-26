@@ -175,6 +175,8 @@ export function RemoteAccessSetting({
     snapshot: ReturnType<typeof projectRuntimeReview>;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Set in the click handler's own tick: `busy` renders only after it, so a fast second click would otherwise pass.
+  const changing = useRef(false);
   const [stale, setStale] = useState(false);
   // The last read that got no answer, for Details under the stale line.
   const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
@@ -193,6 +195,9 @@ export function RemoteAccessSetting({
   const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean } | null>(null);
   // The stop was confirmed from far away; this page is about to stop working.
   const [closingPage, setClosingPage] = useState(false);
+  // A far-away stop whose request died with no answer from the host: the route may still be on.
+  // `checked` is what a read of the host said afterwards; it never assumes the stop worked.
+  const [stopUnconfirmed, setStopUnconfirmed] = useState<{ routeId: string; checked: "none" | "still-on" | "no-answer" } | null>(null);
   // Track the displayed address and keep its change notice through later polls.
   const [seenAddress, setSeenAddress] = useState<{ origin: string; changed: boolean } | null>(null);
   // Set by Turn on again: turn on as soon as the next review is ready, but only if it shows the
@@ -651,6 +656,8 @@ export function RemoteAccessSetting({
   }, [readyReview, busy]);
 
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
+    if (changing.current) return;
+    changing.current = true;
     actionEpoch.current += 1;
     setBusy(true);
     setError(null);
@@ -659,6 +666,7 @@ export function RemoteAccessSetting({
     } catch (failure) {
       setError(toDisplayError(failure, "action", wayLabel, kind));
     } finally {
+      changing.current = false;
       actionEpoch.current += 1;
       setBusy(false);
     }
@@ -833,6 +841,9 @@ export function RemoteAccessSetting({
   // `accepted` runs only once the host has accepted the stop. A refused stop
   // leaves the route where it was, still needing the owner and still re-checked.
   async function stopRoute(route: Route, accepted: () => void, farAway = false) {
+    // A stop is already under way; a second click starts nothing.
+    if (changing.current) return;
+    setStopUnconfirmed(null);
     // Said before the request: the tunnel may close before a reply comes back.
     if (farAway) setClosingPage(true);
     await turnOff(async () => {
@@ -843,9 +854,13 @@ export function RemoteAccessSetting({
           acknowledgeDisconnect: true,
         });
       } catch (failure) {
-        // From far away, a request that dies because the address closed is the expected end.
-        if (farAway && !(failure instanceof ReachabilityFailure)) return;
         setClosingPage(false);
+        // From far away, a request that dies because the address closed may be the expected end, but
+        // nothing here proves it: the host sent no answer. Say so and offer a read of the host.
+        if (farAway && !(failure instanceof ReachabilityFailure)) {
+          setStopUnconfirmed({ routeId: route.handle.id, checked: "none" });
+          return;
+        }
         throw failure;
       }
       accepted();
@@ -854,6 +869,28 @@ export function RemoteAccessSetting({
       setAcknowledged((current) => new Set(current).add(route.handle.id));
       setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
     });
+  }
+  // Reads the host once. Only a read: it sends no stop, so it cannot change the route.
+  const [checkingStop, setCheckingStop] = useState(false);
+  async function checkStop() {
+    if (!stopUnconfirmed || checkingStop) return;
+    const { routeId } = stopUnconfirmed;
+    setCheckingStop(true);
+    try {
+      const fresh = await request("/state");
+      if (!mounted.current) return;
+      if (fresh.ok) {
+        const next = fresh.data as State;
+        setState(next);
+        setStopUnconfirmed({ routeId, checked: "still-on" });
+      } else {
+        setStopUnconfirmed({ routeId, checked: "no-answer" });
+      }
+    } catch {
+      if (mounted.current) setStopUnconfirmed({ routeId, checked: "no-answer" });
+    } finally {
+      if (mounted.current) setCheckingStop(false);
+    }
   }
   // Turn off, Turn off and on, Turn on again: ask first only when this page came in through the address.
   function requestStop(route: Route, again: boolean) {
@@ -999,6 +1036,22 @@ export function RemoteAccessSetting({
         </div>
       ) : null}
       {closingPage ? <p className="text-sm" role="status">Turning off… this page will stop working in a moment.</p> : null}
+      {stopUnconfirmed && state.routes.some((item) => item.handle.id === stopUnconfirmed.routeId && headlineOf(item) !== "Off") ? (
+        <div className="grid gap-2 rounded-xl border p-4" role="status">
+          <p className="text-sm">
+            {stopUnconfirmed.checked === "still-on"
+              ? "Checked just now: remote access is still on. Turn it off again below."
+              : stopUnconfirmed.checked === "no-answer"
+                ? "We couldn't reach the host to check. Remote access may still be on."
+                : "We couldn't confirm that remote access turned off. If this page stops loading, it is off. Otherwise it may still be on."}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={checkingStop} onClick={() => void checkStop()} type="button" variant="outline">
+              Check again
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {passwordMissing ? (
         <div className="grid gap-2 rounded-xl border p-4">
           <h3 className="pdpp-label">Step 1: Set a password</h3>
@@ -1076,7 +1129,7 @@ export function RemoteAccessSetting({
                 action={done.action}
                 busy={mutationBlocked}
                 draft={done.draft}
-                onAllow={(action, input) => void allow(done.draft, action, input)}
+                onAllow={(action, input) => allow(done.draft, action, input)}
                 onOther={chooseAnotherWay}
               />
             ) : null}
@@ -1096,7 +1149,7 @@ export function RemoteAccessSetting({
                 busy={mutationBlocked}
                 changed={changed}
                 key={done.review.id}
-                onTurnOn={(review) => void turnOn(review)}
+                onTurnOn={(review) => turnOn(review)}
                 review={done.review}
                 steps={done.steps}
                 wayTitle={wayTitle}

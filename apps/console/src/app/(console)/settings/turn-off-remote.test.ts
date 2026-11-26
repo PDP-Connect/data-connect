@@ -81,7 +81,14 @@ type Entry = Result | ((call: Call) => Result | Promise<Result>);
 async function withScreen<T>(
   pageUrl: string,
   table: Record<string, Entry>,
-  run: (screen: { calls: Call[]; press: (label: RegExp) => Promise<void>; text: () => string; has: (label: RegExp) => boolean }) => Promise<T>
+  run: (screen: {
+    calls: Call[];
+    press: (label: RegExp) => Promise<void>;
+    /** Two clicks in one tick, before React renders the first one's `busy`. */
+    pressTwiceAtOnce: (label: RegExp) => Promise<void>;
+    text: () => string;
+    has: (label: RegExp) => boolean;
+  }) => Promise<T>
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: pageUrl });
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
@@ -115,6 +122,15 @@ async function withScreen<T>(
         const button = buttons().find((node) => label.test(node.textContent ?? ""));
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
+        await settle();
+      },
+      pressTwiceAtOnce: async (label) => {
+        const button = buttons().find((node) => label.test(node.textContent ?? ""));
+        assert.ok(button, `no button matching ${label}`);
+        await act(async () => {
+          button.click();
+          button.click();
+        });
         await settle();
       },
     });
@@ -181,19 +197,45 @@ test("the route's address with a path or default port still matches the page", a
   });
 });
 
-test("a stop that dies because the tunnel closed is the expected end, not an error", async () => {
+const UNCONFIRMED = "We couldn't confirm that remote access turned off.";
+
+test("a far-away stop that dies with no answer says it could not confirm, and offers a read, not a retry", async () => {
   const table = {
     "/state": stateWith(route(REMOTE)),
     "/routes/route-1/stop": () => {
       throw new TypeError("Failed to fetch");
     },
   };
-  await withScreen(REMOTE, table, async ({ calls, press, text }) => {
+  await withScreen(REMOTE, table, async ({ calls, press, text, has }) => {
     await press(turnOffCase.label);
     await press(/^Turn off$/);
     assert.equal(stops(calls).length, 1);
-    assert.ok(text().includes(STOPPING), text());
-    assert.doesNotMatch(text(), /couldn't|Couldn't|Something went wrong|alert/i);
+    assert.ok(!text().includes(STOPPING), "'Turning off…' must not stay with no way out");
+    assert.ok(text().includes(UNCONFIRMED), text());
+    assert.ok(has(/^Check again$/));
+    // The read sends no stop and never claims success: the host still lists the route as on.
+    await press(/^Check again$/);
+    assert.equal(stops(calls).length, 1, "a recheck is a read; it sends no second stop");
+    assert.match(text(), /still on/i);
+    assert.doesNotMatch(text(), /turned off\.|is off\./i);
+    assert.ok(has(/^Turn off$/), "Turn off is available again");
+  });
+});
+
+test("a far-away stop with no answer, then a read that gets no answer, still does not claim it is off", async () => {
+  let reads = 0;
+  const table = {
+    "/state": () => (++reads <= 1 ? stateWith(route(REMOTE)) : fail("reachability_unavailable")),
+    "/routes/route-1/stop": () => {
+      throw new TypeError("Failed to fetch");
+    },
+  };
+  await withScreen(REMOTE, table, async ({ press, text }) => {
+    await press(turnOffCase.label);
+    await press(/^Turn off$/);
+    await press(/^Check again$/);
+    assert.match(text(), /couldn.t reach the host/i);
+    assert.ok(!text().includes(STOPPING));
   });
 });
 
@@ -239,6 +281,14 @@ test("Turn on again from far away follows the same rule", async () => {
   await withScreen("http://localhost:3000", table, async ({ calls, press, text }) => {
     await press(/^Turn on again$/);
     assert.ok(!text().includes(CONFIRM));
+    assert.equal(stops(calls).length, 1);
+  });
+});
+
+test("two fast clicks on Turn off send one stop", async () => {
+  const table = { "/state": stateWith(route(REMOTE)), "/routes/route-1/stop": ok({ operationId: "op-1" }) };
+  await withScreen("http://localhost:3000", table, async ({ calls, pressTwiceAtOnce }) => {
+    await pressTwiceAtOnce(turnOffCase.label);
     assert.equal(stops(calls).length, 1);
   });
 });
