@@ -44,6 +44,7 @@ import {
   getRunTerminalEvent,
   getRunTerminalStatus,
   listSpineCorrelations,
+  listAppAccess,
   listSpineEventsPage,
   searchSpine,
 } from "../lib/spine.ts";
@@ -547,6 +548,7 @@ import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
 import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
+import { mountRefAppAccess } from "./routes/ref-app-access.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
 import { mountRefStaticSecretCredentialCapture } from "./routes/ref-static-secret-credentials.ts";
 import {
@@ -5200,6 +5202,21 @@ export function buildAsApp(opts: ServerOpts = {}) {
   mountRefTraces(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefTraces>[1]);
   mountRefGrants(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefGrants>[1]);
   mountRefRuns(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefRuns>[1]);
+
+  mountRefAppAccess(app, {
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+    ownerSubjectId: (req: ReqLike) => getOwnerTokenSubjectId(req),
+    list: listAppAccess,
+    revokeGrant,
+    revokePackage: revokeGrantPackage,
+    getPackage: getGrantPackageForOwner,
+    applyRevokeSideEffects: buildApplyGrantRevokeSideEffects({
+      getDeliveryWorker: () => ({ tick: () => getDefaultDeliveryWorker().tick().then(() => undefined) }),
+      getStore: getDefaultClientEventSubscriptionStore,
+    }),
+    pdppError,
+    handleError,
+  } as unknown as Parameters<typeof mountRefAppAccess>[1]);
 
   // ────────────────────────────────────────────────────────────────────────
   // /_ref/grant-packages — operator visibility for hosted-MCP grant packages

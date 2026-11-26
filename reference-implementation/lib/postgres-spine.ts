@@ -9,6 +9,10 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+import {
+  type AppAccess, type AppAccessGrantRow, type AppAccessEventRow,
+  type AppAccessMemberRow, type AppAccessInstanceRow, projectAppAccess,
+} from "./app-access.ts";
 
 import { postgresQuery, withPostgresTransaction } from "../server/postgres-storage.ts";
 import {
@@ -16,6 +20,45 @@ import {
   type RunHistorySpineEvent,
   writePostgresRunHistoryForSpineEvent,
 } from "../server/stores/run-history-writer.ts";
+
+export const APP_ACCESS_EVENTS_SQL = `SELECT g.grant_id, reads.* FROM grants g
+  CROSS JOIN LATERAL (SELECT e.connector_instance_id,
+  MAX(CASE WHEN e.event_type = 'disclosure.served' THEN e.occurred_at END) AS last_read_at,
+  MAX(CASE WHEN e.event_type = 'grant.revoked' THEN e.occurred_at END) AS revoked_at,
+  COUNT(*) FILTER (WHERE e.event_type = 'disclosure.served' AND e.occurred_at >= $2 AND e.occurred_at <= $3) AS reads_last_7_days
+  FROM spine_events e
+  WHERE e.grant_id = g.grant_id
+    AND e.event_type IN ('disclosure.served', 'grant.revoked')
+  GROUP BY e.connector_instance_id
+  ) reads WHERE g.subject_id = $1`;
+
+export async function postgresListAppAccess(
+  subjectId: string,
+  now = new Date().toISOString(),
+  query = postgresQuery
+): Promise<AppAccess[]> {
+  const since = new Date(Date.parse(now) - 7 * 86_400_000).toISOString();
+  const [grants, events, members, instances] = await Promise.all([
+    query<AppAccessGrantRow>(
+      `SELECT g.grant_id, g.client_id, g.status, g.issued_at, g.expires_at,
+      g.grant_json, g.storage_binding_json, g.trust_signal_json, c.metadata_json
+      FROM grants g LEFT JOIN oauth_clients c ON c.client_id = g.client_id WHERE g.subject_id = $1`,
+      [subjectId]
+    ),
+    query<AppAccessEventRow>(APP_ACCESS_EVENTS_SQL, [subjectId, since, now]),
+    query<AppAccessMemberRow>(
+      `SELECT m.grant_id, m.package_id FROM grant_package_members m
+      JOIN grants g ON g.grant_id = m.grant_id WHERE g.subject_id = $1`,
+      [subjectId]
+    ),
+    query<AppAccessInstanceRow>(
+      `SELECT client_id, handle, internal_id FROM pairwise_identity_handles
+      WHERE subject_id = $1 AND kind = 'instance'`,
+      [subjectId]
+    ),
+  ]);
+  return projectAppAccess(grants.rows, events.rows, members.rows, instances.rows, now);
+}
 
 /**
  * Shared by both spine append backends and auth event builders. Keep full

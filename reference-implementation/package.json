@@ -6,6 +6,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./app-access": "./lib/app-access.ts",
     "./reference-local-defaults": "./server/reference-local-defaults.ts",
     "./reference-topology": "./server/reference-topology.ts",
     "./connection-setup-plan": "./server/connection-setup-plan.ts",
