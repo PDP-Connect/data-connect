@@ -447,3 +447,49 @@ html:has(.rr-app) {
     display: none;
   }
 }
+
+/* The template stays hidden even though the drawer's layout declares display:flex. */
+.pdpp-dialog.rr-drawer[hidden] {
+  display: none;
+}
+.pdpp-dialog.rr-drag-panel,
+.pdpp-dialog-backdrop.rr-drag-backdrop,
+.rr-drag-committed .rr-drawer,
+.rr-drag-committed .rr-drawer-overlay {
+  animation: none;
+}
+.pdpp-dialog.rr-drag-panel {
+  pointer-events: none;
+  transition: none;
+  will-change: transform;
+}
+.pdpp-dialog-backdrop.rr-drag-backdrop {
+  pointer-events: none;
+  transition: none;
+}
+.rr-dragging,
+.rr-dragging * {
+  user-select: none;
+}
+.rr-dragging .rr-content,
+.rr-dragging .rr-drawer {
+  overflow: hidden;
+}
+.rr-drag-panel.rr-drag-settling {
+  transition: transform 200ms ease-out;
+}
+.rr-drag-backdrop.rr-drag-settling {
+  transition: opacity 200ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rr-drag-panel.rr-drag-settling,
+  .rr-drag-backdrop.rr-drag-settling {
+    transition: none;
+  }
+}
+
+.rr-drag-committed .rr-drawer,
+.rr-drag-committed .rr-drawer-overlay {
+  opacity: 1;
+  transition: none;
+}

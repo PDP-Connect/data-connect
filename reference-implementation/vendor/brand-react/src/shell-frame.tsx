@@ -29,7 +29,7 @@
 import { AppWindow, Compass, Database, Home, type LucideIcon, Menu, Settings2 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -43,12 +43,7 @@ import { DEFAULT_JUMP_SHORTCUT_LABEL, jumpShortcutLabel } from "./jump-shortcut.
 import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
 import { ShellThemeButton } from "./shell-theme.tsx";
 import "./shell.css";
-import {
-  DRAWER_SWIPE_MAX_WIDTH,
-  drawerSwipeDecision,
-  shouldIgnoreDrawerSwipeTarget,
-  type SwipePoint,
-} from "./drawer-swipe-gesture.ts";
+import { bindDrawerDrag } from "./drawer-drag.ts";
 
 export interface NavItem {
   /** Real route href (pinned by redirects/tests). */
@@ -320,11 +315,7 @@ interface RecordroomShellProps {
   onJump?: () => void;
 }
 
-export function RecordroomShell({
-  children,
-  onJump,
-  build,
-}: RecordroomShellProps) {
+export function RecordroomShell({ children, onJump, build }: RecordroomShellProps) {
   const identity = DATACONNECT_PRODUCT_IDENTITY;
   const resolvedVersion = build ?? `${identity.name} ${identity.version}`;
   const pathname = usePathname() ?? "";
@@ -332,46 +323,35 @@ export function RecordroomShell({
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
-  useEffect(() => {
-    let start: { point: SwipePoint; time: number } | null = null;
-    const handleTouchStart = (event: TouchEvent) => {
-      if (
-        event.touches.length !== 1 ||
-        window.innerWidth > DRAWER_SWIPE_MAX_WIDTH ||
-        shouldIgnoreDrawerSwipeTarget(event.target, drawerOpen)
-      ) {
-        start = null;
-        return;
-      }
-      const touch = event.touches[0];
-      start = touch ? { point: { x: touch.clientX, y: touch.clientY }, time: event.timeStamp } : null;
-    };
-    const handleTouchEnd = (event: TouchEvent) => {
-      const origin = start;
-      start = null;
-      const touch = event.changedTouches[0];
-      if (!origin || event.changedTouches.length !== 1 || !touch) return;
-      const decision = drawerSwipeDecision(
-        origin.point,
-        { x: touch.clientX, y: touch.clientY },
-        event.timeStamp - origin.time,
-        window.innerWidth,
-        drawerOpen,
-      );
-      if (decision === "open") setDrawerOpen(true);
-      if (decision === "close") setDrawerOpen(false);
-    };
-    const handleTouchCancel = () => { start = null; };
-
-    window.addEventListener("touchstart", handleTouchStart, { passive: true });
-    window.addEventListener("touchend", handleTouchEnd, { passive: true });
-    window.addEventListener("touchcancel", handleTouchCancel, { passive: true });
-    return () => {
-      window.removeEventListener("touchstart", handleTouchStart);
-      window.removeEventListener("touchend", handleTouchEnd);
-      window.removeEventListener("touchcancel", handleTouchCancel);
-    };
+  const previewRef = useRef<HTMLDivElement>(null);
+  const openRef = useRef(drawerOpen);
+  useLayoutEffect(() => {
+    openRef.current = drawerOpen;
   }, [drawerOpen]);
+  useEffect(() => {
+    const template = previewRef.current;
+    if (!template) {
+      return;
+    }
+    return bindDrawerDrag(template, () => openRef.current, setDrawerOpen);
+  }, []);
+
+  const drawerContents = (
+    <nav aria-label="Primary">
+      <div className="rr-side__brand">
+        <BrandMark />
+        <span className="rr-side__name">{identity.name}</span>
+        <IcDialogClose aria-label="Close navigation" className="rr-drawer__close rr-chrome-btn" type="button">
+          Close
+        </IcDialogClose>
+      </div>
+      {onJump ? <JumpButton onClose={closeDrawer} onJump={onJump} /> : null}
+      <div className="rr-drawer__nav">
+        <NavList onNavigate={closeDrawer} pathname={pathname} />
+      </div>
+      <FootBlock version={resolvedVersion} />
+    </nav>
+  );
 
   return (
     <IcDialog modal onOpenChange={setDrawerOpen} open={drawerOpen}>
@@ -406,24 +386,15 @@ export function RecordroomShell({
           <div className="rr-content">{children}</div>
         </main>
 
+        {/* An inert visual template: the real dialog opens only after release. */}
+        <div aria-hidden="true" className="pdpp-dialog rr-drawer" hidden inert ref={previewRef}>
+          {drawerContents}
+        </div>
         {/* ─── Mobile drawer ─── */}
         <IcDialogPortal>
           <IcDialogBackdrop className="rr-drawer-overlay" />
           <IcDialogPopup aria-label="Primary navigation" className="rr-drawer">
-            <nav aria-label="Primary">
-              <div className="rr-side__brand">
-                <BrandMark />
-                <span className="rr-side__name">{identity.name}</span>
-                <IcDialogClose aria-label="Close navigation" className="rr-drawer__close rr-chrome-btn" type="button">
-                  Close
-                </IcDialogClose>
-              </div>
-              {onJump ? <JumpButton onClose={closeDrawer} onJump={onJump} /> : null}
-              <div className="rr-drawer__nav">
-                <NavList onNavigate={closeDrawer} pathname={pathname} />
-              </div>
-              <FootBlock version={resolvedVersion} />
-            </nav>
+            {drawerContents}
           </IcDialogPopup>
         </IcDialogPortal>
       </div>

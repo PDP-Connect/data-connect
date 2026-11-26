@@ -2,54 +2,99 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { drawerSwipeDecision, shouldIgnoreDrawerSwipeTarget } from "./drawer-swipe-gesture.ts";
+import {
+  canStartDrawerDrag,
+  drawerDragAxis,
+  drawerDragPosition,
+  drawerDragRelease,
+  drawerReleaseVelocity,
+  shouldIgnoreDrawerSwipeTarget,
+} from "./drawer-swipe-gesture.ts";
 
-test("phone swipes open from the left content and close from the menu drawer", () => {
-  assert.equal(drawerSwipeDecision({ x: 48, y: 100 }, { x: 128, y: 110 }, 180, 390, false), "open");
-  assert.equal(drawerSwipeDecision({ x: 240, y: 100 }, { x: 150, y: 105 }, 180, 390, true), "close");
-  assert.equal(drawerSwipeDecision({ x: 4, y: 100 }, { x: 90, y: 100 }, 160, 390, false), "nothing");
+test("first ten pixels lock the direction for the entire gesture", () => {
+  const start = { x: 100, y: 100 };
+  assert.equal(drawerDragAxis(start, { x: 106, y: 106 }, "pending"), "pending");
+  assert.equal(drawerDragAxis(start, { x: 110, y: 102 }, "pending"), "horizontal");
+  assert.equal(drawerDragAxis(start, { x: 102, y: 110 }, "pending"), "vertical");
+  assert.equal(drawerDragAxis(start, { x: 200, y: 110 }, "vertical"), "vertical");
+  assert.equal(drawerDragAxis(start, { x: 102, y: 200 }, "horizontal"), "horizontal");
 });
 
-test("drawer swipes ignore slow, short, vertical, and desktop movement", () => {
-  assert.equal(drawerSwipeDecision({ x: 48, y: 100 }, { x: 100, y: 100 }, 180, 390, false), "nothing");
-  assert.equal(drawerSwipeDecision({ x: 48, y: 100 }, { x: 105, y: 130 }, 180, 390, false), "nothing");
-  assert.equal(drawerSwipeDecision({ x: 48, y: 100 }, { x: 128, y: 100 }, 501, 390, false), "nothing");
-  assert.equal(drawerSwipeDecision({ x: 48, y: 100 }, { x: 128, y: 100 }, 180, 861, false), "nothing");
-  assert.equal(drawerSwipeDecision({ x: 240, y: 100 }, { x: 150, y: 105 }, 180, 390, false), "nothing");
+test("both Android edge zones, desktop widths, and non-touch input are excluded", () => {
+  for (const x of [0, 23, 367, 390]) {
+    assert.equal(canStartDrawerDrag(x, 390, "touch"), false);
+  }
+  for (const x of [24, 195, 366]) {
+    assert.equal(canStartDrawerDrag(x, 390, "touch"), true);
+  }
+  assert.equal(canStartDrawerDrag(100, 861, "touch"), false);
+  assert.equal(canStartDrawerDrag(100, 390, "mouse"), false);
+  assert.equal(canStartDrawerDrag(100, 390, "pen"), false);
 });
 
-test("swipes that begin in code, a table, a form control, or a horizontal scroller are ignored", () => {
-  const dom = new JSDOM(`<div id="root">
+test("position follows travel one for one and clamps in either direction", () => {
+  assert.equal(drawerDragPosition(false, 123, 300), 123);
+  assert.equal(drawerDragPosition(false, -50, 300), 0);
+  assert.equal(drawerDragPosition(false, 500, 300), 300);
+  assert.equal(drawerDragPosition(true, -123, 300), 177);
+  assert.equal(drawerDragPosition(true, -500, 300), 0);
+  assert.equal(drawerDragPosition(true, 50, 300), 300);
+});
+
+test("release uses half distance or velocity toward open; a held flick expires", () => {
+  assert.equal(drawerDragRelease(150, 300, 0), false);
+  assert.equal(drawerDragRelease(151, 300, 0), true);
+  assert.equal(drawerDragRelease(20, 300, 0.41), true);
+  assert.equal(drawerDragRelease(20, 300, 0.4), false);
+  assert.equal(drawerDragRelease(20, 300, -0.8), false);
+  assert.equal(drawerReleaseVelocity(50, 100, 50), 0.5);
+  assert.equal(drawerReleaseVelocity(50, 100, 101), 0);
+  assert.equal(drawerReleaseVelocity(50, 0, 0), 0);
+});
+
+test("nested gesture owners are excluded without modifying their pages", () => {
+  const dom = new JSDOM(`<main id="page">
     <pre><code id="code">code</code></pre>
     <table><tbody><tr><td id="cell">cell</td></tr></tbody></table>
-    <input id="text" type="text"><input id="range" type="range">
-    <div data-map id="map"></div>
-    <div id="scroll" style="overflow-x: auto"><span id="inside">wide</span></div>
-  </div>`);
+    <input id="text"><textarea id="textarea"></textarea><select id="select"></select>
+    <input id="range" type="range"><div role="slider" id="slider"></div>
+    <div contenteditable="true" id="editable"></div><div role="textbox" id="textbox"></div>
+    <div data-map id="map"></div><canvas id="canvas"></canvas><iframe id="iframe"></iframe>
+    <div class="pdpp-stream-dialog"><span id="stream">browser surface</span></div>
+    <div data-drawer-gesture="ignore"><span id="custom">custom control</span></div>
+    <div id="scroll" style="overflow-x: auto"><span id="inside">long address</span></div>
+    <div role="dialog"><a id="link" href="#">link</a></div>
+  </main>`);
   const { document } = dom.window;
-  Object.defineProperty(document.querySelector("#scroll"), "scrollWidth", { value: 400 });
-  Object.defineProperty(document.querySelector("#scroll"), "clientWidth", { value: 100 });
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#code")), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#cell")), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#text")), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#range")), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#map")), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#inside")), true);
-});
-
-test("an open swipe inside another dialog is ignored; a close swipe inside the drawer is not", () => {
-  const dom = new JSDOM(`<div role="dialog"><a id="link" href="#">link</a></div>`);
-  const link = dom.window.document.querySelector("#link");
-  assert.equal(shouldIgnoreDrawerSwipeTarget(link, false), true);
-  assert.equal(shouldIgnoreDrawerSwipeTarget(link, true), false);
-});
-
-test("shell drawer touch listeners are passive and leave browser scrolling alone", () => {
-  const shell = readFileSync(new URL("./shell-frame.tsx", import.meta.url), "utf8");
-  assert.match(shell, /addEventListener\("touchstart", handleTouchStart, \{ passive: true \}\)/);
-  assert.match(shell, /addEventListener\("touchend", handleTouchEnd, \{ passive: true \}\)/);
-  assert.doesNotMatch(shell, /preventDefault\(/);
+  Object.defineProperty(document.querySelector("#scroll"), "scrollWidth", {
+    value: 400,
+  });
+  Object.defineProperty(document.querySelector("#scroll"), "clientWidth", {
+    value: 100,
+  });
+  for (const id of [
+    "code",
+    "cell",
+    "text",
+    "textarea",
+    "select",
+    "range",
+    "slider",
+    "editable",
+    "textbox",
+    "map",
+    "canvas",
+    "iframe",
+    "stream",
+    "custom",
+    "inside",
+    "link",
+  ]) {
+    assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector(`#${id}`)), true, id);
+  }
+  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#page")), false);
+  assert.equal(shouldIgnoreDrawerSwipeTarget(document.querySelector("#link"), true), false);
+  dom.window.close();
 });

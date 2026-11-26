@@ -275,3 +275,63 @@ test("search in the drawer closes it before opening the jump dialog", async () =
   assert.deepEqual(jumps, ["opened"]);
   assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
 });
+
+test("touch drag tracks an inert copy before release and commits the accessible dialog afterward", async () => {
+  const { host } = installBrowserGlobals();
+  const currentBrowser = browser;
+  assert.ok(currentBrowser);
+  const { document } = currentBrowser.dom.window;
+  const { RecordroomShell } = await import("./shell-frame.tsx");
+  act(() =>
+    currentBrowser.root.render(
+      app(createElement(RecordroomShell, null, createElement("button", { type: "button" }, "Page action")))
+    )
+  );
+  const content = host.querySelector<HTMLElement>(".rr-content");
+  assert.ok(content);
+  const eventWindow = currentBrowser.dom.window;
+  function pointer(type: string, x: number, y: number, time: number) {
+    const event = new eventWindow.Event(type, {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperties(event, {
+      pointerId: { value: 1 },
+      pointerType: { value: "touch" },
+      isPrimary: { value: true },
+      clientX: { value: x },
+      clientY: { value: y },
+      timeStamp: { value: time },
+    });
+    act(() => content?.dispatchEvent(event));
+  }
+  pointer("pointerdown", 100, 100, 0);
+  pointer("pointermove", 108, 100, 20);
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
+  pointer("pointermove", 220, 100, 300);
+  const preview = document.querySelector<HTMLElement>(".rr-drag-panel");
+  assert.ok(preview);
+  assert.equal(preview.style.transform, "translateX(-180px)");
+  assert.equal(preview.getAttribute("aria-hidden"), "true");
+  assert.equal(preview.hasAttribute("inert"), true);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.equal(document.querySelector<HTMLElement>(".rr-drag-backdrop")?.style.opacity, "0.4");
+  const touchMove = new currentBrowser.dom.window.Event("touchmove", {
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.defineProperty(touchMove, "touches", { value: [{}] });
+  content.dispatchEvent(touchMove);
+  assert.equal(touchMove.defaultPrevented, true);
+  pointer("pointermove", 270, 100, 600);
+  pointer("pointerup", 270, 100, 800);
+  await settle();
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
+  assert.ok(document.querySelector('[role="dialog"][aria-label="Primary navigation"]'));
+  pointer("pointerdown", 270, 100, 1000);
+  pointer("pointermove", 100, 100, 1500);
+  pointer("pointerup", 100, 100, 1700);
+  await settle();
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
+});
