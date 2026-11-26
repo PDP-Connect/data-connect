@@ -7,7 +7,7 @@ import test from "node:test";
 import { buildLocalDeviceRecordEnvelope, LocalDeviceClient } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
 import { readSampleRecord } from "@pdpp/polyfill-connectors/fixture-samples";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
@@ -175,7 +175,7 @@ function startClosureServer(): Promise<StartedServer> {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
@@ -389,7 +389,7 @@ function pkceChallenge(verifier: string): string {
 async function completeScopedMcpFlow(
   asUrl: string,
   session: OwnerSession,
-  connectorId: string
+  sourceId: string
 ): Promise<{ accessToken: string; grantId: string }> {
   const clientId = await registerAuthCodeClient(asUrl, session);
   const verifier = randomBytes(32).toString("base64url");
@@ -398,7 +398,7 @@ async function completeScopedMcpFlow(
       access_mode: "continuous",
       purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
       purpose_description: "Read the fixture mailbox through hosted MCP.",
-      source: { id: `https://registry.pdpp.dev/connectors/${connectorId}`, kind: "connector" },
+      source: { id: sourceId, kind: "connector" },
       streams: [{ fields: ["id", "subject"], name: "messages" }],
       type: "https://pdpp.dev/data-access",
     },
@@ -603,7 +603,7 @@ test("owner-source-to-mcp-closure", async () => {
 
       // 6–7. The app receives only the Gmail/messages connection and stream;
       // read the accepted fixture through the live scoped MCP route.
-      const oauth = await completeScopedMcpFlow(asUrl, session, gmail.connector_id);
+      const oauth = await completeScopedMcpFlow(asUrl, session, (gmail.source as { id: string }).id);
       const initialized = await postMcp(rsUrl, oauth.accessToken, 1, "initialize", {
         capabilities: {},
         clientInfo: { name: "owner-closure-fixture-client", version: "0.0.0" },

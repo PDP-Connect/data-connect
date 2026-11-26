@@ -23,12 +23,13 @@
 //     ("hosted MCP OAuth code flow issues a scoped client token usable at /mcp").
 //   - 421 for an untrusted Host, 401 for a missing token: `hosted-mcp-oauth.test.ts`.
 // This file repeats the icons inside the whole-object initialize pin because a
-// partial assertion would let other fields drift unnoticed.
+// partial assertion would let other fields drift unnoticed. The icons are
+// literals, matching hosted-mcp-oauth.test.ts: an expectation built from
+// productServerIcons would change with the helper and pin nothing.
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { PDPP_MCP_INSTRUCTIONS } from "@pdpp/mcp-server/server";
-import { productServerIcons } from "../server/product-icons.ts";
 import {
 	type PermanentAudienceFixture,
 	startPermanentAudienceFixture,
@@ -143,7 +144,18 @@ describe("hosted MCP legacy wire: initialize", () => {
 					instructions: PDPP_MCP_INSTRUCTIONS,
 					protocolVersion: version,
 					serverInfo: {
-						icons: productServerIcons(fixture.rsUrl),
+						icons: [
+							{
+								mimeType: "image/svg+xml",
+								sizes: ["any"],
+								src: `${fixture.rsUrl}/icon`,
+							},
+							{
+								mimeType: "image/png",
+								sizes: ["180x180"],
+								src: `${fixture.rsUrl}/apple-icon`,
+							},
+						],
 						name: "pdpp-reference-mcp",
 						version: revision,
 					},

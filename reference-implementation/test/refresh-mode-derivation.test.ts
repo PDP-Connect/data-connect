@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { deriveRecommendedMode } from "../runtime/refresh-mode-derivation.ts";
 import { refreshPolicyContradictions } from "../server/refresh-policy-consistency.ts";
 
@@ -161,7 +161,7 @@ interface ShippedManifest {
 
 function readShippedPolicies(): ReadonlyArray<{ file: string; policy: Record<string, unknown> }> {
   const out: Array<{ file: string; policy: Record<string, unknown> }> = [];
-  for (const { file, manifest: rawManifest } of readPolyfillManifests()) {
+  for (const { file, manifest: rawManifest } of readShippedManifests()) {
     const manifest = rawManifest as ShippedManifest;
     const policy = manifest.capabilities?.refresh_policy;
     if (policy && typeof policy === "object") {

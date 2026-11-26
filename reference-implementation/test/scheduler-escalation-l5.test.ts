@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { computeSourcePressureCooldown } from "../runtime/scheduler-source-pressure-cooldown.ts";
 
@@ -168,7 +168,7 @@ test("§10-B computeSourcePressureCooldown: without consecutiveCooldownCycles (d
 // intentional.
 
 test("§10-B ChatGPT manifest declares a finite positive-integer max_cooldown_cycles", () => {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "chatgpt.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "chatgpt.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for chatgpt.json");
   }

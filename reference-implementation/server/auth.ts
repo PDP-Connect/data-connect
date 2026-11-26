@@ -3505,19 +3505,29 @@ function derivedRepairPlan(
   };
 }
 
-function assertLegacyOwnership(incoming: Record<string, unknown>, others: { manifest: unknown }[]): void {
+/**
+ * Current source ids may be shared by multiple connectors. A legacy identity must belong to only one
+ * connector and cannot equal another connector's current identity, or historical records are ambiguous.
+ */
+function assertExclusiveLegacySourceOwnership(
+  incoming: Record<string, unknown>,
+  others: { manifest: unknown }[]
+): void {
   const claimed = sourceIdentityClaims(incoming);
   for (const { manifest } of others) {
     const other = manifestRecordOf(manifest);
     if (!other) continue;
     const otherClaims = sourceIdentityClaims(other);
-    if ([...claimed].some((id) => otherClaims.has(id))) {
+    if (
+      [...claimed.legacy].some((id) => otherClaims.all.has(id)) ||
+      [...otherClaims.legacy].some((id) => claimed.all.has(id))
+    ) {
       throw invalidConnectorManifest("Legacy source identity is already owned by another connector");
     }
   }
 }
 
-function sourceIdentityClaims(manifest: Record<string, unknown>): Set<string> {
+function sourceIdentityClaims(manifest: Record<string, unknown>): { all: Set<string>; legacy: Set<string> } {
   const declaration = sourceDeclarationOf(manifest);
   const source = sourceIdOfDeclaration(declaration);
   const rawSource = isRecord(manifest.source) && typeof manifest.source.id === "string" ? manifest.source.id : undefined;
@@ -3527,12 +3537,15 @@ function sourceIdentityClaims(manifest: Record<string, unknown>): Set<string> {
   const history = Array.isArray(collection?.legacy_source_ids)
     ? collection.legacy_source_ids.filter((id): id is string => typeof id === "string")
     : [];
-  return new Set([
+  const legacy = new Set([
     ...declaredLegacySourceIds(manifest),
     ...history,
-    ...(source === undefined ? [] : [source]),
-    ...(rawSource === undefined ? [] : [rawSource]),
+    ...(source !== undefined && isHistoricalSourceProjection(manifest) ? [source] : []),
   ]);
+  return {
+    legacy,
+    all: new Set([...legacy, ...(source === undefined ? [] : [source]), ...(rawSource === undefined ? [] : [rawSource])]),
+  };
 }
 
 export function retainMovedFromIdentity(manifestJson: string, previousManifest: unknown, movedFrom?: string): string {
@@ -3569,22 +3582,26 @@ export function assertRetainedSourceIdentities(
   previousManifest: unknown,
   incomingManifest: Record<string, unknown>
 ): void {
-  const incomingClaims = sourceIdentityClaims(incomingManifest);
-  const dropped = [...sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {})].filter((id) => !incomingClaims.has(id));
+  const incomingClaims = sourceIdentityClaims(incomingManifest).all;
+  const dropped = [...sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {}).all].filter((id) => !incomingClaims.has(id));
   if (dropped.length > 0) {
     throw invalidConnectorManifest(`Connector update cannot drop previously claimed source identity ${dropped[0]}`);
   }
 }
 
-export async function assertLegacyOwnershipPostgres(client: PostgresTransactionClient, key: string, manifest: Record<string, unknown>): Promise<void> {
+export async function assertExclusiveLegacySourceOwnershipPostgres(
+  client: PostgresTransactionClient,
+  key: string,
+  manifest: Record<string, unknown>
+): Promise<void> {
   // Serialize identity claims across different connector keys, including first registrations.
   await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
   const others = await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id <> $1", [key]);
-  assertLegacyOwnership(manifest, others.rows);
+  assertExclusiveLegacySourceOwnership(manifest, others.rows);
 }
 
-export function assertLegacyOwnershipSqlite(key: string, manifest: Record<string, unknown>): void {
-  assertLegacyOwnership(manifest, getDb().prepare("SELECT manifest FROM connectors WHERE connector_id <> ?").all<{ manifest: string }>(key));
+export function assertExclusiveLegacySourceOwnershipSqlite(key: string, manifest: Record<string, unknown>): void {
+  assertExclusiveLegacySourceOwnership(manifest, getDb().prepare("SELECT manifest FROM connectors WHERE connector_id <> ?").all<{ manifest: string }>(key));
 }
 
 async function persistManifestAndAdvanceGenerations(
@@ -3616,7 +3633,7 @@ async function persistManifestAndAdvanceGenerations(
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
       }
-      await assertLegacyOwnershipPostgres(client, connectorId, JSON.parse(persistedManifestJson));
+      await assertExclusiveLegacySourceOwnershipPostgres(client, connectorId, JSON.parse(persistedManifestJson));
       // A manifest stored before digests were retained is the only record of
       // its version's accepted content: keep it before it is replaced.
       const previousDigest = previous ? declarationDigestOf(previous) : null;
@@ -3694,7 +3711,7 @@ async function persistManifestAndAdvanceGenerations(
     if (identityMove) {
       moveSourceIdentitySqlite(identityMove);
     }
-    assertLegacyOwnershipSqlite(connectorId, JSON.parse(persistedManifestJson));
+    assertExclusiveLegacySourceOwnershipSqlite(connectorId, JSON.parse(persistedManifestJson));
     if (options.queueDerivedRepair) {
       const plan = derivedRepairPlan(existing?.manifest ?? null, persistedManifestJson);
       const instances = db
@@ -5654,7 +5671,7 @@ export async function registerConnector(
     verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
-  manifest = await assertIncomingSourceDeclarationPublisher(manifest);
+  manifest = await normalizeIncomingConnectorManifest(manifest);
   validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
   // The retained identity is read here and re-checked under the publication lock in
   // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
@@ -5844,6 +5861,22 @@ function declaredCurrentSourceIdOf(manifest: Record<string, unknown> | undefined
   return current !== undefined && (collection?.declared_source_id === current || stated === current) ? current : undefined;
 }
 
+/** Recognize the server's historical projection from its retained declaration, never document provenance. */
+function isHistoricalSourceProjection(manifest: Record<string, unknown> | undefined): boolean {
+  const declaration = sourceDeclarationOf(manifest);
+  const extensions = isRecord(declaration?.extensions) ? declaration.extensions : undefined;
+  const collection = extensions && isRecord(extensions[COLLECTION_PROFILE_URI])
+    ? extensions[COLLECTION_PROFILE_URI]
+    : undefined;
+  return (
+    isRecord(declaration?.publisher) &&
+    declaration.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
+    isRecord(declaration.source) && declaration.source.kind === "connector" &&
+    declaredCurrentSourceIdOf(manifest) === undefined &&
+    !(Array.isArray(collection?.legacy_source_ids) && collection.legacy_source_ids.length > 0)
+  );
+}
+
 /** A historical projection may move once under the same registration's admitted identity authority. */
 function legacyProjectionMove(
   connectorId: string,
@@ -5857,19 +5890,7 @@ function legacyProjectionMove(
   const declared = sourceDeclarationOf(incoming);
   const from = sourceIdOfDeclaration(retained);
   const to = sourceIdOfDeclaration(declared);
-  const extensions = isRecord(retained?.extensions) ? retained.extensions : undefined;
-  const collection = extensions && isRecord(extensions[COLLECTION_PROFILE_URI])
-    ? extensions[COLLECTION_PROFILE_URI]
-    : undefined;
-  const hasMoved = Array.isArray(collection?.legacy_source_ids) && collection.legacy_source_ids.length > 0;
-  const isHistoricalProjection =
-    isRecord(retained?.publisher) &&
-    retained.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
-    isRecord(retained.source) &&
-    retained.source.kind === "connector" &&
-    declaredCurrentSourceIdOf(previous) === undefined &&
-    !hasMoved;
-  if (from === undefined || to === undefined || !isHistoricalProjection || !incoming || storageConnectorIdOf(incoming) !== connectorId) {
+  if (from === undefined || to === undefined || !isHistoricalSourceProjection(previous) || !incoming || storageConnectorIdOf(incoming) !== connectorId) {
     return null;
   }
   if (declaredLegacySourceIds(incoming).includes(from)) {
@@ -5989,7 +6010,7 @@ function assertSourceIdentityMovable(
 }
 
 /** A returned server projection is writeable only when omitting it regenerates the same declaration. */
-export async function assertIncomingSourceDeclarationPublisher(
+export async function normalizeIncomingConnectorManifest(
   manifest: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   const declaration = sourceDeclarationOf(manifest);

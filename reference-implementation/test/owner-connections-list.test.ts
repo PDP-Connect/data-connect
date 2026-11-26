@@ -23,7 +23,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -200,7 +200,7 @@ async function approveClientGrant(
 }
 
 function loadManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
@@ -599,7 +599,7 @@ test("owner-agent connection listing rejects a client grant token with 403", asy
     const streamName = String(asRecord(asArray(streams)[0]).name);
     const clientToken = await approveClientGrant(
       asUrl,
-      String(manifest.connector_id),
+      String((manifest.source as { id: string }).id),
       streamName,
       "cin_amazon_personal"
     );

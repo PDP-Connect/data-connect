@@ -48,7 +48,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { ConnectorInstallStore } from "../server/connector-install/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
@@ -139,7 +139,7 @@ test(
 // source, and moves to the published profiles when that pin is removed.
 test("every shipped first-party manifest passes the live registration validator", () => {
   const failures: string[] = [];
-  for (const entry of readPolyfillManifests()) {
+  for (const entry of readShippedManifests()) {
     try {
       validateConnectorManifest(entry.manifest as Record<string, unknown>);
     } catch (error) {

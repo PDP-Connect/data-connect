@@ -1,0 +1,497 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/wholefoods",
+		"display": {
+			"name": "Whole Foods"
+		}
+	},
+	"connector_key": "wholefoods",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
+	"version": "0.3.49",
+	"display_name": "Whole Foods",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#046F46"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			},
+			"browser": {
+				"required": true
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": [
+			"manual_action",
+			"otp"
+		],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 7200,
+			"interaction_posture": "otp_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Whole Foods (via Amazon) frequently requires OTP and triggers bot-detection; refresh manually."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The Amazon account used to place Whole Foods orders.",
+			"display": {
+				"label": "Your Amazon account",
+				"detail": "Name and email of the Amazon account whose order history was scraped."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"name": {
+						"type": [
+							"string",
+							"null"
+						],
+						"x_pdpp_role": "primary-title"
+					},
+					"email": {
+						"type": [
+							"string",
+							"null"
+						]
+					}
+				},
+				"required": [
+					"id"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"name"
+					]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "orders",
+			"required": true,
+			"description": "Whole Foods orders via Amazon.",
+			"display": {
+				"label": "Your Whole Foods orders",
+				"detail": "Order date, order URL, total, item count, status. Uses your Amazon login."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"order_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date",
+						"x_pdpp_role": "event-time"
+					},
+					"order_url": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "uri"
+					},
+					"status": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"total_cents": {
+						"type": [
+							"integer",
+							"null"
+						]
+					},
+					"item_count": {
+						"type": [
+							"integer",
+							"null"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"item_count"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"consent_time_field": "order_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"order_date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": [
+						"order_date"
+					]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "order_items",
+			"required": true,
+			"description": "Items within Whole Foods orders, each with a source Amazon product ID. Nutrition joins on `product_id`.",
+			"display": {
+				"label": "Your Whole Foods items",
+				"detail": "Product name, quantity, price."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"order_id": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"product_id": {
+						"type": "string"
+					},
+					"product_url": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "uri"
+					},
+					"image_url": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"quantity": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"unit_price_cents": {
+						"type": [
+							"integer",
+							"null"
+						]
+					},
+					"quantity_unit": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"price_unit": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"line_total_cents": {
+						"type": [
+							"integer",
+							"null"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"order_id",
+					"name",
+					"product_id"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"name"
+					]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "nutrition",
+			"required": false,
+			"description": "Nutrition facts per ordered product, read from the Amazon product page and the Whole Foods product pages the order links to, keyed by `product_id` and joinable to `order_items`. A product whose Nutrition Facts panel could not be read, or that has none, has no record: the connector collects only what these pages show, and it does not look nutrition up anywhere else. Records written by connector 0.3.34 may also carry `source` = `usda_fdc`, `not_found`, `error` or `blocked`; this connector writes none of those.",
+			"display": {
+				"label": "Nutrition facts",
+				"detail": "Nutrition facts for each ordered product whose Nutrition Facts panel was read. A product whose panel could not be read has no row."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"product_id": {
+						"type": "string"
+					},
+					"name": {
+						"type": [
+							"string",
+							"null"
+						],
+						"x_pdpp_role": "primary-title"
+					},
+					"source": {
+						"type": "string",
+						"enum": [
+							"wholefoods_product_page",
+							"wholefoods_structured_data",
+							"amazon_product_page",
+							"usda_fdc",
+							"not_found",
+							"error",
+							"blocked"
+						],
+						"description": "The page the facts were read from. `usda_fdc`, `not_found`, `error` and `blocked` appear only on records written by connector 0.3.34 or earlier."
+					},
+					"confidence": {
+						"type": "string",
+						"enum": [
+							"high",
+							"medium",
+							"low"
+						]
+					},
+					"calories": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"protein_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"carbs_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"fat_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"sodium_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"fiber_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"sugar_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"serving_size": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"servings_per_container": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"id": {
+						"type": "string"
+					},
+					"added_sugar_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"allergens": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"calcium_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"category": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"cholesterol_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"ingredients": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"iron_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"highlights": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"potassium_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"raw_nutrition_text": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"saturated_fat_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"trans_fat_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"upc": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"vitamin_d_mcg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"type": {
+						"type": [
+							"string"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"product_id",
+					"source",
+					"confidence"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"name"
+					]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
+		"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
+		"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+		"stream_collection_failed": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
+		"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
+	}
+}

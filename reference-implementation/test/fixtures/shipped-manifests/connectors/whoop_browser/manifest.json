@@ -1,0 +1,395 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/whoop-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/whoop_browser",
+		"display": { "name": "WHOOP (Browser Sign-In)" }
+	},
+	"connector_key": "whoop-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
+	"version": "0.1.9",
+	"display_name": "WHOOP (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": { "required": true },
+			"browser": { "required": true }
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the cycles, recoveries, sleeps and workouts that app.whoop.com loads for the owner's own signed-in session, from inside that page. The first run and an expired session need the owner to sign in through the browser handoff. The first run reads the account's history in thirty-day windows; later runs re-read the last week, which WHOOP may still be scoring, and continue from there. Requests go one at a time with pauses."
+		},
+		"public_listing": { "tier": "development" }
+	},
+	"streams": [
+		{
+			"name": "cycles",
+			"required": true,
+			"description": "WHOOP physiological cycles: each runs from one sleep's start to the next, with its day strain, energy and heart rate.",
+			"display": {
+				"label": "Your WHOOP cycles",
+				"detail": "Each cycle's start and end, strain, energy and heart rate."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "WHOOP's cycle id. Recoveries share it; sleeps and workouts carry it as cycle_id."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the cycle began, at the onset of the sleep that opens it (RFC 3339, UTC)."
+					},
+					"end_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the cycle ended (RFC 3339, UTC); null for the cycle still under way."
+					},
+					"day": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "The calendar day WHOOP assigns the cycle, in the owner's local time."
+					},
+					"timezone_offset": {
+						"type": ["string", "null"],
+						"description": "The owner's UTC offset during the cycle, as +HH:MM or -HH:MM."
+					},
+					"strain": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 21,
+						"description": "Day strain on WHOOP's 0 to 21 scale; null while WHOOP has not scored it."
+					},
+					"kilojoules": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Energy expended over the cycle, in kilojoules."
+					},
+					"average_heart_rate": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Average heart rate over the cycle, in beats per minute."
+					},
+					"max_heart_rate": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Highest heart rate over the cycle, in beats per minute."
+					}
+				},
+				"required": ["id", "start_at"],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"end_at": ["gte", "gt", "lte", "lt"],
+					"day": ["gte", "gt", "lte", "lt"],
+					"strain": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at", "day"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "recoveries",
+			"required": true,
+			"description": "WHOOP recovery for each cycle, scored from the sleep that opens it: recovery score, heart rate variability, resting heart rate, blood oxygen and skin temperature.",
+			"display": {
+				"label": "Your WHOOP recoveries",
+				"detail": "Recovery score, HRV, resting heart rate, SpO2 and skin temperature for each cycle."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The id of the cycle this recovery belongs to; one recovery per cycle."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the cycle began (RFC 3339, UTC): the onset of the sleep this recovery was scored from."
+					},
+					"sleep_id": {
+						"type": ["string", "null"],
+						"description": "The sleep this recovery was scored from, matching sleeps.id."
+					},
+					"recovery_score": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Recovery score, a percentage from 0 to 100."
+					},
+					"hrv_rmssd_ms": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "Heart rate variability as RMSSD, in milliseconds."
+					},
+					"resting_heart_rate": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Resting heart rate, in beats per minute."
+					},
+					"spo2_percentage": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Blood oxygen saturation, as a percentage; null where the strap does not measure it."
+					},
+					"skin_temp_celsius": {
+						"type": ["number", "null"],
+						"description": "Skin temperature, in degrees Celsius."
+					}
+				},
+				"required": ["id", "start_at"],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"recovery_score": ["gte", "gt", "lte", "lt"],
+					"hrv_rmssd_ms": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "sleeps",
+			"required": true,
+			"description": "WHOOP sleeps, naps included: when each began and ended, its sleep-stage durations, sleep performance and respiratory rate.",
+			"display": {
+				"label": "Your WHOOP sleeps",
+				"detail": "Sleep and nap times, stage durations, sleep performance and respiratory rate."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "WHOOP's id for the sleep."
+					},
+					"cycle_id": {
+						"type": "string",
+						"description": "The cycle this sleep belongs to, matching cycles.id."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the sleep began (RFC 3339, UTC)."
+					},
+					"end_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the sleep ended (RFC 3339, UTC)."
+					},
+					"timezone_offset": {
+						"type": ["string", "null"],
+						"description": "The owner's UTC offset during the sleep, as +HH:MM or -HH:MM."
+					},
+					"is_nap": {
+						"type": ["boolean", "null"],
+						"description": "Whether WHOOP counts this sleep as a nap."
+					},
+					"performance_percentage": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Sleep performance: the sleep obtained as a percentage of the sleep needed."
+					},
+					"respiratory_rate": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 100,
+						"description": "Respiratory rate during the sleep, in breaths per minute."
+					},
+					"in_bed_ms": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400000,
+						"description": "Time in bed, in milliseconds."
+					},
+					"awake_ms": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400000,
+						"description": "Time awake while in bed, in milliseconds."
+					},
+					"light_ms": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400000,
+						"description": "Light sleep, in milliseconds."
+					},
+					"slow_wave_ms": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400000,
+						"description": "Slow-wave (deep) sleep, in milliseconds."
+					},
+					"rem_ms": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400000,
+						"description": "REM sleep, in milliseconds."
+					}
+				},
+				"required": ["id", "cycle_id", "start_at"],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"end_at": ["gte", "gt", "lte", "lt"],
+					"performance_percentage": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "workouts",
+			"required": true,
+			"description": "WHOOP workouts and other activities: when each began and ended, its sport, strain, energy and heart rate.",
+			"display": {
+				"label": "Your WHOOP workouts",
+				"detail": "Activity times, sport, strain, energy and heart rate."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "WHOOP's id for the workout."
+					},
+					"cycle_id": {
+						"type": "string",
+						"description": "The cycle this workout belongs to, matching cycles.id."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the workout began (RFC 3339, UTC)."
+					},
+					"end_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the workout ended (RFC 3339, UTC)."
+					},
+					"timezone_offset": {
+						"type": ["string", "null"],
+						"description": "The owner's UTC offset during the workout, as +HH:MM or -HH:MM."
+					},
+					"sport_id": {
+						"type": ["integer", "null"],
+						"description": "WHOOP's sport id: -1 is a generic activity, 0 is running."
+					},
+					"strain": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 21,
+						"description": "Workout strain on WHOOP's 0 to 21 scale."
+					},
+					"kilojoules": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Energy expended during the workout, in kilojoules."
+					},
+					"average_heart_rate": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Average heart rate during the workout, in beats per minute."
+					},
+					"max_heart_rate": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Highest heart rate during the workout, in beats per minute."
+					}
+				},
+				"required": ["id", "cycle_id", "start_at"],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"end_at": ["gte", "gt", "lte", "lt"],
+					"strain": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at"],
+					"group_by": ["sport_id"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "WHOOP stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+		"sign_in_required": "WHOOP needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run read as much WHOOP history as one run allows. The next run continues from where this one stopped.",
+		"source_unreadable": "WHOOP answered with something this connector doesn't recognise, so nothing more was read. WHOOP may have changed its app; please report this rather than retrying."
+	}
+}

@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "../runtime/undeclared-tuning-environment.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -15,7 +15,7 @@ const REFERENCE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function shippedManifestsByKey(): Map<string, Record<string, unknown>> {
   const out = new Map<string, Record<string, unknown>>();
-  for (const { manifest } of readPolyfillManifests()) {
+  for (const { manifest } of readShippedManifests()) {
     const key = canonicalConnectorKey((manifest as { connector_id?: unknown }).connector_id);
     if (key) {
       out.set(key, manifest as Record<string, unknown>);
