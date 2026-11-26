@@ -13,6 +13,8 @@ import { findManifestForConnectorId } from "../../../../sources/lib/relationship
 import { listConnectorManifests } from "../../../../lib/rs-client.ts";
 import { BrowserSessionLaunchPanel } from "./launch-panel.tsx";
 
+import { flowPreview, flowPreviewState } from "../../../flow-preview.ts";
+
 export const dynamic = "force-dynamic";
 
 interface PageParams {
@@ -32,6 +34,10 @@ export default async function BrowserSessionLaunchPage({
 }) {
   const { connectorId: rawConnectorId } = await params;
   const connectorId = decodeURIComponent(rawConnectorId);
+
+  const previewQuery = await searchParams;
+  const preview = flowPreviewState("launch", { _preview: firstValue(previewQuery._preview), _state: firstValue(previewQuery._state) });
+  if (preview) return <RecordroomShellWithPalette><BrowserSessionLaunchPanel connectionId={flowPreview.connectionId} connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} draft={false} previewState={preview} /></RecordroomShellWithPalette>;
 
   const browserConnect = await loadBrowserConnectSupport(connectorId);
   if (!browserConnect.browserBound) {

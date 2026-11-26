@@ -21,7 +21,8 @@ const INITIATE_PROVIDER_AUTH_RE = /initiateProviderAuthorization\(connectorId\)/
 const DEPLOYMENT_ROUTE_RE = /\/deployment/;
 
 test("provider authorization uses a same-origin owner POST action", async () => {
-  const [page, route] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(START_ROUTE_FILE, "utf8")]);
+  const [loader, body, route] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(`${HERE}[connectorId]/provider-auth-body.tsx`, "utf8"), readFile(START_ROUTE_FILE, "utf8")]);
+  const page = loader + body;
 
   assert.match(page, OWNER_POST_FORM_RE);
   assert.match(page, AUTHORIZE_ACCOUNT_RE);

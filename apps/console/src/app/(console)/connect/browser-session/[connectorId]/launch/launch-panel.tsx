@@ -7,6 +7,8 @@ import { buttonVariants } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import { flowPreview } from "../../../flow-preview.ts";
+
 interface LaunchState {
   error: string | null;
   networkLost: boolean;
@@ -109,16 +111,19 @@ export function BrowserSessionLaunchPanel({
   connectorId,
   displayName,
   draft,
+  previewState,
 }: {
   connectionId: string;
   connectorId: string;
   displayName: string;
   draft: boolean;
+  previewState?: string;
 }) {
-  const [state, setState] = useState<LaunchState>({ error: null, networkLost: false, starting: true });
+  const [state, setState] = useState<LaunchState>({ error: previewState && previewState !== "opening" ? (previewState === "busy" ? flowPreview.busyError : flowPreview.startError) : null, networkLost: previewState === "lost-contact", starting: !previewState || previewState === "opening" });
   const startedRef = useRef(false);
 
   function start() {
+    if (previewState) return;
     setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
@@ -130,7 +135,7 @@ export function BrowserSessionLaunchPanel({
   }
 
   useEffect(() => {
-    if (startedRef.current) {
+    if (previewState || startedRef.current) {
       return;
     }
     startedRef.current = true;
@@ -142,7 +147,7 @@ export function BrowserSessionLaunchPanel({
       .catch((err) => {
         setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
       });
-  }, [connectionId, connectorId, draft]);
+  }, [connectionId, connectorId, draft, previewState]);
 
   return (
     <section className="grid gap-4">

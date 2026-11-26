@@ -18,6 +18,8 @@ import { getCollectedKinds, getCollectionTerminalEvent } from "../../../syncs/[r
 import { FirstSyncBody } from "./first-sync-body.tsx";
 import { type FirstSyncFacts, firstSyncOutcome } from "./first-sync-outcome.ts";
 
+import { flowPreview, flowPreviewState, previewStatus } from "../../flow-preview.ts";
+
 export const dynamic = "force-dynamic";
 
 function firstValue(value: string | string[] | undefined): string | undefined {
@@ -47,7 +49,10 @@ export default async function ConnectionSetupStatusPage({
 }) {
   const { connectionId: rawConnectionId } = await params;
   const connectionId = decodeURIComponent(rawConnectionId);
-  const runId = firstValue((await searchParams).run_id);
+  const query = await searchParams;
+  const runId = firstValue(query.run_id);
+  const preview = flowPreviewState("status", { _preview: firstValue(query._preview), _state: firstValue(query._state) });
+  if (preview) return <RecordroomShellWithPalette><FirstSyncBody connectionId={flowPreview.connectionId} connectorId={flowPreview.connector.connectorId} name={flowPreview.connector.displayName} outcome={firstSyncOutcome(previewStatus(preview), flowPreview.connector.displayName, { kinds: preview === "copying-nothing-yet" ? null : flowPreview.kinds, schedule: null })} resumeAction={resumeConnectionAction} /></RecordroomShellWithPalette>;
 
   const status = await getConnectionSetupStatus(connectionId, runId ?? null).catch((err) => {
     if (err instanceof RefNotFoundError) {

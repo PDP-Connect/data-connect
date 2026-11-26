@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const PAGE_FILE = fileURLToPath(new URL("./[connectorId]/page.tsx", import.meta.url));
 
 test("provider authorization has the account action and one way back", async () => {
-  const page = await readFile(PAGE_FILE, "utf8");
+  const page = await readFile(PAGE_FILE, "utf8") + await readFile(new URL("./[connectorId]/provider-auth-body.tsx", import.meta.url), "utf8");
   assert.match(page, /title=[\s\S]{0,200}Connect \{displayName\}/);
   assert.match(page, /Allow DataConnect to read your \{displayName\} account\./);
   assert.match(page, /Continue to \{displayName\}/);

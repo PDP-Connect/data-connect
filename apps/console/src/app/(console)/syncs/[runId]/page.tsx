@@ -64,6 +64,8 @@ import {
   type TerminalRunStatus,
 } from "./run-terminal-status.ts";
 
+import { flowPreview, flowPreviewState } from "../../connect/flow-preview.ts";
+
 export const dynamic = "force-dynamic";
 
 interface LatestProgress {
@@ -74,7 +76,7 @@ interface LatestProgress {
   total: number | null;
 }
 
-type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[] }>;
+type RunPageSearchParams = Promise<{ cursor?: string | string[]; receipts_cursor?: string | string[]; _preview?: string; _state?: string }>;
 
 function getCursor(value: string | string[] | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -103,6 +105,8 @@ export default async function RunDetailPage({
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
   const query = await searchParams;
+  const preview = flowPreviewState("details", query);
+  if (preview) return <RecordroomShellWithPalette><RunInteractionForm fields={flowPreview.fields} interactionId="sample-step" kind="credentials" message={flowPreview.message} preview previewError={preview === "rejected" ? flowPreview.startError : undefined} runId={runId} /></RecordroomShellWithPalette>;
   const cursor = getCursor(query.cursor);
   const receiptsCursor = getCursor(query.receipts_cursor);
 

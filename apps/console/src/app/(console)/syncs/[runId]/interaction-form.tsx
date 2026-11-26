@@ -23,17 +23,20 @@ interface Props {
   message: string;
   runId: string;
   submitLabel?: string | null;
+  previewError?: string;
+  preview?: boolean;
 }
 
 const INITIAL: RunInteractionActionState = { error: null, status: null };
 
-export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel }: Props) {
+export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel, previewError, preview }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [state, setState] = useState<RunInteractionActionState>(INITIAL);
+  const [state, setState] = useState<RunInteractionActionState>({ ...INITIAL, error: previewError ?? null });
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   function submitWithStatus(formData: FormData, status: "success" | "cancelled") {
+    if (preview) return;
     formData.set("status", status);
     formData.set("run_id", runId);
     formData.set("interaction_id", interactionId);

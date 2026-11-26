@@ -36,6 +36,8 @@ import {
 } from "./stream-state.ts";
 import { ResolvedSurface, StreamSurface } from "./stream-viewer.tsx";
 
+import { flowPreview, flowPreviewState } from "../../../connect/flow-preview.ts";
+
 export const dynamic = "force-dynamic";
 export const viewport: Viewport = {
   initialScale: 1,
@@ -194,30 +196,12 @@ export default async function RunInteractionStreamPage({
   const runId = decodeURIComponent(raw);
   const sp = await searchParams;
 
-  // Dev preview bypass: render the visual surface without a real run.
-  // `?_preview=1`                  → orientation card with synthetic Strava context.
-  // `?_preview=1&_state=resolved`  → success state.
-  // `?_preview=1&_state=task`      → orientation card with the Stage-2 overlay open on mount,
-  //                                  so the modal layout can be reviewed in isolation.
-  if (sp._preview === "1" && process.env.NODE_ENV !== "production") {
-    const previewConnector: ConnectorContext = {
-      connectorId: "https://example.com/connectors/strava",
-      displayName: "Strava",
-    };
-    if (sp._state === "resolved") {
-      return <ResolvedSurface connector={previewConnector} runId={runId} />;
-    }
-    return (
-      <StreamSurface
-        autoOpen={sp._state === "task"}
-        connector={previewConnector}
-        interactionId="preview-interaction"
-        interactionKind="otp"
-        interactionMessage="Sign in to Strava. DataConnect continues on its own when you're done."
-        interactionRequiresResponse
-        runId={runId}
-      />
-    );
+  const preview = flowPreviewState("browser", sp);
+  if (preview) {
+    if (preview === "signed-in") return <ResolvedSurface connector={flowPreview.connector} runId={runId} />;
+    if (preview === "opening") return <PreparingBrowserSurface connectionId={flowPreview.connectionId} poll={false} runId={runId} />;
+    if (preview === "approve") return <ExternalApprovalSurface poll={false} assistance={{ message: flowPreview.message } as NonNullable<ReturnType<typeof getCurrentRunAssistance>>} runId={runId} />;
+    return <StreamSurface connector={flowPreview.connector} interactionId="sample-step" interactionKind={preview === "needs-details" ? "credentials" : preview === "browser-step" ? "manual_action" : "otp"} interactionMessage={flowPreview.message} interactionRequiresResponse pollForResolution={false} previewState={preview} runId={runId} />;
   }
 
   let envelope: TimelineEnvelope | null;
@@ -379,16 +363,18 @@ function AssistanceCompleteSurface({ connectionId, runId }: { connectionId: stri
 }
 
 function PreparingBrowserSurface({
+  poll = true,
   connectionId,
   runId,
 }: {
+  poll?: boolean;
   connectionId: string | null;
   runId: string;
 }) {
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
       <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
+        {poll ? <NoAssistanceRunPoller runId={runId} /> : null}
         <p className="pdpp-eyebrow text-muted-foreground">Opening the browser</p>
         <h1 className="pdpp-heading mt-3 text-balance text-foreground">Getting the browser ready.</h1>
         <p className="mt-3 text-muted-foreground text-sm leading-6">
@@ -401,16 +387,18 @@ function PreparingBrowserSurface({
 }
 
 function ExternalApprovalSurface({
+  poll = true,
   assistance,
   runId,
 }: {
+  poll?: boolean;
   assistance: NonNullable<ReturnType<typeof getCurrentRunAssistance>>;
   runId: string;
 }) {
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
       <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
+        {poll ? <NoAssistanceRunPoller runId={runId} /> : null}
         <p className="pdpp-eyebrow text-muted-foreground">approval waiting</p>
         <h1 className="pdpp-heading mt-3 text-balance text-foreground">Approve the request.</h1>
         <p className="mt-3 text-muted-foreground text-sm leading-6">{assistance.message}</p>

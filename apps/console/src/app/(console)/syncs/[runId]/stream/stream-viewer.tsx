@@ -152,7 +152,10 @@ import { createViewportWriters } from "./stream-viewport-writer.ts";
 import { sampleVideoSharpnessTelemetry } from "./stream-visual-quality.ts";
 import { STREAMING_UNAVAILABLE_TAG } from "./streaming-protocol.ts";
 
+import { flowPreview } from "../../../connect/flow-preview.ts";
+
 interface StreamSurfaceProps {
+  previewState?: string;
   /** Open the Stage-2 overlay on mount (preview only). */
   autoOpen?: boolean;
   connector: ConnectorContext | null;
@@ -1464,7 +1467,12 @@ function streamEventData(event: Event): string {
   return typeof data === "string" ? data : "";
 }
 
-export function StreamSurface({
+export function StreamSurface(props: StreamSurfaceProps) {
+  if (process.env.NODE_ENV !== "production" && props.previewState) return <PreviewStreamSurface {...props} />;
+  return <LiveStreamSurface {...props} />;
+}
+
+function LiveStreamSurface({
   autoOpen = false,
   connector,
   interactionId,
@@ -5733,12 +5741,14 @@ function CloseConfirmBubble({
 // ─── Interaction response dock ───────────────────────────────────────────────
 
 function StreamInteractionDock({
+  previewError,
   interactionId,
   interactionKind,
   interactionRequiresResponse,
   message,
   runId,
 }: {
+  previewError?: string;
   interactionId: string;
   interactionKind: string;
   interactionRequiresResponse: boolean;
@@ -5748,7 +5758,7 @@ function StreamInteractionDock({
   const router = useRouter();
   const [code, setCode] = useState("");
   const [collapsed, setCollapsed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(previewError ?? null);
   const [isPending, startTransition] = useTransition();
 
   if (!(interactionRequiresResponse && (interactionKind === "otp" || interactionKind === "manual_action"))) {
@@ -5986,4 +5996,13 @@ function UnsupportedSurface({
       </div>
     </main>
   );
+}
+
+function PreviewStreamSurface({ connector, interactionId, interactionKind, interactionMessage, interactionRequiresResponse = true, previewState, runId }: StreamSurfaceProps) {
+  const name = connector?.displayName ?? "the data source";
+  const [open, setOpen] = useState(previewState !== "card" && previewState !== "card-error");
+  const [confirming, setConfirming] = useState(previewState === "stop-question");
+  if (interactionKind === "credentials") return <UnsupportedSurface connector={connector} interactionMessage={interactionMessage} runHref={`/syncs/${encodeURIComponent(runId)}`} />;
+  if (!open) return <main className="relative min-h-dvh"><WordmarkCorner /><div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-16"><OrientationCard buttonLabel="Open browser" connectorId={connector?.connectorId} connectorIcon={connector?.icon} connectorName={name} isMinting={false} message={interactionMessage} onAction={() => setOpen(true)} troubleMessage={previewState === "card-error" ? "Couldn't reach the browser." : null} /></div></main>;
+  return <main className="relative min-h-dvh"><WordmarkCorner /><div className="flex min-h-dvh items-center justify-center bg-muted"><p>Sample page, not a real sign-in</p></div><button aria-label="End browser session" className="absolute top-4 right-4" onClick={() => setConfirming(true)} type="button">×</button>{confirming ? <CloseConfirmBubble connectorName={name} onCancel={() => setConfirming(false)} onConfirm={() => setOpen(false)} /> : previewState === "browser-trouble" ? <TroubleToast message="Couldn't reach the browser." /> : <StreamInteractionDock interactionId={interactionId} interactionKind={interactionKind} interactionRequiresResponse={interactionRequiresResponse} message={interactionMessage} previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined} runId={runId} />}</main>;
 }
