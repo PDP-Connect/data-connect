@@ -1,7 +1,7 @@
 # Desktop attach to a remote DataConnect server
 
 Status: proposed (2026-11-17). Build target: one PR into `main`.
-Owner question (Tim, 2026-11-13): "be able to attach to a remote instance like how t3 code can". This is in addition to Gozar giving a server a public address (PR #679). Gozar answers "where is the server". This document answers "how does the desktop use it".
+Owner question (2026-11-13): "be able to attach to a remote instance like how t3 code can". This is in addition to Gozar giving a server a public address (PR #679). Gozar answers "where is the server". This document answers "how does the desktop use it".
 
 ## What exists today (measured, 2026-11-17)
 
@@ -90,7 +90,7 @@ The requirement that any surface syncs with any surface, read as a constraint on
 2. Console: Settings section "Attach a desktop app" (create code, show code and link, countdown). Paired desktops already appear in the existing owner-sessions list and can be revoked there.
 3. Desktop: attach window, keychain-backed attach store, `attach.json`, attach-aware bootstrap (a stored session replaces the password login), tray items, disconnect with server revoke, and the native cookie fix.
 4. Tests: server (pairing mint, redeem, expiry, single use, rate limit, 30-day session, revoke), desktop Rust (cookie for `localhost`, attach store round trip with a fake keychain, URL and link parsing, https policy, bootstrap picks session over password, env override wins), console (action and component tests), and an end-to-end run with the released desktop binary against a Core image built from this branch.
-5. `TIM-WALK-ATTACH.md`, dry-run by me before handing over.
+5. `PAIRING-WALK-ATTACH.md`, dry-run by me before handing over.
 
 ## Expect it to work because
 
