@@ -2223,6 +2223,63 @@ test("the catalog route says whether the list is fresh and when it was fetched",
   assert.equal(body?.fetched_at, "2026-11-20T10:00:00.000Z");
 });
 
+test("an install or update that cannot reach the registry says so in plain words", async () => {
+  type Handler = (req: { body?: Record<string, unknown> }, res: { json: (v: unknown) => unknown; status: (v: number) => unknown }) => Promise<void>;
+  const posts = new Map<string, Handler>();
+  const gets = new Map<string, Handler>();
+  const app = {
+    get(path: string, ...args: unknown[]) {
+      gets.set(path, args.at(-1) as Handler);
+      return this;
+    },
+    post(path: string, ...args: unknown[]) {
+      posts.set(path, args.at(-1) as Handler);
+      return this;
+    },
+  };
+  const offline = Object.assign(new Error("Failed to fetch ghcr.io/x: fetch failed"), {
+    name: "OciRegistryError",
+    reason: "unverifiable",
+  });
+  const sent: Array<{ status: number; code: string; message: string }> = [];
+  mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
+    handleError: () => assert.fail("an unreachable registry is not a generic failure"),
+    pdppError: (_res: unknown, status: number, code: string, message: string) => {
+      sent.push({ code, message, status });
+    },
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      inspectSelected: async () => ({ status: "none" }),
+      catalog: async () => {
+        throw offline;
+      },
+      install: async () => {
+        throw offline;
+      },
+      uninstall: async () => assert.fail("should not uninstall"),
+      status: async () => [],
+      update: async () => {
+        throw offline;
+      },
+    },
+  } as never);
+  const res = { json: () => undefined, status: () => res };
+  await posts.get("/v1/owner/connector-install/install")?.({ body: { connector_id: "github", digest } }, res);
+  await posts.get("/v1/owner/connector-install/update")?.({ body: { connector_id: "github" } }, res);
+  await gets.get("/v1/owner/connector-install/catalog")?.({ body: {} }, res);
+  assert.deepEqual(
+    sent.map((item) => [item.status, item.code]),
+    [[503, "registry_unreachable"], [503, "registry_unreachable"], [503, "registry_unreachable"]]
+  );
+  assert.equal(
+    sent[0]?.message,
+    "Adding this service needs an internet connection. Try again when this computer is online."
+  );
+  assert.doesNotMatch(sent[0]?.message ?? "", /ghcr|fetch failed|OCI/);
+});
+
 function offlineCatalogService(
   dataDir: string,
   loader: (context?: { bounded: boolean }) => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>,
