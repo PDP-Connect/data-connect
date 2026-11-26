@@ -56,7 +56,7 @@ test("generated and chosen desktop passwords have distinct states and local acti
   const generated = await render({ canReveal: true, passwordSet: false, source: "desktop" })
   assert.match(generated, /DataConnect made a password for you/)
   assert.match(generated, /Show password/)
-  assert.match(generated, /Set password/)
+  assert.match(generated, /Change password/)
   const chosen = await render({ canReveal: true, passwordSet: true, source: "desktop" })
   assert.match(chosen, /You chose this password/)
   assert.match(chosen, /Change password/)

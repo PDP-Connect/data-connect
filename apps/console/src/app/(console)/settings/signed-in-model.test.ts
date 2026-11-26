@@ -5,7 +5,8 @@ import test from "node:test";
 import { buildSignedInModel, publicSessionAddress } from "./signed-in-model.ts";
 import { buildSettingsPractice } from "./settings-practice.ts";
 test('thirteen identical labels retain distinct rows, current first and five initially', () => {
-  const input = buildSettingsPractice('sessions-thirteen')!.inventory.sessions;
+  const practice = buildSettingsPractice('sessions-thirteen'); assert.ok(practice);
+  const input = practice.inventory.sessions;
   const model = buildSignedInModel(input);
   assert.equal(model.total, 13); assert.equal(model.rows.length, 5);
   assert.equal(model.rows[0]?.current, true);

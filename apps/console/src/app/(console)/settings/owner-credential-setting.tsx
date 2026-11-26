@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Diagnostics } from "./diagnostics.tsx"
 import { useState } from "react"
 import { revealOwnerCredentialAction } from "./owner-credential-actions.ts"
 
@@ -72,19 +73,21 @@ export function OwnerCredentialSetting({
       </p>
 
       {error ? (
+        <>
         <p
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
-          {error}
+          Could not show the password. Try again.
         </p>
+        <Diagnostics><pre>{error}</pre></Diagnostics></>
       ) : null}
 
       {password ? (
         <div className="grid gap-2">
           {linuxPolkitUnverified ? (
             <p className="pdpp-caption text-muted-foreground" role="status">
-              This Linux build allows local-only reveal without an OS prompt until polkit is verified.
+              This build shows the password without asking you to unlock this computer.
             </p>
           ) : null}
           <pre className="select-all break-all rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-[15px] text-foreground">

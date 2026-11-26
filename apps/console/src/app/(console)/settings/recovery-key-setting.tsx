@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Button } from "@/components/ui/button.tsx"
+import { Diagnostics } from "./diagnostics.tsx"
 import { useState } from "react"
 import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
 
@@ -68,12 +69,14 @@ export function RecoveryKeySetting({
       </p>
 
       {error ? (
+        <>
         <p
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
           Could not show the recovery code. Try again.
         </p>
+        <Diagnostics><pre>{error}</pre></Diagnostics></>
       ) : null}
 
       {code ? (

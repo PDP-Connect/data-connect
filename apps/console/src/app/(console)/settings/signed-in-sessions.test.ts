@@ -19,9 +19,10 @@ test('five sign-ins initially, Show all reveals thirteen, confirmation gates eve
   const dom = new JSDOM('<div id="root"></div>');
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
   const { SignedInSessions } = await import("./signed-in-sessions.tsx");
-  const container = dom.window.document.querySelector('#root')!;
+  const container = dom.window.document.querySelector('#root'); assert.ok(container);
   const root = createRoot(container);
-  const sessions = buildSettingsPractice('sessions-thirteen')!.inventory.sessions;
+  const practice = buildSettingsPractice('sessions-thirteen'); assert.ok(practice);
+  const sessions = practice.inventory.sessions;
   const press = async (label: string) => { const button = [...container.querySelectorAll('button')].find(row => row.textContent === label); assert.ok(button); await act(async () => button.click()); };
   try {
     await act(async () => root.render(createElement(SignedInSessions, { sessions })));

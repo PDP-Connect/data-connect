@@ -361,7 +361,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     // Readable leftovers show as the short lines above the button; unreadable ones
     // open Details below it. Either way the card shows them. A free cost that also
     // carries price fields is a contradiction, so Details opens for it too.
-    for (const { disclosures, values, open } of [
+    for (const { disclosures, values } of [
       { disclosures: { ...readableRoute, cost: { kind: "free", amount: 12, currency: "USD", period: "month" } }, values: [/12/, /USD/, /month/], open: true },
       { disclosures: { ...readableRoute, address: { stability: "rotating" } }, values: [/Stability/, /rotating/], open: true },
       { disclosures: { ...readableRoute, cost: { kind: "paid", amount: 12, currency: "USD" } }, values: [/12/, /USD/, /price is in Details/], open: true },
@@ -369,6 +369,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     ]) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
       const details = container.querySelector("[data-disclosure]")!
+      assert.ok(details)
       const label = JSON.stringify(disclosures)
       assert.equal(container.querySelector("details"), null)
       for (const value of values) assert.match(shownText(container), value, `${label}: the leftover value shows on the card`)

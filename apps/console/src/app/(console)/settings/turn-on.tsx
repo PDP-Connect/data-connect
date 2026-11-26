@@ -76,7 +76,6 @@ export function TurnOnCard({
   const compact = reduced !== null && !readable.unreadable && !unread;
   const shownLines = compact && reduced ? reduced.shown : routeLines;
   const movedLines = compact && reduced ? reduced.rest : [];
-  const detailsOpen = !compact;
   // Everything the service reports that the short lines do not carry, one click away.
   const details = complete ? (
     <div className="grid gap-2" data-disclosure="">

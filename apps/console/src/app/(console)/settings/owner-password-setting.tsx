@@ -22,7 +22,6 @@ import type { OwnerPasswordSource } from "./owner-password-data.ts"
  */
 export function OwnerPasswordSetting({
   canReveal = false,
-  managedDesktop = false,
   passwordSet = true,
   source,
   practice = false,
@@ -77,7 +76,7 @@ export function OwnerPasswordSetting({
         "Password changed. Other signed-in devices have been signed out."
       )
       router.refresh()
-    } catch (error) {
+    } catch {
       setMessage(
         "Could not change the password. Try again."
       )
@@ -103,7 +102,7 @@ export function OwnerPasswordSetting({
       }
       setMessage("Password window opened.")
       router.refresh()
-    } catch (error) {
+    } catch {
       setMessage(
         "Could not open the password window. Try again."
       )
@@ -138,7 +137,7 @@ export function OwnerPasswordSetting({
           onClick={() => void requestDesktopChange()}
           type="button"
         >
-          {busy ? "Checking…" : passwordSet ? "Change password" : "Set password"}
+          {busy ? "Checking…" : "Change password"}
         </Button>
       </div>
     )

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Button } from "@/components/ui/button.tsx"
+import { Diagnostics } from "./diagnostics.tsx"
 import { useEffect, useState } from "react"
 import { createDesktopPairingAction } from "./desktop-pairing-actions.ts"
 import { countdownLabel, secondsRemaining } from "./desktop-pairing.ts"
@@ -194,12 +195,14 @@ export function DesktopPairingSetting({ practice = false }: { practice?: boolean
       <Button aria-expanded={expanded} className="justify-self-start" onClick={() => setExpanded(!expanded)} type="button" variant="ghost">Connect a DataConnect app on another computer</Button>
       {expanded ? <>
       {error ? (
+        <>
         <p
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
           Could not make a connection code. Try again.
         </p>
+        <Diagnostics><pre>{error}</pre></Diagnostics></>
       ) : null}
       <div>
         <Button
