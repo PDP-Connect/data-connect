@@ -47,7 +47,12 @@ function makeRes(): { captured: CapturedResponse; res: unknown } {
   return { captured, res };
 }
 
-function mount(store: RecoveryKeyStore): FakeApp["routes"] {
+const PASSWORD_OK = {
+  check: async (_req: unknown, submitted: string) => (submitted === "right" ? { status: "ok" as const } : { status: "invalid" as const }),
+  isSet: async () => true,
+};
+
+function mount(store: RecoveryKeyStore, ownerPassword: typeof PASSWORD_OK = PASSWORD_OK): FakeApp["routes"] {
   const app = new FakeApp();
   mountOwnerRecoveryKey(app as unknown as Parameters<typeof mountOwnerRecoveryKey>[0], {
     handleError: (res, err) => {
@@ -56,6 +61,7 @@ function mount(store: RecoveryKeyStore): FakeApp["routes"] {
         .json({ error: { message: err instanceof Error ? err.message : String(err) } });
     },
     requireOwner: (...args: unknown[]) => (args[2] as () => void)(),
+    ownerPassword,
     requireToken: (...args: unknown[]) => (args[2] as () => void)(),
     store,
   });
@@ -68,7 +74,7 @@ test("POST export returns the store's code", async () => {
   assert.ok(handler);
 
   const { captured, res } = makeRes();
-  await handler?.({}, res);
+  await handler?.({ body: { password: "right" } }, res);
   assert.deepEqual(captured.body, { data: { code: "AB12-CD34-EF56" }, object: "recovery_key_export" });
 });
 
@@ -81,7 +87,7 @@ test("POST export surfaces a refusal from the store as an error response, not a 
   const handler = routes.get("POST /v1/owner/recovery-key/export");
 
   const { captured, res } = makeRes();
-  await handler?.({}, res);
+  await handler?.({ body: { password: "right" } }, res);
   assert.equal(captured.status, 500);
   assert.match(String((captured.body as { error: { message: string } }).error.message), /No encrypted vault/);
 });
@@ -102,9 +108,27 @@ test("POST export registers requireToken and requireOwner ahead of the handler",
   };
   mountOwnerRecoveryKey(app as unknown as Parameters<typeof mountOwnerRecoveryKey>[0], {
     handleError: () => {},
+    ownerPassword: PASSWORD_OK,
     requireOwner: () => {},
     requireToken: () => {},
     store: { requestExport: async () => "CODE" },
   });
   assert.equal(registeredArgs.length, 3, "expected requireToken, requireOwner, and the handler");
+});
+
+test("POST export asks for the owner password again before relaying, like the recovery kit", async () => {
+  let asked = 0;
+  const routes = mount({ requestExport: async () => { asked++; return "AB12-CD34-EF56"; } });
+  const handler = routes.get("POST /v1/owner/recovery-key/export");
+  for (const [body, status, code] of [[{}, 401, "owner_password_required"], [{ password: "wrong" }, 401, "owner_password_invalid"]] as const) {
+    const { captured, res } = makeRes();
+    await handler?.({ body }, res);
+    assert.equal(captured.status, status);
+    assert.equal((captured.body as { error: { code: string } }).error.code, code);
+  }
+  const noPassword = mount({ requestExport: async () => { asked++; return "x"; } }, { ...PASSWORD_OK, isSet: async () => false });
+  const { captured, res } = makeRes();
+  await noPassword.get("POST /v1/owner/recovery-key/export")?.({ body: { password: "right" } }, res);
+  assert.equal(captured.status, 409);
+  assert.equal(asked, 0, "the desktop key was never requested without the password");
 });

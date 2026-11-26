@@ -8159,8 +8159,18 @@ function buildRsApp(opts: ServerOpts = {}) {
   // routes/owner-recovery-key.ts for the full rationale: this route is a
   // pure relay over short-lived per-command result files, never a
   // computation of the code itself.
+  // One password re-check (one attempt budget) for both recovery exports below.
+  const rsOwnerPasswordCheck = createOwnerPasswordCheck({
+    loginRateLimit: rsOwnerAuthConfig.loginRateLimit,
+    password: rsOwnerAuthConfig.password,
+    store: opts.ownerPasswordVerifierStore
+      ? { readVerifier: async () => (await opts.ownerPasswordVerifierStore?.read()) ?? null }
+      : null,
+    verifier: opts.ownerAuthPasswordVerifier ?? null,
+  });
   mountOwnerRecoveryKey(app, {
     handleError,
+    ownerPassword: rsOwnerPasswordCheck,
     requireOwner,
     requireToken,
     store: createRecoveryKeyStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
@@ -8169,14 +8179,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   mountOwnerRecoveryKit(app, {
     exporter: createServerRecoveryKitExporter(),
     handleError,
-    ownerPassword: createOwnerPasswordCheck({
-      loginRateLimit: rsOwnerAuthConfig.loginRateLimit,
-      password: rsOwnerAuthConfig.password,
-      store: opts.ownerPasswordVerifierStore
-        ? { readVerifier: async () => (await opts.ownerPasswordVerifierStore?.read()) ?? null }
-        : null,
-      verifier: opts.ownerAuthPasswordVerifier ?? null,
-    }),
+    ownerPassword: rsOwnerPasswordCheck,
     requireOwner,
     requireToken,
   } as unknown as Parameters<typeof mountOwnerRecoveryKit>[1]);

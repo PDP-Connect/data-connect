@@ -85,3 +85,56 @@ export function createOwnerPasswordCheck({
     },
   }
 }
+
+export interface OwnerPasswordGateResponse {
+  json: (body: unknown) => unknown
+  setHeader?: (name: string, value: string) => unknown
+  status: (code: number) => OwnerPasswordGateResponse
+}
+
+/**
+ * Re-asks for the owner password before a sensitive export (no time window).
+ * Order: no password on this install, then none sent (spends no attempt), then
+ * the throttled comparison. Returns true only when the caller may go on; on
+ * false it has already written the refusal.
+ */
+export async function passOwnerPasswordGate(
+  check: OwnerPasswordCheck,
+  req: { readonly body?: unknown; readonly headers?: OwnerLoginRateLimitRequest["headers"] },
+  res: OwnerPasswordGateResponse
+): Promise<boolean> {
+  if (!(await check.isSet())) {
+    res.status(409).json({
+      error: { code: "owner_password_not_set", message: "Set an owner password before showing the recovery code." },
+    })
+    return false
+  }
+  const body = req.body
+  const submitted =
+    body && typeof body === "object" && typeof (body as { password?: unknown }).password === "string"
+      ? (body as { password: string }).password
+      : ""
+  if (submitted === "") {
+    res.status(401).json({
+      error: { code: "owner_password_required", message: "Send the owner password in the request body." },
+    })
+    return false
+  }
+  const result = await check.check({ headers: {}, ...req } as OwnerLoginRateLimitRequest, submitted)
+  if (result.status === "rate_limited") {
+    res.setHeader?.("Retry-After", String(result.retryAfterSeconds))
+    res.status(429).json({
+      error: {
+        code: "owner_login_rate_limited",
+        message: "Too many attempts. Retry after the indicated delay.",
+        type: "slow_down",
+      },
+    })
+    return false
+  }
+  if (result.status !== "ok") {
+    res.status(401).json({ error: { code: "owner_password_invalid", message: "That password is not right." } })
+    return false
+  }
+  return true
+}

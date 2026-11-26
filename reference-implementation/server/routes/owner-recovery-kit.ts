@@ -6,7 +6,7 @@ import { getStorageBackendKind } from "../postgres-storage.ts"
 import { resolveCredentialEncryptionKey } from "../stores/credential-encryption.ts"
 import { resolveDatabaseEncryptionKey } from "../sqlite-encryption.ts"
 import type { OwnerLoginRateLimitRequest } from "../owner-login-rate-limit.ts"
-import type { OwnerPasswordCheck } from "../owner-password-check.ts"
+import { type OwnerPasswordCheck, passOwnerPasswordGate } from "../owner-password-check.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 interface RouteRequest {
@@ -71,47 +71,7 @@ export function mountOwnerRecoveryKit(app: AppLike, ctx: MountOwnerRecoveryKitCo
     ...guarded,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
-        // Re-ask for the password on every export (no time window). Order: no
-        // password on this install, then none sent (spends no attempt), then
-        // the throttled comparison. The code is read only after all three.
-        if (!(await ctx.ownerPassword.isSet())) {
-          res.status(409).json({
-            error: {
-              code: "owner_password_not_set",
-              message: "Set an owner password before showing the recovery code.",
-            },
-          })
-          return
-        }
-        const body = req.body
-        const submitted =
-          body && typeof body === "object" && typeof (body as { password?: unknown }).password === "string"
-            ? (body as { password: string }).password
-            : ""
-        if (submitted === "") {
-          res.status(401).json({
-            error: { code: "owner_password_required", message: "Send the owner password in the request body." },
-          })
-          return
-        }
-        const result = await ctx.ownerPassword.check({ headers: {}, ...req }, submitted)
-        if (result.status === "rate_limited") {
-          res.setHeader?.("Retry-After", String(result.retryAfterSeconds))
-          res.status(429).json({
-            error: {
-              code: "owner_login_rate_limited",
-              message: "Too many attempts. Retry after the indicated delay.",
-              type: "slow_down",
-            },
-          })
-          return
-        }
-        if (result.status !== "ok") {
-          res.status(401).json({
-            error: { code: "owner_password_invalid", message: "That password is not right." },
-          })
-          return
-        }
+        if (!(await passOwnerPasswordGate(ctx.ownerPassword, req, res))) return
         const code = ctx.exporter.exportCode()
         res.json({ data: { code }, object: "recovery_kit_export" })
       } catch (err) {
