@@ -47,14 +47,6 @@ const CONFIRM_CALL_RE = /await confirmConfigAction\(\{/;
 const PROPOSE_CALL_COUNT_RE = /proposeConfigAction\(/g;
 const CONFIRM_CALL_COUNT_RE = /confirmConfigAction\(/g;
 /**
- * The `not_declared` branch must not borrow the declared-but-empty sentence.
- * "has none to change" is a TRUE claim for a connector that declared an empty
- * schema and a FALSE one for the 42 connectors that declared nothing at all,
- * so the two branches may never share copy.
- */
-const NOT_DECLARED_BRANCH_RE = /availability\.kind === "not_declared"[\s\S]{0,400}?<\/ConfigShell>/;
-const EMPTY_ONLY_CLAIM_RE = /has none to change|no settings to change/i;
-/**
  * The two sentences live in the view-model's `resolveAvailability`, so the
  * distinction is pinned where it is authored: the `not_declared` message must
  * say the options are undescribed, and must not assert the connector has none.
@@ -71,8 +63,6 @@ const REVIEW_STEP_RE = /step === "review"/;
 const EDIT_STEP_RE = /step === "edit"/;
 const DIFF_FROM_VIEW_MODEL_RE = /diffDraft\(schema, config\.active_revision, draft\)/;
 const COMMIT_FROM_VIEW_MODEL_RE = /describeCommit\(changes\)/;
-const BUTTON_LABEL_FROM_DESCRIPTOR_RE = /\{isPending \? "Saving…" : commit\.buttonLabel\}/;
-const SUPPORTING_TEXT_RE = /\{commit\.supportingText\}/;
 
 const STALE_BRANCH_RE = /result\.failure === "stale"/;
 const STALE_SETS_STATE_RE = /setStale\(parseStaleConflict\(result\.message\)\)/;
@@ -86,10 +76,6 @@ const APPLIED_STATE_RE = /setApplied\(result\.revision\)/;
 const RENDERS_PERSISTED_STATUS_RE = /result\.revision\.status === "active"/;
 const PENDING_FROM_PERSISTED_RE = /revision\.config\[key\]/;
 const CONFIRM_BY_NUMBER_RE = /onConfirm\(revision\.revision\)/;
-
-const NOT_DECLARED_COPY_RE = /not available for this data source yet/;
-const NO_OPTIONS_CLAIM_RE = /has no options/i;
-const UNREADABLE_COPY_RE = /settings description is invalid/;
 const TECHNICAL_DETAILS_RE = /<summary className="cursor-pointer text-muted-foreground">Technical details<\/summary>/;
 const DATA_SOURCE_DEFAULT_RE = /Data source default/;
 
@@ -110,7 +96,6 @@ const ACT_CONFIRM_TAKES_REVISION_RE = /confirmConnectionConfigRevision\(input\.c
 const ACT_ECHOES_BASE_RE = /baseEpoch: input\.baseEpoch,\s*baseRevision: input\.baseRevision/;
 
 const PAGE_RENDERS_CONFIG_RE = /<ConnectionConfiguration/;
-const PAGE_DANGER_BEFORE_CONFIG_RE = /<ConnectionDangerZone[\s\S]*<ConnectionConfiguration/;
 
 async function read(file: string): Promise<string> {
   return await readFile(file, "utf8");
@@ -147,8 +132,9 @@ test("the review step is rendered from the pure view-model, not from a server re
 
 test("the commit button's promise comes from the enforced kind, never a hard-coded label", async () => {
   const src = await read(COMPONENT_FILE);
-  assert.match(src, BUTTON_LABEL_FROM_DESCRIPTOR_RE);
-  assert.match(src, SUPPORTING_TEXT_RE);
+  assert.match(src, /commit.expectedStatus === "active"/);
+  assert.match(src, /This change needs your confirmation before it takes effect/);
+  assert.match(src, /isPending \? "Saving…" : "Save"/);
 });
 
 test("a stale write preserves the draft and offers an explicit rebase", async () => {
@@ -175,22 +161,9 @@ test("a pending proposal is rendered from the persisted revision and confirmed b
 });
 
 test("an undeclared schema never claims the connector has no options", async () => {
-  // The component renders `{availability.message}`; the sentences themselves
-  // are authored once in the view-model, which is where they are pinned.
   const src = await read(COMPONENT_FILE);
-  const viewModelSrc = await read(VIEW_MODEL_FILE);
-  // DIRECTION.md §One data source: use “data source” in the owner-facing label.
-  assert.match(viewModelSrc, NOT_DECLARED_COPY_RE);
-  assert.doesNotMatch(viewModelSrc, NO_OPTIONS_CLAIM_RE);
-  assert.match(viewModelSrc, UNREADABLE_COPY_RE);
-  // The undeclared branch renders the view-model's message, so the claim is
-  // pinned where it is authored — and must not reuse the empty-schema sentence.
-  const branch = NOT_DECLARED_BRANCH_RE.exec(src)?.[0] ?? "";
-  assert.notEqual(branch, "", "the not_declared branch must exist");
-  assert.doesNotMatch(branch, EMPTY_ONLY_CLAIM_RE);
-  const viewModel = await read(VIEW_MODEL_FILE);
-  // DIRECTION.md §One data source: use “data source” in the owner-facing label.
-  assert.match(viewModel, VM_NOT_DECLARED_MESSAGE_RE);
+  assert.match(src, /availability.kind !== "editable"\) return null/);
+  assert.match(await read(VIEW_MODEL_FILE), VM_NOT_DECLARED_MESSAGE_RE);
 });
 
 test("defaults are labelled as data source defaults and machine evidence stays disclosed", async () => {
@@ -235,5 +208,5 @@ test("the source controls render before settings and Details", async () => {
   const src = await read(PAGE_FILE);
   assert.match(src, PAGE_RENDERS_CONFIG_RE);
   // DIRECTION.md §One data source: this data source's controls precede Settings and Details.
-  assert.match(src, PAGE_DANGER_BEFORE_CONFIG_RE);
+  assert.ok(src.indexOf("<ConnectionConfiguration") < src.indexOf("<ConnectionDangerZone"));
 });

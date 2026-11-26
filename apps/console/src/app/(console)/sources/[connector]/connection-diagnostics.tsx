@@ -222,6 +222,22 @@ export function ConnectionRecoverySummary(props: ConnectionRecoverySummaryProps)
   );
 }
 
+export function ConnectionDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">) {
+  if (!connectionHealth) return null;
+  const remediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);
+  if (!remediation) return null;
+  return <OutboxStallRemediationPanel
+    connectionId={connectionId}
+    connectorId={connectorId}
+    hostLabels={boundHostLabels(sourceInstancesForRecovery(sourceInstances, connectionId))}
+    plain
+    providerOrigin={providerOrigin}
+    remediation={remediation}
+    sourceInstanceId={recoverySourceInstanceId(sourceInstances, connectionId)}
+    verdictRemediation={primaryOwnerActionRemediation(renderedVerdict)}
+  />;
+}
+
 function recoveryTimeLabel(value: string | null): string | null {
   if (!value) return null;
   const date = new Date(value);
@@ -1096,6 +1112,7 @@ function OutboxStallRemediationPanel({
   connectionId,
   connectorId,
   hostLabels,
+  plain = false,
   providerOrigin,
   remediation,
   sourceInstanceId,
@@ -1112,6 +1129,7 @@ function OutboxStallRemediationPanel({
    * the data" wording.
    */
   hostLabels: readonly string[];
+  plain?: boolean;
   remediation: NonNullable<ReturnType<typeof summarizeOutboxStallRemediation>>;
   /**
    * Server-owned CAUSE-SPECIFIC remediation from the rendered verdict. When
@@ -1181,18 +1199,18 @@ function OutboxStallRemediationPanel({
     >
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-outbox-remediation-label">
         {/* biome-ignore lint/suspicious/noUnnecessaryConditions: verdictRemediation is RefActionRemediation | null; tsc rejects removing this guard. */}
-        {verdictRemediation?.label ?? remediation.label}
+        {plain ? "What to do on that computer" : verdictRemediation?.label ?? remediation.label}
       </p>
       {hostLabels.length > 0 ? (
         <p className="pdpp-caption text-muted-foreground" data-testid="diagnostics-outbox-remediation-host">
-          Bound device{hostLabels.length === 1 ? "" : "s"}:{" "}
+          {plain ? "Computer" : `Bound device${hostLabels.length === 1 ? "" : "s"}`}:{" "}
           <span className="font-medium text-foreground">{hostLabels.join(", ")}</span>
         </p>
       ) : null}
-      <p className="pdpp-caption text-muted-foreground" title={remediation.reason ?? undefined}>
-        {explanation}
+      <p className="pdpp-caption text-muted-foreground" title={plain ? undefined : remediation.reason ?? undefined}>
+        {plain ? "Open a terminal on that computer and follow these steps." : explanation}
       </p>
-      {remediation.scale ? (
+      {!plain && remediation.scale ? (
         <p
           className="pdpp-caption text-muted-foreground tabular-nums"
           data-testid="diagnostics-outbox-remediation-scale"
@@ -1201,10 +1219,10 @@ function OutboxStallRemediationPanel({
         </p>
       ) : null}
       <ol className="flex flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
-        {steps.map((step) => (
+        {steps.map((step, index) => (
           <li className="flex flex-col gap-0.5" key={step.label}>
-            <span className="pdpp-caption font-medium text-foreground">{step.label}</span>
-            {step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
+            <span className="pdpp-caption font-medium text-foreground">{plain ? `Step ${index + 1}` : step.label}</span>
+            {!plain && step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
             {step.command === null ? (
               // Fail-closed: a placeholder could not be resolved. Never render a
               // broken command with literal <…> that the owner would copy and run.
@@ -1217,18 +1235,18 @@ function OutboxStallRemediationPanel({
             ) : (
               <div className="flex min-w-0 items-center gap-2 py-1">
                 <code
-                  className="pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"
+                  className={plain ? "pdpp-caption min-w-0 flex-1 break-all whitespace-pre-wrap font-mono text-foreground" : "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"}
                   data-testid="diagnostics-outbox-remediation-command"
                 >
                   {step.command}
                 </code>
-                <CopyButton ariaLabel={`Copy command: ${step.label}`} value={step.command} />
+                <CopyButton ariaLabel={plain ? `Copy step ${index + 1}` : `Copy command: ${step.label}`} value={step.command} />
               </div>
             )}
           </li>
         ))}
       </ol>
-      {verdictRemediation ? null : (
+      {plain || verdictRemediation ? null : (
         // Legacy fallback only: when the reference does not send cause-specific
         // remediation, we can't tell failed-upload from state-read, so this note
         // covers both. With a verdict remediation present the steps are already

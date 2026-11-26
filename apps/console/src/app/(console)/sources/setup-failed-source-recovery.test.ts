@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}[connector]/page.tsx`;
+const PAGE_FILE = `${HERE}[connector]/source-page.tsx`;
 const ACTIONS_FILE = `${HERE}[connector]/actions.ts`;
 const DANGER_ZONE_FILE = `${HERE}[connector]/connection-danger-zone.tsx`;
 const REF_CLIENT_FILE = `${HERE}../lib/ref-client.ts`;
@@ -52,6 +52,6 @@ test("setup-failed details reuse the single-connection danger-zone delete", asyn
     read(ACTIONS_FILE),
   ]);
   assert.match(page, /<ConnectionDangerZone[\s\S]*connectionId=\{connectorInstanceId \?\? connectionId\}/);
-  assert.match(dangerZone, /<DeleteForm activeRunId=\{activeRunId\} connectionId=\{connectionId\} \/>/);
+  assert.match(dangerZone, /<DeleteForm\s+activeRunId=\{activeRunId\}\s+connectionId=\{connectionId\}/);
   assert.match(actions, /await deleteConnectionWithRunCancel\(connectionId, cancelRunId, \{ cancelRun, deleteConnection \}\)/);
 });

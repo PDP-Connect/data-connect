@@ -49,7 +49,6 @@ function ResolvedSourceUpdate({
 function SourceUpdateSlotResolved({
   displayName,
   model,
-  version,
 }: {
   displayName: string;
   model: SourceUpdateModel | null;

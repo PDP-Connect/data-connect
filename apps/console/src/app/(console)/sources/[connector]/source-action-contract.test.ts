@@ -41,7 +41,8 @@ for (const file of readdirSync(root).filter((name) => name.endsWith(".tsx"))) {
 
 for (const [action, expected] of Object.entries(baseline.uses)) {
   test(`${action} keeps its call arguments or posted fields`, () => {
-    assert.deepEqual(uses.get(action)?.sort(), expected);
+    const withoutTrailingCommas = (value: string) => value.replace(/,([)}\]])/gu, "$1");
+    assert.deepEqual(uses.get(action)?.map(withoutTrailingCommas).sort(), expected.map(withoutTrailingCommas).sort());
   });
 }
 for (const [file, hash] of Object.entries(baseline.actions)) {

@@ -6,10 +6,6 @@
 import { IcButton } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
-import {
-  connectorInstallActionLabel,
-  connectorNotInstalledCopy,
-} from "../../lib/connector-implementation.ts";
 import { installConnectorForSourceAction } from "./install-connector-action.ts";
 import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 

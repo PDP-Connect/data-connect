@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const DETAIL_PAGE = `${HERE}[connector]/page.tsx`;
+const DETAIL_PAGE = `${HERE}[connector]/source-page.tsx`;
 
 const STATIC_SECRET_CAPTURE_RESOLVED_ONCE =
   /const staticSecretCapture = staticSecretCredentialCaptureFromManifest\(manifest\)/;
@@ -31,7 +31,7 @@ const SESSION_BOUND_PRECEDES_STATIC_SECRET =
 // drives the button). A browser-session connection never offers a
 // credential-capture button as its repair.
 const STATIC_SECRET_UPDATE_CAPABILITY_GATED_ON_BINDING_AND_SURFACE =
-  /hasStaticSecretCredentialUpdate=\{\s*storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"\s*\}/;
+  /hasStaticSecretCredentialUpdate=\{\s*credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"\s*\}/;
 const STATIC_SECRET_UPDATE_LINK_VISIBLE = /storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate/;
 // The rendered `reauth` action routes by the server-owned owner-action surface,
 // not by connector-manifest capability alone.
@@ -75,7 +75,7 @@ const REPAIR_CREDENTIAL_ACTION_LINKS_TO_REPAIR =
 // Every OTHER paused row - notably one the owner paused deliberately - gets a
 // real Resume action that posts to its owner-session server action, and an
 // actively-collecting row gets Pause, so the pause/resume cycle is closed.
-const RESUME_ACTION_POSTS_RESUME = /statusAction\?\.kind === "resume"\) \{\s*return <form action=\{resumeConnectionAction\}>/;
+const RESUME_ACTION_POSTS_RESUME = /statusAction\?\.kind === "resume"\) \{\s*return <ResumeConnectionButton/;
 const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused\) && overview\.connectionStatus === "active"/;
 const PAUSE_CONNECTION_SECTION_POSTS_PAUSE =
   /function PauseConnectionSection\([\s\S]{0,600}<form action=\{pauseConnectionAction\}>/;

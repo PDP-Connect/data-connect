@@ -122,7 +122,7 @@ function ConfigEditor({
   const pending = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
 
   const resetToSummary = useCallback(() => {
-    setStep("summary");
+    setStep("edit");
     setReason("");
     setShowReasonError(false);
     setFailure(null);
@@ -160,7 +160,7 @@ function ConfigEditor({
         resetToSummary();
       } else {
         setPersisted(result.revision);
-        setStep("summary");
+        setStep("edit");
         setReason("");
       }
       router.refresh();
@@ -239,7 +239,7 @@ function ConfigEditor({
         <CurrentSettings onEdit={() => setStep("edit")} revision={config.active_revision} rows={currentSettings} />
       ) : null}
 
-      {step === "edit" ? (
+      {step === "edit" && !pending ? (
         <DraftEditor
           draft={draft}
           errors={fieldErrors}
@@ -612,7 +612,6 @@ function PendingProposal({
   schema: NonNullable<ConnectionConfigWire["options_schema"]>;
 }) {
   const byKey = new Map(schema.options.map((option) => [option.option_key, option]));
-  const proposedBy = revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by);
   return (
     <div className="flex flex-col gap-3 border-y border-border py-4">
       <div className="flex flex-col gap-0.5">

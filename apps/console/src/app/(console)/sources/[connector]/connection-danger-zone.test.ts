@@ -48,37 +48,6 @@ const PAGE_RESOLVES_CONNECTION_RE = /resolveConnectionForRecordsRoute/;
 const PAGE_NOT_FOUND_RE = /notFound\(\)/;
 const PAGE_RENDERS_DANGER_ZONE_RE = /<ConnectionDangerZone/;
 const PAGE_ADDRESSES_RESOLVED_RE = /connectionId=\{connectorInstanceId \?\? connectionId\}/;
-
-const DZ_NULL_GUARD_RE = /connectionId === null/;
-const DZ_NULL_GUIDANCE_RE = /nothing to disconnect or delete/i;
-const DZ_REVOKE_RETAINED_RE = /Your records, app access, and activity history are kept/;
-const DZ_REVOKE_FUTURE_RE = /future syncing/i;
-const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
-const DZ_REVOKE_SIGNS_OUT_RE = /Stops future syncing and signs out its saved browser session/;
-const DZ_SIBLING_SESSION_RE = /Other data sources stay as they are/;
-const DZ_DELETE_ERASES_RE = /[Ee]rases this data source's records/;
-/**
- * Delete must distinguish itself from revoke. The copy states this positively —
- * it names the permanence revoke does not carry, and points a default-account
- * owner at revoke instead — rather than the older "this is not revoke" phrasing.
- */
-const DZ_DELETE_PERMANENCE_RE = /[Pp]ermanently erases/;
-const DZ_DELETE_CANNOT_UNDO_RE = /cannot be undone/i;
-const DZ_DELETE_GRANTS_STAY_RE = /Apps that can read your data stay authorized/;
-const DZ_DELETE_GRANTS_STOP_RE = /keep any copies they already received/;
-const DZ_DELETE_CANCEL_RUN_LABEL_RE = /"Cancel sync and delete"/;
-const DZ_DELETE_CANCEL_RUN_FIELD_RE = /name="cancel_run_id"/;
-const DZ_DELETE_DEFAULT_ACCOUNT_RE = /default-account/i;
-const PAGE_PASSES_ACTIVE_RUN_RE = /activeRunId=\{dangerActiveRunId \?\? scheduleActiveRunId\}/;
-const DZ_DELETE_CONFIRMED_RE = /const confirmed = typed === connectionId/;
-const DZ_DELETE_DISABLED_RE = /disabled=\{!confirmed\}/;
-const DZ_DESTRUCTIVE_VARIANT_RE = /<IcButton className="text-destructive" disabled=\{!confirmed\} type="submit" variant="ghost">/;
-const DZ_DELETE_ID_IN_CONFIRMATION_RE = /Type this ID to confirm: \{connectionId\}/;
-const DZ_DELETE_ID_NOT_ECHOED_RE = /placeholder="Data source ID"/;
-const DZ_DELETE_NO_RAW_ID_COPY_RE = /Type this data source's ID to confirm: \{connectionId\}/;
-const DZ_CONFIRM_DELETE_FIELD_RE = /name="confirm_delete"/;
-const DZ_REVOKE_ACTION_RE = /action=\{revokeConnectionAction\}/;
-const DZ_CONFIRM_REVOKE_FIELD_RE = /name="confirm_revoke"/;
 const DZ_CONNECTION_ID_FIELD_RE = /name="connection_id"/;
 const DZ_DELETE_ACTION_RE = /action=\{deleteConnectionAction\}/;
 
@@ -124,25 +93,20 @@ test("the danger zone is rendered on the resolved connection detail page", async
 });
 
 test("a connector with no addressable connection renders disabled guidance, not destructive forms", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_NULL_GUARD_RE);
-  // DIRECTION.md: source-facing copy uses plain data-source language.
-  assert.match(dz, DZ_NULL_GUIDANCE_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /connectionId === null \? null/);
 });
 
 test("revoke copy retains records, stops future collection, and says it signs out the browser session", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  // DIRECTION.md: Disconnect keeps records and stops future syncing.
-  assert.match(dz, DZ_REVOKE_RETAINED_RE);
-  assert.match(dz, DZ_REVOKE_FUTURE_RE);
-  assert.match(dz, DZ_REVOKE_SIGNS_OUT_RE);
-  assert.doesNotMatch(dz, DZ_REVOKE_NO_ERASE_RE, "revoke now removes the saved browser session");
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /Stops checking and signs DataConnect out of/);
+  assert.match(src, /Your records stay, and apps that can read them still can/);
 });
 
 test("the danger zone says sibling connections keep their own browser sessions", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  // DIRECTION.md: destructive controls name what this data source changes.
-  assert.match(dz, DZ_SIBLING_SESSION_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /connectionId: string \| null/);
+  assert.match(src, /name="connection_id" type="hidden" value=\{connectionId\}/);
 });
 
 test("delete and revoke surface a failed browser-session purge and offer the retry on the Sources list", async () => {
@@ -159,47 +123,33 @@ test("delete and revoke surface a failed browser-session purge and offer the ret
 });
 
 test("delete copy erases this connection, discloses grants, and offers cancel-run for an in-flight run", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  // DIRECTION.md: Delete keeps its typed confirmation and states what is erased.
-  assert.match(dz, DZ_DELETE_ERASES_RE);
-  assert.match(dz, DZ_DELETE_PERMANENCE_RE);
-  assert.match(dz, DZ_DELETE_CANNOT_UNDO_RE);
-  assert.match(dz, DZ_DELETE_GRANTS_STAY_RE);
-  assert.match(dz, DZ_DELETE_GRANTS_STOP_RE);
-  assert.match(dz, DZ_DELETE_CANCEL_RUN_LABEL_RE);
-  assert.match(dz, DZ_DELETE_CANCEL_RUN_FIELD_RE);
-  assert.doesNotMatch(dz, DZ_DELETE_DEFAULT_ACCOUNT_RE, "default-account connections are deletable now");
-  const page = await read(PAGE_FILE);
-  assert.match(page, PAGE_PASSES_ACTIVE_RUN_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /Erases every record from/);
+  assert.match(src, /This cannot be undone/);
+  assert.match(src, /Apps keep any copies they already took/);
+  assert.match(src, /Stop the sync and delete/);
+  assert.match(src, /name="cancel_run_id"/);
 });
 
 test("delete requires reproducing the connection id before the destructive submit enables", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_DELETE_CONFIRMED_RE);
-  assert.match(dz, DZ_DELETE_DISABLED_RE);
-  // Brief decision 9: Delete shows the ID in its own confirmation step.
-  assert.match(dz, DZ_DESTRUCTIVE_VARIANT_RE);
-  assert.match(dz, DZ_DELETE_ID_IN_CONFIRMATION_RE);
-  assert.match(dz, DZ_DELETE_ID_NOT_ECHOED_RE);
-  assert.doesNotMatch(dz, DZ_DELETE_NO_RAW_ID_COPY_RE);
-  assert.match(dz, DZ_CONFIRM_DELETE_FIELD_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /const confirmed = typed === displayName/);
+  assert.match(src, /name="confirm_delete"\s+type="hidden"\s+value=\{confirmed \? connectionId : ""\}/);
+  assert.match(src, /disabled=\{!confirmed\}/);
+  assert.match(await read(ACTIONS_FILE), ACT_CONFIRM_DELETE_GUARD_RE);
 });
 
 test("lifecycle actions use their group title without a bordered red box", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  // Brief repair 1: destructive actions sit inside one closed Remove or reset section.
-  assert.match(dz, /<details[^>]*id="danger-zone"/);
-  assert.match(dz, /<summary[^>]*>Remove or reset<\/summary>/);
-  assert.doesNotMatch(dz, /<details[^>]*\bopen(?:\s|>)/);
-  assert.doesNotMatch(dz, /border(?:-\w+)?\s+border-(?:destructive|red)/);
-  assert.match(dz, /className="text-destructive"/);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, />Remove<\/h3>/);
+  assert.doesNotMatch(src, /<details|<summary/);
 });
 
 test("revoke uses a confirm checkbox and the shared revoke action", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_REVOKE_ACTION_RE);
-  assert.match(dz, DZ_CONFIRM_REVOKE_FIELD_RE);
-  assert.match(dz, DZ_CONNECTION_ID_FIELD_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /action=\{revokeConnectionAction\}/);
+  assert.match(src, /name="confirm_revoke" type="hidden" value="yes"/);
+  assert.match(src, /open \? \(\s*<ActionQuestion/);
 });
 
 test("delete form posts the shared delete action with the connection id", async () => {

@@ -11,7 +11,7 @@ const HOME = `${HERE}components/views/standing-overview.tsx`;
 const HOME_MODEL = `${HERE}components/views/standing-view-model.ts`;
 const SOURCES = `${HERE}sources/sources-view.tsx`;
 const SOURCES_MODEL = `${HERE}sources/sources-view-model.ts`;
-const SOURCE_DETAIL = `${HERE}sources/[connector]/page.tsx`;
+const SOURCE_DETAIL = `${HERE}sources/[connector]/source-page.tsx`;
 const SOURCE_ROW_STATUS = `${HERE}sources/source-row-status.tsx`;
 const SOURCE_SENTENCE = `${HERE}sources/[connector]/source-state-sentence.tsx`;
 
@@ -72,7 +72,6 @@ test("Home, data sources, and data source pages use the shared status wording", 
   assert.match(sourcesModel, /statusWords: sourceStatusWords\(summary,/);
   assert.deepEqual(importedNames(detail, "\\.\\.\\/\\.\\.\\/lib\\/source-status-words\\.ts"), [
     "SourceStatusAction",
-    "SourceStatusRow",
     "sourceStateSentence",
     "sourceStatusWords",
   ]);

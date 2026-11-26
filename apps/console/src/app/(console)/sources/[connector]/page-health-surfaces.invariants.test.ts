@@ -32,7 +32,6 @@ const RE_DERIVE_AUTO_PAUSED_BANNER = /deriveAutoPausedBanner/;
 const RE_AUTO_PAUSED_BANNER_CONDITIONAL = /autoPausedBanner\s*\?/;
 const RE_AUTO_PAUSED_BANNER_ROW_COMPONENT = /<AutoPausedBannerRow/;
 const RE_AUTO_PAUSED_BANNER_ROW_TESTID = /data-testid="auto-paused-banner-row"/;
-const RE_AUTO_PAUSED_BANNER_TESTID = /data-testid="auto-paused-banner"/;
 const RE_RECENT_RUNS_SECTION = /title="Recent syncs"/;
 const RE_ACQUISITION_COVERAGE_MAPPING = /acquisitionCoverage: summary\.acquisition_coverage \?\? null/;
 const RE_ACQUISITION_COVERAGE_SECTION = /function AcquisitionCoverageSection/;

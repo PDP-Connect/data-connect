@@ -7,7 +7,7 @@ import { mock, test } from "node:test";
 import type * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "../../lib/source-status-words.ts";
+import { sourceStateSentence, type SourceStatusRow } from "../../lib/source-status-words.ts";
 import { buildRecoveryDemoModel } from "./source-detail-demo-data.ts";
 
 const NOW = new Date("2026-11-24T12:00:00.000Z");
@@ -81,19 +81,6 @@ function SourceStatusText({ status }: { status: { words: string } }) {
   return createElement("span", null, status.words);
 }
 
-function SourceUpdateSlot({ demoModel }: {
-  demoModel: { currentVersion: string; otherSources: string[]; targetVersion: string } | null;
-}) {
-  return demoModel
-    ? createElement("section", { "data-testid": "source-update-demo" },
-        createElement("h2", null, "Update"),
-        createElement("p", null, `Version ${demoModel.targetVersion} is ready (you have ${demoModel.currentVersion}).`),
-        demoModel.otherSources.length > 0 ? createElement("p", null, `It also updates ${demoModel.otherSources.join(" and ")}.`) : null,
-        createElement("button", { type: "button" }, "Update")
-      )
-    : null;
-}
-
 mock.module("server-only", { namedExports: {} });
 mock.module("next/navigation", {
   namedExports: {
@@ -155,9 +142,6 @@ mock.module(new URL("./install-connector-action.ts", import.meta.url).href, {
 mock.module(new URL("../add/connector-install-actions.ts", import.meta.url).href, {
   namedExports: { updateConnectorAction: async () => ({ ok: true }) },
 });
-mock.module(new URL("./source-update-section.tsx", import.meta.url).href, {
-  namedExports: { SourceUpdateSlot },
-});
 mock.module(new URL("./source-update-view-model.ts", import.meta.url).href, {
   namedExports: { buildSourceUpdateModel: () => null },
 });
@@ -187,7 +171,7 @@ test("all 24 status rows keep the shared state choice and their actions", async 
     const model = buildRecoveryDemoModel(row as SourceStatusRow);
     const sentence = sourceStateSentence(model.source, { now: NOW, name: model.displayName });
     assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text));
-    assert.ok(dom.window.document.querySelector('a[href$="/technical"]'));
+    assert.ok(dom.window.document.querySelector('a[href*="/technical"]'));
     assert.equal(dom.window.document.querySelector('details[data-testid="source-details"]'), null);
   }
 });
@@ -222,4 +206,83 @@ test("a paused device has no remote Resume action", async () => {
   const controls = [...dom.window.document.querySelectorAll("button, a")].map((element) => element.textContent?.trim());
   assert.ok(!controls.includes("Resume"));
   assert.ok(controls.includes("View this device"));
+});
+
+// The main page's words are tested against every development state, using the
+// actual controls, update component, settings editor and management dialogs.
+test("every practice state obeys the words and folds contract", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const { SOURCE_PRACTICE_STATES } = await import("./source-page-practice.ts");
+  const { bannedCopyProblems, visibleText } = await import("../add/banned-copy.ts");
+  const extra = /\b(?:details|diagnostics|version|collector|retained|coverage|covered|considered|fetched|gaps?|retryable|dead-lettered|outbox|heartbeat|posture|freshness|backoff|configuration|revision|events|run)\b|\bsync position\b|\bsaved browser session\b|\bnot measured\b|\bnobody has described\b|\b(?:cin|run|conn|dsi|dev)_[a-z0-9_]+\b|\b(?:PDPP|interaction|assistance|surface|stream)\b|close this tab/iu;
+  const problems: string[] = [];
+  for (const state of SOURCE_PRACTICE_STATES) {
+    const dom = await renderDemo(state);
+    const document = dom.window.document;
+    const technicalLinks = [...document.querySelectorAll('a[href*="/technical"]')];
+    assert.equal(technicalLinks.length, 1, state);
+    assert.equal(technicalLinks[0]?.textContent, "Technical details");
+    technicalLinks[0]?.parentElement?.remove();
+    const html = document.body.innerHTML;
+    problems.push(...bannedCopyProblems(html).map((problem) => `${state}: ${problem}`));
+    const own = html.replace(/<details\b[^>]*>\s*<summary\b[^>]*>\s*What went wrong\s*<\/summary>[\s\S]*?<\/details>/gu, "");
+    const hit = visibleText(own).replaceAll("sign-in details", "sign-in").match(extra);
+    if (hit) problems.push(`${state}: ${hit[0]}`);
+    for (const details of document.querySelectorAll("details")) assert.equal(details.querySelector("summary")?.textContent?.trim(), "What went wrong", state);
+    const headings = [...document.querySelectorAll("h2")].map((heading) => heading.textContent);
+    assert.ok(headings.indexOf("What is here") < headings.indexOf("Schedule"), state);
+    assert.ok(headings.indexOf("Schedule") < headings.indexOf("Manage"), state);
+    if (headings.includes("Settings")) assert.ok(headings.indexOf("Settings") < headings.indexOf("Manage"), state);
+  }
+  assert.deepEqual(problems, []);
+});
+
+test("practice states cover partial copies, missing kinds, settings, accounts and each confirmation", async () => {
+  const cases = [
+    ["partly-more-coming", /24 so far\. More at the next sync\./],
+    ["partly-some-lost", /24 records\. Some could not be copied\./],
+    ["didnt-come", /Didn't come[\s\S]*Northwind could not send these messages\./],
+    ["settings-choices", /Settings[\s\S]*How many days of messages to copy\./],
+    ["settings-question", /Awaiting your confirmation/],
+    ["other-accounts", /Also connected: Northwind, work/],
+    ["device-healthy", /It runs on Work computer, last heard from/],
+  ] as const;
+  for (const [state, pattern] of cases) assert.match((await renderDemo(state)).window.document.body.textContent ?? "", pattern, state);
+  for (const state of ["dialog-reset", "dialog-disconnect", "dialog-delete", "dialog-delete-running"]) assert.ok((await renderDemo(state)).window.document.querySelector('[role="alertdialog"]'), state);
+});
+
+test("the technical practice route has its heading, explanation and way back", async () => {
+  const { default: TechnicalPage } = await import("./technical/page.tsx");
+  const html = await TechnicalPage({ params: Promise.resolve({ connector: "cin_demo_claude_code_workstation" }), searchParams: Promise.resolve({ demo: "technical" }) });
+  const document = new JSDOM(renderToStaticMarkup(html)).window.document;
+  assert.equal(document.querySelector("h1")?.textContent, "Technical details for Claude Code workstation");
+  assert.match(document.body.textContent ?? "", /Ids, logs and measurements for whoever is helping you with a problem\./);
+  assert.ok(document.querySelector('a[href$="?demo=atlas"]'));
+});
+
+test("the main device steps keep exactly the technical page's resolved commands", async () => {
+  const { SourceTechnicalDetails } = await import("./source-page.tsx");
+  const { ConnectionDeviceRecoverySteps } = await import("./connection-diagnostics.tsx");
+  const { bannedCopyProblems } = await import("../add/banned-copy.ts");
+  const model = buildRecoveryDemoModel(16, true);
+  const technical = new JSDOM(renderToStaticMarkup(createElement(SourceTechnicalDetails, { model, now: NOW.toISOString() }))).window.document;
+  const main = new JSDOM(renderToStaticMarkup(createElement(ConnectionDeviceRecoverySteps, {
+    connectionHealth: model.connectionHealth, connectionId: model.connectorInstanceId ?? model.connectionId,
+    connectorId: model.connectorId, localDeviceProgress: model.overview.localDeviceProgress ?? null,
+    providerOrigin: model.providerOrigin, renderedVerdict: model.connectionRenderedVerdict, sourceInstances: model.sourceInstances,
+  }))).window.document;
+  const selector = '[data-testid="diagnostics-outbox-remediation-command"]';
+  const commands = (document: Document) => [...document.querySelectorAll(selector)].map((node) => node.textContent);
+  assert.ok(commands(main).length > 0);
+  assert.deepEqual(commands(main), commands(technical));
+  for (const command of main.querySelectorAll(selector)) command.remove();
+  assert.deepEqual(bannedCopyProblems(main.body.innerHTML), []);
+  assert.equal(main.querySelector("details"), null);
+});
+
+
+test("unknown counts are omitted while known zero remains a fact", async () => {
+  const document = (await renderDemo("unknown-count")).window.document;
+  assert.doesNotMatch(document.querySelector('a[href$="/messages"]')?.textContent ?? "", /999|count unavailable|not measured/);
+  assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", /0 records/);
 });

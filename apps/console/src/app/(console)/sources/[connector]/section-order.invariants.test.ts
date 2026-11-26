@@ -76,13 +76,14 @@ test("a disconnected source has one set-up link", async () => {
 
 test("device recovery evidence stays on the technical page", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.ok(src.indexOf("export function SourceTechnicalDetails") < src.indexOf("<ConnectionRecoverySummary"));
+  assert.match(src, /hasDeviceLocalRemediation \? <DeviceSteps>/);
+  assert.match(src, /export function SourceTechnicalDetails/);
 });
 
 test("source controls precede Settings and folded Details", async () => {
   const at = await renderOrder();
   // DIRECTION.md §One data source: controls come before Settings and Details.
-  assert.ok(at.dangerZone < at.configuration, "source controls precede Settings");
+  assert.ok(at.configuration < at.dangerZone, "Settings precedes Manage");
   assert.ok(at.configuration < at.details, "Settings precede folded Details");
   assert.ok(at.details < at.diagnostics, "Diagnostics stays inside folded Details");
 });
@@ -95,7 +96,7 @@ test("Settings follows source controls and precedes Diagnostics in Details", asy
   const at = await renderOrder();
   assert.notEqual(at.configuration, -1, "configuration must render on this page");
   // DIRECTION.md §One data source: Settings is followed by folded Details.
-  assert.ok(at.dangerZone < at.configuration, "source controls precede Settings");
+  assert.ok(at.configuration < at.dangerZone, "Settings precedes Manage");
   assert.ok(at.configuration < at.diagnostics, "Settings precedes diagnostics");
 });
 
