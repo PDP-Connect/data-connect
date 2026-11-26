@@ -4,6 +4,7 @@ import { SupportCopy } from "../../components/support-copy.tsx";
 import { IcButton, IcInput, buttonVariants } from "@pdpp/brand-react"
 import { PageHeader } from "@pdpp/operator-ui/components/primitives"
 import Link from "next/link"
+import { unstable_rethrow } from "next/navigation"
 import { RecordroomShellWithPalette } from "../../components/recordroom-shell-with-palette.tsx"
 import { takeOwnerBootstrapFlow } from "../../lib/operator-bootstrap.ts"
 import { issueOwnerTokenAction } from "./actions.ts"
@@ -39,7 +40,7 @@ export default async function TokensPage({
     groups = tokenGroups(practice.clients, practice.details, practice.owners)
   else {
     try { groups = await loadTokenGroups(); }
-    catch { groups = []; inventoryFailed = true; }
+    catch (cause) { unstable_rethrow(cause); groups = []; inventoryFailed = true; }
   }
   const created = practice?.created ?? flow?.token
   return (
