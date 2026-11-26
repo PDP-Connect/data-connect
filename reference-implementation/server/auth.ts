@@ -3509,7 +3509,7 @@ function assertLegacyOwnership(incoming: Record<string, unknown>, others: { mani
     if (!other) continue;
     const otherLegacy = declaredLegacySourceIds(other);
     const otherCurrent = sourceIdOfDeclaration(sourceDeclarationOf(other));
-    if (legacy.some((id) => otherLegacy.includes(id) || id === otherCurrent) || (current !== undefined && otherLegacy.includes(current))) {
+    if ([...legacy, ...(current === undefined ? [] : [current])].some((id) => otherLegacy.includes(id) || id === otherCurrent)) {
       throw invalidConnectorManifest("Legacy source identity is already owned by another connector");
     }
   }
@@ -5770,9 +5770,6 @@ function legacyProjectionMove(
   incomingManifestJson: string,
   verifiedSourceDeclaration: boolean
 ): SourceIdentityMove | null {
-  if (!verifiedSourceDeclaration) {
-    return null;
-  }
   const previous = manifestRecordOf(previousManifest);
   const incoming = manifestRecordOf(incomingManifestJson);
   const retained = sourceDeclarationOf(previous);
@@ -5785,6 +5782,10 @@ function legacyProjectionMove(
     isRecord(retained.source) &&
     retained.source.kind === "connector" &&
     previous?.manifest_uri === from;
+  if (from !== undefined && to !== undefined && isLegacyProjection && incoming && declaredLegacySourceIds(incoming).includes(from) && storageConnectorIdOf(incoming) === connectorId) {
+    return { connectorId, from, to };
+  }
+  if (!verifiedSourceDeclaration) return null;
   const isPublishedDeclaration =
     isRecord(declared?.publisher) &&
     declared.publisher.id !== LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
@@ -5972,6 +5973,9 @@ export function normalizeConnectorManifestForStorage(
       `connector_id ${connectorId} is a URL with no connector_key; register a connector key, and keep the URL as manifest_uri`
     );
   }
+  if (context.retainedConnectorId !== undefined && context.retainedConnectorId !== connectorId) {
+    throw invalidConnectorManifest("Declared legacy identity does not match the retained connector key");
+  }
   const storedManifest: Record<string, unknown> = {
     ...cloneJson(manifest),
     connector_id: connectorId,
@@ -5987,14 +5991,21 @@ export function normalizeConnectorManifestForStorage(
   // declaration must validate; it cannot fall back to a retained declaration or compatibility mapping.
   if (storedManifest.source_declaration !== undefined && storedManifest.source_declaration !== null) {
     storedManifest.source_declaration = acceptedSourceDeclaration(storedManifest.source_declaration);
+  } else if (isRecord(storedManifest.source) && storedManifest.source.id !== undefined) {
+    const sourceId = storedManifest.source.id;
+    if (typeof sourceId !== "string" || /\s/.test(sourceId) || !URL.canParse(sourceId)) {
+      throw invalidConnectorManifest("source.id must be an absolute URI");
+    }
+    storedManifest.source_declaration = snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(storedManifest, {
+      connectorImplementationId: implementationIdOf(storedManifest, sourceId),
+      publisherId: LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID,
+      sourceId,
+    });
   } else if (context.retainedSourceDeclaration !== undefined) {
     storedManifest.source_declaration = projectRetainedSourceDeclaration(storedManifest, context.retainedSourceDeclaration);
   } else {
     const ids = declaredLegacySourceIds(storedManifest);
-    if (context.retainedConnectorId !== undefined && context.retainedConnectorId !== connectorId) {
-      throw invalidConnectorManifest("Declared legacy identity does not match the retained connector key");
-    }
-    if (ids.length === 0 && context.retainedConnectorId !== undefined) return { connectorId, storedManifest };
+    if (ids.length === 0) return { connectorId, storedManifest };
     if (ids.length !== 1) {
       throw invalidConnectorManifest(`Connector ${connectorId} has no source declaration; register an explicit source_declaration or one legacy_source_ids identity`);
     }
