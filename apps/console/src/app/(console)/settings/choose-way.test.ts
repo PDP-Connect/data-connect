@@ -298,7 +298,7 @@ test("the phone and ChatGPT outcomes lead; Other ways still opens the full list"
     assert.deepEqual(headings.slice(0, 2), ["Addresses ChatGPT can open", "Your phone and computers"]);
     assert.match(headings[2] ?? "", /^Details · /, headings[2] ?? "no Details row");
     assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
-    assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Details starts closed");
+    assert.equal(container.querySelector("fieldset details"), null, "the alternatives are shown without folds");
     const shown = container.querySelector("fieldset")!.textContent!;
     assert.doesNotMatch(shown, /Label |ngrok-tcp|detect-only|deferred|admitted/);
     assert.deepEqual(bannedIn(shown), []);

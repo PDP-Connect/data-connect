@@ -11,6 +11,7 @@ import { OpenExternalLink } from "../components/open-external-link.tsx"
 import { NotificationsRow } from "./notifications-row.tsx"
 import { SettingsRow } from "./settings-row.tsx"
 import { loadSettingsSummary } from "./settings-summary-data.ts"
+import { ServerRemoteAccess } from "./server-remote-access.tsx"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
@@ -53,7 +54,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
           id="remote-access"
           title="Remote access"
         >
-          {practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}
+          {!managedDesktopHost ? <ServerRemoteAccess address={summary.publicAddress} /> : practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}
         </Section>
         <Section title="Password and sign-in">
           {ownerPasswordSource ? (

@@ -79,10 +79,10 @@ export function TurnOnCard({
   const detailsOpen = !compact;
   // Everything the service reports that the short lines do not carry, one click away.
   const details = complete ? (
-    <details className="grid gap-2" open={detailsOpen}>
-      <summary className="cursor-pointer text-sm text-muted-foreground">
+    <div className="grid gap-2" data-disclosure="">
+      <h4 className="cursor-pointer text-sm text-muted-foreground">
         Details · everything {plain(candidate.display.label)} tells us about this connection
-      </summary>
+      </h4>
       <div className="grid gap-3">
         <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
         {consent.scope?.query.expectedOrigin ? (
@@ -109,7 +109,7 @@ export function TurnOnCard({
           </div>
         ))}
       </div>
-    </details>
+    </div>
   ) : null;
   return (
     <section aria-label="Turn on" className="grid gap-4">

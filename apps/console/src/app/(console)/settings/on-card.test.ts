@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The On card, the automatic proof re-check, route loss, Turn on again, the
 // facts list in Details and Try again.
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { mock, type TestContext } from "node:test";
@@ -265,8 +266,8 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     // Details is a footer row: what was checked on the left, the toggle on the right.
     const footer = onCard.querySelector("[data-diagnostics]");
     assert.ok(footer, "the On card carries one Details");
-    assert.match(footer.textContent ?? "", /What we checked, and everything Tunnel service reports/);
-    assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
+    assert.match(footer.textContent ?? "", /Copy details for support/);
+    assert.equal(onCard.querySelector("details"), null);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
   }, t);
@@ -875,29 +876,12 @@ test("Turn on again waits for a click when the facts changed since the owner app
 
 // ---------- Details ----------
 
-test("Details show facts with a value, known-empty facts as None, and one count for facts the service doesn't publish", async (t) => {
-  const facts = [
-    fact("Cost", "free"),
-    fact("Account", null),
-    fact("Region", null, false),
-    fact("Speed limit", null, false),
-    fact("Uptime", null, false),
-  ];
-  await withScreen(host({ "/state": onState(routeAt({ facts })) }), async ({ allText }) => {
-    const text = allText();
-    assert.match(text, /Cost\s*free/);
-    assert.match(text, /Account\s*None/);
-    assert.match(text, /3 facts Tunnel service doesn't publish\./);
-    assert.doesNotMatch(text, /needs.provider.call|Region|Uptime|Speed limit/);
-  }, t);
-});
-
-test("one unknown fact is a singular count, and none is no line", async (t) => {
-  await withScreen(host({ "/state": onState(routeAt({ facts: [fact("Region", null, false)] })) }), async ({ allText }) => {
-    assert.match(allText(), /1 fact Tunnel service doesn't publish\./);
-  }, t);
-  await withScreen(host({ "/state": onState(routeAt({ facts: [fact("Cost", "free")] })) }), async ({ allText }) => {
-    assert.doesNotMatch(allText(), /doesn't publish/);
+test("route facts are copied for support without exposing the raw report on the card", async (t) => {
+  const facts = [fact("Cost", "free"), fact("Account", null), fact("Region", null, false)];
+  await withScreen(host({ "/state": onState(routeAt({ facts })) }), async ({ container }) => {
+    const report = await copySupport(container);
+    assert.match(report, /Cost/); assert.match(report, /free/); assert.match(report, /"count":1/);
+    assert.equal(container.querySelector("details"), null);
   }, t);
 });
 
@@ -1029,7 +1013,7 @@ for (const providerId of ["localhost-run", "cloudflare-named"]) {
       const address = container.querySelector("[aria-label='Your address']");
       assert.ok(address, "the live route is mounted");
       assert.ok(
-        [...address.querySelectorAll("dd")].some((node) => node.textContent === line),
+        (await copySupport(address)).includes(line),
         "an unidentified route keeps its own condition, regardless of the selected way"
       );
     }, t);
@@ -1051,8 +1035,8 @@ test("live localhost.run facts use the creating provider, not the selected way",
   }), async ({ container }) => {
     const address = container.querySelector("[aria-label='Your address']");
     assert.ok(address, "the live route is mounted");
-    const values = [...address.querySelectorAll("dd")].map((node) => node.textContent);
-    assert.ok(!values.includes(line), "known-false localhost.run condition is removed");
+    const values = await copySupport(address);
+    assert.doesNotMatch(address.textContent ?? "", new RegExp(line), "the condition stays out of the plain card");
     assert.ok(values.includes(retained), "other route facts remain visible");
   }, t);
 });

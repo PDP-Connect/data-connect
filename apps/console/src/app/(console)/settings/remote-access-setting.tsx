@@ -135,9 +135,11 @@ const PASSWORD_SET_FRAGMENT = "#remote-access-password-set";
 export function RemoteAccessSetting({
   request = requestReachability,
   appVersion,
+  technical = false,
 }: {
   request?: typeof requestReachability;
   appVersion?: string;
+  technical?: boolean;
 }) {
   const [host, setHost] = useState<{ known: true; value: HostSettings } | { known: false; reason: string }>({
     known: false,
@@ -1026,9 +1028,10 @@ export function RemoteAccessSetting({
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
-    <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
+    <DiagnosticsContext.Provider value={{ appVersion, technical }}>
     {/* The page's Section already names this card; no second heading here. */}
     <section aria-label="Remote access" className="grid gap-4" ref={sectionRef}>
+      {technical ? null : <>
       {confirmStop ? (
         <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
           <p className="text-sm font-medium">
@@ -1152,15 +1155,14 @@ export function RemoteAccessSetting({
                   pickedId={wayId}
                 />
                 {recommended ? (
-                  <details className="grid gap-2">
-                    <summary className="cursor-pointer text-[13px] text-muted-foreground">Details</summary>
+                  <div className="grid gap-2">
                     <RecommendedWay
                       checked={wayId === recommended.providerId}
                       disabled={mutationBlocked}
                       onPick={pickWay}
                       row={wayRow(recommended, capabilities, blocks)}
                     />
-                  </details>
+                  </div>
                 ) : null}
               </>
             ) : null}
@@ -1473,7 +1475,8 @@ export function RemoteAccessSetting({
           );
         })}
       </section>
-      <Diagnostics label="This computer">
+      </>}
+      {technical ? <Diagnostics label="This computer">
         {Object.entries(capabilities).map(([id, observation]) => (
           <p key={id}>
             {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
@@ -1549,7 +1552,7 @@ export function RemoteAccessSetting({
             ))}
           </div>
         ))}
-      </Diagnostics>
+      </Diagnostics> : null}
     </section>
     </DiagnosticsContext.Provider>
   );

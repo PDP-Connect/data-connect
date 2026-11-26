@@ -52,6 +52,8 @@ for (const name of settingsPracticeNames) {
 			);
 			await act(async () => {});
 			assert.match(dom.window.document.body.textContent ?? "", practice.expect);
+      assert.equal(dom.window.document.querySelector("details"), null);
+      assert.doesNotMatch(dom.window.document.body.textContent ?? "", /PDPP_|DATACONNECT_|Code:|host_runtime_unavailable|configuration_stale|provider_unavailable/);
 		} finally {
 			await act(async () => root.unmount());
 			dom.window.close();

@@ -250,9 +250,9 @@ test("a background service that is down says so, copies diagnostics, and shows n
     assert.match(mainText(), /DataConnect's background service isn't running\./);
     assert.match(mainText(), /Quit and reopen DataConnect\./);
     assert.doesNotMatch(mainText(), SNAKE);
-    assert.ok(buttons().includes("Copy diagnostics"));
-    assert.match(text(), /Code: host_supervisor_unavailable/);
-    assert.match(text(), /Server message: The server's own words with host_code/);
+    assert.ok(buttons().includes("Copy details for support"));
+    assert.doesNotMatch(text(), /Code: host_supervisor_unavailable/);
+    assert.doesNotMatch(text(), /Server message: The server's own words with host_code/);
   });
 });
 
@@ -260,7 +260,7 @@ test("a path that is too long says so and copies diagnostics", async () => {
   await withScreen(host({ "/catalog": fail("host_path_too_long") }), async ({ mainText, buttons }) => {
     assert.match(mainText(), /data folder path is too long for remote access\./);
     assert.doesNotMatch(mainText(), SNAKE);
-    assert.ok(buttons().includes("Copy diagnostics"));
+    assert.ok(buttons().includes("Copy details for support"));
   });
 });
 

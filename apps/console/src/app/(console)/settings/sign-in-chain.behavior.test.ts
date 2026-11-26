@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict"
 import test, { mock } from "node:test"
 import { JSDOM } from "jsdom"
@@ -341,15 +342,15 @@ for (const [id, line, detail] of [
       assert.ok(text.includes(line))
       const section = container.querySelector('[aria-label="Finish setting up Tailscale"]')
       assert.ok(section)
-      const details = section.querySelector("details")
+      const details = section.querySelector("[data-diagnostics]")
       assert.ok(details)
       const outsideDetails = section.cloneNode(true) as HTMLElement
-      const folded = outsideDetails.querySelector("details")
+      const folded = outsideDetails.querySelector("[data-diagnostics]")
       assert.ok(folded)
       folded.remove()
       // Remote access repair 3: plain wording stays outside; provider terms stay folded.
       assert.doesNotMatch(outsideDetails.textContent ?? "", /MagicDNS|tailnet/)
-      assert.ok(details.textContent?.includes(detail))
+      assert.ok((await copySupport(details)).includes(detail))
       assert.deepEqual(bannedIn(text), [])
       assert.doesNotMatch(text, /daemon|refresh setup|administrator can/i)
       await act(async () => button("Open Tailscale admin")!.click())
@@ -545,7 +546,7 @@ test("a response that does not move the setup on stops the chain after one reque
     assert.match(container.textContent ?? "", /Try again/)
     assert.deepEqual(bannedIn(container.textContent ?? ""), [])
     assert.ok(button("Sign in to Tailscale"), "the owner can try again")
-    assert.equal(container.querySelector("details summary")?.textContent !== undefined, true)
+    assert.ok(button("Copy details for support"))
   } finally {
     await act(async () => root.unmount())
     dom.window.close()

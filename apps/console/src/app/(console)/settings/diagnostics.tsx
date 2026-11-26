@@ -4,7 +4,7 @@
 // Plain-words errors with the raw code one click away, and the collapsed
 // Details block that holds host internals. Everything inside `Diagnostics`
 // may show codes and flags; nothing outside it may.
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
@@ -20,7 +20,7 @@ import {
 
 export { ReachabilityFailure };
 
-export const DiagnosticsContext = createContext<{ appVersion?: string }>({});
+export const DiagnosticsContext = createContext<{ appVersion?: string; technical?: boolean }>({});
 
 // What an error's button may do on this card. A button with no handler is not shown.
 export type Recover = {
@@ -70,25 +70,16 @@ export function diagnosticsText(error: DisplayError, appVersion?: string): strin
   ].join("\n");
 }
 
+function supportText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(supportText).join("\n");
+  if (isValidElement<{ children?: ReactNode }>(node)) return node.props.children === undefined ? JSON.stringify(node.props) : supportText(node.props.children);
+  return "";
+}
+
 export function Diagnostics({ children, label = "Details", note }: { children: ReactNode; label?: string; note?: string }) {
-  return (
-    <details className="grid gap-2" data-diagnostics="">
-      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">
-        {note ? (
-          <span className="flex flex-wrap items-center justify-between gap-3">
-            <span className="pdpp-caption">{note}</span>
-            <span className="flex-none text-sm">
-              {label}{" "}
-              <span aria-hidden="true">›</span>
-            </span>
-          </span>
-        ) : (
-          label
-        )}
-      </summary>
-      <div className="grid gap-2">{children}</div>
-    </details>
-  );
+  const { technical } = useContext(DiagnosticsContext);
+  return technical ? <div className="grid gap-2" data-diagnostics=""><h4>{label}</h4>{note ? <p>{note}</p> : null}{children}</div> : <div data-diagnostics=""><CopyButton label="Copy details for support" text={supportText(children)} /></div>;
 }
 
 function CopyButton({ label, text }: { label: string; text: string }) {
@@ -194,10 +185,7 @@ export function ErrorNotice({ error, action = "turn-on" }: { error: DisplayError
           {nextAction.label}
         </Button>
       ) : null}
-      <Diagnostics label="Details">
-        <pre className="whitespace-pre-wrap break-words">{text}</pre>
-        <CopyButton label="Copy diagnostics" text={text} />
-      </Diagnostics>
+      <CopyButton label="Copy details for support" text={text} />
     </div>
   );
 }

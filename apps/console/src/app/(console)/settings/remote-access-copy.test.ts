@@ -5,6 +5,7 @@
 // underscore-joined code, a dotted capability flag or an ISO-8601 timestamp.
 // Two scans enforce it: the string literals in the source files, and the text
 // rendered for each main state (which also covers library and server values).
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { mock } from "node:test";
@@ -455,7 +456,8 @@ function visibleText(container: Element): string {
 
 async function withScreen<T>(
   handler: Handler,
-  run: (screen: { container: Element; act: typeof act; settle: () => Promise<void> }) => Promise<T>
+  run: (screen: { container: Element; act: typeof act; settle: () => Promise<void> }) => Promise<T>,
+  technical = false
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
   Object.assign(globalThis, {
@@ -475,7 +477,7 @@ async function withScreen<T>(
   const root = createRoot(container);
   const request = (async (url: string, body?: Record<string, unknown>) => handler(url, body)) as typeof requestReachability;
   try {
-    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
+    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test", technical })));
     return await run({ container, act, settle: () => act(async () => {}) });
   } finally {
     await act(async () => root.unmount());
@@ -494,9 +496,9 @@ test("the main state, with library and server values full of codes, shows none",
     assert.match(text, /Works from the internet · checked (just now|\d+ (min|hr|days?) ago)/);
     assert.doesNotMatch(text, /Staged configuration|Reload draft|Commit and review route|Host settings/);
     // Host internals live under Details.
-    const details = [...container.querySelectorAll("[data-diagnostics]")].map((node) => node.textContent).join("\n");
-    assert.match(details, /installer\.execute: false/);
-    assert.match(details, /Target: 127\.0\.0\.1:37807/);
+    const details = await copySupport(container);
+    assert.doesNotMatch(container.textContent ?? "", /installer\.execute/);
+    assert.match(details, /127\.0\.0\.1:37807/);
   });
 });
 
@@ -535,8 +537,7 @@ test("clearing a port asks before it acknowledges that remote access may stop", 
   };
   await withScreen(handler, async ({ container, act, settle }) => {
     await settle();
-    const hostDetails = [...container.querySelectorAll("details")].find((item) => item.querySelector("summary")?.textContent === "This computer") as HTMLDetailsElement;
-    hostDetails.open = true;
+    assert.equal(container.querySelector("details"), null);
     const save = [...container.querySelectorAll("button")].find((item) => item.textContent === "Save port")!;
     await act(async () => save.click());
     await settle();
@@ -559,7 +560,7 @@ test("clearing a port asks before it acknowledges that remote access may stop", 
       port: null,
       acknowledgeDisconnect: true,
     });
-  });
+  }, true);
 });
 
 test("a failed first load says what to do, keeps the code in Details, and clears on the next good load", async (t) => {
@@ -575,11 +576,11 @@ test("a failed first load says what to do, keeps the code in Details, and clears
       // The service answered, so it is reachable: the paused line says why changes wait.
       assert.doesNotMatch(text, /Can't reach DataConnect's background service/);
       assert.match(text, /Changes are paused until remote access can be checked\./);
-      const details = container.querySelector("[role=alert] [data-diagnostics]")!.textContent!;
+      const details = (await copySupport(container.querySelector("[role=alert]")!));
       assert.match(details, /Code: owner_password_required/);
       assert.match(details, /App version: 0\.0\.0-test/);
       assert.match(details, /Server message: The reachability operation/);
-      assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Copy diagnostics"));
+      assert.ok([...container.querySelectorAll("button")].some((node) => ["Copy details for support", "Copied"].includes(node.textContent ?? "")));
       healthy = true;
       await run(async () => t.mock.timers.tick(3000));
       assert.equal(container.querySelector("[role=alert]"), null, "the load error stays after a good load");
@@ -604,7 +605,7 @@ test("reads that get no answer while the service restarts show the paused line w
         assert.equal(container.querySelector("[role=alert]"), null, `${mode}: no error card`);
         assert.match(text, /Can't reach DataConnect's background service\. Changes are paused\./, mode);
         assert.doesNotMatch(text, /couldn't turn on|isn't running/, mode);
-        const details = container.querySelector("[role=status] [data-diagnostics]")?.textContent ?? "";
+        const details = await copySupport(container.querySelector("[role=status]")!);
         assert.match(details, new RegExp(`Code: ${code}`), `${mode}: the code stays under Details`);
         mode = next;
         await run(async () => t.mock.timers.tick(3000));
@@ -623,7 +624,7 @@ test("a read the service answers with its generic error shows a card that says i
     // RAISE rule 6: a failed state has one plain sentence and one next step.
     assert.equal(alert.querySelector(":scope > p")?.textContent, "We couldn't check remote access.");
     assert.ok([...alert.querySelectorAll("button")].some((button) => button.textContent === "Try again"));
-    assert.match(alert.textContent ?? "", /Code: reachability_unavailable/);
+    assert.match(await copySupport(alert), /Code: reachability_unavailable/);
     const text = visibleText(container);
     assert.doesNotMatch(text, /couldn't turn on/);
     // The service answered, so the paused line must not say it can't be reached.
@@ -651,7 +652,7 @@ test("a read the service answers with a specific error is shown even when anothe
       const alert = container.querySelector("[role=alert]")?.textContent ?? "";
       assert.match(alert, /too long for remote access/);
       assert.match(visibleText(container), /Can't reach DataConnect's background service/);
-      const details = container.querySelector("[role=status] [data-diagnostics]")?.textContent ?? "";
+      const details = await copySupport(container.querySelector("[role=status]")!);
       assert.match(details, /Code: client_error/, "the thrown read keeps its code under Details");
     }
   );
@@ -690,7 +691,7 @@ test("an unknown error code shows the generic message, and an action error survi
     // RAISE rule 6: the failed sentence and its one next step are separate.
     assert.equal(container.querySelector('[role="alert"] > p')?.textContent, "Remote access couldn't turn on.");
     assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
-    assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));
+    assert.ok((await copySupport(container.querySelector("[role=alert]")!)).includes("brand_new_server_code"));
     await run(async () => t.mock.timers.tick(3000));
     assert.ok(container.querySelector("[role=alert]"), "an action error should stay until the next action");
   });
@@ -1006,13 +1007,10 @@ test("a failed state has one plain sentence, one next step, and closed Details",
     assert.equal(alert.querySelectorAll(":scope > p").length, 1);
     assert.deepEqual(
       [...alert.querySelectorAll("button")].filter((button) => !button.closest("details")).map((button) => button.textContent),
-      ["Try again"]
+      ["Try again", "Copy details for support"]
     );
-    const details = alert.querySelector("details");
-    assert.ok(details);
-    assert.equal(details.querySelector("summary")?.textContent, "Details");
-    assert.equal((details as HTMLDetailsElement).open, false);
-    assert.match(details.textContent ?? "", /Code: provider_unavailable/);
+    assert.equal(alert.querySelector("details"), null);
+    assert.doesNotMatch(alert.textContent ?? "", /Code: provider_unavailable/);
     assert.doesNotMatch(alert.className, /destructive|red-/);
   } finally {
     dom.window.close();

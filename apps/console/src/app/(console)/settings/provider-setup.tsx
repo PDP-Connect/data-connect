@@ -13,6 +13,7 @@ import {
 import {
   type DisplayError,
   ErrorNotice,
+  Diagnostics,
   ReachabilityFailure,
   toDisplayError,
 } from "./diagnostics.tsx"
@@ -116,10 +117,7 @@ function SetupOperationAction({
         <h4 className="pdpp-label">{isAccountPolicyStep ? "Tailscale account settings" : plain(action.label)}</h4>
         <p>{isAccountPolicyStep ? "Ask an administrator to allow this address, then check again." : instructions}</p>
         {isAccountPolicyStep ? (
-          <details>
-            <summary>Details</summary>
-            <p>{plain(action.label)}. {plain(instructions)}</p>
-          </details>
+          <Diagnostics><p>{plain(action.label)}. {plain(instructions)}</p></Diagnostics>
         ) : null}
         {url?.protocol === "https:" && !url.username && !url.password ? (
           <a href={url.href} rel="noreferrer" target="_blank">
@@ -709,10 +707,7 @@ export function ProviderSetup({
       <section aria-label={`Finish setting up ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{adminCopy.line}</p>
-        <details>
-          <summary>Details</summary>
-          <p>{adminCopy.detail}</p>
-        </details>
+        <Diagnostics><p>{adminCopy.detail}</p></Diagnostics>
         {notice ? <p role="status">{notice}</p> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}

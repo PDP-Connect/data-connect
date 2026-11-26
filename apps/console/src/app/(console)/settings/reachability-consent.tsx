@@ -7,6 +7,7 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
+import { Diagnostics } from "./diagnostics.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { isKnownFalseCondition } from "./known-false-conditions.ts";
 import { formatLocalTime, humanizeKey, plain, verbatimValue } from "./plain-text.ts";
@@ -83,7 +84,7 @@ export function ConsentDisclosures({ value, providerId }: { value: unknown; prov
   if (typeof value === "object") {
     return (
       <dl className="grid gap-3">
-        {Object.entries(value).filter(([, item]) => !isKnownFalseCondition(providerId, item)).map(([key, item]) => (
+        {Object.entries(value).filter(([key, item]) => !machineKey.test(key) && !isKnownFalseCondition(providerId, item)).map(([key, item]) => (
           <div key={key}>
             <dt className="pdpp-label">{humanizeKey(key)}</dt>
             <dd>
@@ -168,10 +169,7 @@ export function disclosureSentences(value: unknown, except: readonly string[] = 
 /** The structured disclosure, verbatim, for the owner who wants every field. Closed unless `open`. */
 export function DisclosureDetails({ value, providerId, open }: { value: unknown; providerId?: string | null; open?: boolean }) {
   return (
-    <details open={open}>
-      <summary>Details</summary>
-      <ConsentDisclosures value={value} providerId={providerId} />
-    </details>
+    <div data-disclosure="">{open ? <ConsentDisclosures value={value} providerId={providerId} /> : null}<Diagnostics><pre>{JSON.stringify(value, null, 2)}</pre></Diagnostics></div>
   );
 }
 

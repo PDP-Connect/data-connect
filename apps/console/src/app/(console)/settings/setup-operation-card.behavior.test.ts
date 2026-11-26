@@ -96,7 +96,7 @@ async function mount(nextAction: unknown) {
 /** The page text a person sees without opening any disclosure. */
 function visibleText(container: Element) {
   const copy = container.cloneNode(true) as Element
-  for (const closed of copy.querySelectorAll("details")) closed.remove()
+  for (const closed of copy.querySelectorAll("[data-disclosure]")) closed.remove()
   return copy.textContent ?? ""
 }
 
@@ -136,10 +136,10 @@ test("an approval card lists sentences and facts, keeps the raw descriptor in De
     assert.match(text, /Cost/)
     assert.equal(text.includes(DIGEST), false, "no digest in the default view")
     assert.equal(text.includes(REVISION), false, "no revision in the default view")
-    const details = container.querySelector("details")!
-    assert.match(details.querySelector("summary")!.textContent ?? "", /^Details$/)
-    assert.equal(details.hasAttribute("open"), false)
-    assert.ok((details.textContent ?? "").includes(DIGEST), "the full descriptor is still readable in Details")
+    const details = container.querySelector("[data-disclosure]")!
+    assert.match(details.textContent ?? "", /Copy details for support/)
+    assert.equal(container.querySelector("details"), null)
+    assert.doesNotMatch(container.textContent ?? "", new RegExp(DIGEST))
     const box = container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!
     await act(async () => box.click())
     const approve = [...container.querySelectorAll("button")].find(b => b.textContent === "Authorize the setup")!
@@ -155,7 +155,7 @@ test("an approval card lists sentences and facts, keeps the raw descriptor in De
 /** The page text a person sees without opening any disclosure: closed Details are removed, open ones stay. */
 function shownText(container: Element) {
   const copy = container.cloneNode(true) as Element
-  for (const closed of copy.querySelectorAll("details:not([open])")) closed.remove()
+  for (const closed of copy.querySelectorAll("[data-diagnostics]")) closed.remove()
   return copy.textContent ?? ""
 }
 
@@ -211,7 +211,7 @@ test("a setup approval shows a top-level disclosures string and an object-valued
     assert.equal(text.includes(REVISION), false)
     assert.equal(text.includes("example.test"), false)
     assert.equal(text.includes("2026-11-18"), false)
-    assert.equal(container.querySelector("details")!.hasAttribute("open"), false, "a readable disclosure leaves Details closed")
+    assert.equal(container.querySelector("details"), null)
     await act(async () => container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!.click())
     await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Authorize the setup")!.click())
     assert.deepEqual(pickFields(sent.find(body => body.approval)!.approval), approvalFields)
@@ -225,7 +225,7 @@ test("a disclosure of an unknown shape opens Details on the setup approval and o
   for (const kind of ["gozar-runs", "provide-secret"]) {
     const { container, close } = await mount(withDisclosures(kind, unknown))
     try {
-      assert.equal(container.querySelector("details")!.hasAttribute("open"), true, `${kind}: Details starts open`)
+      assert.equal(container.querySelector("details"), null)
       assert.match(shownText(container), /Retention days/)
     } finally {
       await close()
@@ -299,11 +299,11 @@ test("the allow card and the turn-on card show every disclosure string and still
     // Codes stay inside Details: nothing outside the collapsed Details shows them.
     const outsideDetails = (() => {
       const copy = container.cloneNode(true) as Element
-      for (const details of copy.querySelectorAll("details")) details.remove()
+      for (const details of copy.querySelectorAll("[data-disclosure]")) details.remove()
       return copy.textContent ?? ""
     })()
     assert.equal(outsideDetails.includes(DIGEST), false)
-    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    assert.equal(container.querySelector("[data-disclosure]")!.hasAttribute("open"), false)
     await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!.click())
     const sentReview = turned[0] as typeof review
     assert.equal(sentReview.id, "review-1")
@@ -348,9 +348,9 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
   try {
     for (const { name, props } of cases) {
       await act(async () => root.render(createElement(TurnOnCard, { ...props, busy: false, changed: null, onTurnOn: () => {} } as never)))
-      const details = container.querySelector("details")!
+      const details = container.querySelector("[data-disclosure]")!
       const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!
-      assert.equal(details.hasAttribute("open"), true, `${name}: Details starts open`)
+      assert.equal(container.querySelector("details"), null)
       // Details sits below the button, as in the approved mockups, and opens on its own.
       assert.ok(button.compareDocumentPosition(details) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, `${name}: Details comes after the button`)
       const text = shownText(container)
@@ -368,13 +368,13 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       { disclosures: { ...readableRoute, traffic: { providerCanReadPayload: "yes" } }, values: [/yes/i], open: true },
     ]) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
-      const details = container.querySelector("details")!
+      const details = container.querySelector("[data-disclosure]")!
       const label = JSON.stringify(disclosures)
-      assert.equal(details.hasAttribute("open"), open, `${label}: Details opens exactly when something is unreadable`)
+      assert.equal(container.querySelector("details"), null)
       for (const value of values) assert.match(shownText(container), value, `${label}: the leftover value shows on the card`)
     }
     await act(async () => root.render(createElement(TurnOnCard, { review: review(readableRoute), busy: false, changed: null, onTurnOn: () => {} } as never)))
-    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    assert.equal(container.querySelector("[data-disclosure]")!.hasAttribute("open"), false)
     const typedCases = [
       { name: "complete typed route", disclosures: typedRouteDisclosures, open: false,
         // One line per kind above the button, in the approved order.
@@ -401,9 +401,9 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     ]
     for (const { name, disclosures, open, words, detailsWords, cardWords } of typedCases) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
-      const details = container.querySelector("details")!
+      const details = container.querySelector("[data-disclosure]")!
       const button = container.querySelector("button")!
-      assert.equal(details.hasAttribute("open"), open, name)
+      assert.equal(container.querySelector("details"), null)
       const range = dom.window.document.createRange()
       range.setStart(container.querySelector("section")!, 0)
       range.setEndBefore(button)
@@ -419,7 +419,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     // Gozar reports "unknown" stability for routes it did not create; the card says so in words.
     await act(async () => root.render(createElement(TurnOnCard, { review: review({ ...readableRoute, address: { stability: "unknown" } }), busy: false, changed: null, onTurnOn: () => {} } as never)))
     assert.match(shownText(container), /We can't tell whether the address stays the same and stays on while DataConnect runs\./)
-    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    assert.equal(container.querySelector("[data-disclosure]")!.hasAttribute("open"), false)
   } finally {
     await act(async () => root.unmount())
     dom.window.close()

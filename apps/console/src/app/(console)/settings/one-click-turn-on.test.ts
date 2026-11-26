@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // One-click Turn on: the preparation chain, setup actions with effects, the
 // review that the click approves, and the Cancel paths.
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { JSDOM } from "jsdom";
@@ -630,7 +631,7 @@ test("a failed preparation says so and Try again runs it again", async () => {
     assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
     assert.doesNotMatch(text(), /couldn.t turn on/);
     assert.deepEqual(approvals(calls), []);
-    assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));
+    assert.ok((await copySupport(container)).includes("brand_new_server_code"));
     await press(/^Try again$/);
     assert.match(text(), /Turn on remote access/);
   });
@@ -1074,14 +1075,14 @@ test("real trial-consent action: Turn on shows the trial's own facts, and one cl
     assert.match(factLines[2] ?? "", /⏱/);
     assert.match(factLines[2] ?? "", /Free\. The address changes each time and turns off by itself\./);
     // The trial's own review heading and paragraph moved into the closed Details below the button.
-    const details = card.querySelector("details");
+    const details = card.querySelector("[data-disclosure]");
     assert.ok(details, "the card has one Details");
-    assert.equal(details.hasAttribute("open"), false, "nothing is unreadable, so Details starts closed");
+    assert.equal(card.querySelector("details"), null);
     assert.ok(button.compareDocumentPosition(details) & 4, "Details sits below the button");
     assert.match(details.textContent ?? "", /Review the public HTTPS trial/);
     assert.match(details.textContent ?? "", /Start a public HTTPS trial through the relay/);
     const outsideDetails = card.cloneNode(true) as Element;
-    for (const node of outsideDetails.querySelectorAll("details")) node.remove();
+    for (const node of outsideDetails.querySelectorAll("[data-disclosure]")) node.remove();
     assert.doesNotMatch(outsideDetails.textContent ?? "", /Review the public HTTPS trial|Start a public HTTPS trial/);
     assert.equal(button.disabled, false);
     assert.ok(!calls.some((call) => call.url === "/setups"), "no setup is started for a consent-only step");
