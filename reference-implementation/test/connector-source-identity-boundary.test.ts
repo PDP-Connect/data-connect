@@ -307,7 +307,7 @@ scenario("concurrent legacy identity claims by different keys commit exactly one
 scenario("registration and activation cannot claim the same current identity for different keys", async () => {
   const registrationKey = "srcid-race-register-owner";
   const activationKey = "srcid-race-activation-owner";
-  let tasks: [Promise<unknown>, Promise<unknown>] | undefined;
+  let settled: Promise<PromiseSettledResult<unknown>[]> | undefined;
   let blocker: PoolClient | undefined;
   let blockerHasLock = false;
 
@@ -320,7 +320,7 @@ scenario("registration and activation cannot claim the same current identity for
       blockerHasLock = true;
     }
 
-    tasks = [
+    const tasks = [
       explicitRegistration(registrationKey, EXPLICIT_SOURCE),
       publishConnectorActivation(
         installRecord(
@@ -333,6 +333,7 @@ scenario("registration and activation cannot claim the same current identity for
         )
       ),
     ];
+    settled = Promise.allSettled(tasks);
     if (blockerHasLock) {
       await waitForOwnershipLockWaiters(2);
     }
@@ -342,7 +343,7 @@ scenario("registration and activation cannot claim the same current identity for
       blockerHasLock = false;
     }
 
-    const results = await Promise.allSettled(tasks);
+    const results = await settled;
     const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
     const loserIndex = results.findIndex((result) => result.status === "rejected");
     assert.notEqual(winnerIndex, -1, "one current identity claimant commits");
@@ -371,8 +372,8 @@ scenario("registration and activation cannot claim the same current identity for
       await blocker?.query("ROLLBACK");
     }
     blocker?.release();
-    if (tasks) {
-      await Promise.allSettled(tasks);
+    if (settled) {
+      await settled;
     }
   }
 });
