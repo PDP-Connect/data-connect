@@ -164,7 +164,7 @@ function visibleOutsideDetails(dom: JSDOM): string {
 }
 
 test("unresolved device commands do not offer an empty steps panel", async () => {
-  const dom = await renderDemo("trouble-unknown");
+  const dom = await renderDemo("device-no-steps");
   assert.doesNotMatch(visibleOutsideDetails(dom), /Command unavailable/);
   assert.ok(![...dom.window.document.querySelectorAll("button")].some((node) => node.textContent === "See what to do on that computer"));
 });
@@ -342,7 +342,7 @@ test("a source that never connected offers only retry and removal", async () => 
   const text = document.body.textContent ?? "";
   assert.match(text, /Claude Code was never connected\./);
   assert.match(text, /Set up again/);
-  assert.match(text, /Takes Claude Code workstation off your list\. There is nothing to erase\./);
+  assert.match(text, /Takes Claude Code off your list\. There is nothing to erase\./);
   assert.doesNotMatch(text, /What is here|Schedule|Add another|Rename|Delete and erase|Copy everything again|Manage|Apps that can read this|Also connected/);
 });
 
@@ -373,7 +373,7 @@ test("settings show one explanation per choice, a narrow number, and only useful
   assert.ok(![...settings.querySelectorAll("button")].some((node) => node.textContent === "Cancel"));
   assert.match(settings.querySelector('input[type="number"]')?.className ?? "", /!w-28/);
   const pending = (await renderDemo("settings-question")).window.document.querySelector("#configuration");
-  assert.match(pending?.textContent ?? "", /You asked to change this/);
+  assert.match(pending?.textContent ?? "", /ChatGPT asked to change this/);
   assert.ok([...pending?.querySelectorAll("button") ?? []].some((node) => node.textContent === "Don't change"));
 });
 
@@ -472,4 +472,19 @@ test("polished controls give disconnected setup one filled action and device nav
   const device = (await renderDemo("status-10-local-device")).window.document;
   assert.equal([...device.querySelectorAll("a")].filter((node) => node.textContent === "View this device").length, 1);
   assert.equal((visibleOutsideDetails(await renderDemo("status-19")).match(/Rename/g) ?? []).length, 1);
+});
+
+test("real-shaped count and device practice states preserve positive holdings and suppress empty repairs", async () => {
+  const { buildSourcePracticeModel } = await import("./source-page-practice.ts");
+  const held = buildSourcePracticeModel("summary-zero-held");
+  assert.ok(held);
+  assert.equal(held.source.total_records, 0);
+  assert.equal(held.source.stream_records?.[0]?.retained_record_count, 41);
+  const text = visibleOutsideDetails(await renderDemo("summary-zero-held"));
+  assert.match(text, /44 records/);
+  assert.doesNotMatch(text, /Nothing in|\b0 records/);
+  assert.match(text, /can't yet tell whether it got everything/);
+  const zero = (await renderDemo("device-zero-pending")).window.document;
+  assert.doesNotMatch(zero.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /could not send/);
+  assert.ok(![...zero.querySelectorAll("button")].some((node) => node.textContent === "See what to do on that computer"));
 });

@@ -45,7 +45,6 @@ import { getConnectionConfig, listConnectionConfigRevisions } from "../../lib/co
 import {
   type AutoPausedBanner,
   deriveAutoPausedBanner,
-  summarizeOutboxStallRemediation,
   derivePrimaryRowAction,
   type PrimaryRowAction,
   syncActionIdleLabel,
@@ -81,7 +80,6 @@ import {
 } from "../../lib/rs-client.ts";
 import {
   hasPrimaryOwnerLocalDeviceRemediation,
-  primaryOwnerActionRemediation,
   isSetupInProgressConnector,
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
@@ -845,7 +843,7 @@ function ConnectorPageView({
     const device = sourceInstances[0];
     const deviceName = device?.device_display_name ?? device?.local_binding_name;
     const pending = device?.records_pending ?? overview.localDeviceProgress?.records_pending;
-    stateSentence = { text: deviceStepsAvailable ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.` : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${serviceName}.`, slot: null };
+    stateSentence = { text: deviceStepsAvailable && typeof pending === "number" && pending > 0 ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.` : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${serviceName}.`, slot: null };
   } else if (!archived && running) {
     stateSentence = { text: "Syncing now.", slot: null };
   } else if (partial && markedMissing && [19, 20, 21].includes(sourceStatus.row)) {
@@ -960,7 +958,7 @@ function ConnectorPageView({
 }
 
 function SourceManage({ neverConnected, children }: { neverConnected: boolean; children: ReactNode }) {
-  return neverConnected ? <>{children}</> : <Section title="Manage">{children}</Section>;
+  return neverConnected ? children : <Section title="Manage">{children}</Section>;
 }
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {

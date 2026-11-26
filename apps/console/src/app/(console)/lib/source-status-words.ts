@@ -378,7 +378,7 @@ function matchStateSentence(
           : surface === "provider_interaction"
             ? (!ownerAction(source)?.target || ownerAction(source)?.cta === "Complete the requested action" ? `Something stopped ${options.name} from syncing.` : `${options.name} is waiting for you to finish a step.`)
             : surface === "local_device"
-              ? `The computer that holds this data${options.deviceName ? ` (${options.deviceName})` : ""} could not send${typeof options.unsentRecords === "number" ? ` ${options.unsentRecords.toLocaleString()} records` : " some records"}.`
+              ? options.unsentRecords === 0 ? "No records are waiting to be sent." : typeof options.unsentRecords === "number" && options.unsentRecords > 0 ? `The computer that holds this data${options.deviceName ? ` (${options.deviceName})` : ""} could not send ${options.unsentRecords.toLocaleString()} records.` : `Open DataConnect on ${options.deviceName ?? "the computer that holds this data"} and look for a message about ${options.name}.`
               : `${options.name} needs you.`;
       const extra = source.rendered_verdict?.pill.label === "Some records stuck"
         ? " Some records are stuck."
@@ -450,7 +450,7 @@ function matchStateSentence(
         return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}` };
       }
       if (label === "Not measured") return { text: lastSuccessfulSync(source) ? `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${options.name} yet.` : "Not synced yet." };
-      if (label === "Collected, not independently checked") return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not checked this against the source.` };
+      if (label === "Collected, not independently checked") return { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${options.name} yet.` };
       if (label === "Missing optional data" || label === "Some records stuck" || label === "Missing data" || label === "Can't collect") {
         const willRetry = source.schedule?.scheduler_backoff?.backoff_applied ? " DataConnect will keep trying." : "";
         return { text: `${wordsWithoutWhen()}.${willRetry}${when ? ` Last synced ${when}.` : ""}` };

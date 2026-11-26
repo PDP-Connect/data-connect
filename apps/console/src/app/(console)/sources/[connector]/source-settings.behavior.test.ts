@@ -64,7 +64,7 @@ test("Don't change dismisses the question without confirming its stored proposal
   confirmations.length = 0;
   await mounted("settings-question", async (container) => {
     assert.ok(button(container, "Confirm"));
-    assert.match(container.textContent ?? "", /You asked to change this/);
+    assert.match(container.textContent ?? "", /ChatGPT asked to change this/);
     await act(async () => button(container, "Don't change")?.click());
     assert.equal(button(container, "Confirm"), undefined);
     assert.deepEqual(confirmations, []);

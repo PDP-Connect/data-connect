@@ -10,7 +10,7 @@ import {
 import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
-  "apps-some", "apps-none",
+  "apps-some", "apps-none", "summary-zero-held", "device-zero-pending", "device-no-steps",
   "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
 	"unknown-count",
@@ -151,11 +151,11 @@ function buildPracticeModel(
 	}
 	if (state === "unmeasured-completeness") {
     const verdict: NonNullable<ConnectorPageModel["connectionRenderedVerdict"]> = {
-      ...model.source.rendered_verdict!,
+      ...fixtureValue(model.source.rendered_verdict),
       pill: { label: "Not measured", tone: "grey" },
       required_actions: [{ affects: ["messages"], audience: "maintainer" as const, kind: "code_fix" as const, cta: "Some data from this source isn't being measured yet", surface: { kind: "maintainer" as const }, satisfied_when: { kind: "none" as const }, terminal: false, urgency: "soon" as const }],
     };
-    model = { ...model, connectionRenderedVerdict: verdict, source: { ...model.source, last_run: model.source.last_successful_run, owner_state: { ...model.source.owner_state!, resolver: "blocked_maintainer" }, rendered_verdict: verdict } };
+    model = { ...model, connectionRenderedVerdict: verdict, source: { ...model.source, last_run: model.source.last_successful_run, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "blocked_maintainer" }, rendered_verdict: verdict } };
   }
   if (state === "unknown-count") model.streams = model.streams.map((stream) => stream.name === "messages" ? { ...stream, record_count: 999, count_state: "stale" } : { ...stream, record_count: null, count_state: "known_zero" });
 	if (state.startsWith("settings-")) {
@@ -206,13 +206,13 @@ function buildPracticeModel(
 
   if (state === "waiting-unknown") {
     const action = { ...buildRecoveryDemoModel(8).connectionPrimaryAction!, surface: { kind: "provider_interaction" as const }, cta: "Complete the requested action", target: undefined };
-    model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "needs_owner" }, rendered_verdict: { ...model.source.rendered_verdict!, required_actions: [action] } };
+    model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "needs_owner" }, rendered_verdict: { ...fixtureValue(model.source.rendered_verdict), required_actions: [action] } };
     model.connectionPrimaryAction = action;
   }
-  if (state === "trouble-unknown") model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "system_degraded" }, rendered_verdict: { ...model.source.rendered_verdict!, pill: { label: "Can't collect", tone: "red" } } };
+  if (state === "trouble-unknown") model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "system_degraded" }, rendered_verdict: { ...fixtureValue(model.source.rendered_verdict), pill: { label: "Can't collect", tone: "red" } } };
   if (state === "strong-state-pending" || state === "archive-leftover") {
     model.connectionHealth = { ...model.connectionHealth!, detail_gap_backlog: { ...buildRecoveryDemoModel(16, true).connectionHealth!.detail_gap_backlog!, pending: 3 } };
-    if (state === "strong-state-pending") model.source = { ...model.source, owner_state: { ...model.source.owner_state!, resolver: "blocked_maintainer" } };
+    if (state === "strong-state-pending") model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "blocked_maintainer" } };
     else model.source = { ...model.source, source_visibility: "archived", source_binding_kind: "historical_archive" };
   }
   if (state === "records-zero-one") model.streams = model.streams.map((stream, i) => ({ ...stream, record_count: i === 0 ? 1 : 0, count_state: i === 0 ? "known" : "known_zero" }));
@@ -225,8 +225,10 @@ function buildPracticeModel(
   if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: "Northwind" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
   if (state === "settings-machine-change" || state === "settings-migration-choice" || state === "settings-long-list") {
     const base = buildPracticeModel("settings-question")!;
-    const revision = { ...base.configRevisions[0]!, is_explicit: state !== "settings-machine-change", origin: "agent" as const, set_by: state !== "settings-long-list" ? "migration" : "app:Sample app", source_of_change: state === "settings-long-list" ? "App request" : "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
-    model.configuration = { ...base.configuration!, options_schema: { ...base.configuration!.options_schema!, options: [{ ...base.configuration!.options_schema!.options[0]!, option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
+    const revision = { ...fixtureValue(base.configRevisions[0]), is_explicit: state !== "settings-machine-change", origin: "agent" as const, set_by: state !== "settings-long-list" ? "migration" : "app:Sample app", source_of_change: state === "settings-long-list" ? "App request" : "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
+    const configuration = fixtureValue(base.configuration);
+    const schema = fixtureValue(configuration.options_schema);
+    model.configuration = { ...configuration, options_schema: { ...schema, options: [{ ...fixtureValue(schema.options[0]), option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
     model.configRevisions = [revision];
   }
 	if (state.startsWith("dialog-"))
@@ -245,10 +247,55 @@ function buildPracticeModel(
 
 
 export function buildSourcePracticeModel(state: string): ConnectorPageModel | null {
-  const model = buildPracticeModel(state);
+  let model = buildPracticeModel(state);
   if (!model) return null;
+  if (state === "trouble-unknown") {
+    const healthy = buildRecoveryDemoModel(19);
+    const verdict = { ...fixtureValue(model.source.rendered_verdict), required_actions: [] };
+    model = { ...model, sourceInstances: [], latestKnownGaps: [], connectionHealth: healthy.connectionHealth, connectionPrimaryAction: null, connectionRenderedVerdict: verdict, overview: { ...model.overview, localDeviceProgress: null }, source: { ...model.source, source_kind: "account", source_binding_kind: "browser_collector", local_device_progress: null, connection_health: healthy.source.connection_health, collection_report: [], rendered_verdict: verdict } };
+  }
+  if (state === "status-2") {
+    model.streams = buildRecoveryDemoModel(19).streams.map((stream) => ({ ...stream, record_count: null, count_state: "unobserved" }));
+    model.schedule = buildRecoveryDemoModel(19).schedule;
+    model.source = { ...model.source, source_binding_kind: "browser_enrollment_shell", schedule: model.schedule };
+    model.otherAccounts = [{ connectionId: model.connectionId, displayName: model.displayName }];
+  }
+  if (state === "settings-question") {
+    model.configRevisions = model.configRevisions.map((revision) => ({ ...revision, origin: "agent", set_by: "app:ChatGPT", source_of_change: "App request" }));
+  }
+  if (state === "settings-migration-choice") {
+    model.configRevisions = model.configRevisions.map((revision) => ({ ...revision, origin: "agent", is_explicit: true, config: { channel_allowlist: Array.from({ length: 250 }, (_, index) => `C${String(index).padStart(10, "0")}`) }, set_by: "agent:settings-upgrade (NOT owner-authored)", source_of_change: "migration:E1-env-var-to-config-spine" }));
+  }
+  if (state === "settings-machine-change" && model.configuration) {
+    const active = { ...fixtureValue(model.configRevisions[0]), status: "active" as const };
+    model.configuration = { ...model.configuration, active_revision: active };
+    model.configRevisions = [active];
+  }
+  if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: model.displayName }, { connectionId: "cin_sample_unnamed", displayName: "this data source" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
+  if (state === "summary-zero-held") {
+    model.streams = model.streams.map((stream, index) => ({ ...stream, record_count: 0, count_state: "known_zero", retained_record_count: index === 0 ? 41 : 3 }));
+  }
+  if (state === "device-zero-pending" || state === "device-no-steps") {
+    model = buildRecoveryDemoModel(16, true);
+    const pending = state === "device-zero-pending" ? 0 : 3;
+    const progress = { ...fixtureValue(model.overview.localDeviceProgress), records_pending: pending, outbox_counts: { total: pending, pending, dead_letter: pending } };
+    const deviceAction = { ...fixtureValue(model.connectionPrimaryAction), audience: "owner" as const, surface: { kind: "local_device" as const }, cta: "See what to do on that computer" };
+    model.connectionPrimaryAction = deviceAction;
+    model.connectionRenderedVerdict = { ...fixtureValue(model.connectionRenderedVerdict), required_actions: [deviceAction] };
+    model.source = { ...model.source, source_kind: "local_device", local_device_progress: progress, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "needs_owner" }, rendered_verdict: model.connectionRenderedVerdict, collection_report: [] };
+    model.overview = { ...model.overview, localDeviceProgress: progress };
+    model.latestKnownGaps = [];
+    model.sourceInstances = state === "device-no-steps" ? [] : model.sourceInstances.map((device) => ({ ...device, records_pending: pending, outbox_diagnostics: { total: 0, pending: 0, dead_letter: 0 } }));
+    if (state === "device-no-steps") model.providerOrigin = null;
+  }
+  if (state === "status-22" || state === "status-22-failed-last-run") model.manualUploadHref = `/connect/manual-upload/${model.connectorId}?connection_id=${model.connectionId}`;
   const counts = model.streams.map((stream) => stream.count_state === "stale" || stream.count_state === "unknown" || stream.count_state === "unobserved" ? null : stream.record_count);
   const total = counts.every((count) => count !== null) ? counts.reduce((sum, count) => sum + (count ?? 0), 0) : null;
-  model.source = { ...model.source, total_records: total ?? 0, total_records_state: total === null ? "unobserved" : total === 0 ? "known_zero" : "known" };
+  model.source = { ...model.source, stream_records: model.streams.map((stream) => ({ stream: stream.name, record_count: stream.record_count, count_state: stream.count_state, retained_record_count: stream.retained_record_count, last_updated: stream.last_updated })), total_records: total ?? 0, total_records_state: total === null ? "unobserved" : total === 0 ? "known_zero" : "known" };
   return model;
+}
+
+function fixtureValue<T>(value: T | null | undefined): T {
+  if (value === null || value === undefined) throw new Error("Practice state is missing required evidence");
+  return value;
 }
