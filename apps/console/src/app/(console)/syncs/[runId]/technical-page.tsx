@@ -274,8 +274,7 @@ export default async function RunDetailPage({
         runId={runId}
       />
       <CollectedKindsSection events={events} />
-      <details className="mb-8 pt-4" data-testid="sync-details">
-        <summary className="cursor-pointer text-sm font-medium text-muted-foreground">Details</summary>
+      <div className="mb-8 pt-4" data-testid="sync-details">
         <div className="pt-5">
           {detailsContent}
           <Section title="Related pages">
@@ -324,7 +323,7 @@ export default async function RunDetailPage({
             </p>
           </Section>
         </div>
-      </details>
+      </div>
     </RecordroomShellWithPalette>
   );
 }
