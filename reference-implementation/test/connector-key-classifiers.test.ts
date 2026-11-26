@@ -17,8 +17,8 @@
  *     → null; canonicalized; blanks skipped.
  *   - enrollmentKeyForCanonicalKey: identity except `claude-code` → `claude_code`.
  *   - displayNameForConnector: manifest.display_name → manifest.name → the key.
- *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: allowlist
- *     membership over the CANONICAL key (so a registry-URL id still matches).
+ *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: the claim in
+ *     the connector's own manifest (`capabilities.proven`), never a key list.
  *   - isSupportedLocalCollectorConnector: membership over the ENROLLMENT key
  *     (so `claude-code` matches `claude_code`); non-string => false.
  *   - isSupportedBrowserCollectorConnector / isBrowserBoundConnector: shipped
@@ -103,24 +103,21 @@ test("displayNameForConnector: display_name -> name -> the key", () => {
 
 // --- isProviderAuthLifecycleProven ------------------------------------------
 
-test("isProviderAuthLifecycleProven: allowlist membership over the canonical key", () => {
-  assert.equal(isProviderAuthLifecycleProven("test_provider"), true, "allowlisted");
-  assert.equal(
-    isProviderAuthLifecycleProven("https://registry.pdpp.dev/connectors/test_provider"),
-    true,
-    "registry-url id still matches via canonicalization"
-  );
-  assert.equal(isProviderAuthLifecycleProven("gmail"), false, "gmail is not lifecycle-proven");
+test("isProviderAuthLifecycleProven: reads the manifest's own claim, strictly true", () => {
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: true } } }), true);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: false } } }), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: { proven: { provider_auth_lifecycle: "true" } } }), false);
+  assert.equal(isProviderAuthLifecycleProven({ capabilities: {} }), false, "no proven block");
+  assert.equal(isProviderAuthLifecycleProven(null), false, "no manifest");
 });
 
 // --- isStaticSecretLiveProven -----------------------------------------------
 
-test("isStaticSecretLiveProven: gmail/github/slack proven; others not", () => {
-  assert.equal(isStaticSecretLiveProven("gmail"), true);
-  assert.equal(isStaticSecretLiveProven("github"), true);
-  assert.equal(isStaticSecretLiveProven("slack"), true);
-  assert.equal(isStaticSecretLiveProven("amazon"), false, "amazon is not static-secret-proven");
-  assert.equal(isStaticSecretLiveProven("  github  "), true, "canonicalization trims before the membership check");
+test("isStaticSecretLiveProven: reads capabilities.proven.static_secret_live.proven, strictly true", () => {
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: true } } } }), true);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: { proven: false } } } }), false);
+  assert.equal(isStaticSecretLiveProven({ capabilities: { proven: { static_secret_live: {} } } }), false);
+  assert.equal(isStaticSecretLiveProven(undefined), false, "no manifest");
 });
 
 // --- isSupportedLocalCollectorConnector -------------------------------------

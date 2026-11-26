@@ -39,10 +39,6 @@
  *     alphabetically — the enrollment UI's connector picker renders in this
  *     order
  *   - browserBoundKeys: manifests declaring runtime_requirements.bindings.browser
- *   - providerAuthLifecycleProvenKeys: manifests declaring
- *     capabilities.proven.provider_auth_lifecycle === true
- *   - staticSecretLiveProvenKeys: manifests declaring
- *     capabilities.proven.static_secret_live.proven === true
  *
  * Takes one optional CLI arg: an output path to write to instead of the
  * tracked `server/generated/connector-registry.generated.ts` (used by the
@@ -264,20 +260,6 @@ const browserBoundKeys = polyfillManifests
   .filter((key): key is string => key !== null)
   .sort((a, b) => a.localeCompare(b));
 
-// Provider-auth lifecycle proven keys: capabilities.proven.provider_auth_lifecycle === true.
-const providerAuthLifecycleProvenKeys = polyfillManifests
-  .filter(({ manifest }) => manifest.capabilities?.proven?.provider_auth_lifecycle === true)
-  .map(({ manifest }) => manifestKey(manifest))
-  .filter((key): key is string => key !== null)
-  .sort((a, b) => a.localeCompare(b));
-
-// Static-secret live proven keys: capabilities.proven.static_secret_live.proven === true.
-const staticSecretLiveProvenKeys = polyfillManifests
-  .filter(({ manifest }) => manifest.capabilities?.proven?.static_secret_live?.proven === true)
-  .map(({ manifest }) => manifestKey(manifest))
-  .filter((key): key is string => key !== null)
-  .sort((a, b) => a.localeCompare(b));
-
 function jsonArrayLiteral(values: readonly string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
 }
@@ -322,12 +304,6 @@ export const LOCAL_COLLECTOR_PROVEN_KEYS: readonly string[] = Object.freeze(${js
 
 /** Manifests declaring a runtime_requirements.bindings.browser binding. */
 export const BROWSER_BOUND_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(browserBoundKeys)});
-
-/** Manifests declaring capabilities.proven.provider_auth_lifecycle === true. */
-export const PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(providerAuthLifecycleProvenKeys)});
-
-/** Manifests declaring capabilities.proven.static_secret_live.proven === true. */
-export const STATIC_SECRET_LIVE_PROVEN_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(staticSecretLiveProvenKeys)});
 `;
 
 if (process.argv[2]) {

@@ -24,9 +24,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConnectorCatalogEntry } from "./connection-catalog.ts";
+import { parseConnectorInstallCatalogResponse } from "./connector-install-contract.ts";
+import { connectorInstallCatalogFixture } from "./connector-install-fixtures.ts";
 import {
   isRunnableAddOffer,
   sourceSetupAction,
+  sourceSetupCardModel,
   sourceSetupGuidance,
   sourceSetupRank,
   sourceSetupRowIsUnavailable,
@@ -373,4 +376,32 @@ test("sourceSetupRank always sorts an unavailable row after every rank a normal 
     sourceSetupRank(scaffold) > sourceSetupRank(experimental),
     "an unavailable row's rank must exceed even the lowest-priority actionable rank"
   );
+});
+
+test("an unregistered local collector with a package listing still offers Install, because proof is judged after install", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const target = catalog.find((candidate) => candidate.connector_id === "github" && candidate.latest) ?? null;
+  assert.ok(target, "fixture has a github package");
+  const unproven = makeEntry({
+    connectorKey: "github",
+    disposition: "local_collector_unproven",
+    modality: "local_collector",
+    ownerActionable: false,
+    publicTier: "supported",
+    registrationStatus: null,
+    setupModality: "local_collector",
+  });
+
+  const beforeInstall = sourceSetupCardModel(unproven, { catalog: target, installed: null }, false);
+  assert.equal(beforeInstall.noSetupPath, false);
+  assert.equal(beforeInstall.packageNeedsInstall, true, "the package can be installed");
+  assert.equal(beforeInstall.unavailable, false, "the row stays in the main list");
+  assert.equal(beforeInstall.setupAction, null, "no account setup route exists before registration");
+
+  const registeredUnproven = makeEntry({ ...unproven, registrationStatus: "registered" });
+  const afterRegistration = sourceSetupCardModel(registeredUnproven, { catalog: target, installed: null }, false);
+  assert.equal(afterRegistration.unavailable, true, "a registered connector whose manifest claims no proof is not offered");
+
+  const noListing = sourceSetupCardModel(unproven, null, false);
+  assert.equal(noListing.unavailable, true, "with no package listing there is nothing to install");
 });
