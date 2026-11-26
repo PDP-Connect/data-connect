@@ -134,8 +134,8 @@ test("filter options are links that apply at once, so a portaled popup cannot dr
   assert.match(view, /href=\{recentSyncsFilterHref\(params, name, option\.value\)\}/);
 });
 
-test("failed History reads use a plain retry sentence and fold the server details", async () => {
+test("failed History reads use a plain retry sentence without a technical fold", async () => {
   const source = await readFile(new URL("page.tsx", import.meta.url), "utf8");
   assert.match(source, /This could not be loaded\.[\s\S]*?Try again/);
-  assert.match(source, /<details className="mt-4">[\s\S]*?<ServerUnreachable \/>/);
+  assert.doesNotMatch(source, /<details/);
 });
