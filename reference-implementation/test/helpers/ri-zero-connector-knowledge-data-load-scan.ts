@@ -1374,6 +1374,42 @@ function isProhibitedEvasionMechanismCall(
   return false;
 }
 
+function importedManifestParserBindings(program: Node, fileDir: string): ReadonlySet<string> {
+  const bindings = new Set<string>();
+  for (const stmt of nodeArrayField(program, "body")) {
+    const source = nodeField(stmt, "source");
+    if (
+      stmt.type !== "ImportDeclaration" || source?.type !== "StringLiteral" ||
+      joinRelative(fileDir, source.value as string) !== "reference-implementation/runtime/binding-declarations.ts"
+    ) {
+      continue;
+    }
+    for (const specifier of nodeArrayField(stmt, "specifiers")) {
+      if (specifier.type !== "ImportSpecifier" || !isIdentifier(nodeField(specifier, "imported") as Node, "parseManifestJsonText")) {
+        continue;
+      }
+      const local = nodeField(specifier, "local");
+      if (local?.type === "Identifier") {
+        bindings.add(local.name as string);
+      }
+    }
+  }
+  return bindings;
+}
+
+function isJsonParseCall(node: Node | null, manifestParserBindings: ReadonlySet<string>): boolean {
+  if (node?.type !== "CallExpression") {
+    return false;
+  }
+  const callee = nodeField(node, "callee");
+  return (
+    (callee?.type === "MemberExpression" &&
+      isIdentifier(nodeField(callee, "object") as Node, "JSON") &&
+      isIdentifier(nodeField(callee, "property") as Node, "parse")) ||
+    (callee?.type === "Identifier" && manifestParserBindings.has(callee.name as string))
+  );
+}
+
 /**
  * Scan one production file's AST for JSON/YAML-consuming data-load call
  * sites, independent of which JS syntax shape reaches the file.
@@ -1448,14 +1484,9 @@ export function scanFileDataLoads(
       isIdentifier(callee.property as Node, "toString")
     );
   }
+  const manifestParserBindings = importedManifestParserBindings(program, analysis.fileDir);
   function flowsIntoJsonParse(callNode: Node, parent: Node | null): boolean {
-    if (
-      parent?.type === "CallExpression" &&
-      // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `parent.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-      (parent.callee as Node)?.type === "MemberExpression" &&
-      isIdentifier((parent.callee as Node).object as Node, "JSON") &&
-      isIdentifier((parent.callee as Node).property as Node, "parse")
-    ) {
+    if (isJsonParseCall(parent, manifestParserBindings)) {
       return true;
     }
     const initNode = parent?.type === "AwaitExpression" ? parent : callNode;
@@ -1468,13 +1499,7 @@ export function scanFileDataLoads(
       if (found) {
         return;
       }
-      if (
-        n.type === "CallExpression" &&
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `n.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-        (n.callee as Node)?.type === "MemberExpression" &&
-        isIdentifier((n.callee as Node).object as Node, "JSON") &&
-        isIdentifier((n.callee as Node).property as Node, "parse")
-      ) {
+      if (isJsonParseCall(n, manifestParserBindings)) {
         const [arg] = nodeArrayField(n, "arguments");
         if (arg && (isIdentifier(arg, boundName) || isDecodedBinding(arg, boundName))) {
           found = true;

@@ -550,7 +550,11 @@ test("registered Core source IDs resolve to one exact local connector binding", 
     });
     assert.deepEqual((approved.grant.streams as unknown as ResolvedStream[])[0]?.instance_ids, [connectorInstanceId]);
 
-    await registerConnector(customCoreSourceManifest("custom_core_source_b", sourceId));
+    const duplicate = customCoreSourceManifest("custom_core_source_b", sourceId);
+    await assert.rejects(() => registerConnector(duplicate), /already owned/);
+    // A pre-existing duplicate row still fails closed at grant resolution.
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)")
+      .run("custom_core_source_b", JSON.stringify(duplicate));
     await assert.rejects(
       () =>
         initiateGrant({
