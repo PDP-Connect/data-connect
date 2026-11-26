@@ -451,12 +451,12 @@ test("checks go on while the address answers, even when a check does not move th
       return ok(route);
     },
   });
-  await withScreen(handler, async ({ calls, tick, text }) => {
+  await withScreen(handler, async ({ calls, tick, text, container }) => {
     for (let second = 0; second < 150; second += 1) await tick(1_000);
     assert.ok(checks(calls).length >= 6, `checks kept going: ${checks(calls).length} in 150 s`);
     assert.ok(checks(calls).length <= 15, `and not in a tight loop: ${checks(calls).length} in 150 s`);
-    assert.doesNotMatch(text(), /Needs your action|can't confirm/i);
-    assert.match(text(), /On/);
+    assert.equal(container.querySelector('section[aria-label="On"]'), null, "an unchanged expired proof cannot keep On");
+    assert.match(text(), /Needs your action|Turning on/);
   }, t);
 });
 
@@ -1040,3 +1040,26 @@ test("live localhost.run facts use the creating provider, not the selected way",
     assert.ok(values.includes(retained), "other route facts remain visible");
   }, t);
 });
+
+
+test("an expired proof is not On while an unrelated stop prevents its recheck", async (t) => {
+  const expired = routeAt({ observedAt: T0 - 60_000, validUntil: T0 - 30_000 });
+  const other = routeAt({ id: "route-other", origin: "https://other.example.invalid" });
+  const held = deferred<Result>();
+  const handler = host({
+    "/state": ok({ routes: [other, expired], reasons: {}, starting: false, services: [], lifecycle: lifecycle("stale"), operations: [] }),
+    "/routes/route-other/stop": () => held.promise,
+    "/routes/route-1/check": () => ok(expired),
+  });
+  await withScreen(handler, async ({ container, calls, press, tick }) => {
+    await press(/^Turn off$/);
+    assert.ok(calls.some(call => call.url === "/routes/route-other/stop"));
+    await tick(3_000);
+    assert.equal(checks(calls).length, 0, "another action holds off the check");
+    const card = container.querySelector('section[aria-label="Your address"]')?.children[1];
+    assert.ok(card);
+    assert.equal(card.matches('section[aria-label="On"]'), false);
+    held.resolve(fail("service_unreachable"));
+    await act(async () => {});
+  }, t);
+})

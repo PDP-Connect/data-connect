@@ -555,13 +555,17 @@ export function RemoteAccessSetting({
     }
     return null;
   })();
-  const recheckPending = (route: Route) => recheckTarget?.route.handle.id === route.handle.id;
+  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
+  const recheckPending = (route: Route) => recheckId === route.handle.id;
   const recheckUnderWay = (route: Route) => rechecking.has(route.handle.id) || recheckPending(route);
-  // While a re-check is pending or under way the status stays On: neither
-  // "checking" nor "stale" reaches the owner.
+  const hasCurrentProof = (route: Route) => {
+    const until = route.verification.validUntil;
+    return route.verification.status === "verified" && Boolean(route.published) &&
+      until?.known === true && Date.parse(until.value) > Date.now();
+  };
   const shownPhase = (route: Route) => {
     const phase = phaseOf(route);
-    return recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
+    return hasCurrentProof(route) && recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
   };
   const attentionOf = (route: Route): Attention | null =>
     routeAttention(route, {
@@ -577,8 +581,10 @@ export function RemoteAccessSetting({
         !(operation?.kind === "stop" && operation.stage === "applying") &&
         cancel !== "stopping",
     });
-  const headlineOf = (route: Route) =>
-    routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+  const headlineOf = (route: Route) => {
+    const headline = routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+    return headline === "On" && !hasCurrentProof(route) ? "Turning on" : headline;
+  };
   const routesOff = state.routes.every((route) => headlineOf(route) === "Off");
   const outcome = operation ? operationOutcome(operation) : null;
   // Preparation runs only while nothing is on or on its way. A finished
@@ -882,7 +888,6 @@ export function RemoteAccessSetting({
     });
   }
   useEffect(() => () => recheckLoop.current?.stop(), []);
-  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
   const recheckGeneration = recheckTarget?.route.handle.generation ?? 0;
   const recheckWindow = recheckTarget?.key ?? "";
   const recheckWait = recheckTarget?.delay ?? 0;
