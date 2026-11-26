@@ -4,12 +4,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 function fixture(run) {
-  const root = mkdtempSync(join(homedir(), ".tmp", "dc-snapshot-test-"));
+  const root = mkdtempSync(join(tmpdir(), "dc-snapshot-test-"));
   const snapshot = join(root, "reference-implementation/test/fixtures/shipped-manifests");
   try {
     mkdirSync(join(root, "scripts"));

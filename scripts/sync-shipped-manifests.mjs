@@ -13,7 +13,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs"
-import { homedir } from "node:os"
+import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -44,7 +44,7 @@ function sourceRepository(commit) {
   const localRepo = process.env.DATA_CONNECTORS_REPO
   if (localRepo) return { cwd: localRepo, cleanup: () => {} }
 
-  const scratchBase = process.env.RUNNER_TEMP ?? join(homedir(), ".tmp")
+  const scratchBase = process.env.RUNNER_TEMP ?? tmpdir()
   mkdirSync(scratchBase, { recursive: true })
   const scratch = mkdtempSync(join(scratchBase, "dc-shipped-manifests-"))
   try {
