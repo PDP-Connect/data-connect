@@ -206,3 +206,38 @@ export function snapshotContentAddressedSourceDeclarationFromLegacyConnectorMani
     declaration_version: `${LEGACY_CONNECTOR_PROJECTION_VERSION_PREFIX}:sha256:${digest}`,
   });
 }
+
+/** Retain moved-from source ids in the canonical declaration snapshot. */
+export function retainCollectionLegacySourceIds(
+  declarationValue: unknown,
+  sourceIds: readonly string[]
+): SourceDeclaration {
+  const declaration = snapshotSourceDeclaration(declarationValue) as unknown as JsonObject;
+  const extensions = isObject(declaration.extensions) ? declaration.extensions : {};
+  const collection = isObject(extensions[COLLECTION_PROFILE_URI]) ? extensions[COLLECTION_PROFILE_URI] : {};
+  const existing = Array.isArray(collection.legacy_source_ids)
+    ? collection.legacy_source_ids.filter((value): value is string => typeof value === "string")
+    : [];
+  const legacySourceIds = [...new Set([...existing, ...sourceIds])].sort();
+  if (
+    legacySourceIds.length === existing.length &&
+    existing.every((id) => legacySourceIds.includes(id))
+  ) {
+    return declaration as unknown as SourceDeclaration;
+  }
+
+  const updated: JsonObject = {
+    ...declaration,
+    extensions: {
+      ...extensions,
+      [COLLECTION_PROFILE_URI]: { ...collection, legacy_source_ids: legacySourceIds },
+    },
+  };
+  const version = declaration.declaration_version;
+  if (typeof version === "string" && version.startsWith(`${LEGACY_CONNECTOR_PROJECTION_VERSION_PREFIX}:sha256:`)) {
+    const { declaration_version: _version, ...content } = updated;
+    const digest = createHash("sha256").update(stableJson(content)).digest("hex");
+    updated.declaration_version = `${LEGACY_CONNECTOR_PROJECTION_VERSION_PREFIX}:sha256:${digest}`;
+  }
+  return snapshotSourceDeclaration(updated) as unknown as SourceDeclaration;
+}

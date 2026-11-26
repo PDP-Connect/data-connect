@@ -81,7 +81,11 @@ import {
 } from "./stores/owner-password-verifier-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { InvalidSourceDeclarationError, snapshotSourceDeclaration } from "./source-declaration.ts";
-import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
+import {
+  COLLECTION_PROFILE_URI,
+  retainCollectionLegacySourceIds,
+  snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest,
+} from "./source-declaration-legacy-collection.ts";
 import {
   type AcceptedSourceDeclarationRevisionStore,
   acceptedRevisionEvidenceReference,
@@ -3502,16 +3506,68 @@ function derivedRepairPlan(
 }
 
 function assertLegacyOwnership(incoming: Record<string, unknown>, others: { manifest: unknown }[]): void {
-  const legacy = declaredLegacySourceIds(incoming);
-  const current = sourceIdOfDeclaration(sourceDeclarationOf(incoming));
+  const claimed = sourceIdentityClaims(incoming);
   for (const { manifest } of others) {
     const other = manifestRecordOf(manifest);
     if (!other) continue;
-    const otherLegacy = declaredLegacySourceIds(other);
-    const otherCurrent = sourceIdOfDeclaration(sourceDeclarationOf(other));
-    if ([...legacy, ...(current === undefined ? [] : [current])].some((id) => otherLegacy.includes(id) || id === otherCurrent)) {
+    const otherClaims = sourceIdentityClaims(other);
+    if ([...claimed].some((id) => otherClaims.has(id))) {
       throw invalidConnectorManifest("Legacy source identity is already owned by another connector");
     }
+  }
+}
+
+function sourceIdentityClaims(manifest: Record<string, unknown>): Set<string> {
+  const declaration = sourceDeclarationOf(manifest);
+  const source = sourceIdOfDeclaration(declaration);
+  const rawSource = isRecord(manifest.source) && typeof manifest.source.id === "string" ? manifest.source.id : undefined;
+  const extensions = isRecord(declaration?.extensions) ? declaration.extensions : undefined;
+  const collection =
+    extensions && isRecord(extensions[COLLECTION_PROFILE_URI]) ? extensions[COLLECTION_PROFILE_URI] : undefined;
+  const history = Array.isArray(collection?.legacy_source_ids)
+    ? collection.legacy_source_ids.filter((id): id is string => typeof id === "string")
+    : [];
+  return new Set([
+    ...declaredLegacySourceIds(manifest),
+    ...history,
+    ...(source === undefined ? [] : [source]),
+    ...(rawSource === undefined ? [] : [rawSource]),
+  ]);
+}
+
+export function retainMovedFromIdentity(manifestJson: string, previousManifest: unknown, movedFrom?: string): string {
+  const manifest = manifestRecordOf(manifestJson);
+  const declaration = sourceDeclarationOf(manifest);
+  if (!manifest || !declaration) {
+    return manifestJson;
+  }
+  const previousDeclaration = sourceDeclarationOf(previousManifest);
+  const previousExtensions = isRecord(previousDeclaration?.extensions) ? previousDeclaration.extensions : undefined;
+  const previousCollection =
+    previousExtensions && isRecord(previousExtensions[COLLECTION_PROFILE_URI])
+      ? previousExtensions[COLLECTION_PROFILE_URI]
+      : undefined;
+  const history = Array.isArray(previousCollection?.legacy_source_ids)
+    ? previousCollection.legacy_source_ids.filter((id): id is string => typeof id === "string")
+    : [];
+  if (movedFrom) {
+    history.push(movedFrom);
+  }
+  if (history.length === 0) {
+    return manifestJson;
+  }
+  manifest.source_declaration = retainCollectionLegacySourceIds(declaration, history);
+  return JSON.stringify(manifest);
+}
+
+export function assertRetainedSourceIdentities(
+  previousManifest: unknown,
+  incomingManifest: Record<string, unknown>
+): void {
+  const incomingClaims = sourceIdentityClaims(incomingManifest);
+  const dropped = [...sourceIdentityClaims(manifestRecordOf(previousManifest) ?? {})].filter((id) => !incomingClaims.has(id));
+  if (dropped.length > 0) {
+    throw invalidConnectorManifest(`Connector update cannot drop previously claimed source identity ${dropped[0]}`);
   }
 }
 
@@ -3535,7 +3591,7 @@ async function persistManifestAndAdvanceGenerations(
   const identityOptions = { verifiedSourceDeclaration: options.verifiedSourceDeclaration === true };
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
-      await assertLegacyOwnershipPostgres(client, connectorId, JSON.parse(manifestJson));
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
       await lockConnectorManifestPublication(client, connectorId);
       const activation = await client.query<{ state: string; canonical_manifest_json: string }>(
         "SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=$1 FOR SHARE",
@@ -3550,9 +3606,12 @@ async function persistManifestAndAdvanceGenerations(
         ])
       ).rows[0]?.manifest;
       const identityMove = retainedSourceIdentityChange(connectorId, previous, manifestJson, identityOptions);
+      const persistedManifestJson = retainMovedFromIdentity(manifestJson, previous, identityMove?.from);
+      assertRetainedSourceIdentities(previous, JSON.parse(persistedManifestJson) as Record<string, unknown>);
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
       }
+      await assertLegacyOwnershipPostgres(client, connectorId, JSON.parse(persistedManifestJson));
       // A manifest stored before digests were retained is the only record of
       // its version's accepted content: keep it before it is replaced.
       const previousDigest = previous ? declarationDigestOf(previous) : null;
@@ -3563,13 +3622,13 @@ async function persistManifestAndAdvanceGenerations(
           [connectorId, previousDigest.version, previousDigest.digest]
         );
       }
-      const acceptedVersion = declarationVersionOf(manifestJson);
+      const acceptedVersion = declarationVersionOf(persistedManifestJson);
       if (acceptedVersion) {
         await client.query(
           `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
            VALUES($1, $2, $3)
            ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = EXCLUDED.content_digest" : "DO NOTHING"}`,
-          [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+          [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(persistedManifestJson))]
         );
       }
       const changed = await client.query(
@@ -3578,10 +3637,10 @@ async function persistManifestAndAdvanceGenerations(
          ON CONFLICT (connector_id) DO UPDATE SET manifest = EXCLUDED.manifest
            WHERE connectors.manifest IS DISTINCT FROM EXCLUDED.manifest
          RETURNING connector_id`,
-        [connectorId, manifestJson]
+        [connectorId, persistedManifestJson]
       );
       if (options.queueDerivedRepair) {
-        const plan = derivedRepairPlan(previous, manifestJson);
+        const plan = derivedRepairPlan(previous, persistedManifestJson);
         const instances = await client.query<{ connector_instance_id: string }>(
           "SELECT connector_instance_id FROM connector_instances WHERE connector_id = $1 ORDER BY connector_instance_id",
           [connectorId]
@@ -3615,7 +3674,6 @@ async function persistManifestAndAdvanceGenerations(
   }
   return transaction(() => {
     const db = getDb();
-    assertLegacyOwnershipSqlite(connectorId, JSON.parse(manifestJson));
     const activation = db
       .prepare("SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=?")
       .get<{ state: string; canonical_manifest_json: string }>(connectorId);
@@ -3626,11 +3684,14 @@ async function persistManifestAndAdvanceGenerations(
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
     const identityMove = retainedSourceIdentityChange(connectorId, existing?.manifest, manifestJson, identityOptions);
+    const persistedManifestJson = retainMovedFromIdentity(manifestJson, existing?.manifest, identityMove?.from);
+    assertRetainedSourceIdentities(existing?.manifest, JSON.parse(persistedManifestJson) as Record<string, unknown>);
     if (identityMove) {
       moveSourceIdentitySqlite(identityMove);
     }
+    assertLegacyOwnershipSqlite(connectorId, JSON.parse(persistedManifestJson));
     if (options.queueDerivedRepair) {
-      const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
+      const plan = derivedRepairPlan(existing?.manifest ?? null, persistedManifestJson);
       const instances = db
         .prepare("SELECT connector_instance_id FROM connector_instances WHERE connector_id = ? ORDER BY connector_instance_id")
         .all<{ connector_instance_id: string }>(connectorId);
@@ -3651,22 +3712,22 @@ async function persistManifestAndAdvanceGenerations(
         [connectorId, previousDigest.version, previousDigest.digest]
       );
     }
-    const acceptedVersion = declarationVersionOf(manifestJson);
+    const acceptedVersion = declarationVersionOf(persistedManifestJson);
     if (acceptedVersion) {
       execDynamicSqlAcknowledged(
         `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
          VALUES(?, ?, ?)
          ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = excluded.content_digest" : "DO NOTHING"}`,
-        [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+        [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(persistedManifestJson))]
       );
     }
-    if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
+    if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(persistedManifestJson)) {
       return false;
     }
     execDynamicSqlAcknowledged(
       `INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)
        ON CONFLICT(connector_id) DO UPDATE SET manifest = excluded.manifest`,
-      [connectorId, manifestJson]
+      [connectorId, persistedManifestJson]
     );
     execDynamicSqlAcknowledged(
       "UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_id = ?",
