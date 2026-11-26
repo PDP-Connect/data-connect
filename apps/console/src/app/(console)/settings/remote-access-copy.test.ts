@@ -517,6 +517,8 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     assert.match(text, /Free\. The address changes each time and turns off by itself\./);
     assert.doesNotMatch(text, /\b\d+\s*(seconds?|minutes?|hours?)\b|1 hour|15 minutes/);
     assert.match(text, /Turn on remote access/);
+    // The redesign dropped the framed "Step 2 of 2 / Turn on" heading; the ways list stands alone.
+    assert.doesNotMatch(text, /Step 2 of 2/);
     assert.doesNotMatch(text, /Continue setup|Staged configuration|Reload|Start setup|Save and review|Discard|Review reachability|Apply reachability/);
     assert.doesNotMatch(text, /\b(draft|route|attached|session|durable)\b/i);
     assert.equal(container.querySelector('input[type="checkbox"]'), null, "there is no approval checkbox");

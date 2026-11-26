@@ -1132,13 +1132,9 @@ export function RemoteAccessSetting({
         <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
       ) : null}
       {idle && !passwordMissing && !(operation && outcome === "did-not-turn-on") ? (
-        <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
-          {visibleRoutes.length === 0 && !operation && reservations.length === 0 ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
-          <div className="grid gap-4 p-4">
-            <div className="grid gap-1">
-              <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
-              <h3 className="text-base font-semibold">Turn on</h3>
-            </div>
+        <section aria-label="Turn on remote access" className="grid gap-4">
+          {visibleRoutes.length === 0 && !operation && reservations.length === 0 ? <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
+          <div className="grid gap-4">
             <p className="text-sm text-muted-foreground">Choose whether to use DataConnect from your phone or with ChatGPT.</p>
             {inventory ? <WaysList inventory={inventory} capabilities={capabilities} blocks={blocks} disabled={mutationBlocked} pickedId={wayId} onPick={pickWay} /> : null}
             {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
