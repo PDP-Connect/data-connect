@@ -40,3 +40,16 @@ test("filters apply once on change and preserve native GET without scripts",asyn
     assert.equal(historyStartLabel("2026-08-13"),"History starts 13 Aug 2026.");
   }finally{await act(async()=>root.unmount());Object.assign(globalThis,previous);dom.window.close()}
 });
+
+test("read pagination merges consecutive lines across the page boundary",async()=>{
+  const {ReadDayPager}=await import("../audit/day/read-day-pager.tsx");
+  const {readPractice}=await import("./practice.ts");const fixture=readPractice("seven-fifty");if(fixture.mode!=="reads") { throw new Error("fixture"); }
+  const dom=new JSDOM('<div id="root"></div>',{url:"https://console.example/audit/day"});
+  const previous={document:globalThis.document,window:globalThis.window,HTMLElement:globalThis.HTMLElement,Element:globalThis.Element};
+  Object.assign(globalThis,{document:dom.window.document,window:dom.window,HTMLElement:dom.window.HTMLElement,Element:dom.window.Element});const root=createRoot(document.getElementById("root") as HTMLElement);
+  try {
+    await act(async()=>root.render(<ReadDayPager rows={fixture.data.slice(0,50)} discovery={[]} sources={[]} offset={0} nextCursor="next" loadMore={async()=>({rows:fixture.data.slice(50,100),next:null})} />));
+    await act(async()=>document.querySelector("button")?.click());
+    assert.equal(document.querySelectorAll("li").length,1);assert.ok(document.body.textContent?.includes("100 times"));
+  } finally {await act(async()=>root.unmount());Object.assign(globalThis,previous);dom.window.close();}
+});
