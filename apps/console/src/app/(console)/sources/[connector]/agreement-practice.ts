@@ -2,39 +2,55 @@
 // SPDX-License-Identifier: Apache-2.0
 import { buildRecoveryDemoModel } from "./source-detail-demo-data.ts";
 import type { SourceStatusRow } from "../../lib/source-status-words.ts";
+import type { RefConnectorSummary, RefRequiredAction } from "../../lib/ref-client.ts";
 
+const SHAPES: Record<string,{row:SourceStatusRow;failed?:boolean;gap?:boolean;off?:boolean;device?:boolean;held?:number;canonical?:number;copied?:number;reason?:string;stream?:string}> = {
+  "maintainer-failure": {row:13,failed:true},
+  "schedule-off-failure": {row:16,failed:true,off:true},
+  "maintainer-partial": {row:13,gap:true},
+  "archived-partial": {row:1,gap:true},
+  "zero-summary-positive-tally": {row:16,off:true,stream:"profile",held:1,canonical:0,copied:1},
+  "retry-partial": {row:16,failed:true,gap:true,held:207,copied:442},
+  "retry-web": {row:16,failed:true,gap:true},
+  "unfinished-sign-in": {row:13,failed:true,gap:true,reason:"assistance_timed_out"},
+  "maintainer-unknown-kind": {row:13,failed:true,gap:true},
+  "maintainer-copy-failure": {row:13,failed:true,gap:true,reason:"stream_collection_failed"},
+  "device-unsent": {row:8,device:true},
+  "install-again": {row:4},
+};
 /** Invented accounts with the stored shapes in the final agreement ledger. */
-export const AGREEMENT_STATES = [
-  "maintainer-failure", "schedule-off-failure", "maintainer-partial", "archived-partial",
-  "zero-summary-positive-tally", "retry-partial", "retry-web", "unfinished-sign-in",
-  "maintainer-unknown-kind", "maintainer-copy-failure", "device-unsent", "install-again",
-] as const;
-export function agreementPractice(state: string) {
-  const index = (AGREEMENT_STATES as readonly string[]).indexOf(state);
-  if (index < 0) return null;
-  const row: SourceStatusRow = index === 3 ? 1 : index === 10 ? 8 : index === 11 ? 4 : [1,4,5,6].includes(index) ? 16 : 13;
-  const model = buildRecoveryDemoModel(row, false);
-  const id = `practice-agreement-${index}`;
-  const kind = index === 4 ? "profile" : "messages";
-  const held = index === 4 ? 1 : index === 5 ? 207 : 428;
-  const failed = ![2,3,4,10,11].includes(index);
-  const reason = index === 7 ? "assistance_timed_out" : index === 9 ? "stream_collection_failed" : "connector_reported_failed";
-  const records = [{ stream: kind, last_updated:null, record_count: index === 4 ? 0 : held, retained_record_count: held, count_state: index === 4 ? "known_zero" as const : "known" as const }];
-  const source = {
-    ...model.source, connection_id: id, connector_instance_id: id, connector_id: "northwind",
-    display_name: "Northwind (practice account)", connector_display_name: "Northwind",
-    source_kind: index === 10 ? "local_device" as const : "account" as const,
-    source_visibility: index === 3 ? "archived" as const : "active" as const,
-    status: index === 3 ? "paused" : "active", streams: [kind], stream_records: records,
-    total_records: index === 4 ? 0 : held, total_records_state: "known" as const,
-    last_run: { ...model.source.last_run!, status: failed ? "failed" : index === 10 || index === 11 ? "skipped" : "succeeded", failure_reason: reason, terminal_reason: reason, connector_error: null },
-    collection_report: [2,3,4,5,6,7,8,9].includes(index) ? [{stream:kind, checkpoint:"unknown",collected:index===4?1:index===5?442:14,considered:"unknown" as const,coverage_condition:index===4?"complete" as const:"terminal_gap" as const,forward_disposition:index===4?"complete" as const:"terminal" as const,pending_detail_gaps:0,skipped:null}] : [],
-    local_device_progress: index === 10 ? {...model.source.local_device_progress!,records_pending:4_959} : null,
-  };
-  if (index === 1 || index === 4) source.owner_state = {...source.owner_state!,resolver:"owner_paused"};
-  if (index === 10) source.owner_state = {...source.owner_state!,resolver:"needs_owner"};
-  return {...model, connectionId:id,connectorInstanceId:id,connectorId:"northwind",displayName:source.display_name,
-    source, latestKnownGaps:[], streams:records.map(record=>({...record,name:record.stream,object:"stream" as const,last_updated:null})),
-    overview:{...model.overview,localDeviceProgress:source.local_device_progress},
-  };
+export const AGREEMENT_STATES = Object.keys(SHAPES);
+export function agreementPractice(state:string) {
+  const shape=SHAPES[state];
+  if(!shape) {return null;}
+  const model=buildRecoveryDemoModel(shape.row,false);
+  const id=`practice-agreement-${state}`;
+  const kind=shape.stream ?? "messages";
+  const held=shape.held ?? 428;
+  const canonical=shape.canonical ?? held;
+  const reason=shape.reason ?? "connector_reported_failed";
+  let status="succeeded";
+  if(shape.failed) {status="failed";}
+  if(shape.device || shape.row === 4) {status="skipped";}
+  const records=[{stream:kind,last_updated:null,record_count:canonical,retained_record_count:held,count_state:"known" as const}];
+  const source:RefConnectorSummary={...model.source,connection_id:id,connector_instance_id:id,connector_id:"northwind",display_name:"Northwind (practice account)",connector_display_name:"Northwind",source_kind:"account",source_visibility:"active",status:"active",streams:[kind],stream_records:records,total_records:canonical,total_records_state:"known",last_run:{run_id:"practice-sync",status,failure_reason:reason,terminal_reason:reason,event_count:0,started_at:"2026-11-25T12:00:00Z",finished_at:null,first_at:"2026-11-25T12:00:00Z",last_at:"2026-11-25T12:00:00Z"},collection_report:[],local_device_progress:null};
+  if(shape.gap || shape.copied) {
+    source.collection_report=[{stream:kind,checkpoint:"unknown",collected:shape.copied ?? 14,considered:"unknown",coverage_condition:shape.gap?"terminal_gap":"complete",forward_disposition:shape.gap?"terminal":"complete",pending_detail_gaps:0,skipped:null}];
+  }
+  const maintainer:RefRequiredAction={affects:[kind],audience:"maintainer",kind:"code_fix",cta:"Fix the copy",surface:{kind:"maintainer"},satisfied_when:{kind:"none"},terminal:true,urgency:"soon"};
+  let actions:RefRequiredAction[]=[];
+  if(shape.row === 13) {actions=[maintainer];}
+  if(shape.off) {
+    source.owner_state={evidence_as_of:null,owner_of_state:"owner",posture:"observed",resolver:"owner_paused"};
+    actions=[{...maintainer,audience:"owner",kind:"reattach_schedule",cta:"Resume schedule",surface:{kind:"schedule"},satisfied_when:{kind:"schedule_attached_and_enabled"},terminal:false}];
+  }
+  if(shape.row === 1) {source.source_visibility="archived";source.status="paused";}
+  if(shape.device) {
+    source.source_kind="local_device";
+    source.local_device_progress={last_heartbeat_at:null,last_heartbeat_status:null,last_ingest_at:null,source_count:1,records_pending:4959,device_name:"Practice computer",source_instance_id:"practice-instance"};
+    source.owner_state={evidence_as_of:null,owner_of_state:"owner",posture:"observed",resolver:"needs_owner"};
+    actions=[{...maintainer,audience:"owner",kind:"add_info",cta:"See what to do on that computer",surface:{kind:"local_device"},terminal:false,remediation:buildRecoveryDemoModel(16).connectionRenderedVerdict?.required_actions[0]?.remediation}];
+  }
+  if(source.rendered_verdict) {source.rendered_verdict={...source.rendered_verdict,required_actions:actions};}
+  return {...model,connectionRenderedVerdict:source.rendered_verdict ?? null,connectionPrimaryAction:actions.find(item=>item.audience === "owner") ?? null,sourceInstances:model.sourceInstances.map(device=>({...device,connector_instance_id:id,source_instance_id:"practice-instance",device_display_name:"Practice computer",records_pending:source.local_device_progress?.records_pending ?? null})),connectionId:id,connectorInstanceId:id,connectorId:"northwind",displayName:source.display_name,source,latestKnownGaps:[],streams:records.map(record=>({...record,name:record.stream,object:"stream" as const})),overview:{...model.overview,localDeviceProgress:source.local_device_progress}};
 }

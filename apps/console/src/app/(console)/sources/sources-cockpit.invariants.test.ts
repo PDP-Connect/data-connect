@@ -68,8 +68,8 @@ test("the source page keeps the moved per-kind list and its collection facts", a
   const [page, facts] = await Promise.all([readFile(SOURCE_PAGE_FILE, "utf8"), readFile(STREAM_FACTS_FILE, "utf8")]);
   // detail-page-2 decision 6: the title alone; coverage facts are a plain line inside folded Details, not a chip.
   assert.match(page, /title="What is here"/);
-  assert.match(page, /sourceStreamRecordCount\(stream\)/);
-  assert.match(page, /coverage_condition/);
+  assert.match(page, /sourceKindLine\(source,\s*stream.name\)/);
+  assert.match(await readFile(new URL("../lib/source-kind-line.ts", import.meta.url), "utf8"), /coverage_condition/);
   assert.match(facts, /data-testid="stream-coverage-fact"/);
   assert.match(facts, /data-testid="stream-collected-counts"/);
   assert.match(facts, /data-testid="stream-forward-disposition"/);

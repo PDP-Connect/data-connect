@@ -362,6 +362,7 @@ export interface RunSummary {
 }
 
 export interface RefConnectorRunSummary {
+  collection_facts?: {streams: readonly {stream:string;collected:number}[]} | null;
   connector_error?: unknown;
   terminal_reason?: string | null;
   event_count: number;
@@ -447,6 +448,7 @@ export interface RefSchedule {
  */
 export interface RefLocalDeviceProgress {
   device_name?: string | null;
+  source_instance_id?: string | null;
   last_heartbeat_at: string | null;
   last_heartbeat_status: string | null;
   last_ingest_at: string | null;

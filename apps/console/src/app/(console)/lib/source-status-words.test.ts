@@ -11,7 +11,7 @@ const SUCCESS = "2026-11-24T10:00:00.000Z";
 
 test("a retired setup shell is never connected even with unavailable counts and leftover kinds", () => {
   const value = source({ source_visibility: "setup_failed", status: "revoked", total_records_state: "unobserved", total_records: 0, streams: ["messages"], last_successful_run: null, connection_health: health({ last_success_at: null }) });
-  assert.equal(sourceStateSentence(value, { now: NOW, name: "Northwind" }).text, "Northwind was never connected.");
+  assert.equal(sourceStateSentence(value, { now: NOW, name: "Northwind" }).text, "Example source was never connected.");
   assert.equal(sourceStatusWords(value, { now: NOW }).action?.label, "Set up again");
 });
 
@@ -76,6 +76,7 @@ function source(overrides: Partial<RefConnectorSummary> = {}): RefConnectorSumma
     connection_id: "source-test-id",
     connector_id: "sample",
     display_name: "Example source",
+    connector_display_name: "Example source",
     freshness: {},
     last_run: null,
     last_successful_run: null,
@@ -100,7 +101,7 @@ test("only the completed-import and up-to-date rows count as up to date", () => 
 
 function assertRow(row: SourceStatusRow, words: string, tone: "plain" | "attention" | "accent" | "faint", expectedAction: ReturnType<typeof sourceStatusWords>["action"] = null) {
   // DIRECTION.md, "One status table": row 2 is not a needs-you row.
-  const needsYou = [4, 5, 6, 8, 9].includes(row);
+  const needsYou = expectedAction !== null;
   assert.deepEqual(sourceStatusWords(fixture(row), { now: NOW }), { row, words, tone, action: expectedAction, needsYou });
 }
 
@@ -179,7 +180,7 @@ test("a lifecycle-paused source stays out of needs-you when an owner action is s
     owner_state: { ...healthyState, owner_of_state: "owner", resolver: "needs_owner" },
     rendered_verdict: verdict("Can't collect", [requiredAction({ kind: "reauth", surface: { kind: "browser_session" } })]),
   }), { now: NOW });
-  assert.deepEqual(result, { row: 10, words: "Paused", tone: "faint", action: { kind: "resume", label: "Resume", filled: false }, needsYou: false });
+  assert.deepEqual(result, { row: 10, words: "Paused", tone: "faint", action: { kind: "resume", label: "Resume", filled: false }, needsYou: true });
 });
 test("an automatic schedule paused by its owner uses the server action, not lifecycle resume", () => {
   const schedule = fixture(12).schedule;
@@ -196,7 +197,7 @@ test("an automatic schedule paused by its owner uses the server action, not life
     words: "Automatic sync is off · last synced 2 hours ago",
     tone: "faint",
     action: { kind: "server_cta", label: "Resume schedule", filled: false },
-    needsYou: false,
+    needsYou: true,
   });
   assert.equal(sourceStateSentence(ownerPaused, { now: NOW, name: "Example source" }).text, "Automatic sync is off. Last synced 2 hours ago.");
 
@@ -274,7 +275,7 @@ test("row 8 chooses words from each owner action surface and preserves its CTA",
   const cases = [
     ["browser_session", "Needs you to sign in again"],
     ["stored_credential", "Needs its saved sign-in details updated"],
-    ["provider_interaction", "Something stopped this data source from syncing"],
+    ["provider_interaction", "Something stopped Example source from syncing."],
     ["local_device", "Needs attention on your device"],
     ["runtime_retry", "Needs you"],
   ] as const;
@@ -285,7 +286,7 @@ test("row 8 chooses words from each owner action surface and preserves its CTA",
       rendered_verdict: verdict("Can't collect", [requiredAction({ cta, surface: { kind: surface } })]),
     }), { now: NOW });
     assert.equal(result.words, expected);
-    assert.deepEqual(result.action, surface === "provider_interaction" ? { kind: "sync_now", label: "Try again", filled: true } : { kind: "server_cta", label: surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : cta, filled: true });
+    assert.deepEqual(result.action, surface === "local_device" ? null : surface === "provider_interaction" ? { kind: "sync_now", label: "Try again", filled: true } : { kind: "server_cta", label: surface === "stored_credential" ? "Update sign-in details" : cta, filled: true });
   }
 });
 
@@ -310,8 +311,8 @@ test("needsYou is true exactly on the rows where the person must act", () => {
   for (let row = 1; row <= 24; row += 1) {
     const result = sourceStatusWords(fixture(row as SourceStatusRow), { now: NOW });
     // DIRECTION.md, "One status table": row 2 does not count as needs-you.
-    assert.equal(result.needsYou, [4, 5, 6, 8, 9].includes(row), `row ${row}`);
-    if (result.action && row !== 16 && row !== 2) assert.equal(result.action.filled, result.needsYou, `row ${row}`);
+    assert.equal(result.needsYou, result.action !== null, `row ${row}`);
+    if (result.action?.filled) assert.equal(result.needsYou, true, `row ${row}`);
   }
 });
 
@@ -384,7 +385,7 @@ test("source page sentences use the same row and named slots for page-owned fact
   assert.deepEqual(sentence(fixture(3)), { text: "Disconnected. Your records stay.", slot: null });
   assert.deepEqual(sentence(fixture(5)), { text: "The first copy of Example source may not be complete.", slot: "what_you_can_do" });
   assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again.", slot: null });
-  assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do.", slot: null });
+  assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect.", slot: null });
   assert.deepEqual(sentence(fixture(14)), { text: "Some optional data is missing. Last synced 2 hours ago.", slot: null });
   assert.deepEqual(sentence(fixture(22)), { text: "Nothing imported yet. Add an export to copy your records.", slot: null });
 });
@@ -473,9 +474,9 @@ test("only the sole unmeasured-completeness maintainer cause gets the plain sync
   const base = source({ owner_state: { ...healthyState, resolver: "blocked_maintainer" }, rendered_verdict: verdict("Not measured", [unmeasured]) });
   const words = sourceStatusWords(base, { now: NOW });
   assert.equal(words.words, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
-  assert.equal(words.needsYou, false);
+  assert.equal(words.needsYou, words.action !== null);
   assert.equal(words.tone, "plain");
-  assert.equal(words.action?.label, "Sync now");
+  assert.equal(words.action, null);
   assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, words.words);
   for (const actions of [[{ ...unmeasured, cta: "Fix the copy" }], [{ ...unmeasured, terminal: true }], [unmeasured, requiredAction()]]) {
     assert.match(sourceStateSentence({ ...base, rendered_verdict: verdict("Not measured", actions) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
@@ -486,7 +487,7 @@ test("only the sole unmeasured-completeness maintainer cause gets the plain sync
 
 test("retired setup visibility is authoritative despite leftover measurement evidence", () => {
   const base = source({ source_visibility: "setup_failed", total_records: 0, total_records_state: "known_zero", connection_health: health({ last_success_at: null }) });
-  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Northwind was never connected.");
+  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Example source was never connected.");
   assert.equal(sourceStatusWords(base, { now: NOW }).action?.label, "Set up again");
   for (const change of [{ total_records: 1 }, { total_records_state: "unknown" as const }, { connection_health: health() }]) {
     assert.match(sourceStateSentence({ ...base, ...change }, { now: NOW, name: "Northwind" }).text, /was never connected/);

@@ -217,6 +217,7 @@ export function buildRecoveryDemoModel(
     connectionStatus: "active",
     connector: {
       connector_id: "claude-code",
+      connector_display_name: "Claude Code",
       display_name: "Claude Code",
       name: "Claude Code",
       streams: [{ name: "messages" }, { name: "sessions" }],
@@ -302,6 +303,7 @@ export function buildRecoveryDemoModel(
       connection_health: connectionHealth,
       connection_id: connectionId,
       connector_id: "claude-code",
+      connector_display_name: "Claude Code",
       display_name: "Claude Code workstation",
       freshness: {},
       last_run: null,

@@ -185,7 +185,7 @@ test("a device-local add_info recovery renders non-clickable guidance, not a /ru
 
 test("empty records omit invented counts", async () => {
  const src = await readFile(PAGE_FILE, "utf8");
- assert.match(src, /sourceStreamRecordCount\(stream\)/);
+ assert.match(src, /sourceKindLine\(source,\s*stream.name\)/);
 });
 
 test("detail Sync now acknowledges accepted starts without stale optimistic running state", async () => {

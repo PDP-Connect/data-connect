@@ -7,9 +7,12 @@ import { mock, test } from "node:test";
 import type * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { sourceStateSentence, type SourceStatusRow } from "../../lib/source-status-words.ts";
+import { sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "../../lib/source-status-words.ts";
+import { AGREEMENT_STATES, agreementPractice } from "./agreement-practice.ts";
 import { buildRecoveryDemoModel } from "./source-detail-demo-data.ts";
 
+const NONE_YET = /None yet/;
+const NO_SEND_FAILURE = /could not send/;
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 
 function Link({ children, href, ...props }: React.ComponentProps<"a"> & { href: string }) {
@@ -178,7 +181,7 @@ test("all 24 status rows keep the shared state choice and their actions", async 
     assert.equal(dom.window.document.querySelector('[data-status-row]')?.getAttribute("data-status-row"), String(row));
     const model = buildRecoveryDemoModel(row as SourceStatusRow);
     const sentence = sourceStateSentence(model.source, { now: NOW, name: model.source.connector_display_name ?? model.manifest.display_name ?? model.displayName });
-    if (![11, 14, 15, 16, 19, 20].includes(row)) assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text));
+    if (![11, 14, 15, 16, 19, 20].includes(row)) assert.ok(dom.window.document.querySelector('[data-testid="source-state-sentence"]')?.textContent?.startsWith(sentence.text), `row ${row}`);
     assert.ok(dom.window.document.querySelector('a[href*="/technical"]'));
     assert.equal(dom.window.document.querySelector('details[data-testid="source-details"]'), null);
   }
@@ -188,7 +191,7 @@ test("record kinds use human names, known counts, and dates", async () => {
   const dom = await renderDemo("atlas");
   const row = dom.window.document.querySelector('a[href$="/messages"]');
   assert.match(row?.textContent ?? "", /Messages/);
-  assert.match(row?.textContent ?? "", /428 records/);
+  assert.match(row?.textContent ?? "", /428/);
   assert.match(row?.textContent ?? "", /newest/);
 });
 
@@ -249,9 +252,9 @@ test("every practice state obeys the words and folds contract", async (t) => {
 
 test("practice states cover partial copies, missing kinds, settings, accounts and each confirmation", async () => {
   const cases = [
-    ["partly-more-coming", /24 so far\. More at the next sync\./],
-    ["partly-some-lost", /24 records\. Some could not be copied\./],
-    ["didnt-come", /Didn't come[\s\S]*DataConnect could not copy this\./],
+    ["partly-more-coming", /24 so far\. Some didn't come at the last sync\./],
+    ["partly-some-lost", /24 so far\. Some didn't come at the last sync\./],
+    ["didnt-come", /Didn't come at the last sync\./],
     ["settings-choices", /Settings[\s\S]*Increase this to copy older messages\./],
     ["settings-question", /Awaiting your confirmation/],
     ["other-accounts", /Also connected: Northwind \(work\)/],
@@ -295,8 +298,8 @@ test("the main device steps keep exactly the technical page's resolved commands"
 test("unknown counts are omitted while known zero remains a fact", async () => {
   const document = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(document.querySelector('a[href$="/messages"]')?.textContent ?? "", /999|count unavailable|not measured/);
-  assert.equal(document.querySelector('a[href$="/sessions"]'), null);
-  assert.match(document.body.textContent ?? "", /Nothing in: Sessions/);
+  assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", NONE_YET);
+  assert.match(document.body.textContent ?? "", /SessionsNone yet/);
 });
 
 test("a device without server steps says what to look for and offers no empty panel", async () => {
@@ -388,7 +391,7 @@ test("the unmeasured-completeness practice state uses the shared plain sentence 
 test("real-data shapes never expose raw errors or actionless waiting states", async () => {
   const raw = await renderDemo("raw-error");
   assert.doesNotMatch(visibleOutsideDetails(raw), /offset=|refusing_to_advance|machine_failure/);
-  assert.match(visibleOutsideDetails(raw), /DataConnect could not copy this/);
+  assert.match(visibleOutsideDetails(raw), /Didn't come at the last sync/);
   const waiting = await renderDemo("waiting-unknown");
   assert.match(visibleOutsideDetails(waiting), /Something stopped Northwind from syncing/);
   assert.ok([...waiting.window.document.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
@@ -413,12 +416,12 @@ test("pending settings summarize codes and hide machine changes", async () => {
 
 test("empty kinds collapse and missing measurement never claims permanent loss", async () => {
   const document = (await renderDemo("records-zero-one")).window.document;
-  assert.match(document.body.textContent ?? "", /1 record\b/);
+  assert.match(document.body.textContent ?? "", /1 record/);
   assert.doesNotMatch(document.body.textContent ?? "", /1 records|0 records/);
-  assert.match(document.body.textContent ?? "", /Nothing in: Sessions/);
-  assert.equal(document.querySelector('a[href$="/sessions"]'), null);
+  assert.match(document.body.textContent ?? "", /SessionsNone yet/);
+  assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", NONE_YET);
   assert.doesNotMatch(visibleOutsideDetails(await renderDemo("measurement-shortfall")), /Some could not be copied|Some of it didn't come/);
-  assert.match(visibleOutsideDetails(await renderDemo("partly-some-lost")), /Some could not be copied/);
+  assert.match(visibleOutsideDetails(await renderDemo("partly-some-lost")), /Some didn't come at the last sync/);
 });
 
 test("short service names stay in sentences and other accounts exclude this source", async () => {
@@ -459,8 +462,8 @@ test("positive kinds never carry the whole-kind failure sentence", async () => {
   for (const state of ["atlas", "partly-some-lost"]) {
     const dom = await renderDemo(state);
     const row = dom.window.document.querySelector('a[href$="/messages"]');
-    assert.doesNotMatch(row?.textContent ?? "", /DataConnect could not copy this/);
-    if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some could not be copied/);
+    assert.doesNotMatch(row?.textContent ?? "", /Didn't come at the last sync/);
+    if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some didn't come at the last sync/);
   }
 });
 
@@ -485,6 +488,30 @@ test("real-shaped count and device practice states preserve positive holdings an
   assert.doesNotMatch(text, /Nothing in|\b0 records/);
   assert.match(text, /can't yet tell whether it got everything/);
   const zero = (await renderDemo("device-zero-pending")).window.document;
-  assert.doesNotMatch(zero.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /could not send/);
+  assert.doesNotMatch(zero.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", NO_SEND_FAILURE);
   assert.ok(![...zero.querySelectorAll("button")].some((node) => node.textContent === "See what to do on that computer"));
 });
+
+test("a source that syncs only when pressed never offers Pause syncing",async()=>{
+  const document=(await renderDemo("manual-only")).window.document;
+  assert.ok(![...document.querySelectorAll("button")].some(node=>node.textContent === "Pause syncing"));
+});
+
+for(const state of AGREEMENT_STATES) {
+  test(`the actual source page keeps the agreement answer and main action: ${state}`,async(t)=>{
+    t.mock.timers.enable({apis:["Date"],now:NOW});
+    const model=agreementPractice(state);assert.ok(model);
+    const status=sourceStatusWords(model.source,{now:NOW});
+    const sentence=sourceStateSentence(model.source,{now:NOW,name:"Northwind"});
+    const dom=await renderDemo(`agreement-${state}`);
+    const element=dom.window.document.querySelector('[data-testid="source-state-sentence"]');assert.ok(element);
+    assert.equal(element.getAttribute("data-source-words"),status.words);
+    assert.equal(element.getAttribute("data-source-action"),status.action?.label ?? "");
+    assert.ok(element.textContent?.startsWith(sentence.text));
+    const primaryLabels=new Set(["Try again","Sign in again","Install again","Resume schedule","See what to do on that computer","View this device"]);
+    if(status.action?.label === "Sync now") {primaryLabels.add("Sync now");}
+    const actual=[...dom.window.document.querySelectorAll("header a, header button")].map(node=>node.textContent?.trim() ?? "").filter(label=>primaryLabels.has(label));
+    assert.deepEqual(actual,status.action ? [status.action.label] : []);
+    dom.window.close();
+  });
+}

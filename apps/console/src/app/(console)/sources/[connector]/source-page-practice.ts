@@ -12,7 +12,7 @@ import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
   ...AGREEMENT_STATES.map(state => `agreement-${state}`),
-  "apps-some", "apps-none", "summary-zero-held", "device-zero-pending", "device-no-steps",
+  "manual-only", "apps-some", "apps-none", "summary-zero-held", "device-zero-pending", "device-no-steps",
   "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
 	"unknown-count",
@@ -290,6 +290,8 @@ export function buildSourcePracticeModel(state: string): ConnectorPageModel | nu
     model.sourceInstances = state === "device-no-steps" ? [] : model.sourceInstances.map((device) => ({ ...device, records_pending: pending, outbox_diagnostics: { total: 0, pending: 0, dead_letter: 0 } }));
     if (state === "device-no-steps") model.providerOrigin = null;
   }
+  if (model.overview.isRunning) {model.source = {...model.source,owner_state:{...fixtureValue(model.source.owner_state),resolver:"collecting"}};}
+  if (state === "manual-only" && model.schedule) {model.schedule={...model.schedule,effective_mode:"manual"};model.source={...model.source,schedule:model.schedule};}
   if (state === "status-22" || state === "status-22-failed-last-run") model.manualUploadHref = `/connect/manual-upload/${model.connectorId}?connection_id=${model.connectionId}`;
   const counts = model.streams.map((stream) => stream.count_state === "stale" || stream.count_state === "unknown" || stream.count_state === "unobserved" ? null : stream.record_count);
   const total = counts.every((count) => count !== null) ? counts.reduce((sum, count) => sum + (count ?? 0), 0) : null;

@@ -283,6 +283,7 @@ async function runConformance(
   const byConnectorFirst = asRecord(byConnector[0]);
   assert.equal(byConnectorFirst.sourceInstanceId, "src_1");
   assert.equal(byConnectorFirst.deviceStatus, "active");
+  assert.equal(byConnectorFirst.deviceName, "the owner MacBook");
   assert.equal(byConnectorFirst.sourceStatus, "active");
   assert.equal(byConnectorFirst.connectorInstanceId, "cin_local_files_dev_1");
   assert.equal(byConnectorFirst.lastIngestAt, NOW);

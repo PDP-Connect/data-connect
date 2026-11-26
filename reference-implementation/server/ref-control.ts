@@ -849,6 +849,8 @@ export interface ControllerLike {
  * heartbeat from painting another device's pill.
  */
 export interface LocalDeviceProgress {
+  readonly device_name?: string | null;
+  readonly source_instance_id?: string | null;
   readonly last_heartbeat_at: string | null;
   readonly last_heartbeat_status: string | null;
   readonly last_ingest_at: string | null;

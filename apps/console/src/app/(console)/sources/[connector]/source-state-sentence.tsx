@@ -21,6 +21,8 @@ export function SourceStateSentenceText({
       className="mb-6 max-w-3xl"
       data-source-id={connectionId}
       data-status-row={status.row}
+      data-source-words={status.words}
+      data-source-action={status.action?.label ?? ""}
       data-testid="source-state-sentence"
     >
       <SourceStatusText className={status.tone === "attention" ? "!text-[length:var(--text-body)]" : "!text-[length:var(--text-body)] !text-foreground"} status={{ ...status, words: statusSentence }} />

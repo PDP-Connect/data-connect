@@ -219,6 +219,7 @@ function mapSourceInstanceHeartbeatRow(row: Row | null | undefined) {
     connectorId: row.connector_id,
     connectorInstanceId: row.connector_instance_id ?? null,
     deviceId: row.device_id,
+    deviceName: row.device_display_name ?? null,
     deviceRevokedAt: row.device_revoked_at ?? null,
     deviceStatus: row.device_status,
     lastError: parseJson(row.last_error_json, null),
@@ -301,7 +302,7 @@ export async function listSourceInstanceHeartbeatsByConnectionIds(connectorInsta
                          dsi.status AS source_status, dsi.last_error_json, dsi.last_heartbeat_at,
                          dsi.last_heartbeat_status, dsi.records_pending, dsi.outbox_diagnostics_json,
                          dsi.manifest_generation, dsi.updated_at, dio.last_ingest_at,
-                         de.status AS device_status, de.revoked_at AS device_revoked_at
+                         de.display_name AS device_display_name, de.status AS device_status, de.revoked_at AS device_revoked_at
                     FROM device_source_instances dsi
                     JOIN device_exporters de ON de.device_id = dsi.device_id`;
   // dio is scoped to dsi.device_id (via the requested connector_instance_id
@@ -1307,6 +1308,7 @@ export function createPostgresDeviceExporterStore() {
                 dsi.manifest_generation,
                 dsi.updated_at,
                 dio.last_ingest_at,
+                de.display_name AS device_display_name,
                 de.status AS device_status,
                 de.revoked_at AS device_revoked_at
            FROM device_source_instances dsi

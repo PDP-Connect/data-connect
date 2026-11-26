@@ -1,9 +1,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
 import { resolveSyncCause } from "./sync-cause.ts";
 import { personDay } from "../history/day-cut.ts";
-import { formatRelative } from "@pdpp/display";
+import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
 import { projectSourceActionability } from "./source-actionability.ts";
 
@@ -36,10 +37,12 @@ export interface SourceStatusWords {
   words: string;
   tone: SourceStatusTone;
   action: SourceStatusAction | null;
-  /** True when the person must act before this data source can sync (rows 4, 5, 6, 8, 9). */
+  /** True when the shared answer offers a next step for the person. */
   needsYou: boolean;
 }
 
+const FINAL_STOP = /\.$/;
+const BROWSER_SIGN_IN_SUFFIX = / \(Browser Sign-In\)$/i;
 type MatchedStatus = Omit<SourceStatusWords, "needsYou"> & { sentence: SourceStateSentence; problem: boolean };
 
 export interface SourceAnswer extends SourceStatusWords { sentence: SourceStateSentence; problem: boolean }
@@ -59,6 +62,7 @@ export interface SourceStatusOptions {
    * links to the page, which then decides.
    */
   offset?: number;
+  pendingDetails?: boolean;
   signInRepairAvailable?: boolean;
 }
 
@@ -135,7 +139,7 @@ function lifecycleRow(
   options: SourceStatusOptions
 ): MatchedStatus | null {
   const {signInRepairAvailable} = options;
-  const name = source.connector_display_name || source.display_name;
+  const name = (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "");
   const when = formatWhen(lastSuccessfulSync(source), options.now, options.offset);
   if (projection.renderedStatus.kind === "archived") return { row: 1, words: "Archived", tone: "faint", action: null , sentence: { text: "Archived. It no longer syncs. Your records are kept.", slot: null }, problem: false };
   if (projection.renderedStatus.kind === "setup_failed") {
@@ -171,7 +175,7 @@ function lifecycleRow(
     case "unverified_zero":
       return { row: 6, words: "First sync found no records", tone: "attention", action: action("retry_first_sync", "Retry first sync", true) , sentence: { text: "First sync found no records.", slot: "what_you_can_do" }, problem: true };
     case "verified_empty":
-      return { row: 7, words: "No records found", tone: "plain", action: action("review_result", "Review result", false) , sentence: { text: ("No records found").replace(/\.$/, "") + ".", slot: "what_you_can_do" }, problem: false };
+      return { row: 7, words: "No records found", tone: "plain", action: action("review_result", "Review result", false) , sentence: { text: "No records found.", slot: "what_you_can_do" }, problem: false };
   }
 
   const resolver = source.owner_state?.resolver;
@@ -193,16 +197,17 @@ function lifecycleRow(
     const requiredAction = ownerAction(source);
     const surface = requiredAction?.surface?.kind;
     if (surface === "local_device" && source.local_device_progress?.records_pending === 0) {
-      return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` DataConnect has not compared this with ${name} yet.` : ""}`, slot: null }, problem: false };
+      return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null , sentence: { text: "No records are waiting to be sent.", slot: null }, problem: false };
     }
     const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
     const devicePending = source.local_device_progress?.records_pending;
     const deviceName = source.local_device_progress?.device_name;
-    const deviceText = typeof devicePending === "number" && devicePending > 0
+    const deviceHasSteps = Boolean(requiredAction?.remediation?.commands.some(command=>substituteCommandTemplate(command.command_template,{connectionId:source.connection_id,connectorId:source.connector_id,sourceInstanceId:source.local_device_progress?.source_instance_id ?? null,providerUrl:null}) !== null));
+    const deviceText = deviceHasSteps && typeof devicePending === "number" && devicePending > 0
       ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send ${devicePending.toLocaleString()} record${devicePending === 1 ? "" : "s"}.`
       : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${name}.`;
     const sentence = surface === "local_device" ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
-    const words = surface === "local_device" && typeof devicePending === "number" && devicePending > 0 ? deviceText.replace(/\.$/, "") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
+    const words = surface === "local_device" && typeof devicePending === "number" && devicePending > 0 ? deviceText .replace(FINAL_STOP, "") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
@@ -216,7 +221,7 @@ function lifecycleRow(
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
-      action: unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : surface === "local_device" && !requiredAction?.remediation?.commands.length ? null : requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : surface === "local_device" && !deviceHasSteps ? null : requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {
@@ -229,29 +234,28 @@ function lifecycleRow(
 }
 
 function fallbackPillRow(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus | null {
-  const name = source.connector_display_name || source.display_name;
+  const name = (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "");
   const label = source.rendered_verdict?.pill.label;
   if (!label) return null;
   const when = formatWhen(lastSuccessfulSync(source), options.now, options.offset);
   const withWhen = (prefix: string) => when ? `${prefix} · last synced ${when}` : prefix;
-  if (label === "Missing optional data") return { row: 14, words: withWhen("Some optional data is missing"), tone: "plain", action: null , sentence: { text: (withWhen("Some optional data is missing")).replace(/\.$/, "") + ".", slot: null }, problem: true };
-  if (label === "Some records stuck") return { row: 15, words: withWhen("Some records are stuck"), tone: "plain", action: null , sentence: { text: (withWhen("Some records are stuck")).replace(/\.$/, "") + ".", slot: null }, problem: true };
+  if (label === "Missing optional data") return { row: 14, words: withWhen("Some optional data is missing"), tone: "plain", action: null , sentence: { text: `${(withWhen("Some optional data is missing")) .replace(FINAL_STOP, "")}.`, slot: null }, problem: true };
+  if (label === "Some records stuck") return { row: 15, words: withWhen("Some records are stuck"), tone: "plain", action: null , sentence: { text: `${(withWhen("Some records are stuck")) .replace(FINAL_STOP, "")}.`, slot: null }, problem: true };
   if (label === "Missing data" || label === "Can't collect") return { row: 16, words: withWhen("Trouble syncing"), tone: "plain", action: null , sentence: { text: withWhen("Trouble syncing"), slot: null }, problem: true };
   if (label === "Import complete") return { row: 18, words: when ? `Imported ${when}` : "Imported", tone: "plain", action: null , sentence: { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.`, slot: null }, problem: false };
   if (label === "Needs refresh") return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) , sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   if (label === "Not measured") {
     if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${name} yet.`, slot: null }, problem: false };
-    return { row: 23, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : (source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet").replace(/\.$/, "") + ".", slot: null }, problem: false };
+    return { row: 23, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${(source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
   }
   if (label === "Healthy" || label === "Collected, not independently checked") {
     return { row: 20, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` DataConnect has not compared this with ${name} yet.` : ""}`, slot: null }, problem: false };
   }
-  return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : ("Status not available").replace(/\.$/, "") + ".", slot: null }, problem: false };
+  return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${("Status not available") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
 }
 
 function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus {
-  const {now} = options;
-  const name = source.connector_display_name || source.display_name;
+  const name = (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "");
   const projection = projectSourceActionability(source);
   const lifecycle = lifecycleRow(source, projection, options);
   if (lifecycle) return lifecycle;
@@ -282,7 +286,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   }
   if (source.last_run?.status === "failed") {
     const run = source.last_run;
-    const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, source.connector_display_name || source.display_name);
+    const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, ""));
     return { row: 16, words: cause.sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: cause.action && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", cause.action, true) : null , sentence: { text: cause.sentence, slot: null }, problem: true };
   }
   if (resolver === "system_degraded") {
@@ -291,8 +295,8 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
       ? "Some optional data is missing"
       : label === "Some records stuck"
         ? "Some records are stuck"
-        : `Something stopped ${source.connector_display_name || source.display_name} from syncing.`;
-    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: base.startsWith("Something stopped") ? base : withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null , sentence: { text: (base.startsWith("Something stopped") ? base : withWhen(base)).replace(/\.$/, "") + ".", slot: null }, problem: true };
+        : `Something stopped ${(source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "")} from syncing.`;
+    return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: base.startsWith("Something stopped") ? base : withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null , sentence: { text: base.startsWith("Something stopped") ? base : `${base}.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: true };
   }
   if (resolver === "refresh_due") {
     return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) , sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
@@ -302,6 +306,10 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return {row:16,words:text,tone:"plain",action:null,sentence:{text,slot:null},problem:true};
   }
   if (resolver === "healthy") {
+    if (options.pendingDetails || source.connection_health.detail_gap_backlog?.pending || source.collection_report?.some(entry=>entry.pending_detail_gaps>0)) {
+      const text=`Synced${when ? ` ${when}` : ""}. Still checking a few things.`;
+      return {row:20,words:text,tone:"plain",action:null,sentence:{text,slot:null},problem:false};
+    }
     if (source.rendered_verdict?.pill.label === "Import complete") {
       return { row: 18, words: when ? `Imported ${when}` : "Imported", tone: "plain", action: null , sentence: { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.`, slot: null }, problem: false };
     }
@@ -318,7 +326,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   }
   if (resolver === "not_measured") {
     if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${name} yet.`, slot: null }, problem: false };
-    return { row: 22, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : (source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet").replace(/\.$/, "") + ".", slot: null }, problem: false };
+    return { row: 22, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${(source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
   }
 
   const fallback = fallbackPillRow(source, options);
@@ -327,7 +335,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return fallback;
   }
   if (!source.owner_state && (source.status || source.source_visibility)) {
-    return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : ("Status not available").replace(/\.$/, "") + ".", slot: null }, problem: false };
+    return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${("Status not available") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
   }
   return { row: 24, words: "Status not available", tone: "faint", action: null , sentence: { text: "Status not available.", slot: null }, problem: false };
 }
@@ -343,7 +351,7 @@ export function sourceStatusWords(source: RefConnectorSummary, options: SourceSt
 export function isUpToDateRow(row: SourceStatusRow): boolean { return row === 18 || row === 19; }
 function backoffSentence(source: RefConnectorSummary, options: SourceStatusOptions, name: string): string {
   const backoff = source.schedule?.scheduler_backoff;
-  const coming = backoff?.next_run_at && Date.parse(backoff.next_run_at) > options.now.getTime()+45000 ? ` ${formatRelative(new Date(backoff.next_run_at), options.now.getTime())}` : "";
+  const coming = backoff?.next_run_at && Date.parse(backoff.next_run_at) > options.now.getTime()+45_000 ? ` ${formatRelative(new Date(backoff.next_run_at), options.now.getTime())}` : "";
   return backoff?.reason_class === "source_pressure" || backoff?.consecutive_failures === 0 ? `${name} asked DataConnect to slow down. It will try again on its own${coming}.` : `The last sync did not finish. DataConnect will try again on its own${coming}.`;
 }
 export interface SourceStateSentenceOptions extends SourceStatusOptions {
@@ -354,8 +362,7 @@ export interface SourceStateSentenceOptions extends SourceStatusOptions {
 }
 export function sourceStateSentence(source: RefConnectorSummary, options: SourceStateSentenceOptions): SourceStateSentence {
   const progress = source.local_device_progress;
-  const enriched = progress && (options.deviceName || options.unsentRecords !== undefined) ? {...source,local_device_progress:{...progress,device_name:progress.device_name ?? options.deviceName,records_pending:progress.records_pending ?? options.unsentRecords ?? null}} : source;
+  const enriched = options.deviceName || options.unsentRecords !== undefined ? {...source,local_device_progress:{last_heartbeat_at:null,last_heartbeat_status:null,last_ingest_at:null,source_count:0,...progress,device_name:progress?.device_name ?? options.deviceName,records_pending:progress?.records_pending ?? options.unsentRecords ?? null}} : source;
   const answer = sourceAnswer(enriched, options);
-  if (options.pendingDetails && [19,20].includes(answer.row)) return {text:`Synced${formatWhen(lastSuccessfulSync(source),options.now,options.offset) ? ` ${formatWhen(lastSuccessfulSync(source),options.now,options.offset)}` : ""}. Still checking a few things.`,slot:null};
   return answer.sentence;
 }

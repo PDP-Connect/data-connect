@@ -15,6 +15,7 @@ SELECT dsi.source_instance_id,
        dsi.manifest_generation,
        dsi.updated_at,
        dio.last_ingest_at,
+       de.display_name AS device_display_name,
        de.status AS device_status,
        de.revoked_at AS device_revoked_at
 FROM device_source_instances dsi

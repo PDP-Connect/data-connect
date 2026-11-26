@@ -1,5 +1,6 @@
+import { readPersonOffset } from "../../history/server-day.ts";
 import { sourceKindLine } from "../../lib/source-kind-line.ts";
-import { sourceRecordCount, sourceStreamRecordCount } from "../../lib/source-record-count.ts";
+import { sourceRecordCount } from "../../lib/source-record-count.ts";
 import { sourceRecordLabel, isOwnerRecordKind } from "../../lib/source-record-label.ts";
 import { SourceApps, SourceAppsList } from "./source-apps.tsx";
 import { groupGrantAccessByApp } from "../../grants/app-access.ts";
@@ -17,7 +18,6 @@ import {
   isSetupFailedSource,
 } from "@pdpp/display";
 import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
-import { classifyKnownGaps, normalizeKnownGaps } from "../../lib/run-gaps.ts";
 import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
@@ -80,7 +80,6 @@ import {
   type StreamSummary,
 } from "../../lib/rs-client.ts";
 import {
-  hasPrimaryOwnerLocalDeviceRemediation,
   isSetupInProgressConnector,
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
@@ -101,7 +100,7 @@ import { ConnectionConfiguration, ConnectionSettingsHistory } from "./connection
 import { ConnectionConfirmation } from "./connection-confirmation.tsx";
 import { DeviceSteps } from "./device-steps.tsx";
 import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
-import { ConnectionDeviceRecoverySteps, ConnectionDiagnostics, ConnectionRecoverySummary, hasDeviceRecoverySteps } from "./connection-diagnostics.tsx";
+import { ConnectionDeviceRecoverySteps, ConnectionDiagnostics, ConnectionRecoverySummary } from "./connection-diagnostics.tsx";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
 import { AddAnotherAccount } from "./add-another-account.tsx";
 import { RenameConnection } from "./rename-connection.tsx";
@@ -488,6 +487,7 @@ export default async function ConnectorPage({
       apps={practiceModel ? <SourceAppsList apps={sp.demo === "apps-some" ? groupGrantAccessByApp(buildAppPractice("one").registrations.map((app) => ({ ...app, sources: app.sources.map((row) => ({ ...row, source: { ...row.source, connection_id: model.connectionId, connector_id: model.connectorId, id: model.connectorId } })) }))) : []} connectionId={model.connectionId} /> : <Suspense fallback={null}><SourceApps connectionId={model.connectorInstanceId ?? model.connectionId} /></Suspense>}
       otherAccounts={otherAccounts}
       now={now}
+      offset={practiceModel ? 0 : await readPersonOffset()}
       updateDemo={updateDemo}
       updates={updates}
       practiceState={practiceModel ? sp.demo : undefined}
@@ -730,6 +730,7 @@ function ConnectorPageView({
   updateDemo,
   updates,
   practiceState,
+  offset=0,
 }: {
   addAnotherAccountAction?: ReactNode;
   model: ConnectorPageModel;
@@ -744,6 +745,7 @@ function ConnectorPageView({
   updateDemo: SourceUpdateModel | null;
   updates?: Promise<SourceUpdateModel | null>;
   practiceState?: string;
+  offset?:number;
 }) {
   const {
     activeRunId: scheduleActiveRunId,
@@ -770,7 +772,7 @@ function ConnectorPageView({
     source,
   } = model;
   const displayName = connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id);
-  const serviceName = canonicalConnectorKey(connectorId) === "google-maps" ? "Google Maps" : source.connector_display_name ?? manifest.display_name ?? manifest.name ?? formatConnectorKeyForDisplay(connectorId);
+  const serviceName = canonicalConnectorKey(connectorId) === "google-maps" ? "Google Maps" : (source.connector_display_name ?? manifest.display_name ?? manifest.name ?? formatConnectorKeyForDisplay(connectorId)).replace(/ \(Browser Sign-In\)$/i, "");
   const { running } = resolveActiveRunNavigation({
     overview,
     scheduleActiveRunId,
@@ -786,7 +788,7 @@ function ConnectorPageView({
   const neverConnected = sourceNeverConnected(source);
   const archived = source.source_visibility === "archived";
   const oneTime = source.source_kind === "manual" || source.rendered_verdict?.pill.label === "Import complete";
-  const pausable = !(revoked || paused || archived || oneTime) && Boolean(model.schedule) && overview.connectionStatus === "active";
+  const pausable = !(revoked || paused || archived || oneTime) && Boolean(model.schedule) && model.schedule?.effective_mode !== "manual" && overview.connectionStatus === "active";
   // Stable rename selector: prefer the explicit instance id, fall back to the
   // connection id. Both address the same connection on the backend route.
   const renameSelector = connectorInstanceId ?? connectionId;
@@ -828,15 +830,12 @@ function ConnectorPageView({
   const syncIdleLabel = syncActionIdleLabel(overview.lastRun?.status);
   const scheduleSyncAvailable = connectionPrimaryAction?.kind === "reattach_schedule" && primaryAction.kind === "sync";
   const renderedAt = new Date(now);
-  const pendingDetails = Boolean(connectionHealth?.detail_gap_backlog?.pending) ||
-    [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
-  const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, pendingDetails, signInRepairAvailable });
+  const sourceStatus = sourceStatusWords(source, { now: renderedAt, offset, signInRepairAvailable });
+  const stateSentence = sourceStateSentence(source, { now: renderedAt, offset, name: serviceName, signInRepairAvailable });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
   const deviceStepsAvailable = hasDeviceLocalRemediation;
-  const devicePending = source.local_device_progress?.records_pending;
   const recordTotal = sourceRecordCount(source);
   const visibleTotal = recordTotal.count === null ? undefined : `${recordTotal.count.toLocaleString()} record${recordTotal.count === 1 ? "" : "s"}`;
 
@@ -861,7 +860,7 @@ function ConnectorPageView({
             routeConnectionId={connectionId}
             sourceInstances={sourceInstances}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
-            statusAction={archived || (devicePending === 0 && primaryActionSurface === "local_device") || (pageStatusAction?.kind === "view_device" && !oneTime && sourceTimeLabel(sourceInstances[0]?.last_heartbeat_at)) ? null : pageStatusAction}
+            statusAction={pageStatusAction}
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
@@ -890,12 +889,12 @@ function ConnectorPageView({
         <SourceRecords model={model} />
         {recordTotal.conflicting ? <p className="pdpp-body mt-3 text-muted-foreground">DataConnect can't yet tell whether it got everything.</p> : null}
         {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>Add another export</Link>
+          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>{source.acquisition_coverage?.latest_batch || source.last_successful_run ? "Add another export" : "Add an export"}</Link>
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
         </div> : null}
       </Section> : null}
       {!neverConnected ? apps : null}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} /> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
       {!archived && !neverConnected ? <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
@@ -946,9 +945,9 @@ function SourceManage({ neverConnected, children }: { neverConnected: boolean; c
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
   const { connectionId, source, manifest } = model;
-  const streams = model.streams.filter((stream,index,all) => all.findIndex(candidate=>candidate.name===stream.name)===index && isOwnerRecordKind(stream.name, canonicalConnectorKey(model.connectorId)));
-  const technicalKinds = model.streams.length - streams.length;
-  const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
+  const uniqueStreams = model.streams.filter((stream,index,all) => all.findIndex(candidate=>candidate.name===stream.name)===index);
+  const streams = uniqueStreams.filter(stream=>isOwnerRecordKind(stream.name,canonicalConnectorKey(model.connectorId)));
+  const technicalKinds = uniqueStreams.length - streams.length;
   const label = (name: string) => sourceRecordLabel(name, manifest.streams as StreamManifestEntry[]);
   return <>
     <DataList>{streams.map((stream) => {
@@ -1875,8 +1874,8 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
   );
 }
 
-export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false }: {
-  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean;
+export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
+  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
 }) {
   const text = disconnected ? "Not checked while disconnected." : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
   const next = !disconnected && !paused && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
@@ -1886,7 +1885,7 @@ export function ScheduleSummary({ displayName, schedule, scheduleError, sourceIn
   return <Section title="Schedule" action={disconnected ? undefined : <Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
     {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
     {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}
-    {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link className="underline underline-offset-4 hover:text-foreground" href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}
+    {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. {showDeviceLink ? <Link className="underline underline-offset-4 hover:text-foreground" href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link> : null}</p> : null}
   </Section>;
 }
 
