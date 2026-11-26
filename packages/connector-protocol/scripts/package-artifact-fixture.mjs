@@ -8,16 +8,42 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-const execFile = promisify(execFileCallback);
+const execFileRaw = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const packages = ["connector-protocol", "collector-runtime"];
+
+let repositoryLocationVariables;
+
+// Git itself names the variables that point it at a repository, index or
+// object store (`git rev-parse --local-env-vars`). A hook or a wrapper shell
+// can set them, and a child git that inherits them acts on the caller's
+// repository instead of the one in its `cwd`.
+function repositoryLocationVariableNames() {
+  repositoryLocationVariables ??= execFileRaw("git", ["rev-parse", "--local-env-vars"]).then(({ stdout }) =>
+    stdout.split("\n").filter(Boolean)
+  );
+  return repositoryLocationVariables;
+}
+
+export async function isolatedGitEnv(env = process.env) {
+  const isolated = { ...env };
+  for (const name of await repositoryLocationVariableNames()) {
+    delete isolated[name];
+  }
+  return isolated;
+}
+
+// Every git subprocess of the fixture goes through this one function.
+async function git(args, options = {}) {
+  return execFileRaw("git", args, { ...options, env: await isolatedGitEnv() });
+}
 
 export async function createArtifactTestFixture(packageName) {
   const started = performance.now();
   const root = await mkdtemp(join(tmpdir(), "pdpp-artifact-test-"));
   try {
-    await execFile("git", ["clone", "--shared", "--no-checkout", "--", repoRoot, root]);
-    await execFile("git", ["checkout", "HEAD", "--", ".gitignore", ...packages.map((name) => `packages/${name}`)], {
+    await git(["clone", "--shared", "--no-checkout", "--", repoRoot, root]);
+    await git(["checkout", "HEAD", "--", ".gitignore", ...packages.map((name) => `packages/${name}`)], {
       cwd: root,
     });
     await symlink(join(repoRoot, "node_modules"), join(root, "node_modules"));
@@ -31,8 +57,7 @@ export async function createArtifactTestFixture(packageName) {
         await copyFile(join(repoRoot, scriptPath), join(root, scriptPath));
       })
     );
-    await execFile(
-      "git",
+    await git(
       [
         "update-index",
         "--assume-unchanged",
