@@ -19,6 +19,7 @@ import {
   toDisplayError,
 } from "./diagnostics.tsx"
 import { plain } from "./plain-text.ts"
+import { CopyButton } from "./on-card.tsx"
 import { type ActionKind, publicError } from "./reachability-errors.ts"
 import {
   adminStepCopy,
@@ -702,7 +703,7 @@ export function ProviderSetup({
       <section aria-label={`Sign in to ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{`Waiting for you to sign in at ${service}.`}</p>
-        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <Button variant="outline" onClick={() => navigator.clipboard?.writeText(notice)}>Copy details for support</Button> : null}</div> : null}
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         {chainAsksFields(action) ? (
@@ -742,7 +743,7 @@ export function ProviderSetup({
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{adminCopy.line}</p>
         <Diagnostics><p>{adminCopy.detail}</p></Diagnostics>
-        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <Button variant="outline" onClick={() => navigator.clipboard?.writeText(notice)}>Copy details for support</Button> : null}</div> : null}
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         <div className="flex flex-wrap gap-3">
@@ -779,7 +780,7 @@ export function ProviderSetup({
       <section aria-label={`Sign in to ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{copy.line}</p>
-        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <Button variant="outline" onClick={() => navigator.clipboard?.writeText(notice)}>Copy details for support</Button> : null}</div> : null}
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         {stage === "sign-in" ? <WhatThisDoes consents={shown} /> : null}

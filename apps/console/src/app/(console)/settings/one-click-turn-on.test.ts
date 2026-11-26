@@ -1310,3 +1310,17 @@ test("two same-tick provider Cancel clicks send one cancel", async () => {
     });
   }
 });
+
+test("provider support copy reports failure", async () => {
+  // A pending browser sign-in whose handoff fails offers its fixed support details.
+  await withProviderSetup(providerBrowserStep(), async () => fail("setup_action_unavailable"), async container => {
+    const signIn = [...container.querySelectorAll("button")].find(button => button.textContent === "Sign in to Tunnel service");
+    assert.ok(signIn);
+    await act(async () => signIn.click());
+    const copy = [...container.querySelectorAll("button")].find(button => button.textContent === "Copy details for support");
+    assert.ok(copy, "the failed handoff offers support details");
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: () => Promise.reject(new Error("clipboard denied")) } } });
+    await act(async () => copy.click());
+    assert.ok([...container.querySelectorAll('[role="status"]')].some(status => /Couldn't copy to the clipboard/.test(status.textContent ?? "")));
+  });
+});
