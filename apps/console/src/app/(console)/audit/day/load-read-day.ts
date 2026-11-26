@@ -8,7 +8,7 @@ import { practiceNow,historyPracticeSources, practiceEnabled, readPractice } fro
 import { practiceHistoryApps } from "../../history/history-apps.ts";
 export async function loadReadDay(params: Record<string,string | undefined>) {
   const practice = practiceEnabled(params.demo); const offset = await readPersonOffset();
-  const { apps,sources } = practice ? { apps: practiceHistoryApps("mixed"),sources: historyPracticeSources() } : await loadActivity({date:params.day});
+  const { apps,sources } = practice ? { apps: practiceHistoryApps(params.fixture ?? "mixed"),sources: historyPracticeSources() } : await loadActivity({date:params.day});
   const app = apps.find(app=>app.hrefId===params.app) ?? (practice?apps[0]:undefined);
   const day = params.day ?? (practice ? personDay(Date.now(),offset) : "");
   if (!app || !day) return null;
@@ -21,5 +21,5 @@ export async function loadReadDay(params: Record<string,string | undefined>) {
   const start=practice ? Number(params.cursor ?? 0) : 0;
   const rows = practice ? dataRows.slice(start,start+50) : dataRows;
   const more = history.has_more || start+rows.length < dataRows.length;
-  return { app,day,offset,rows,sources,discovery,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/audit/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
+  return { pageKey:JSON.stringify([app.hrefId,day,params.connection_id ?? ""]),app,day,offset,rows,sources,discovery,nextCursor:more ? history.next_cursor ?? String(start+rows.length) : null,moreHref:more ? historyHref("/audit/day",params,history.next_cursor ? {cursor:history.next_cursor} : {more:"1"}) : undefined };
 }

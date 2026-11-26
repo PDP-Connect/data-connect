@@ -11,7 +11,7 @@ export async function loadSyncDay(params: Record<string,string | undefined>) {
   if (!day) return null;
   if (!params.connection_id && (!practice || params.demo==="all-sources")) {
     const [history,sources]=await Promise.all([practice ? syncPractice(params.fixture ?? "mixed",offset,practiceNow(day,offset)).history : listSyncHistory({first:day,last:day,offset}),practice ? historyPracticeSources() : loadHistorySources()]);
-    return {name:"Data sources",day,offset,rows:[],sourceRows:history.mode==="days"?history.data:[],sources};
+    return {name:"Data sources",day,offset,rows:[],sourceRows:history.mode==="days"?history.data.filter(row=>row.day===day):[],sources,fixture:params.fixture};
   }
   const [history,sources] = await Promise.all([
     practice ? syncDayPractice(params.demo as string,offset,practiceNow(day,offset),params.connection_id,params.fixture) : listSyncHistory({ first: day, last: day, day, offset, connection_id: params.connection_id as string, limit: params.more === "1" ? 100 : 50, ...(params.cursor ? { cursor: params.cursor } : {}) }),

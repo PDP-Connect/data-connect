@@ -12,7 +12,7 @@ import { dayLabel, historyHref, historyTime, visibleDays } from "../history/day-
 import { sourceName, type HistorySource } from "../history/source-names.ts";
 import type { NamedAppDay } from "../history/history-apps.ts";
 export function appDayHref(row: NamedAppDay, demo?: string, connection?: string): string {
-  return historyHref("/audit/day",{}, { app: row.app.hrefId, day: row.day, ...(connection ? {connection_id:connection} : {}), ...(demo ? { demo: demo==="seven-fifty"?"seven-fifty":"history-reads" } : {}) });
+  return historyHref("/audit/day",{}, { app: row.app.hrefId, day: row.day, ...(connection ? {connection_id:connection} : {}), ...(demo ? { demo: demo==="seven-fifty"?"seven-fifty":"history-reads",fixture:demo } : {}) });
 }
 export function ReadDayLines({ row, sources, linked=false, demo }: { row: NamedAppDay; sources: HistorySource[]; linked?:boolean;demo?:string }) {
   const ranked = row.sources.map(source => ({ reads: source.reads, href:appDayHref(row,demo,source.connection_id ?? source.source_id), text: `${sourceName(sources,source.connection_id ?? source.source_id,source.source_id)} · ${source.reads} time${source.reads===1?"":"s"}${source.records === null ? "" : ` · ${source.records.toLocaleString("en-US")} record${source.records===1?"":"s"}`}` }));

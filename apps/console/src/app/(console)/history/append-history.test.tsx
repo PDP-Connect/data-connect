@@ -20,6 +20,10 @@ test("append keeps earlier rows, adds the next page once, and states where histo
     await act(async()=>{document.querySelector("button")?.click()});
     assert.match(document.body.textContent ?? "",/First 50 rowsNext 40 rowsHistory starts 13 Aug 2026\./);
     assert.equal(calls,1);assert.equal(document.querySelector("button"),null);
+    await act(async()=>root.render(<AppendHistory initial={{content:<p>Updated first 50 rows</p>,next:"page2"}} label="Show more" load={async()=>({content:null,next:null})} />));
+    assert.match(document.body.textContent ?? "",/Updated first 50 rowsNext 40 rows/);
+    await act(async()=>root.render(<AppendHistory key="other-source" initial={{content:<p>Filtered first page</p>,next:null}} label="Show more" />));
+    assert.match(document.body.textContent ?? "",/Filtered first page/);assert.doesNotMatch(document.body.textContent ?? "",/Next 40/);
   }finally{await act(async()=>root.unmount());Object.assign(globalThis,previous);dom.window.close()}
 });
 test("filters apply once on change and preserve native GET without scripts",async()=>{
