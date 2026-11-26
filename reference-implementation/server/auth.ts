@@ -83,7 +83,7 @@ import { buildGrantedAuthorizationDetail } from "./source-approved-authorization
 import { InvalidSourceDeclarationError, snapshotSourceDeclaration } from "./source-declaration.ts";
 import {
   COLLECTION_PROFILE_URI,
-  retainCollectionLegacySourceIds,
+  retainCollectionSourceIdentity,
   snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest,
 } from "./source-declaration-legacy-collection.ts";
 import {
@@ -3553,10 +3553,15 @@ export function retainMovedFromIdentity(manifestJson: string, previousManifest: 
   if (movedFrom) {
     history.push(movedFrom);
   }
-  if (history.length === 0) {
+  const retainedDeclaredId = declaredCurrentSourceIdOf(manifestRecordOf(previousManifest));
+  const declaredSourceId = retainedDeclaredId === sourceIdOfDeclaration(declaration) ? retainedDeclaredId : undefined;
+  if (history.length === 0 && declaredSourceId === undefined) {
     return manifestJson;
   }
-  manifest.source_declaration = retainCollectionLegacySourceIds(declaration, history);
+  manifest.source_declaration = retainCollectionSourceIdentity(declaration, {
+    ...(declaredSourceId === undefined ? {} : { declaredSourceId }),
+    legacySourceIds: history,
+  });
   return JSON.stringify(manifest);
 }
 
@@ -5761,6 +5766,8 @@ export interface ConnectorManifestStorageContext {
    */
   readonly retainedSourceDeclaration?: unknown;
   readonly retainedConnectorId?: string;
+  /** A current source.id already admitted for this registration, retained in its declaration extension. */
+  readonly retainedDeclaredSourceId?: string;
 }
 
 function storageConnectorIdOf(manifest: Record<string, unknown>): unknown {
@@ -5791,7 +5798,12 @@ export function retainedStorageContext(previousManifest: unknown): ConnectorMani
   const declaration = sourceDeclarationOf(previousManifest);
   const previous = manifestRecordOf(previousManifest);
   const id = previous && storageConnectorIdOf(previous);
-  return { ...(declaration === undefined ? {} : { retainedSourceDeclaration: declaration }), ...(typeof id === "string" ? { retainedConnectorId: id } : {}) };
+  const declaredSourceId = declaredCurrentSourceIdOf(previous);
+  return {
+    ...(declaration === undefined ? {} : { retainedSourceDeclaration: declaration }),
+    ...(typeof id === "string" ? { retainedConnectorId: id } : {}),
+    ...(declaredSourceId === undefined ? {} : { retainedDeclaredSourceId: declaredSourceId }),
+  };
 }
 
 /** The declaration currently retained under a connector key, read before the registration transaction. */
@@ -5819,12 +5831,19 @@ function manifestRecordOf(manifest: unknown): Record<string, unknown> | undefine
   }
 }
 
-/**
- * The one identity change Core Section 5 allows here. A connector registered before source declarations
- * retains a legacy projection whose `source.id` is its own provenance URI. A package for the same
- * implementation (same `manifest_uri`) whose source declaration the installer verified names the source
- * that implementation acquires, so the retained identity moves to it.
- */
+/** The current-id fact is separate from document provenance and historical aliases. */
+function declaredCurrentSourceIdOf(manifest: Record<string, unknown> | undefined): string | undefined {
+  const declaration = sourceDeclarationOf(manifest);
+  const current = sourceIdOfDeclaration(declaration);
+  const extensions = isRecord(declaration?.extensions) ? declaration.extensions : undefined;
+  const collection = extensions && isRecord(extensions[COLLECTION_PROFILE_URI])
+    ? extensions[COLLECTION_PROFILE_URI]
+    : undefined;
+  const stated = isRecord(manifest?.source) ? manifest.source.id : undefined;
+  return current !== undefined && (collection?.declared_source_id === current || stated === current) ? current : undefined;
+}
+
+/** A historical projection may move once under the same registration's admitted identity authority. */
 function legacyProjectionMove(
   connectorId: string,
   previousManifest: unknown,
@@ -5837,31 +5856,30 @@ function legacyProjectionMove(
   const declared = sourceDeclarationOf(incoming);
   const from = sourceIdOfDeclaration(retained);
   const to = sourceIdOfDeclaration(declared);
-  const isLegacyProjection =
+  const extensions = isRecord(retained?.extensions) ? retained.extensions : undefined;
+  const collection = extensions && isRecord(extensions[COLLECTION_PROFILE_URI])
+    ? extensions[COLLECTION_PROFILE_URI]
+    : undefined;
+  const hasMoved = Array.isArray(collection?.legacy_source_ids) && collection.legacy_source_ids.length > 0;
+  const isHistoricalProjection =
     isRecord(retained?.publisher) &&
     retained.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
     isRecord(retained.source) &&
     retained.source.kind === "connector" &&
-    previous?.manifest_uri === from;
-  if (from !== undefined && to !== undefined && isLegacyProjection && incoming && declaredLegacySourceIds(incoming).includes(from) && storageConnectorIdOf(incoming) === connectorId) {
+    declaredCurrentSourceIdOf(previous) === undefined &&
+    !hasMoved;
+  if (from === undefined || to === undefined || !isHistoricalProjection || !incoming || storageConnectorIdOf(incoming) !== connectorId) {
+    return null;
+  }
+  if (declaredLegacySourceIds(incoming).includes(from)) {
     return { connectorId, from, to };
   }
-  if (!verifiedSourceDeclaration) return null;
   const isPublishedDeclaration =
     isRecord(declared?.publisher) &&
     declared.publisher.id !== LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
     isRecord(declared.source) &&
     declared.source.kind === "connector";
-  if (
-    from === undefined ||
-    to === undefined ||
-    !isLegacyProjection ||
-    !isPublishedDeclaration ||
-    incoming?.manifest_uri !== from
-  ) {
-    return null;
-  }
-  return { connectorId, from, to };
+  return verifiedSourceDeclaration && isPublishedDeclaration ? { connectorId, from, to } : null;
 }
 
 /**
@@ -6079,6 +6097,13 @@ export function normalizeConnectorManifestForStorage(
         sourceId,
       }
     );
+  }
+  const current = sourceIdOfDeclaration(sourceDeclarationOf(storedManifest));
+  const stated = isRecord(storedManifest.source) ? storedManifest.source.id : undefined;
+  const declaredSourceId = current !== undefined &&
+    (stated === current || context.retainedDeclaredSourceId === current) ? current : undefined;
+  if (declaredSourceId !== undefined) {
+    storedManifest.source_declaration = retainCollectionSourceIdentity(storedManifest.source_declaration, { declaredSourceId });
   }
   return { connectorId, storedManifest };
 }
