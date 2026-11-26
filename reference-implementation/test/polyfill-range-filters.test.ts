@@ -598,7 +598,7 @@ test("first-party polyfill manifests with aggregation declarations register thro
 
 test("first-party polyfill range filters execute against synthetic records", async () => {
   await withHarness(async ({ asUrl, rsUrl }) => {
-    for (const manifestName of RANGE_FILTERED_CONNECTORS) {
+    for (const manifestName of new Set([...RANGE_FILTERED_CONNECTORS, "reddit"])) {
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
       await registerManifest(
         asUrl,
