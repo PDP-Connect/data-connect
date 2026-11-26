@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { canonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
@@ -21,16 +22,32 @@ export function ReadDayLines({ row, sources, linked=false, demo }: { row: NamedA
   const lines = ranked.sort((a,b)=>b.reads-a.reads).map(line=>line);
   return <div className="mt-1 text-[13px] text-muted-foreground">{lines.slice(0,4).map(line => <p key={line.text}>{linked ? <Link className="text-primary hover:underline" href={line.href}>{line.text}</Link> : line.text}</p>)}{lines.length > 4 ? <p>and {lines.length-4} more</p> : null}</div>;
 }
+function currentAccessNames(app:AppAccess,sources:HistorySource[]):string[] {
+    const currentNames=new Map<string,string>();
+    for(const row of app.sourceAccess.filter(candidate=>candidate.in_force)) {
+      let ids=row.connection_ids ?? [];
+      if(!ids.length) {ids=[row.source.connection_id ?? JSON.stringify(row.source)];}
+      for(const id of ids) {currentNames.set(id,sourceName(sources,id,row.source.connector_id ?? row.source.id));}
+    }
+    return [...currentNames.values()];
+ }
 export function changeSentence(change: AccessChange, app: AppAccess, sources: HistorySource[]): string {
-  const rawSources = change.sources ?? (change.source_id ? [{source_id:change.source_id,connection_id:change.connection_id,source_kind:change.source_kind}] : []);
+  const sameService=(left:string,right:string)=>canonicalConnectorKey(left).replaceAll("_","-")===canonicalConnectorKey(right).replaceAll("_","-");
+  const storedSources = change.sources ?? (change.source_id ? [{source_id:change.source_id,connection_id:change.connection_id,source_kind:change.source_kind}] : []);
+  const rawSources = storedSources;
   const names = [...new Set(rawSources.map(raw => {
-    const matched = app.sourceAccess.find(source => source.source.id === raw.source_id || Boolean(raw.connection_id) && source.source.connection_id === raw.connection_id || source.source.connector_id === raw.source_id);
+    const matched = app.sourceAccess.find(source => sameService(source.source.connector_id ?? source.source.id,raw.source_id) || Boolean(raw.connection_id) && source.source.connection_id === raw.connection_id || source.source.connector_id === raw.source_id);
     const name = sourceName(sources,raw.connection_id ?? raw.source_id,matched?.source.connector_id ?? raw.source_id);
-    return name === "Data source" && matched ? appSourceName(matched.source) ?? name : name;
+    return name === "Data source" && matched ? matched.name || appSourceName(matched.source) || name : name;
   }).filter(name=>name !== "Data source"))];
   const knownSource = names.length ? `${names.slice(0,3).join(", ")}${names.length > 3 ? ` and ${names.length-3} more` : ""}` : null;
   if (change.change === "not_allowed") { return `You didn't allow ${app.name}.`; }
   if (change.change === "removed") { return knownSource ? `You stopped ${app.name} reading ${knownSource}.` : `You removed ${app.name}'s access.`; }
+  if(storedSources.length>1 && app.state === "reading") {
+    const current=currentAccessNames(app,sources);
+    const reach=current.slice(0,3).join(", ");
+    return `You allowed ${app.name} to read your data. Now it can read ${reach}${current.length>3 ? ` and ${(current.length-3).toLocaleString("en-US")} more` : ""}.`;
+  }
   return `You allowed ${app.name} to read ${knownSource ?? "your data"}.`;
 }
 export function accessChangeHref(app: AppAccess): string | null {
@@ -68,7 +85,8 @@ export function ActivityView({ rows, changes, apps, sources, offset, days = 7, p
     <p className="mb-6 text-[13px] text-muted-foreground">DataConnect keeps what an app read, not what it asked.</p>
     {hasItems ? <HistoryFilters path="/audit">{demo ? <input type="hidden" name="demo" value={demo} /> : null}<select aria-label="App" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" name="app" defaultValue={params.app ?? ""}><option value="">All apps</option>{apps.filter(app=>app.state==="reading" || rows.some(row=>row.app===app && row.reads>0)).sort((a,b)=>a.name.localeCompare(b.name,"en",{numeric:true})).map(app => <option key={app.hrefId} value={app.hrefId}>{app.name}{apps.some(other=>other !== app && other.name === app.name) ? ` (${app.place})` : ""}</option>)}</select><select aria-label="Data source" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" name="connection_id" defaultValue={params.connection_id ?? ""}><option value="">All data sources</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select><label className="flex min-h-11 items-center gap-2"><input name="only_access" type="checkbox" value="true" defaultChecked={params.only_access === "true"} />Only changes to access</label></HistoryFilters> : null}
     <AppendHistory key={JSON.stringify(params)} initial={{content:<ActivityDays rows={rows} changes={changes} apps={apps} sources={sources} offset={offset} params={params} demo={demo} days={days} />,next:beforeDay ?? null,firstDay}} load={loadMore} label="Earlier" />
-    {hasItems ? null : params.app || params.connection_id || params.only_access ? <><p>Nothing matches.</p><Link href="/audit">Show everything</Link></> : <><p>No app has read your data yet.</p><p className="text-muted-foreground">When an app reads, it shows here.</p>{apps.length ? null : <Link className={buttonVariants()} href="/connect-ai">Connect an app</Link>}</>}
+    {!hasItems && (params.app || params.connection_id || params.only_access) ? <><p>Nothing matches.</p><Link href="/audit">Show everything</Link></> : null}
+    {!(hasItems || params.app || params.connection_id || params.only_access) ? <><p>No app has read your data yet.</p><p className="text-muted-foreground">When an app reads, it shows here.</p>{apps.length ? null : <Link className={buttonVariants()} href="/connect-ai">Connect an app</Link>}</> : null}
 
   </>;
 }

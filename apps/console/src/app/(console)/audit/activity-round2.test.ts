@@ -26,3 +26,13 @@ test("picker includes current apps plus period readers and excludes other stoppe
  assert.ok(html.includes('<option value="former">Former reader'));
  assert.ok(!html.includes('<option value="stopped">'));
 });
+
+test("a multi-source permission event separates the past grant from the app's complete current inventory",()=>{
+ const [base]=buildAppPractice("one").apps;assert.ok(base);
+ const [access]=base.sourceAccess;assert.ok(access);
+ const sourceAccess=Array.from({length:5},(_,index)=>({...access,in_force:true,name:`Mail ${index+1}`,source:{...access.source,id:"mail",connector_id:"mail",connection_id:`practice-mail-${index}`}}));
+ const app={...base,sourceAccess};
+ const sources=sourceAccess.map(row=>({id:row.source.connection_id,connector:"mail",name:row.name}));
+ const sentence=changeSentence({id:"event",trace_id:"trace",day:"2026-11-25",at:"2026-11-25T12:00:00Z",client_id:"client",change:"allowed",source_id:null,source_kind:null,connection_id:null,sources:[{source_id:"mail",source_kind:"connector",connection_id:null},{source_id:"old-service",source_kind:"connector",connection_id:null}]},app,sources);
+ assert.ok(sentence.endsWith("Now it can read Mail 1, Mail 2, Mail 3 and 2 more."));
+});
