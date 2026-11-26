@@ -12,10 +12,185 @@ import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.
 import { removeAppAccess } from "../lib/remove-app-access.ts";
 import { revokeGrant, revokeGrantPackage, requirePersistedGrantState } from "../server/auth.ts";
 import type { AppAccess } from "../lib/app-access.ts";
+import { createCimdDocument, createHostedMcpGrantPackage } from "../server/auth.ts";
+import { createSqliteConsentDeviceAuthDriver } from "./helpers/sqlite-consent-device-auth-driver.ts";
+import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
 const NOW = "2026-11-25T00:00:00.000Z";
 const ISSUED = "2025-01-01T00:00:00.000Z";
 type Write = (sql: string, values: (string | null)[]) => Promise<unknown>;
+
+test("hosted CIMD package children persist the resolved display without changing registered clients", async () => {
+  const driver = createSqliteConsentDeviceAuthDriver();
+  await driver.setup();
+  try {
+    const at = new Date().toISOString();
+    await createSqliteConnectorInstanceStore().upsert({
+      connectorId: "spotify",
+      connectorInstanceId: "cin_identity",
+      createdAt: at,
+      displayName: "Fixture",
+      ownerSubjectId: "owner_local",
+      sourceBinding: { account: "fixture" },
+      sourceBindingKey: "fixture",
+      sourceKind: "account",
+      status: "active",
+      updatedAt: at,
+    });
+    const issuerBase = "https://issuer.example";
+    const document = await createCimdDocument({
+      clientName: "ChatGPT",
+      redirectUris: ["https://issuer.example/callback"],
+    });
+    const clientId = `${issuerBase}/oauth/client-metadata/${document}`;
+    const issue = (id: string) =>
+      createHostedMcpGrantPackage({
+        authorizationDetails: [
+          {
+            access_mode: "continuous",
+            purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
+            source: { id: driver.getRegisteredConnectorId(), kind: "connector" },
+            streams: [{ instance_ids: ["cin_identity"], name: "top_artists" }],
+            type: "https://pdpp.dev/data-access",
+          },
+        ],
+        clientId: id,
+        opts: { issuerBase },
+        storageBindings: [{ connector_id: "spotify" }],
+      });
+    const result = await issue(clientId);
+    const [child] = result.child_grants as {
+      grant: { grant_id: string; client: { client_display?: { name: string }; registration_mode?: string } };
+    }[];
+    assert.ok(child);
+    assert.equal(child?.grant.client.client_display?.name, "ChatGPT");
+    const persisted = getDb().prepare("SELECT grant_json FROM grants WHERE grant_id=?").get(child.grant.grant_id) as {
+      grant_json: string;
+    };
+    assert.equal(JSON.parse(persisted.grant_json).client.client_display.name, "ChatGPT");
+    const registered = await issue(driver.getRegisteredClientId());
+    const [registeredChild] = registered.child_grants as { grant: { client: Record<string, unknown> } }[];
+    assert.deepEqual(registeredChild?.grant.client, { client_id: driver.getRegisteredClientId() });
+  } finally {
+    await driver.teardown();
+  }
+});
+
+async function checkWebAddressNames(write: Write, list: () => Promise<AppAccess[]> | AppAccess[]) {
+  const ids = [
+    "https://chatgpt.com/old",
+    "https://chatgpt.com/codex",
+    "https://www.tools.example/one?private=id",
+    "cli_unknown",
+  ];
+  for (const [index, client] of ids.entries()) {
+    for (const [suffix, name, date] of [
+      ["old", "Old name", ISSUED],
+      ["new", index === 0 ? "ChatGPT" : "", "2026-01-01T00:00:00.000Z"],
+      ["empty", "  ", "2026-02-01T00:00:00.000Z"],
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: Seed identical ordered fixtures through both store adapters.
+      await write(
+        `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, issued_at)
+        VALUES (?, 'identity_owner', ?, ?, 'continuous', ?)`,
+        [
+          `identity_${index}_${suffix}`,
+          client,
+          JSON.stringify({ client: { client_display: { name: index === 0 ? name : "" } } }),
+          date as string,
+        ]
+      );
+    }
+  }
+  await write(
+    `INSERT INTO grant_packages(package_id, subject_id, client_id, package_json, created_at, approved_at)
+    VALUES ('identity_package', 'identity_owner', ?, ?, ?, ?)`,
+    [ids[1] ?? "", JSON.stringify({ client: { client_display: { name: "Codex" } } }), ISSUED, ISSUED]
+  );
+  await write(
+    `INSERT INTO grant_package_members(package_id, grant_id, token_id, source_json, added_at)
+    VALUES ('identity_package', 'identity_1_new', 'identity_token', '{}', ?)`,
+    [ISSUED]
+  );
+  const result = await list();
+  const apps = ids.map((id) => {
+    const app = result.find((entry) => entry.client_id === id);
+    assert.ok(app);
+    return app;
+  });
+  assert.deepEqual(
+    apps.map((a) => [a.client_name, a.return_host, a.domain_control_verified, a.returns_to_this_computer]),
+    [
+      ["ChatGPT", "chatgpt.com", true, false],
+      ["Codex", "chatgpt.com", true, false],
+      ["tools.example", "www.tools.example", true, false],
+      ["", null, false, false],
+    ]
+  );
+  assert.equal(apps[2]?.client_name_source, "client_id");
+  await write(
+    `INSERT INTO oauth_clients(client_id, registration_mode, token_endpoint_auth_method, metadata_json, created_at, updated_at)
+    VALUES (?, 'dynamic', 'none', ?, ?, ?)`,
+    [
+      ids[0] ?? "",
+      JSON.stringify({ client_name: "Registered", redirect_uris: ["https://return.example/callback"] }),
+      ISSUED,
+      ISSUED,
+    ]
+  );
+  const registered = (await list()).find((app) => app.client_id === ids[0]);
+  assert.ok(registered);
+  assert.equal(registered.client_name, "Registered");
+  assert.equal(registered.return_host, "return.example");
+  assert.equal(registered.domain_control_verified, false);
+}
+
+test("SQLite resolves newest stored names, package names, and safe address fallbacks", async () => {
+  initDb();
+  try {
+    await checkWebAddressNames(
+      (sql, values) =>
+        Promise.resolve(
+          getDb()
+            .prepare(sql)
+            .run(...values)
+        ),
+      () => spine.listAppAccessSqlite("identity_owner", NOW)
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("Postgres resolves newest stored names, package names, and safe address fallbacks", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const connectionString = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(connectionString);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString,
+      databaseName: `dc_apps_test_${randomUUID().replaceAll("-", "")}`,
+    },
+    async (databaseUrl) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl });
+      await checkWebAddressNames(
+        (sql, values) => {
+          let i = 0;
+          return postgresQuery(
+            sql.replaceAll("?", () => {
+              i += 1;
+              return `$${i}`;
+            }),
+            values
+          );
+        },
+        () => postgresListAppAccess("identity_owner", NOW)
+      );
+    }
+  );
+});
 
 export async function seedAppAccess(write: Write): Promise<void> {
   for (const [id, status, expiry, client, connection, kind] of [
@@ -279,6 +454,30 @@ async function checkRemoval(
   assert.equal(tokenRows.length, 3);
   assert.ok(tokenRows.every((row) => row.revoked === true || row.revoked === 1));
   assert.equal((await read("SELECT client_id FROM oauth_clients WHERE client_id='app'")).length, 1);
+
+  const webIds = ["https://chatgpt.com/chat", "https://chatgpt.com/chat-v2", "https://chatgpt.com/codex"];
+  for (const [index, clientId] of webIds.entries()) {
+    const grantId = `web_remove_${index}`;
+    const grant =
+      typeof fixture.grant_json === "string" ? JSON.parse(fixture.grant_json) : structuredClone(fixture.grant_json);
+    grant.grant_id = grantId;
+    grant.client = { client_display: { name: index === 2 ? "Codex" : "ChatGPT" }, client_id: clientId };
+    // biome-ignore lint/performance/noAwaitInLoops: Both store adapters seed the same complete persisted grants.
+    await write(
+      `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, storage_binding_json, access_mode, issued_at)
+        VALUES (?, 'owner_apps', ?, ?, ?, 'continuous', ?)`,
+      [grantId, clientId, JSON.stringify(grant), JSON.stringify({ connector_id: "mail" }), ISSUED]
+    );
+  }
+  const removedWeb = await removeAppAccess({ client_ids: webIds.slice(0, 2) }, deps);
+  assert.equal(removedWeb.ended_count, 2);
+  assert.equal(removedWeb.failed_count, 0);
+  assert.deepEqual(
+    (await read("SELECT grant_id, status FROM grants WHERE grant_id LIKE 'web_remove_%' ORDER BY grant_id")).map(
+      (row) => row.status
+    ),
+    ["revoked", "revoked", "active"]
+  );
 
   for (let index = 0; index < 55; index += 1) {
     await write(

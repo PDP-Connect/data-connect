@@ -81,3 +81,43 @@ test("app removal rejects forged owner scope and malformed inputs before a write
   ]);
   assert.equal(writes, 0);
 });
+
+test("removing a web-address app ends all selected ids and no neighbouring product", async () => {
+  const make = (id: string, grant: string): AppAccess => ({
+    client_id: id,
+    client_name: "ChatGPT",
+    domain_control_verified: true,
+    reads_last_7_days: 0,
+    return_host: "chatgpt.com",
+    returns_to_this_computer: false,
+    sources: [
+      {
+        active_grant_ids: [grant],
+        expires_at: null,
+        first_issued_at: "2026-01-01T00:00:00Z",
+        grant_ids: [grant],
+        in_force: true,
+        kinds: ["messages"],
+        last_read_at: null,
+        package_ids: [],
+        source: { connection_id: null, connector_id: "mail", id: "mail", kind: "connector" },
+        stopped_at: null,
+        stopped_reason: null,
+      },
+    ],
+  });
+  const ids = ["https://chatgpt.com/chat", "https://chatgpt.com/chat-v2"] as const;
+  const { routes, ctx } = mount([
+    make(ids[0], "chat1"),
+    make(ids[1], "chat2"),
+    make("https://chatgpt.com/codex", "codex"),
+  ]);
+  const ended: string[] = [];
+  ctx.revokeGrant = (id) => {
+    ended.push(id);
+    return Promise.resolve();
+  };
+  const handler = routes.get("POST /_ref/app-access/remove")?.[1] as Handler;
+  await handler({ body: { client_ids: ids }, headers: {} }, { json: () => undefined });
+  assert.deepEqual(ended.sort(), ["chat1", "chat2"]);
+});

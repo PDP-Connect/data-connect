@@ -222,8 +222,9 @@ test("cimd oracle: an unregistered valid CIMD document is accepted as an identit
     });
     assert.equal(approved.status, 200, `consent approve: ${JSON.stringify(approved.body)}`);
 
-    const grant = approved.body.grant as { client?: { client_id?: string } };
+    const grant = approved.body.grant as { client?: { client_id?: string; client_display?: { name?: string } } };
     assert.equal(grant.client?.client_id, cimdClientId, "the issued grant is bound to the URL-hosted identity");
+    assert.ok(grant.client?.client_display?.name, "the resolved CIMD display survives single-grant issuance");
 
     const introspection = await jsonPost(
       `${asUrl}/introspect`,

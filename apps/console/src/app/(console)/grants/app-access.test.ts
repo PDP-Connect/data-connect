@@ -8,6 +8,19 @@ function registration(id = "one", patch: Partial<Registration> = {}): Registrati
   return { client_id: id, client_name: "ChatGPT", return_host: "chatgpt.com", returns_to_this_computer: false, domain_control_verified: true, reads_last_7_days: 0,
     sources: [{ source: { kind: "connector", id: "gmail", connector_id: "gmail", connection_id: "mail" }, kinds: ["messages"], in_force: true, first_issued_at: "2026-01-01T00:00:00Z", expires_at: null, stopped_at: null, stopped_reason: null, last_read_at: null, grant_ids: [id], active_grant_ids: [id], package_ids: [] }], ...patch };
 }
+test("address-derived names keep different products on one host separate", () => {
+  const apps = groupGrantAccessByApp([
+    registration("https://tools.example/one", { client_name: "tools.example", client_name_source: "client_id" }),
+    registration("https://tools.example/two", { client_name: "tools.example", client_name_source: "client_id" }),
+    registration("https://chatgpt.com/chat", { client_name: "ChatGPT" }),
+    registration("https://chatgpt.com/other", { client_name: "ChatGPT" }),
+    registration("https://chatgpt.com/codex", { client_name: "Codex" }),
+  ]);
+  assert.equal(apps.length, 4);
+  assert.equal(apps.find((a) => a.name === "ChatGPT")?.clientIds.length, 2);
+  assert.equal(apps.filter((a) => a.name === "tools.example").length, 2);
+});
+
 test("same name AND return host merge, preserving every old permission address", () => {
   const rows = groupGrantAccessByApp([registration(), registration("two"), registration("three", { return_host: "lookalike.example" })]);
   assert.equal(rows.length, 2); assert.deepEqual(rows[0]?.grantIds, ["one", "two"]); assert.equal(rows[0]?.sourceAccess.length, 1);

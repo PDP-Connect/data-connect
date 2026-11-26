@@ -77,8 +77,10 @@ export function listAppAccessSqlite(
     AND e.event_type IN ('disclosure.served', 'grant.revoked') GROUP BY e.grant_id, e.connector_instance_id`)
     .all(new Date(Date.parse(now) - 7 * 86_400_000).toISOString(), now, subjectId) as AppAccessEventRow[];
   const members = db
-    .prepare(`SELECT m.grant_id, m.package_id FROM grant_package_members m
-    JOIN grants g ON g.grant_id = m.grant_id WHERE g.subject_id = ?`)
+    .prepare(`SELECT m.grant_id, m.package_id, p.package_json, p.created_at FROM grant_package_members m
+    JOIN grants g ON g.grant_id = m.grant_id
+    JOIN grant_packages p ON p.package_id = m.package_id AND p.subject_id = g.subject_id AND p.client_id = g.client_id
+    WHERE g.subject_id = ?`)
     .all(subjectId) as AppAccessMemberRow[];
   const instances = db
     .prepare(`SELECT client_id, handle, internal_id FROM pairwise_identity_handles

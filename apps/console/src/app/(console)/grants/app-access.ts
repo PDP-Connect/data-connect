@@ -88,7 +88,7 @@ export function groupGrantAccessByApp(
       ? "this computer"
       : registration.return_host || "no address given";
     const key =
-      name || registration.return_host || registration.returns_to_this_computer
+      registration.client_name_source !== "client_id" && (name || registration.return_host || registration.returns_to_this_computer)
         ? JSON.stringify([name, place])
         : registration.client_id;
     let app = groups.get(key);

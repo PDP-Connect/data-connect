@@ -30,6 +30,7 @@ export interface AppAccessSource {
 export interface AppAccess {
   client_id: string;
   client_name: string;
+  client_name_source?: "registration" | "stored" | "client_id" | null;
   return_host: string | null;
   returns_to_this_computer: boolean;
   domain_control_verified: boolean;
@@ -58,8 +59,10 @@ export interface AppAccessEventRow {
 }
 
 export interface AppAccessMemberRow {
+  created_at?: string;
   grant_id: string;
   package_id: string;
+  package_json?: unknown;
 }
 export interface AppAccessInstanceRow {
   client_id: string;
@@ -83,6 +86,8 @@ export function jsonObject(value: unknown): Record<string, unknown> {
 function text(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
+
+const LEADING_WWW = /^www\./;
 
 export function sameAppAccessSource(a: AppAccessSourceIdentity, b: AppAccessSourceIdentity): boolean {
   return (
@@ -120,10 +125,42 @@ export function projectAppAccess(
     packages.set(member.grant_id, [...(packages.get(member.grant_id) ?? []), member.package_id]);
   }
   const handles = new Map(instances.map((row) => [`${row.client_id}\0${row.handle}`, row.internal_id]));
+  const storedNames = new Map<string, { name: string; issuedAt: string }>();
+  const rememberName = (clientId: string, envelope: unknown, issuedAt: string) => {
+    const name = text(jsonObject(jsonObject(jsonObject(envelope).client).client_display).name)?.trim();
+    const previous = storedNames.get(clientId);
+    if (name && (!previous || Date.parse(issuedAt) > Date.parse(previous.issuedAt) ||
+      (Date.parse(issuedAt) === Date.parse(previous.issuedAt) && name.localeCompare(previous.name) < 0))) {
+      storedNames.set(clientId, { issuedAt, name });
+    }
+  };
+  const clientsByGrant = new Map(grants.map(row => [row.grant_id, row.client_id]));
+  for (const row of grants) {
+    rememberName(row.client_id, row.grant_json, row.issued_at);
+  }
+  for (const member of members) {
+    const clientId = clientsByGrant.get(member.grant_id);
+    if (clientId && member.created_at) {
+      rememberName(clientId, member.package_json, member.created_at);
+    }
+  }
   for (const row of grants) {
     let app = apps.get(row.client_id);
     if (!app) {
       const metadata = jsonObject(row.metadata_json);
+      const registeredName = text(metadata.client_name)?.trim();
+      const storedName = storedNames.get(row.client_id)?.name;
+      let clientHost: string | null = null;
+      if (row.metadata_json === null) {
+        try {
+          const url = new URL(row.client_id);
+          if (url.protocol === "https:" && !url.username && !url.password && !url.hash && url.pathname !== "/") {
+            clientHost = url.hostname.toLowerCase();
+          }
+        } catch {
+          /* not a web-address identity */
+        }
+      }
       let host: string | null = null;
       const redirect = Array.isArray(metadata.redirect_uris) ? metadata.redirect_uris[0] : null;
       if (typeof redirect === "string") {
@@ -133,12 +170,24 @@ export function projectAppAccess(
           /* absent host */
         }
       }
+      host ??= clientHost;
+      let nameSource: AppAccess["client_name_source"] = null;
+      if (registeredName) {
+        nameSource = "registration";
+      } else if (storedName) {
+        nameSource = "stored";
+      } else if (clientHost) {
+        nameSource = "client_id";
+      }
       app = {
         client_id: row.client_id,
-        client_name: text(metadata.client_name)?.trim() ?? "",
+        client_name: registeredName || storedName || clientHost?.replace(LEADING_WWW, "") || "",
+        client_name_source: nameSource,
         return_host: host,
         returns_to_this_computer: host !== null && ["localhost", "127.0.0.1", "::1"].includes(host),
-        domain_control_verified: false,
+        // Unregistered HTTPS identities passed CIMD resolution before issuance:
+        // exact-URL HTTPS fetch (no redirects), or issuer-owned same-origin storage.
+        domain_control_verified: clientHost !== null,
         sources: [],
         reads_last_7_days: 0,
       };

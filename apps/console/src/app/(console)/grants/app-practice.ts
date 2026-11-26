@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AppAccess, PendingApproval } from "../lib/ref-client.ts";
 import { groupGrantAccessByApp } from "./app-access.ts";
+import { buildAppAccessDemoData } from "./grants-demo-data.ts";
 export const APP_PRACTICE_STATES = [
   "empty",
   "one",
@@ -17,6 +18,7 @@ export const APP_PRACTICE_STATES = [
   "no-address",
   "expired",
   "ending",
+  "web-address",
   "app-one",
   "app-twelve",
   "app-end",
@@ -47,6 +49,10 @@ const services = [
   "airtable",
 ];
 export function buildAppPractice(demo: string) {
+  if (demo === "web-address") {
+    const registrations = buildAppAccessDemoData(demo).data;
+    return { registrations, apps: groupGrantAccessByApp(registrations), approvals: [] };
+  }
   const now = Date.now();
   const at = (days: number) => new Date(now + days * 86400000).toISOString();
   const count =

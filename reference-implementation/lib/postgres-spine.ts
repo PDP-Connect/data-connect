@@ -47,8 +47,10 @@ export async function postgresListAppAccess(
     ),
     query<AppAccessEventRow>(APP_ACCESS_EVENTS_SQL, [subjectId, since, now]),
     query<AppAccessMemberRow>(
-      `SELECT m.grant_id, m.package_id FROM grant_package_members m
-      JOIN grants g ON g.grant_id = m.grant_id WHERE g.subject_id = $1`,
+      `SELECT m.grant_id, m.package_id, p.package_json, p.created_at FROM grant_package_members m
+      JOIN grants g ON g.grant_id = m.grant_id
+      JOIN grant_packages p ON p.package_id = m.package_id AND p.subject_id = g.subject_id AND p.client_id = g.client_id
+      WHERE g.subject_id = $1`,
       [subjectId]
     ),
     query<AppAccessInstanceRow>(

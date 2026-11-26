@@ -1,11 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import type { AppAccess, GrantSummary, ListResponse, PendingApproval } from "../lib/ref-client.ts";
 import type { AppAccessDataSource } from "../lib/data-source.ts";
+import type { AppAccess, GrantSummary, ListResponse, PendingApproval } from "../lib/ref-client.ts";
 
-export function createAppAccessDemoDataSource(): AppAccessDataSource {
-  const list = buildAppAccessDemoData();
+export function createAppAccessDemoDataSource(state?: string): AppAccessDataSource {
+  const list = buildAppAccessDemoData(state);
   return {
     listAppAccess: async () => structuredClone(list),
     removeAppAccess: async (input) => {
@@ -48,7 +48,50 @@ export function createAppAccessDemoDataSource(): AppAccessDataSource {
 }
 
 /** Fictional registrations for practice pages; no owner request is made. */
-export function buildAppAccessDemoData(): ListResponse<AppAccess> {
+export function buildAppAccessDemoData(state?: string): ListResponse<AppAccess> {
+  if (state === "web-address") {
+    const source = buildAppAccessDemoData()
+      .data.flatMap((app) => app.sources)
+      .slice(0, 1);
+    return {
+      object: "list",
+      has_more: false,
+      data: (
+        [
+          {
+            client_id: "https://chatgpt.com/metadata/chat",
+            client_name: "ChatGPT",
+            client_name_source: "stored",
+            return_host: "chatgpt.com",
+            domain_control_verified: true,
+          },
+          {
+            client_id: "https://tools.example/metadata/tool",
+            client_name: "tools.example",
+            client_name_source: "client_id",
+            return_host: "tools.example",
+            domain_control_verified: true,
+          },
+          {
+            client_id: "cli_demo_unknown",
+            client_name: "",
+            client_name_source: null,
+            return_host: null,
+            domain_control_verified: false,
+          },
+        ] as const
+      ).map((identity, index) => ({
+        ...identity,
+        returns_to_this_computer: false,
+        reads_last_7_days: 0,
+        sources: structuredClone(source).map((row) => ({
+          ...row,
+          grant_ids: [`web_demo_${index}`],
+          active_grant_ids: [`web_demo_${index}`],
+        })),
+      })),
+    };
+  }
   return {
     object: "list",
     has_more: false,
