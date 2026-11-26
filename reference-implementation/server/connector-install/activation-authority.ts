@@ -12,7 +12,7 @@ import {
   moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
   normalizeIncomingConnectorManifest,
-  retainMovedFromIdentity,
+  retainSourceIdentityFacts,
   retainedSourceIdentityChange,
   retainedStorageContext,
 } from "../auth.ts";
@@ -87,7 +87,7 @@ function activationValues(
   if (connectorId !== record.connectorId) {
     throw new Error("Connector activation manifest identity mismatch");
   }
-  const storedManifestJson = retainMovedFromIdentity(
+  const storedManifestJson = retainSourceIdentityFacts(
     JSON.stringify(normalizedManifest),
     previousManifest,
     movedFrom
