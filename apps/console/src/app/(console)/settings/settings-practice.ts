@@ -112,6 +112,7 @@ export function buildSettingsPractice(
 		"off-unconfirmed",
 	].includes(name);
 	const hasSetup = name === "service-sign-in" || name === "typed-step";
+	const stepSentence = name === "typed-step" ? "DataConnect keeps this token on this computer." : "Sign in to continue.";
 	const action = {
 		id: name === "typed-step" ? "auth" : "tailscale-browser",
 		kind: name === "typed-step" ? "provide-secret" : "open-url",
@@ -122,8 +123,8 @@ export function buildSettingsPractice(
 		secretLabel: "ngrok agent authtoken",
 		digest: "practice-digest",
 		href: "https://login.example.test/sign-in",
-		disclosure: { revision: "1", text: "Sign in to continue.", links: [] },
-    consent: { facts: [], consentFactsDigest: "practice-facts", scope: { kind: "setup", providerId, actionDigest: "practice-digest", actionId: name === "typed-step" ? "auth" : "tailscale-browser", disclosureRevision: "1" }, disclosures: { action: { disclosure: { revision: "1", text: "Sign in to continue.", links: [] } } } },
+		disclosure: { revision: "1", text: stepSentence, links: [] },
+    consent: { facts: [], consentFactsDigest: "practice-facts", scope: { kind: "setup", providerId, actionDigest: "practice-digest", actionId: name === "typed-step" ? "auth" : "tailscale-browser", disclosureRevision: "1" }, disclosures: { action: { disclosure: { revision: "1", text: stepSentence, links: [] } } } },
 		step: {
 			actor: "owner",
 			browser: { expiresAt: iso(600_000), pollAfterMs: 2000 },

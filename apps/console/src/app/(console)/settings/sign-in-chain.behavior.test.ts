@@ -396,6 +396,7 @@ test("a pasted account token is in the submit body only: not in the page, the fi
     const input = field("ngrok token (from your ngrok dashboard)")!
     assert.equal(input.type, "password")
     assert.equal(container.querySelector("a")?.textContent, "Get a token")
+    assert.match(container.querySelector("a")?.className ?? "", /\bunderline\b/)
     assert.equal(container.querySelector("a")?.getAttribute("href"), "https://dashboard.example.test/get-started/your-authtoken")
     assert.equal((button("Save token") as HTMLButtonElement).disabled, true)
     await type(input, SECRET)

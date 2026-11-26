@@ -150,7 +150,7 @@ function SetupOperationAction({
         <p>{action.instructions ?? action.help ?? ""}</p>
       ) : null}
       {obtain?.protocol === "https:" && !obtain.username && !obtain.password ? (
-        <a href={obtain.href} rel="noreferrer" target="_blank">
+        <a className="text-primary underline underline-offset-4" href={obtain.href} rel="noreferrer" target="_blank">
           Where to get it
         </a>
       ) : null}
@@ -262,7 +262,7 @@ function InputCard({
         )}
       </label>
       {obtain ? (
-        <a href={obtain.href} rel="noreferrer" target="_blank">
+        <a className="text-primary underline underline-offset-4" href={obtain.href} rel="noreferrer" target="_blank">
           {secret ? "Get a token" : "Where to get it"}
         </a>
       ) : null}
