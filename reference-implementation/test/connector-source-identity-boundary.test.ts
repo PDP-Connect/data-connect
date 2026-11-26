@@ -224,6 +224,13 @@ scenario("pre-projection registration keeps no identity until a matching manifes
   assert.throws(() => normalizeConnectorManifestForStorage(legacyManifest({ connector_key: "gmail" }), context), /does not match/);
 });
 
+scenario("a manifest update cannot drop a historical identity claimed by its registration", async () => {
+  const manifest = legacyManifest({ connector_key: "srcid-monotonic", source: { id: EXPLICIT_SOURCE }, legacy_source_ids: ["urn:source:historical"] });
+  await registerConnector(manifest, { skipDerivedRepair: true });
+  await assert.rejects(() => registerConnector({ ...manifest, legacy_source_ids: undefined, version: "1.1.0" }, { skipDerivedRepair: true }), /cannot drop.*identity/);
+  assert.deepEqual((await storedFor("srcid-monotonic"))?.legacy_source_ids, ["urn:source:historical"]);
+});
+
 scenario("a declared legacy identity cannot belong to another connector", async () => {
   await registerConnector(legacyManifest({ connector_key: "amazon" }), { skipDerivedRepair: true });
   await assertRejectedWithoutWrite("gmail", () => registerConnector(legacyManifest({ connector_key: "gmail", legacy_source_ids: [firstPartySource("amazon")] }), { skipDerivedRepair: true }), /already owned/);
