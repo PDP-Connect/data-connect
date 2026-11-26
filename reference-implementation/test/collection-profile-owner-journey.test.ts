@@ -4,6 +4,7 @@
 // Real HTTP/session + durable store boundary, beyond the route's fake adapter.
 // Collection Profile 3.4 and 5.12: advertise support before any run, and keep
 // diagnostic records on the owner surface, uncached and namespace-scoped.
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { closeDb, getDb } from "../server/db.ts";
@@ -75,7 +76,7 @@ test("owner can discover profile support and read diagnostics through the real s
         compatible_protocol_versions: ["0.1.0", "0.2.0"],
         conformance: { outstanding: ["binding_authority"], status: "partial" },
         object: "collection_profile_support",
-        protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"],
+        protocol_capabilities: REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities,
         protocol_version: "0.2.0",
       },
       "profile support is discoverable before a connector starts"
