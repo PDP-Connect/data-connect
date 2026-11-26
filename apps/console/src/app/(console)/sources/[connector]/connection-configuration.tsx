@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatRelative } from "@pdpp/display";
 import { IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
@@ -66,47 +67,7 @@ type Step = "edit" | "review" | "summary";
 export function ConnectionConfiguration({ config, connectionId, connectorId, revisions }: Props) {
   const availability = useMemo(() => resolveAvailability(config), [config]);
 
-  if (availability.kind === "not_declared") {
-    return (
-      <ConfigShell>
-        <p className="pdpp-caption text-muted-foreground">{availability.message}</p>
-        <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={null} />
-      </ConfigShell>
-    );
-  }
-
-  if (availability.kind === "unreadable") {
-    return (
-      <ConfigShell>
-        <div className="pdpp-caption border-y border-border py-2.5" role="alert">
-          <p className="font-medium text-destructive">Settings could not be loaded.</p>
-          <details className="mt-1 text-muted-foreground">
-            <summary className="cursor-pointer">Details</summary>
-            <code className="mt-1 block break-words font-mono text-xs">{availability.message}</code>
-          </details>
-        </div>
-        <TechnicalDetails>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-            <dt className="text-muted-foreground">Data source type</dt>
-            <dd className="text-xs break-words">{config.connector_key}</dd>
-            <dt className="text-muted-foreground">Schema status</dt>
-            <dd className="text-xs break-words">{config.options_schema_status}</dd>
-          </dl>
-        </TechnicalDetails>
-      </ConfigShell>
-    );
-  }
-
-  if (availability.kind === "empty") {
-    return (
-      <ConfigShell>
-        <p className="pdpp-caption text-muted-foreground">
-          This data source has settings but none to change.
-        </p>
-        <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={availability.schema} />
-      </ConfigShell>
-    );
-  }
+  if (availability.kind !== "editable") return null;
 
   return (
     <ConfigEditor
@@ -121,7 +82,7 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
 
 function ConfigShell({ children }: { children: React.ReactNode }) {
   return (
-    <Section description="What this data source syncs, and how it is set up." id="configuration" title="Settings for this data source">
+    <Section id="configuration" title="Settings">
       <div className="flex flex-col gap-4">{children}</div>
     </Section>
   );
@@ -135,7 +96,7 @@ function ConfigEditor({
   schema,
 }: Props & { schema: NonNullable<ConnectionConfigWire["options_schema"]> }) {
   const router = useRouter();
-  const [step, setStep] = useState<Step>("summary");
+  const [step, setStep] = useState<Step>("edit");
   const [draft, setDraft] = useState<ConfigDraft>(() => buildDraft(schema, config.active_revision));
   const [reason, setReason] = useState("");
   const [showReasonError, setShowReasonError] = useState(false);
@@ -237,7 +198,7 @@ function ConfigEditor({
       {applied ? (
         <div className="pdpp-caption border-y border-border py-2.5">
           <span className="font-medium text-muted-foreground">
-            Revision {applied.revision} is active. Future syncs use this configuration.
+            Saved. Future syncs use these settings.
           </span>
         </div>
       ) : null}
@@ -246,7 +207,7 @@ function ConfigEditor({
         <div className="pdpp-caption py-2.5" role="alert">
           <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
           <details className="mt-1 text-muted-foreground">
-            <summary className="cursor-pointer">Details</summary>
+            <summary className="cursor-pointer">What went wrong</summary>
             <code className="mt-1 block break-words font-mono text-xs">{failure}</code>
           </details>
         </div>
@@ -256,11 +217,11 @@ function ConfigEditor({
         <div className="pdpp-caption flex flex-col gap-2 border-y border-border py-2.5" role="alert">
           <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
           <details className="text-muted-foreground">
-            <summary className="cursor-pointer">Details</summary>
+            <summary className="cursor-pointer">What went wrong</summary>
             <code className="mt-1 block break-words font-mono text-xs">{stale.message}</code>
           </details>
           <span className="text-muted-foreground">
-            Your edits are still here. Review them against the latest configuration before saving.
+            Your edits are still here. Review them against the latest settings before saving.
           </span>
           <div>
             <IcButton onClick={reviewAgainstLatest} size="sm" type="button" variant="ghost">
@@ -307,7 +268,7 @@ function ConfigEditor({
         />
       ) : null}
 
-      <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={schema} />
+      {config.active_revision?.set_at ? <p className="pdpp-caption text-muted-foreground">Last changed {formatRelative(new Date(config.active_revision.set_at), Date.now())}.</p> : null}
     </ConfigShell>
   );
 }
@@ -348,12 +309,12 @@ function CurrentSettings({
         </p>
       ) : (
         <p className="pdpp-caption text-muted-foreground">
-          No owner-set configuration yet. These are the data source's own defaults.
+          These are the data source's own defaults.
         </p>
       )}
       <div>
         <IcButton onClick={onEdit} size="sm" type="button" variant="ghost">
-          Edit configuration
+          Change settings
         </IcButton>
       </div>
     </div>
@@ -400,7 +361,7 @@ function DraftEditor({
       ))}
       <div className="flex flex-wrap gap-2">
         <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button" variant="ghost">
-          Review changes
+          Save
         </IcButton>
         <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
           Cancel
@@ -607,7 +568,7 @@ function ReviewChanges({
         ) : null}
       </div>
 
-      <p className="pdpp-caption text-muted-foreground">{commit.supportingText}</p>
+      <p className="pdpp-caption text-muted-foreground">{commit.expectedStatus === "active" ? "These settings take effect when you save." : "This change needs your confirmation before it takes effect."}</p>
 
       <label className="pdpp-caption flex flex-col gap-1 text-foreground" htmlFor="config-reason">
         <span>Why are you changing this?</span>
@@ -626,7 +587,7 @@ function ReviewChanges({
           Back to edit
         </IcButton>
         <IcButton disabled={isPending} onClick={onCommit} size="sm" type="button" variant="ghost">
-          {isPending ? "Saving…" : commit.buttonLabel}
+          {isPending ? "Saving…" : "Save"}
         </IcButton>
       </div>
     </div>
@@ -657,7 +618,7 @@ function PendingProposal({
       <div className="flex flex-col gap-0.5">
         <h3 className="pdpp-body font-medium text-attention">Awaiting your confirmation</h3>
         <p className="pdpp-caption text-muted-foreground">
-          Revision {revision.revision}, proposed by {proposedBy}. Nothing changes until you confirm.
+          Nothing changes until you confirm.
         </p>
       </div>
       <dl className="flex flex-col gap-1">
@@ -677,7 +638,7 @@ function PendingProposal({
       <p className="pdpp-caption text-muted-foreground">Reason: “{revision.source_of_change}”</p>
       <div>
         <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
-          {isPending ? "Confirming…" : "Confirm and make active"}
+          {isPending ? "Confirming…" : "Confirm"}
         </IcButton>
       </div>
     </div>

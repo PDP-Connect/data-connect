@@ -17,7 +17,7 @@
       "name=\"confirm_revoke\" value=\"yes\";name=\"connection_id\" value={connectionId}"
     ],
     "deleteConnectionAction": [
-      "name=\"cancel_run_id\" value={activeRunId};name=\"connection_id\" value={connectionId}"
+      "name=\"cancel_run_id\" value={activeRunId};name=\"confirm_delete\" value={confirmed?connectionId:\"\"};name=\"connection_id\" value={connectionId}"
     ],
     "installConnectorForSourceAction": [
       "installConnectorForSourceAction(connectorKey,routeId)"

@@ -49,3 +49,14 @@ for (const [file, hash] of Object.entries(baseline.actions)) {
     assert.equal(createHash("sha256").update(readFileSync(new URL(file, root))).digest("hex"), hash);
   });
 }
+
+for (const action of ["confirmCoverageHorizonAction", "acknowledgeConnectionLossAction"]) {
+  test(`${action} stays bound to the same connection on the technical page`, () => {
+    const page = readFileSync(new URL("./source-page.tsx", import.meta.url), "utf8");
+    const technical = page.slice(page.indexOf("export function SourceTechnicalDetails"));
+    assert.ok(technical.includes(`${action}={${action}}`));
+    assert.ok(technical.includes("connectionId={connectorInstanceId ?? connectionId}"));
+    const forms = readFileSync(new URL("./connection-confirmation.tsx", import.meta.url), "utf8");
+    assert.ok(forms.includes(`action={${action}}`));
+  });
+}

@@ -87,31 +87,27 @@ test("reset control requires confirmation and reports refusal or success", async
   runCalls = 0;
   resetFailure = new Error("A collection run is already active.");
   try {
-    await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1" })));
+    await act(async () => root.render(createElement(ConnectionDangerZone, { displayName: "Northwind", connectionId: "source-1" })));
     // Detail brief item 8 (DIRECTION.md "This data source"): today's "Reset and re-sync" is named "Sync again from the start".
-    const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Sync again from the start");
+    const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Copy everything again");
     assert.ok(button);
-    assert.equal(button.disabled, true);
-    const checkbox = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-      // detail-repair 5: "saved sync position" is system language; the confirmation names the action in plain words.
-      input.closest("label")?.textContent?.includes("Sync again from the start for this data source.")
-    );
-    assert.ok(checkbox);
-    await act(async () => checkbox.click());
-    assert.equal(button.disabled, false);
     await act(async () => button.click());
+    assert.equal(resetCalls, 0);
+    const confirm = container.querySelector<HTMLButtonElement>('[role="alertdialog"] button');
+    assert.ok(confirm);
+    await act(async () => confirm.click());
     assert.equal(resetCalls, 1);
     assert.equal(runCalls, 0);
     // detail-page-2 decision 4: a plain sentence; the raw server text sits only in the folded Details under it.
     const alert = container.querySelector('[role="alert"]');
     assert.equal(alert?.querySelector("p")?.textContent, "This could not be done. Try again.");
-    assert.equal(alert?.querySelector("details code")?.textContent, "A collection run is already active.");
+    assert.equal(alert?.querySelector("details p")?.textContent, "A collection run is already active.");
 
     resetFailure = null;
-    await act(async () => button.click());
+    await act(async () => confirm.click());
     assert.equal(resetCalls, 2);
     assert.equal(runCalls, 0);
-    assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Full sync started/);
+    assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Started copying again/);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -124,12 +120,12 @@ test("Remove or reset opens by itself when it carries a result to show", async (
   dom.window.document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1" })));
+    await act(async () => root.render(createElement(ConnectionDangerZone, { displayName: "Northwind", connectionId: "source-1" })));
     // detail-repair 1: the section starts closed so the page ends calm.
-    assert.equal(container.querySelector<HTMLDetailsElement>("#danger-zone")?.open, false);
+    assert.equal(container.querySelector("#danger-zone")?.tagName, "DIV");
     // A refused disconnect or delete redirects to #danger-zone with ?error=; a closed section would hide it.
-    await act(async () => root.render(createElement(ConnectionDangerZone, { connectionId: "source-1", error: "This could not be done." })));
-    assert.equal(container.querySelector<HTMLDetailsElement>("#danger-zone")?.open, true);
+    await act(async () => root.render(createElement(ConnectionDangerZone, { displayName: "Northwind", connectionId: "source-1", error: "This could not be done." })));
+    assert.ok(container.querySelector('[role="alert"]'));
   } finally {
     await act(async () => root.unmount());
     container.remove();

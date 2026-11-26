@@ -153,7 +153,7 @@ function Toast({ message, tone }: { message: string; tone: "info" | "error" }) {
         <>
           {ACTION_ERROR_COPY}
           <details className="mt-1 text-muted-foreground">
-            <summary className="cursor-pointer">Details</summary>
+            <summary className="cursor-pointer">What went wrong</summary>
             <code className="mt-1 block break-words font-mono text-xs">{message}</code>
           </details>
         </>

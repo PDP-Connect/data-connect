@@ -224,7 +224,7 @@ export function SyncNowButton({
           ) : null}
           {toast.rawDetails ? (
             <details className="mt-1 text-muted-foreground">
-              <summary className="cursor-pointer">Details</summary>
+              <summary className="cursor-pointer">What went wrong</summary>
               <code className="mt-1 block break-words font-mono text-xs">{toast.rawDetails}</code>
             </details>
           ) : null}

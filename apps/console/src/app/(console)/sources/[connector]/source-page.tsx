@@ -95,6 +95,7 @@ import { acknowledgeConnectionLossAction, confirmCoverageHorizonAction } from ".
 import type { ConfigRevisionWire, ConnectionConfigWire } from "./connection-config-view-model.ts";
 import { ConnectionConfiguration, ConnectionSettingsHistory } from "./connection-configuration.tsx";
 import { ConnectionConfirmation } from "./connection-confirmation.tsx";
+import { DeviceSteps } from "./device-steps.tsx";
 import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
 import { ConnectionDiagnostics, ConnectionRecoverySummary } from "./connection-diagnostics.tsx";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
@@ -178,6 +179,7 @@ function manualUploadHrefForConnection(
 
 export interface ConnectorPageModel {
   activeRunId: string | null;
+  initialDialog?: "reset" | "disconnect" | "delete";
   /**
    * Per-stream collection facts derived from the connection summary's
    * `collection_report`, keyed by stream name. Empty when the reference did not
@@ -883,7 +885,9 @@ function ConnectorPageView({
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          <ConnectorHeaderActions
+          hasDeviceLocalRemediation ? <DeviceSteps>
+            <ConnectionRecoverySummary connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} now={now} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} />
+          </DeviceSteps> : <ConnectorHeaderActions
             addAnotherAccountAction={addAnotherAccountAction}
             browserSessionRepairHref={browserSessionRepairHref}
             canStartSync={canStartSyncFromSummary(source)}
@@ -933,7 +937,15 @@ function ConnectorPageView({
       </Section>
       <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} />
       <RecentRunsSection activeRunHref={activeRunHref} autoPausedBanner={autoPausedBanner} connectorId={connectorId} hasSyncHistory={Boolean(source.last_run)} recentRuns={recentRuns} />
-          <Section title="This data source">
+          {configuration ? (
+            <ConnectionConfiguration
+              config={configuration}
+              connectionId={connectorInstanceId ?? connectionId}
+              connectorId={connectorId}
+              revisions={configRevisions}
+            />
+          ) : null}
+          <Section title="Manage">
             {addAnotherAccountAction}
             <RenameConnection
               connectionId={renameSelector}
@@ -945,25 +957,19 @@ function ConnectorPageView({
             <CredentialRepairLinks
               revoked={revoked}
               setupFailed={setupFailed}
-              storedCredentialUpdateHref={storedCredentialUpdateHref}
-              hasStaticSecretCredentialUpdate={storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"}
+              storedCredentialUpdateHref={credentialUpdateHref}
+              hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
             />
             <ConnectionDangerZone
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
+              displayName={displayName}
+              initialDialog={model.initialDialog}
               error={dangerError}
-              message={dangerMessage}
+              message={dangerMessage ? "Done." : undefined}
               setupFailed={setupFailed}
             />
           </Section>
-          {configuration ? (
-            <ConnectionConfiguration
-              config={configuration}
-              connectionId={connectorInstanceId ?? connectionId}
-              connectorId={connectorId}
-              revisions={configRevisions}
-            />
-          ) : null}
 
       <p className="mb-8 text-sm text-muted-foreground"><Link href={`/sources/${encodeURIComponent(connectionId)}/technical`}>Technical details</Link></p>
     </RecordroomShellWithPalette>
@@ -1099,7 +1105,7 @@ export function SourceTechnicalDetails({ model, now, dangerError, dangerMessage 
                 connectionId={connectorInstanceId ?? connectionId}
                 error={dangerError}
                 latestKnownGaps={latestKnownGaps}
-                message={dangerMessage}
+                message={dangerMessage ? "Done." : undefined}
                 pendingHorizons={coverageHorizons}
               />
               {primaryAction.kind === "cooldown_wait" ? (
@@ -1429,17 +1435,7 @@ function RenderedVerdictHeaderAction({
     // below, the only place the owner can actually act.
     // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
     if (action.remediation?.target.kind === "local_device") {
-      return (
-        <span
-          className="pdpp-caption max-w-[18rem] text-right text-muted-foreground"
-          data-action-kind={action.kind}
-          data-action-target="local_device"
-          data-testid="detail-action-rendered-verdict-device-local"
-          title="Use the recovery commands shown in Details, on the host that holds this data source's data."
-        >
-          {label ?? action.cta} — see the commands in Details
-        </span>
-      );
+      return <DeviceSteps><p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p></DeviceSteps>;
     }
     // A non-device add_info is only clickable when the server attached a
     // validated exact sync target from structured attention. Otherwise the
@@ -1878,7 +1874,7 @@ function ConnectionIdentityLine({
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
     <div className="mt-6 flex flex-col items-start gap-2">
-      <p className="pdpp-caption text-muted-foreground">Stop syncing for now. Your records, schedule, and sign-in are kept.</p>
+      <p className="pdpp-caption text-muted-foreground">Stops checking for now. Your records and sign-in are kept.</p>
       <form action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-pause-connection" size="sm" type="submit" variant="ghost">
