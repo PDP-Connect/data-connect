@@ -1,9 +1,9 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { IcButton } from "@pdpp/brand-react";
+import { buttonVariants, IcButton } from "@pdpp/brand-react";
 import { Section, PageHeader } from "@pdpp/operator-ui/components/primitives";
-import { humanizeFieldLabel } from "@pdpp/display";
+import { isOwnerRecordKind, sourceRecordLabel } from "../../lib/source-record-label.ts";
 import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
 import { appSourceName, formatAppLastRead, type AppAccess } from "../app-access.ts";
@@ -53,11 +53,12 @@ export function AppPage({
         title={app.name}
         actions={
           reading ? (
-            <IcButton variant="ghost" className="text-destructive" onClick={() => removal.setQuestion("all")}>
-              Remove access
-            </IcButton>
+            <div className="flex flex-col items-start gap-2">
+              <IcButton variant="destructive" onClick={() => removal.setQuestion("all")}>Remove access</IcButton>
+              {removal.error?.source === "all" ? <div role="alert" className="text-destructive"><p>Access could not be removed.</p><IcButton variant="ghost" disabled={removal.busy} onClick={() => void removal.remove("all")}>Try again</IcButton><Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>What went wrong</Link></div> : null}
+            </div>
           ) : app.state === "waiting" ? (
-            <Link
+            <Link className={buttonVariants()}
               href={
                 demo ? "/consent?demo=one" : `/grants/approvals/${encodeURIComponent(app.pendingId || app.hrefId)}`
               }
@@ -68,12 +69,12 @@ export function AppPage({
         }
       />
       <p className="text-[13px] text-muted-foreground">
-        {app.place}
-        {!app.verified ? " · not verified" : ""}
+        {app.place === "no address given" ? "" : app.place}
+        {!app.verified ? `${app.place === "no address given" ? "" : " · "}not verified` : ""}
       </p>
       {!app.verified ? (
         <p className="text-[13px] text-muted-foreground">
-          DataConnect could not confirm who runs this app. Allow it only if you started this yourself, in {app.place}.
+          DataConnect could not confirm who runs this app. Remove its access if you don’t recognise it.
         </p>
       ) : null}
       {app.state === "waiting" ? (
@@ -84,7 +85,7 @@ export function AppPage({
         <>
           <p className="mt-4">
             Can read your data{app.since ? ` since ${date(app.since)}` : ""}.{" "}
-            {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}.` : app.neverRead ? "Has not read anything yet." : ""}{" "}
+            {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}.` : "Has not read anything yet."}{" "}
             {app.expiresAt ? `Access ends ${date(app.expiresAt)}.` : "Access lasts until you remove it."}
           </p>
         </>
@@ -108,24 +109,15 @@ export function AppPage({
         () => void removal.remove("all"),
         "Remove access"
       )}
-      {removal.error?.source === "all" ? (
-        <div role="alert">
-          <p>Access could not be removed. Try again.</p>
-          <details>
-            <summary>What went wrong</summary>
-            {removal.error.message}
-          </details>
-        </div>
-      ) : null}
       {app.state !== "waiting" ? (
-        <Section title={reading ? "What it can read" : "What it could read"}>
+        <Section className="mt-8" title={reading ? "What it can read" : "What it could read"}>
           <ul className="divide-y divide-border">
             {app.sourceAccess
               .filter((source) => !reading || source.in_force)
               .map((source) => {
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";
-                const kinds = source.kinds.map(humanizeFieldLabel);
+                const kinds = source.kindNames ?? source.kinds.filter(isOwnerRecordKind).map(name => sourceRecordLabel(name));
                 const canRead = reading && !removal.removed.includes(key);
                 return (
                   <li className="py-4" key={key}>
@@ -134,7 +126,7 @@ export function AppPage({
                         <ConnectorMark connectorId={source.source.connector_id || source.source.id} name={name} />
                         <div>
                           <Link
-                            href={`/sources/${encodeURIComponent(source.source.connection_id || source.source.id)}`}
+                            href={source.source.connection_id ? `/sources/${encodeURIComponent(source.source.connection_id)}` : "/sources"}
                           >
                             {name}
                           </Link>
@@ -143,7 +135,7 @@ export function AppPage({
                               ? `${kinds.slice(0, 3).join(", ")} and ${kinds.length - 3} more`
                               : kinds.join(", ")}
                           </p>
-                          {source.first_issued_at !== app.since ? (
+                          {source.first_issued_at.slice(0, 10) !== app.since?.slice(0, 10) ? (
                             <p className="text-[13px] text-muted-foreground">since {date(source.first_issued_at)}</p>
                           ) : null}
                           <p className="text-[13px] text-muted-foreground">
@@ -154,9 +146,7 @@ export function AppPage({
                         </div>
                       </div>
                       {canRead ? (
-                        <IcButton variant="ghost" onClick={() => removal.setQuestion(key)}>
-                          Remove
-                        </IcButton>
+                        <button className="text-sm text-muted-foreground hover:text-foreground" type="button" onClick={() => removal.setQuestion(key)}>Remove</button>
                       ) : null}
                     </div>
                     {question(
@@ -166,19 +156,7 @@ export function AppPage({
                       () => void removal.remove(key, source.source),
                       "Stop"
                     )}
-                    {removal.error?.source === key ? (
-                      <div role="alert">
-                        <p>
-                          {removal.error.message.includes("permission covers other connections")
-                            ? `${app.name}’s access to ${name} can’t be removed by itself. Remove all of ${app.name}’s access instead.`
-                            : "Access could not be removed. Try again."}
-                        </p>
-                        <details>
-                          <summary>What went wrong</summary>
-                          {removal.error.message}
-                        </details>
-                      </div>
-                    ) : null}
+                    {removal.error?.source === key ? <div role="alert" className="text-destructive"><p>Access could not be removed.</p><IcButton variant="ghost" disabled={removal.busy} onClick={() => void removal.remove(key, source.source)}>Try again</IcButton><Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>What went wrong</Link></div> : null}
                   </li>
                 );
               })}

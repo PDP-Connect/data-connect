@@ -1,3 +1,4 @@
+import { sourceRecordLabel, isOwnerRecordKind } from "../../lib/source-record-label.ts";
 import { SourceApps, SourceAppsList } from "./source-apps.tsx";
 import { groupGrantAccessByApp } from "../../grants/app-access.ts";
 import { buildAppPractice } from "../../grants/app-practice.ts";
@@ -953,13 +954,10 @@ function ConnectorPageView({
 }
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
-  const { connectionId, streams, source, manifest } = model;
+  const { connectionId, source, manifest } = model;
+  const streams = model.streams.filter(stream => isOwnerRecordKind(stream.name));
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
-  const label = (name: string) => {
-    const entry = (manifest.streams ?? []).find((stream) => stream.name === name);
-    const declared = entry ? streamDisplayLabel(name, entry as StreamManifestEntry) : null;
-    return declared && declared !== name ? declared : humanizeFieldLabel(name);
-  };
+  const label = (name: string) => sourceRecordLabel(name, manifest.streams as StreamManifestEntry[]);
   const missing = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
   const empty = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && !missing.includes(stream));
   const present = streams.filter((stream) => !missing.includes(stream) && !empty.includes(stream));

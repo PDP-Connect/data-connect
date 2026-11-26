@@ -1,7 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatConnectorKeyForDisplay, formatRelative, formatSourceForDisplay } from "@pdpp/display";
+import { formatRelative, formatConnectorNameForDisplay, humanizeFieldLabel, type SourceDisplayInput } from "@pdpp/display";
+import { connectionDisplayName } from "../lib/connection-display-name.ts";
 import type { GrantPackageChild, GrantSummary, OwnerIssuedClient } from "../lib/ref-client.ts";
 
 export interface AppAccess {
@@ -15,7 +16,7 @@ export interface AppAccess {
   verified: boolean;
   packageIds: string[];
   sources: string[];
-  sourceAccess: (import("../lib/ref-client.ts").AppAccessSource & { name?: string; neverRead?: boolean })[];
+  sourceAccess: (import("../lib/ref-client.ts").AppAccessSource & { name?: string; kindNames?: string[]; neverRead?: boolean })[];
   readsAllSources?: boolean;
   showPlace?: boolean;
   since: string | null;
@@ -27,14 +28,11 @@ export interface AppAccess {
   status: string | null;
 }
 
-export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[0] | null | undefined): string | null {
+export function appSourceName(source: SourceDisplayInput | null | undefined): string | null {
   if (!source) return null;
-  if (source.kind === "connector") {
-    const label = formatConnectorKeyForDisplay(source.connector_id ?? source.id);
-    return `${label[0]?.toUpperCase()}${label.slice(1)}`;
-  }
-  const label = formatSourceForDisplay(source).replace(/^provider_native:/, "");
-  return label ? `${label[0]?.toUpperCase()}${label.slice(1)}` : label;
+  const connectorId = source.connector_id ?? source.id;
+  const service = formatConnectorNameForDisplay({ connectorId });
+  return connectionDisplayName(null, service === service.toLowerCase() ? humanizeFieldLabel(service) : service, connectorId);
 }
 
 export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(
@@ -122,7 +120,7 @@ export function groupGrantAccessByApp(
       if (!previous)
         app.sourceAccess.push({
           ...row,
-          name: sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source",
+          name: row.all_accounts ? `All ${appSourceName(row.source)} accounts` : sourceNames.get(row.source.connection_id || "") || appSourceName(row.source) || "Data source",
           in_force: inForce,
           kinds: [...row.kinds],
           grant_ids: [...row.grant_ids],
@@ -163,10 +161,10 @@ export function groupGrantAccessByApp(
     app.state = current.length ? "reading" : "stopped";
     app.status = current.length ? null : "Removed";
     const visible = current.length ? current : app.sourceAccess;
-    app.sources = [...new Set(visible.map((row) => row.name || appSourceName(row.source) || "Data source"))];
+    app.sources = visible.map((row) => row.name || appSourceName(row.source) || "Data source");
     app.readsAllSources =
       sourceNames.size > 0 &&
-      [...sourceNames.keys()].every((id) => current.some((row) => row.source.connection_id === id));
+      [...sourceNames.keys()].every((id) => current.some((row) => row.source.connection_id === id || row.connection_ids?.includes(id)));
     app.since = visible.map((row) => row.first_issued_at).sort()[0] || null;
     app.lastRead =
       visible

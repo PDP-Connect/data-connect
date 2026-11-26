@@ -54,3 +54,12 @@ test("connection names and the all-sources phrase come only from a complete inve
   names.set("personal-mail", "Gmail (personal)");
   assert.equal(groupGrantAccessByApp([registration()], Date.now(), [], names)[0]?.readsAllSources, false);
 });
+
+test("the app summary and detail count the same connection rows even when labels are identical", () => {
+ const registrations=[registration()];
+ const first=registrations[0]!;
+ first.sources=[{...first.sources[0]!,source:{...first.sources[0]!.source,connection_id:"one"}},{...first.sources[0]!,source:{...first.sources[0]!.source,connection_id:"two"}}];
+ const app=groupGrantAccessByApp(registrations)[0]!;
+ assert.equal(app.sources.length,app.sourceAccess.filter(source=>source.in_force).length);
+ assert.equal(app.sources.length,2);
+});
