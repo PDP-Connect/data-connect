@@ -94,6 +94,9 @@ try {
   const sourceRowIds = await page
     .locator('[data-testid^="add-source-row-"]')
     .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  // The install store reads Core's database, so open it before the first
+  // install check (the checks below run in this process, not in Core).
+  initDb(process.env.PDPP_DB_PATH || "/var/lib/pdpp/pdpp.sqlite");
   for (const connector of ["claude-code", "codex"]) {
     const sourceRow = page.getByTestId(`add-source-row-${connector}`);
     assert.equal(
@@ -105,7 +108,11 @@ try {
     // Observe the ready form and verify the durable install, not an Install
     // button that no longer exists in the owner flow.
     const beforeOpening = await inspectActiveConnector(createConnectorInstallStore(), connector);
-    assert.notEqual(beforeOpening.status, "active", `${connector} must not already be active before opening its service`);
+    assert.equal(
+      beforeOpening.status,
+      "none",
+      `${connector} must have no install before opening its service; status=${beforeOpening.status}; reason=${"reason" in beforeOpening ? beforeOpening.reason : "none"}`
+    );
     await sourceRow.getByRole("link").click();
     await page.waitForURL(`**/sources/add/${connector}`);
     await page.getByTestId("program-command").waitFor({ state: "visible", timeout: 60_000 });
@@ -123,7 +130,6 @@ try {
   // Installing a connector package does not create an owner connection. Seed
   // the same disposable active-instance fixture used by hosted-mcp-oauth.test
   // so the real consent flow has a source with eligible streams to authorize.
-  initDb(process.env.PDPP_DB_PATH || "/var/lib/pdpp/pdpp.sqlite");
   const connectorId = "claude-code";
   const installed = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
   assert.equal(
