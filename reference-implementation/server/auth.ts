@@ -5654,6 +5654,7 @@ export async function registerConnector(
     verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
+  assertIncomingSourceDeclarationPublisher(manifest);
   validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys: await listInstalledConnectorKeys() });
   // The retained identity is read here and re-checked under the publication lock in
   // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
@@ -5984,6 +5985,14 @@ function assertSourceIdentityMovable(
     throw invalidConnectorManifest(
       `Connector ${move.connectorId} cannot move source ${move.from} to ${move.to}: a pairwise handle is already issued under ${move.to} for an instance that also has one under ${move.from}.`
     );
+  }
+}
+
+/** Incoming packages cannot impersonate the server's durable compatibility projections. */
+export function assertIncomingSourceDeclarationPublisher(manifest: Record<string, unknown>): void {
+  const declaration = sourceDeclarationOf(manifest);
+  if (isRecord(declaration?.publisher) && declaration.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID) {
+    throw invalidConnectorManifest("source_declaration publisher is reserved for server-generated projections");
   }
 }
 
