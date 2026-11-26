@@ -1,0 +1,6 @@
+{
+  "pending-actions.ts": "81c417ed73b581ae8e21b402b3c6b8c108dc9f144bb2a2c993be3271deec0394",
+  "[grantId]/revoke-action.ts": "c7cabfa18b2898fb753dd1c3b861bdb27177b5472aeef89a805579ede3634762",
+  "packages/[packageId]/revoke-action.ts": "e4dc6040c774b78bb497b3f87cd305e8efed617da0b90ee11124f654e1d6dde9",
+  "../../consent/actions.ts": "a24d711d008aa11d187ae585748a5c5ed557bcf53d4559c7fd42ad390872bd9c"
+}
