@@ -188,8 +188,7 @@ const GENERIC_RUN_FAILED_GAP_REASONS: ReadonlySet<string> = new Set([
  * generic wrapper's own `recovery_hint` (typically absent or `"unknown"`)
  * would otherwise independently force the whole run terminal even though the
  * connector already gave a more specific, non-terminal read of the same
- * event — the same shape `credentialReasonFromGenericFailure` in
- * `ref-control.ts` already defers to for credential-reason derivation (§10-C).
+ * event.
  * Only the generic wrapper defers: a `run_failed` gap that already carries
  * its own `retry_by_runtime`/`manual_action_required` hint is handled by the
  * ordinary per-gap checks above and never reaches this predicate's caller.
@@ -330,28 +329,6 @@ export function firstPendingDetailGapReason(gaps: readonly PendingDetailGapSumma
     }
   }
   return gaps.length > 0 ? "detail_gap_pending" : null;
-}
-
-export function firstDegradingKnownGapReason(run: ConnectorRunSummary | null): string | null {
-  if (!run) {
-    return null;
-  }
-  for (const gap of run.known_gaps) {
-    if (!gap || typeof gap !== "object" || Array.isArray(gap)) {
-      return null;
-    }
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    const severity = (gap as { severity?: unknown }).severity;
-    if (severity === "informational" || severity === "recoverable") {
-      continue;
-    }
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    const reason = (gap as { reason?: unknown }).reason;
-    if (typeof reason === "string" && reason.length > 0) {
-      return reason;
-    }
-  }
-  return null;
 }
 
 // ─── Durable unfillable-gap proof (§10-A / `unfillableAccounted`) ─────────────

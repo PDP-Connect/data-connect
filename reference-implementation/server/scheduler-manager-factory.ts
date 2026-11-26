@@ -29,7 +29,6 @@ import type {
 } from "../runtime/scheduler.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
-import { describeRunConfigFailure } from "./connector-run-config.ts";
 import { getConnectorManifest } from "./auth.ts";
 import { buildConnectionScopedRunEnvResolver } from "./connection-scoped-run-env.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
@@ -411,6 +410,25 @@ type ConnectorPathResolver = (
   options?: { priorityClass: "background" }
 ) => string | null | Promise<string | null>;
 
+/** Both managed adapters preserve the controller's runtime facts without minting a connector error. */
+export function projectManagedRuntimeFailure(
+  terminalData: Record<string, unknown>,
+  connectorError: object | null
+) {
+  const runtimeFailure = terminalData.runtime_failure;
+  return {
+    failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
+    failure_reason: typeof terminalData.reason === "string" ? terminalData.reason : null,
+    runtime_retryable:
+      connectorError === null &&
+      runtimeFailure &&
+      typeof runtimeFailure === "object" &&
+      typeof (runtimeFailure as { retryable?: unknown }).retryable === "boolean"
+        ? (runtimeFailure as { retryable: boolean }).retryable
+        : null,
+  };
+}
+
 function projectManagedControllerTerminalRun(
   handle: ManagedRunHandle,
   terminalStatus: string,
@@ -443,7 +461,6 @@ function projectManagedControllerTerminalRun(
     typeof terminalData.checkpoint_commit_status === "string"
       ? { commit_status: terminalData.checkpoint_commit_status }
       : null;
-  const failureReason = typeof terminalData.reason === "string" ? terminalData.reason : null;
   const knownGaps = Array.isArray(terminalData.known_gaps)
     ? terminalData.known_gaps.filter((gap): gap is Record<string, unknown> => Boolean(gap && typeof gap === "object"))
     : [];
@@ -451,8 +468,8 @@ function projectManagedControllerTerminalRun(
     typeof terminalData.terminal_reason === "string" ? (terminalData.terminal_reason as TerminalReason) : null;
   return {
     checkpoint_summary: checkpointSummary,
-    connector_error: connectorError ?? describeRunConfigFailure(failureReason),
-    failure_reason: failureReason,
+    connector_error: connectorError,
+    ...projectManagedRuntimeFailure(terminalData, connectorError),
     known_gaps: knownGaps,
     run_id: handle.run_id,
     status: terminalStatus,

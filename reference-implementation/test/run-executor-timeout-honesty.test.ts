@@ -515,6 +515,7 @@ test(
     assert.equal(armedDelayMs, WALL_CLOCK_BUDGET_MS);
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
+    assert.equal(record.connectorError, null, "the scheduler watchdog does not author a connector terminal claim");
     assert.equal(
       record.recordsEmitted,
       5,
