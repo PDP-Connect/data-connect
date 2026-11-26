@@ -91,6 +91,7 @@ interface AuthRequestHeaders {
   readonly host?: string;
   readonly referer?: string;
   readonly referrer?: string;
+  readonly "content-type"?: string;
   readonly "x-forwarded-proto"?: string;
   readonly "user-agent"?: string;
   readonly "x-pdpp-owner-session-label"?: string;
