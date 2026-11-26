@@ -2402,6 +2402,37 @@ test("after a failed refresh the kept catalog is served at once until the quiet 
   }
 });
 
+test("a kept catalog older than the high-water mark is never served", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    let online = true;
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        if (!online) throw new TypeError("fetch failed");
+        return { entries: [entry], generatedAt: "2026-11-01T00:00:00Z" };
+      },
+      catalogRetryQuietMs: 60_000,
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    await service.catalogView?.();
+    online = false;
+    assert.equal((await service.catalogView?.())?.fresh, false);
+    // A newer catalog was accepted elsewhere (shared store) or the process stopped
+    // between recording the mark and keeping the list: the kept list is now a rollback.
+    await store.setCatalogHighWater("2026-11-02T00:00:00Z");
+    await assert.rejects(() => service.catalogView?.() ?? Promise.resolve(), /fetch failed/);
+    const restarted = offlineCatalogService(dataDir, async () => {
+      throw new TypeError("fetch failed");
+    });
+    await assert.rejects(() => restarted.catalogView?.() ?? Promise.resolve(), /fetch failed/);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a kept catalog never lowers the high-water mark and a fresh fetch replaces it", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
   try {

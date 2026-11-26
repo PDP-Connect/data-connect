@@ -1055,7 +1055,7 @@ export function createConnectorInstallService(options: {
     const release = acquireCatalogStateLock(dataDir);
     try {
       const previousHighWater = await store.getCatalogHighWater();
-      const kept = readCatalogSnapshotFile(snapshotPath);
+      const kept = keptWithinHighWater(readCatalogSnapshotFile(snapshotPath), previousHighWater);
       if (kept && Date.now() < quietUntil) {
         return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
       }
@@ -1103,13 +1103,15 @@ export function createConnectorInstallService(options: {
       ) {
         throw new Error("Catalog rollback refused by high-water mark.");
       }
-      await store.setCatalogHighWater(highWater);
+      // Keep the list before raising the mark: a stop between the two leaves a
+      // kept list at least as new as the mark, never older.
       const fetchedAt = new Date().toISOString();
       writeCatalogSnapshotFile(snapshotPath, {
         entries: snapshot.entries,
         fetchedAt,
         ...(snapshot.generatedAt ? { generatedAt: snapshot.generatedAt } : {}),
       });
+      await store.setCatalogHighWater(highWater);
       return { entries: snapshot.entries, fetchedAt, fresh: true };
     } finally {
       release();
@@ -1518,6 +1520,22 @@ function readCatalogSnapshotFile(path: string): KeptCatalogSnapshot | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The kept catalog only if it is not older than the high-water mark; otherwise
+ * serving it would be a rollback (a newer catalog was accepted since it was kept).
+ */
+function keptWithinHighWater(
+  kept: KeptCatalogSnapshot | null,
+  highWater: string | null
+): KeptCatalogSnapshot | null {
+  if (!kept || !highWater) return kept;
+  if (kept.generatedAt && Number.isFinite(Date.parse(highWater))) {
+    return Date.parse(kept.generatedAt) >= Date.parse(highWater) ? kept : null;
+  }
+  const keptMark = kept.entries.map((entry) => entry.digest).sort().join(",");
+  return (kept.generatedAt ?? keptMark) === highWater ? kept : null;
 }
 
 /** Written only after a fetch passed every check; atomic so a crash never leaves half a file. */
