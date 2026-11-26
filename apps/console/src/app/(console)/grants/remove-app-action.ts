@@ -14,6 +14,7 @@ export async function removeAppAction(input: RemoveAppAccessInput) {
     revalidatePath("/sources", "layout");
     return {
       ok: result.failed_count === 0,
+      failedGrantIds: result.failed_grant_ids,
       message: result.failed_count ? "Some access could not be removed. Try again." : null,
     };
   } catch (error) {

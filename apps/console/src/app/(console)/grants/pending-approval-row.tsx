@@ -15,8 +15,10 @@ export function PendingApprovalRow({
   place,
   reviewHref,
   denyAction,
+  requests = [approval],
 }: {
   approval: PendingApproval;
+  requests?: PendingApproval[];
   appName: string;
   place?: string;
   reviewHref?: string;
@@ -27,16 +29,17 @@ export function PendingApprovalRow({
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">
-        <p className="text-[15px] font-medium text-foreground">{appName}</p>
+        <p className="text-[15px] font-medium text-foreground">{appName}{requests.length > 1 ? ` is waiting for your answer · ${requests.length} requests` : ""}</p>
         {place ? <p className="text-[13px] text-muted-foreground">{place}</p> : null}
         <p className="mt-1 text-[13px] text-muted-foreground">
           {approval.grant_preview?.source ? `Wants to read ${appSourceName(approval.grant_preview.source)}` : "Wants to read your data"}
         </p>
         <IcTimestamp value={approval.created_at} />
+        {requests.length > 1 ? requests.slice(1).map((request,index) => <Link className="ml-3 text-primary" key={request.approval_id} href={reviewHref || `/grants/approvals/${encodeURIComponent(request.approval_id)}`}>Review request {index+2}</Link>) : null}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         <Link
-          className={buttonVariants({ size: "sm", variant: "ghost" })}
+          className={buttonVariants({ size: "sm" })}
           href={reviewHref || `/grants/approvals/${encodeURIComponent(approval.approval_id)}`}
         >
           Review
@@ -47,13 +50,14 @@ export function PendingApprovalRow({
               Don't allow {appName}? It will not get access to your data.
             </p>
             <form action={denyAction} className="mt-3">
+              <input name="requests" type="hidden" value={JSON.stringify(requests.map(request=>({approvalId:request.approval_id,kind:request.kind})))} />
               <input name="kind" type="hidden" value={approval.kind} />
               <input name="approval_id" type="hidden" value={approval.approval_id} />
               <input name="deny_confirmation" type="hidden" value="yes" />
               <IcButton size="sm" type="submit" variant="destructive">Don't allow</IcButton>
+              <IcButton variant="ghost" type="button" onClick={() => setConfirming(false)}>Cancel</IcButton>
             </form>
           </div>
-          <IcButton variant="ghost" onClick={() => setConfirming(false)}>Cancel</IcButton>
         </div>}
       </div>
     </div>
