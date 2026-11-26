@@ -120,6 +120,24 @@ function now() {
   return new Date().toISOString();
 }
 
+// The store lists by (created_at ASC, receipt_id ASC) (list-first-page.sql, list-after-cursor.sql).
+// Receipts written in the same millisecond tie on created_at and receipt_id is random, so insertion
+// order is not part of the contract. This derives the order the store promises from the stored rows,
+// comparing as SQLite does (BINARY collation).
+function sqliteListOrder(receiptIds: readonly string[]): string[] {
+  const rows = receiptIds.map((receiptId) => {
+    const row = getDb()
+      .prepare("SELECT created_at FROM record_rejections WHERE receipt_id = ?")
+      .get<{ created_at: string }>(receiptId);
+    assert.ok(row, `expected a stored receipt for ${receiptId}`);
+    return { createdAt: row.created_at, receiptId };
+  });
+  const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return rows
+    .sort((a, b) => compare(a.createdAt, b.createdAt) || compare(a.receiptId, b.receiptId))
+    .map((row) => row.receiptId);
+}
+
 function seedSqliteConnection({
   connectorId = "test_connector",
   connectorInstanceId = "cin_test",
@@ -299,7 +317,7 @@ test("SQLite record rejection store replays exact inputs and keeps payload metad
 
   const page = await store.list({ connectorInstanceId: "cin_test", limit: 10, ownerSubjectId: "owner_a" });
   assert.equal(page.items.length, 2);
-  const [item] = page.items;
+  const item = page.items.find((candidate) => candidate.receiptId === first.receiptId);
   assert.ok(item);
   assert.equal(item.payloadBytes, Buffer.byteLength(input.rawLine));
   assert.equal(item.latestInputIndex, 7);
@@ -496,17 +514,18 @@ test("SQLite record rejection list narrows to a run inside the owner and connect
     });
 
   assert.equal((await list({})).items.length, 3, "no run filter lists the whole connection");
-  assert.deepEqual(ids(await list({ runId: "run_a" })), [receiptA.receiptId, receiptA2.receiptId]);
+  const runAOrder = sqliteListOrder([receiptA.receiptId, receiptA2.receiptId]);
+  assert.deepEqual(ids(await list({ runId: "run_a" })), runAOrder);
   assert.deepEqual(ids(await list({ runId: "run_c" })), [receiptA.receiptId], "matches the latest run too");
   assert.deepEqual(ids(await list({ runId: "run_b" })), [receiptB.receiptId]);
   assert.deepEqual(ids(await list({ runId: "run_nobody" })), []);
   assert.deepEqual(ids(await list({ runId: "run_a_other_owner" })), [], "another owner's run is not visible");
 
   const firstPage = await list({ limit: 1, runId: "run_a" });
-  assert.deepEqual(ids(firstPage), [receiptA.receiptId]);
+  assert.deepEqual(ids(firstPage), [runAOrder[0]]);
   assert.ok(firstPage.nextCursor, "a second matching receipt remains");
   const secondPage = await list({ cursor: firstPage.nextCursor, limit: 1, runId: "run_a" });
-  assert.deepEqual(ids(secondPage), [receiptA2.receiptId], "the cursor keeps the run filter");
+  assert.deepEqual(ids(secondPage), [runAOrder[1]], "the cursor keeps the run filter");
   assert.equal(secondPage.nextCursor, null);
 });
 
