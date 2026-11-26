@@ -47,12 +47,20 @@ SCREEN="${NEKO_DESKTOP_SCREEN:-1440x900@30}"
 SCREEN_WIDTH="${SCREEN%%x*}"
 SCREEN_HEIGHT_WITH_RATE="${SCREEN#*x}"
 SCREEN_HEIGHT="${SCREEN_HEIGHT_WITH_RATE%%@*}"
+case "${SCREEN}" in
+  *x*) ;;
+  *) SCREEN_WIDTH= ;;
+esac
 case "${SCREEN_WIDTH}:${SCREEN_HEIGHT}" in
-  *[!0-9:]*|:*)
+  *[!0-9:]*|:*|*:|*:*:*)
     SCREEN_WIDTH=1440
     SCREEN_HEIGHT=900
     ;;
 esac
+if ! [ "${SCREEN_WIDTH}" -gt 0 ] 2>/dev/null || ! [ "${SCREEN_HEIGHT}" -gt 0 ] 2>/dev/null; then
+  SCREEN_WIDTH=1440
+  SCREEN_HEIGHT=900
+fi
 WIDTH="${SCREEN_WIDTH}"
 HEIGHT="${SCREEN_HEIGHT}"
 

@@ -214,3 +214,38 @@ describe("deriveTimeline", () => {
     expect(timeline.dayGroups[0]?.dayKey).toBe("2026-07-30")
   })
 })
+
+describe("four-digit early calendar years", () => {
+  it("places valid years 0000-0099 on their own day and rejects impossible days", () => {
+    const timeline = deriveTimeline(
+      {
+        streams: [
+          {
+            stream: {
+              id: "archive",
+              label: "Archive",
+              fields: [{ name: "date", format: "date" }],
+              primaryKey: [],
+              timestampFields: ["date"],
+            },
+            records: [
+              { id: "date", data: { date: "0099-01-01" } },
+              { id: "datetime", data: { date: "0004-02-29T12:00:00Z" } },
+              { id: "invalid", data: { date: "0003-02-29" } },
+            ],
+            hasMore: false,
+          },
+        ],
+      },
+      { maxRecords: 10, maxStreams: 1 }
+    )
+
+    expect(timeline.dayGroups.map(group => group.dayKey)).toEqual([
+      "0099-01-01",
+      "0004-02-29",
+    ])
+    expect(timeline.undatedRecords.map(record => record.recordId)).toEqual([
+      "invalid",
+    ])
+  })
+})
