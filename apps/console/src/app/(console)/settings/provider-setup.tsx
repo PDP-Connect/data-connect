@@ -1,7 +1,7 @@
 "use client"
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useEffectEvent, useRef, useState } from "react"
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react"
 import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
 import { Input } from "@/components/ui/input.tsx"
 import { openResource } from "../../../../../../src/lib/open-resource"
@@ -99,7 +99,18 @@ function SetupOperationAction({
 }) {
   const [value, setValue] = useState("")
   const secret = action.kind === "provide-secret"
+  // A pasted secret is held by its field alone, as in InputCard: never in state.
+  const secretField = useRef<HTMLInputElement>(null)
+  const [filled, setFilled] = useState(false)
+  useLayoutEffect(
+    () => () => {
+      if (secretField.current) secretField.current.value = ""
+    },
+    []
+  )
   const needsInput = secret || action.kind === "provide-value"
+  // The action contract says `required: false` for an input that may stay blank; a blank one is omitted.
+  const optional = action.required === false
   const label =
     plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
   const consent = action.consent
@@ -125,17 +136,22 @@ function SetupOperationAction({
   return (
     <SetupApprovalCard
       action={action}
-      busy={busy || (needsInput && !value)}
+      busy={busy || (needsInput && !optional && !(secret ? filled : value))}
       buttonLabel={
         action.kind === "open-url"
           ? "Approve and open in browser"
           : plain(action.label)
       }
       onApprove={approval => {
+        const entered = secret ? (secretField.current?.value ?? "") : value
+        if (secretField.current) secretField.current.value = ""
+        setFilled(false)
         setValue("")
         onApprove(
           approval,
-          needsInput ? { [secret ? "secret" : "value"]: value } : {}
+          needsInput && entered !== ""
+            ? { [secret ? "secret" : "value"]: entered }
+            : {}
         )
       }}
     >
@@ -150,7 +166,16 @@ function SetupOperationAction({
       {needsInput ? (
         <label className="grid gap-2">
           {label}
-          {action.step?.options ? (
+          {secret ? (
+            <Input
+              autoComplete="off"
+              disabled={busy}
+              onChange={() => setFilled(secretField.current?.value !== "")}
+              placeholder={inputPlaceholder(action, true)}
+              ref={secretField}
+              type="password"
+            />
+          ) : action.step?.options ? (
             <select
               disabled={busy}
               onChange={event => setValue(event.target.value)}
@@ -168,8 +193,8 @@ function SetupOperationAction({
               autoComplete="off"
               disabled={busy}
               onChange={event => setValue(event.target.value)}
-              placeholder={inputPlaceholder(action, secret)}
-              type={secret ? "password" : "text"}
+              placeholder={inputPlaceholder(action, false)}
+              type="text"
               value={value}
             />
           )}
@@ -215,6 +240,8 @@ function InputCard({
   const [typed, setTyped] = useState("")
   const [filled, setFilled] = useState(false)
   const approval = approvalFor(action)
+  // The action contract says `required: false` for an input that may stay blank; a blank one is omitted.
+  const optional = action.required === false
   const label = plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
   const obtain = action.obtainUrl ? safeSignInUrl(action.obtainUrl) : null
   const options = action.step?.options
@@ -264,18 +291,18 @@ function InputCard({
       <div className="flex flex-wrap gap-3">
         <button
           type="button"
-          disabled={busy || !approval || (secret ? !filled : typed.trim() === "")}
+          disabled={busy || !approval || (!optional && (secret ? !filled : typed.trim() === ""))}
           onClick={() => {
             if (!approval) return
             if (secret) {
               const value = secretField.current?.value ?? ""
               if (secretField.current) secretField.current.value = ""
               setFilled(false)
-              onSubmit(approval, { secret: value })
+              onSubmit(approval, value === "" ? {} : { secret: value })
             } else {
               const value = typed.trim()
               setTyped("")
-              onSubmit(approval, { value })
+              onSubmit(approval, value === "" ? {} : { value })
             }
           }}
         >
@@ -313,6 +340,8 @@ export function ProviderSetup({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<DisplayError | null>(null)
   const [missing, setMissing] = useState(false)
+  // Bumped by Cancel setup: the input card remounts, so a half-typed secret is gone with its field.
+  const [cancelEpoch, setCancelEpoch] = useState(0)
   const { operationId, providerId, draftId } = reservation
   const path = `/setup-operations/${encodeURIComponent(operationId)}`
   const readPath = `${path}?providerId=${encodeURIComponent(providerId)}`
@@ -794,7 +823,7 @@ export function ProviderSetup({
       ) : null}
       {view && action ? (
         <SetupOperationAction
-          key={`${view.revision}:${action.consent?.consentFactsDigest}`}
+          key={`${view.revision}:${action.consent?.consentFactsDigest}:${cancelEpoch}`}
           action={action}
           busy={busy || disabled}
           onApprove={(approval, input) =>
@@ -874,9 +903,10 @@ export function ProviderSetup({
           <button
             type="button"
             disabled={busy || disabled}
-            onClick={() =>
+            onClick={() => {
+              setCancelEpoch(n => n + 1)
               void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")
-            }
+            }}
           >
             {view.state === "complete" ? "Undo setup" : "Cancel setup"}
           </button>

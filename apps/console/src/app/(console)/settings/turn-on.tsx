@@ -1,7 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
@@ -51,10 +51,22 @@ export function TurnOnCard({
   busy: boolean;
   /** Labels of the facts that changed since the owner last saw them. */
   changed: string[] | null;
+  /** May return a promise; the card ignores a second click until it settles. */
   onTurnOn: (review: Review) => void;
   /** The selected way's name, above the one line per kind. */
   wayTitle?: string | null;
 }) {
+  // A second click can arrive before `busy` renders; the ref closes that gap.
+  const submitting = useRef(false);
+  async function submit() {
+    if (submitting.current) return;
+    submitting.current = true;
+    try {
+      await onTurnOn(review);
+    } finally {
+      submitting.current = false;
+    }
+  }
   const candidate = review.candidate;
   const consent = candidate.consent;
   const complete =
@@ -141,7 +153,7 @@ export function TurnOnCard({
         </p>
       )}
       <div className="flex flex-wrap gap-3">
-        <Button disabled={busy || !complete} onClick={() => onTurnOn(review)} type="button">
+        <Button disabled={busy || !complete} onClick={() => void submit()} type="button">
           Turn on remote access
         </Button>
       </div>
@@ -161,12 +173,28 @@ export function AllowCard({
   action: Action;
   draft: Draft;
   busy: boolean;
+  /** May return a promise; the card ignores a second click until it settles. */
   onAllow: (action: Action, input: { value?: string; secret?: string }) => void;
   onOther: () => void;
 }) {
   const [value, setValue] = useState("");
+  // A second click can arrive before `busy` renders; the ref closes that gap.
+  const submitting = useRef(false);
   const field = draft.configuration.inputRequirements.find((item) => item.actionId === action.id);
   const complete = action.consent?.facts !== undefined && action.consent.disclosures != null;
+  // An input the library marks `required: false` may stay blank; a blank one is omitted, never sent as "".
+  const blocked = field !== undefined && field.required !== false && value === "";
+  async function allow() {
+    if (submitting.current) return;
+    submitting.current = true;
+    const given = field && value !== "" ? { [field.secret ? "secret" : "value"]: value } : {};
+    setValue("");
+    try {
+      await onAllow(action, given);
+    } finally {
+      submitting.current = false;
+    }
+  }
   return (
     <section aria-label="Allow this step" className="grid gap-3 rounded-xl border p-4">
       <h3 className="pdpp-label">{plain(action.label)}</h3>
@@ -198,11 +226,8 @@ export function AllowCard({
       )}
       <div className="flex flex-wrap gap-3">
         <Button
-          disabled={busy || !complete || (field !== undefined && value === "")}
-          onClick={() => {
-            onAllow(action, field ? { [field.secret ? "secret" : "value"]: value } : {});
-            setValue("");
-          }}
+          disabled={busy || !complete || blocked}
+          onClick={() => void allow()}
           type="button"
         >
           Allow

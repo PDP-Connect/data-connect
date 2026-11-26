@@ -44,7 +44,12 @@ function action(kind: string, extra: Record<string, unknown> = {}) {
   }
 }
 
-async function mount(nextAction: unknown) {
+type Reply = Awaited<ReturnType<typeof requestReachability>>
+
+async function mount(
+  nextAction: unknown,
+  options: { state?: string; reply?: (url: string, body?: Record<string, unknown>) => Promise<Reply> | undefined } = {}
+) {
   const React = await import("react")
   const { act, createElement } = React
   const { createRoot } = await import("react-dom/client")
@@ -63,14 +68,16 @@ async function mount(nextAction: unknown) {
     expectedConfigurationRevision: "config",
     usage: "attached",
   }
-  const request: typeof requestReachability = async (_url, body) => {
+  const request: typeof requestReachability = async (url, body) => {
     if (body) sent.push(body as Sent)
+    const custom = options.reply?.(url, body as Record<string, unknown> | undefined)
+    if (custom) return custom
     return {
       ok: true,
       data: {
         operationId: "op-1",
         revision: 1,
-        state: "authorization-required",
+        state: options.state ?? "authorization-required",
         resources: [],
         scope: { draftId: "draft-1", configurationRevision: "config", providerId: "workshop" },
         evidence: { known: false, reason: "verification-pending" },
@@ -422,5 +429,184 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
+  }
+})
+
+// ---------- a blank optional input is omitted; only required inputs gate the button ----------
+
+const press = (container: Element, label: string) => {
+  const button = [...container.querySelectorAll("button")].find(b => b.textContent === label)
+  assert.ok(button, `no button ${label}`)
+  return button
+}
+
+test("the setup input card enables Save for an input the action marks optional, and sends nothing for a blank one", async () => {
+  for (const [kind, label, field] of [["provide-value", "Save", "value"], ["provide-secret", "Save token", "secret"]] as const) {
+    const optional = await mount(action(kind, { required: false, valueLabel: "Account name", secretLabel: "Token" }))
+    try {
+      assert.equal(press(optional.container, label).disabled, false, `${kind}: optional blank input can be saved`)
+      await optional.act(async () => press(optional.container, label).click())
+      const command = optional.sent.find(body => body.approval)!
+      assert.equal(field in command, false, `${kind}: a blank optional input is omitted, not sent as an empty string`)
+    } finally {
+      await optional.close()
+    }
+    const required = await mount(action(kind, { valueLabel: "Account name", secretLabel: "Token" }))
+    try {
+      assert.equal(press(required.container, label).disabled, true, `${kind}: no flag means required`)
+    } finally {
+      await required.close()
+    }
+  }
+})
+
+test("the approval card for an input step enables its button for an optional input and omits the blank one", async () => {
+  const { act, container, sent, close } = await mount(action("provide-value", { required: false, valueLabel: "Account name" }), { state: "blocked" })
+  try {
+    assert.equal(container.querySelector('input[type="text"]') !== null, true, "the generic approval card is on screen")
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!.click())
+    assert.equal(press(container, "Authorize the setup").disabled, false)
+    await act(async () => press(container, "Authorize the setup").click())
+    assert.equal("value" in sent.find(body => body.approval)!, false)
+  } finally {
+    await close()
+  }
+  const required = await mount(action("provide-value", { valueLabel: "Account name" }), { state: "blocked" })
+  try {
+    await required.act(async () => required.container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!.click())
+    assert.equal(press(required.container, "Authorize the setup").disabled, true)
+  } finally {
+    await required.close()
+  }
+})
+
+// ---------- a typed secret is held by its field, not by React state ----------
+
+function propsOf(node: Element) {
+  const key = Object.keys(node).find(name => name.startsWith("__reactProps$"))
+  return (key ? (node as unknown as Record<string, Record<string, unknown>>)[key] : {}) ?? {}
+}
+
+test("the approval card keeps a typed secret out of React state, and clears it on submit, cancel and unmount", async () => {
+  // Submit
+  const submit = await mount(action("provide-secret", { secretLabel: "Scoped API token" }), { state: "blocked" })
+  try {
+    const input = submit.container.querySelector<HTMLInputElement>('input[type="password"]')!
+    assert.equal("value" in propsOf(input), false, "the field is uncontrolled: no value prop mirrors the secret")
+    await submit.act(async () => type(submit.container, input, "secret-value"))
+    assert.equal(propsOf(input).value, undefined, "typing does not put the secret into a prop")
+    await submit.act(async () => submit.container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!.click())
+    await submit.act(async () => press(submit.container, "Authorize the setup").click())
+    assert.equal(submit.sent.find(body => "secret" in body)!.secret, "secret-value")
+    assert.equal(input.value, "", "submit clears the field")
+  } finally {
+    await submit.close()
+  }
+  // Cancel: the request is held open, so the card is still on screen while the cancel runs.
+  const never = new Promise<Reply>(() => {})
+  const cancel = await mount(action("provide-secret", { secretLabel: "Scoped API token" }), {
+    state: "blocked",
+    reply: url => (url.endsWith("/cancel") ? never : undefined),
+  })
+  try {
+    const input = cancel.container.querySelector<HTMLInputElement>('input[type="password"]')!
+    await cancel.act(async () => type(cancel.container, input, "half-typed"))
+    await cancel.act(async () => press(cancel.container, "Cancel setup").click())
+    const left = cancel.container.querySelector<HTMLInputElement>('input[type="password"]')
+    assert.equal(left?.value ?? "", "", "Cancel setup leaves no typed secret in a field")
+    assert.equal(input.value, "", "the field that held it is cleared")
+  } finally {
+    await cancel.close()
+  }
+  // Unmount
+  const gone = await mount(action("provide-secret", { secretLabel: "Scoped API token" }), { state: "blocked" })
+  const input = gone.container.querySelector<HTMLInputElement>('input[type="password"]')!
+  await gone.act(async () => type(gone.container, input, "left-behind"))
+  await gone.close()
+  assert.equal(input.value, "", "unmounting clears the field")
+})
+
+// ---------- the allow and turn-on cards: optional input, and one click is one send ----------
+
+async function renderCard(element: (React: typeof import("react")) => unknown) {
+  const React = await import("react")
+  const { act } = React
+  const { createRoot } = await import("react-dom/client")
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement })
+  const container = dom.window.document.querySelector("#root")!
+  const root = createRoot(container)
+  await act(async () => root.render(element(React) as never))
+  return { act, container, dom, close: async () => { await act(async () => root.unmount()); dom.window.close() } }
+}
+
+test("the allow card gates Allow on required inputs only, and sends nothing for a blank optional one", async () => {
+  const { AllowCard } = await import("./turn-on.tsx")
+  const step = action("run-it", { effects: { writes: [], networkOrigins: [], requiresPrivilege: false, restartRequired: false } }) as never as Record<string, any>
+  const field = (required: boolean) => ({ actionId: "next-step", id: "name", label: "Account name", secret: false, help: "", kind: "text", required, obtainUrl: null })
+  for (const required of [false, true]) {
+    const given: unknown[] = []
+    const card = await renderCard(({ createElement }) =>
+      createElement(AllowCard, { action: step as never, draft: { configuration: { inputRequirements: [field(required)] } } as never, busy: false, onAllow: (_a: unknown, input: unknown) => given.push(input), onOther: () => {} })
+    )
+    try {
+      assert.equal(press(card.container, "Allow").disabled, required, `required=${required}`)
+      if (!required) {
+        await card.act(async () => press(card.container, "Allow").click())
+        assert.deepEqual(given, [{}], "a blank optional input is omitted")
+      }
+    } finally {
+      await card.close()
+    }
+  }
+})
+
+test("two fast clicks on Allow or Turn on remote access call the handler once", async () => {
+  const { AllowCard, TurnOnCard } = await import("./turn-on.tsx")
+  const step = action("run-it", { effects: { writes: [], networkOrigins: [], requiresPrivilege: false, restartRequired: false } }) as never as Record<string, any>
+  step.consent.disclosures = { action: { id: "next-step", digest: DIGEST }, disclosures: ["This step is free"] }
+  let allows = 0
+  let release!: () => void
+  const slow = () => new Promise<void>(resolve => { release = resolve })
+  const allow = await renderCard(({ createElement }) =>
+    createElement(AllowCard, { action: step as never, draft: { configuration: { inputRequirements: [] } } as never, busy: false, onAllow: () => { allows += 1; return slow() }, onOther: () => {} })
+  )
+  try {
+    const button = press(allow.container, "Allow")
+    await allow.act(async () => { button.click(); button.click() })
+    assert.equal(allows, 1)
+    await allow.act(async () => release())
+    await allow.act(async () => press(allow.container, "Allow").click())
+    assert.equal(allows, 2, "once the first send settles, the next click is accepted")
+    await allow.act(async () => release())
+  } finally {
+    await allow.close()
+  }
+  const review = {
+    id: "review-1",
+    kind: "route",
+    candidate: {
+      providerId: "workshop",
+      display: { label: "Workshop" },
+      consentFactsDigest: "consent-v1:route",
+      consent: {
+        consentFactsDigest: "consent-v1:route",
+        facts: [],
+        scope: { kind: "route", providerId: "workshop", query: { target: "http://localhost:3000", usage: { kind: "attached" } } },
+        disclosures: { traffic: { providerCanReadPayload: false }, cost: { kind: "free" }, address: { stability: "stable" }, disclosures: [], digest: DIGEST },
+      },
+    },
+  }
+  let turns = 0
+  const turn = await renderCard(({ createElement }) =>
+    createElement(TurnOnCard, { review: review as never, busy: false, changed: null, onTurnOn: () => { turns += 1; return slow() } })
+  )
+  try {
+    const button = press(turn.container, "Turn on remote access")
+    await turn.act(async () => { button.click(); button.click() })
+    assert.equal(turns, 1)
+    await turn.act(async () => release())
+  } finally {
+    await turn.close()
   }
 })
