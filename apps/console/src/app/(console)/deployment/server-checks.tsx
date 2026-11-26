@@ -3,14 +3,13 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants, Text } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, Text } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { checksHeadline, plainServerChecks, type PlainCheck } from "./plain-checks.ts";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   embeddingCacheRow,
-  overallVerdict,
   ownerPasswordRow,
   type ReadinessRow,
   referenceOriginRow,
@@ -30,7 +29,8 @@ function PlainServerChecks({ inputs, practice, desktop }: { inputs: ServerInputs
   return <ServerChecksView rows={plainServerChecks(inputs, practice ? practice.address : address, practice ? practice.probe : probe, desktop)} />;
 }
 export function ServerChecksView({ rows }: { rows: PlainCheck[] }) {
-  return <><Text>{checksHeadline(rows)}</Text><Section title="Checks"><ul className="divide-y divide-border/70 border-y border-border/70">{rows.map((row) => <li className="grid gap-1 py-4 sm:grid-cols-[10rem_1fr]" key={row.name}><Text>{row.name}</Text><div className="grid gap-1"><Text color="muted">{row.sentence}</Text>{row.action ? row.href ? <Link className="min-h-11 py-2 underline" href={row.href}>{row.action}</Link> : <Text color="muted">{row.action}</Text> : null}</div></li>)}</ul></Section></>;
+  const [restart, setRestart] = useState(false);
+  return <><Text as="h2" size="heading">{checksHeadline(rows)}</Text><Section title="Checks"><ul className="divide-y divide-border/70 border-y border-border/70">{rows.map(row => <li className="grid gap-1 py-4 sm:grid-cols-[10rem_1fr]" key={row.name}><Text>{row.status === "error" || row.status === "warn" ? <span className="text-attention" aria-label="Needs attention">! </span> : null}{row.name}</Text><div className="grid gap-1"><Text color="muted">{row.sentence}</Text>{row.action ? row.href ? <Link className={buttonVariants({ variant: "ghost" })} href={row.href}>{row.action}</Link> : row.action === "Restart DataConnect." ? <IcButton className="w-fit" variant="ghost" onClick={() => setRestart(!restart)}>How to restart DataConnect</IcButton> : <Text color="muted">{row.action}</Text> : null}</div></li>)}</ul></Section>{restart ? <p role="status">On the computer that runs DataConnect, quit and reopen the app. If it runs as a service, ask whoever installed it to restart it.</p> : null}</>;
 }
 function TechnicalServerChecks({ inputs }: { inputs: ServerInputs }) {
   const browserOrigin = useBrowserOrigin();
@@ -65,7 +65,6 @@ function TechnicalServerChecks({ inputs }: { inputs: ServerInputs }) {
 
   return (
     <>
-      <Text className="text-[16px] text-foreground">{serverAddressHeadline(originRow)}</Text>
       <Section title="Checks">
         <ul className="divide-y divide-border/70 border-y border-border/70">
           {rows.map((row) => (
@@ -74,7 +73,7 @@ function TechnicalServerChecks({ inputs }: { inputs: ServerInputs }) {
         </ul>
         <details className="mt-3">
           <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
-          <p className="text-[13px] text-muted-foreground">{summaryWords(overallVerdict(rows))}</p>
+          <p className="text-[13px] text-muted-foreground">Raw check details are shown above.</p>
         </details>
       </Section>
     </>
@@ -134,15 +133,6 @@ function statusWords(status: ReadinessRow["status"]): { label: string; sentence:
     case "error": return { label: "Blocked", sentence: "This check is blocked.", tone: "text-destructive" };
     case "info": return { label: "Info", sentence: "This is not a problem by itself.", tone: "text-muted-foreground" };
     case "unknown": return { label: "Checking", sentence: "This check is still loading.", tone: "text-muted-foreground" };
-  }
-}
-
-function summaryWords(verdict: ReturnType<typeof overallVerdict>): string {
-  switch (verdict) {
-    case "ready": return "All five checks are ready.";
-    case "attention": return "Some checks need attention. See each row.";
-    case "blocked": return "At least one check is blocked.";
-    case "unknown": return "Some checks are still loading.";
   }
 }
 

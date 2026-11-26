@@ -29,7 +29,7 @@ interface DeploymentPageParams {
 export default async function DeploymentPage({ searchParams }: { searchParams: Promise<DeploymentPageParams> }) {
   const params = await searchParams;
   const practice = process.env.NODE_ENV !== "production" && params.demo ? buildServerPractice(params.demo) : null;
-  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6"><PageHeader title="Server" /><ServerChecks inputs={practice.inputs} practice={practice} /><Link href="/deployment/technical">Technical details</Link></main></RecordroomShellWithPalette>;
+  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6"><PageHeader title="Server" /><ServerChecks inputs={practice.inputs} practice={practice} /><nav aria-label="Server settings" className="grid gap-3"><Link className="underline" href="/deployment/tokens">Tokens for scripts and tools</Link><Link className="underline" href="/deployment/provider-apps">Sign-in apps for data sources</Link></nav><Link className="underline" href="/deployment/technical">Technical details</Link></main></RecordroomShellWithPalette>;
   let report: DeploymentDiagnostics | null = null;
   let unreachable = false;
   let loadError = "Server checks could not be loaded";

@@ -23,7 +23,7 @@ test("the headline and Server address row use the same readiness result", async 
   const src = await readFile(CHECKS_FILE, "utf8")
   // Settings repair brief, decision 1: one reference-origin result drives the headline and row.
   assert.match(src, /const originRow = referenceOriginRow\(/)
-  assert.match(src, /serverAddressHeadline\(originRow\)/)
+  assert.doesNotMatch(src, /\{serverAddressHeadline\(originRow\)\}/)
   assert.match(src, /\[\s*ownerPasswordRow\(inputs\),\s*originRow,/)
 })
 

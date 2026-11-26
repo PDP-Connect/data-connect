@@ -10,7 +10,6 @@ import Link from "next/link"
 import { PageHeader } from "@pdpp/operator-ui/components/primitives"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { loadConnectorSummaryPage } from "../../components/connector-summary-page.tsx"
-import { extractReadinessInputs } from "../../components/deployment-readiness-rows.ts"
 import { LivePoller } from "../../components/live-poller.tsx"
 import { ServerUnreachable } from "../../components/server-unreachable.tsx"
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts"
@@ -32,7 +31,6 @@ import {
   getWebPushConfig,
   listWebPushSubscriptions,
 } from "../../lib/ref-client.ts"
-import { ServerChecks } from "../server-checks.tsx"
 
 export const dynamic = "force-dynamic"
 
@@ -149,7 +147,6 @@ export default async function DeploymentPage({
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title="Technical details" />
         <NotificationDiagnostics />
-        <ServerChecks technical inputs={extractReadinessInputs(report)} />
         <nav
           aria-label="Server settings"
           className="grid border-y border-border/70 sm:grid-cols-2"
