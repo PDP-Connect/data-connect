@@ -18,9 +18,9 @@ test("the sync page puts its source title and relative start time above the requ
   assert.doesNotMatch(source, /title=\{<code[^>]*>\{runId\}/);
 });
 
-test("the request is outside one Details fold and timeline facts identify page-only counts", () => {
-  assert.ok(source.indexOf("<CurrentAssistanceSection") < source.indexOf('<details className="mb-8 pt-4"'));
-  assert.equal((source.match(/<summary[^>]*>Details<\/summary>/g) ?? []).length, 1);
+test("the technical request and timeline remain unfolded and facts identify page-only counts", () => {
+  assert.match(source, /<CurrentAssistanceSection/);
+  assert.equal((source.match(/<summary[^>]*>Details<\/summary>/g) ?? []).length, 0);
   assert.match(source, /Checkpoints in this page/);
   assert.match(source, /Progress in this page/);
   assert.match(source, /Interactions in this page/);

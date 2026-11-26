@@ -11,7 +11,7 @@ const SOURCES = `${HERE}../../sources/`;
 const RECORDS_ADD_PAGE_FILE = `${SOURCES}add/page.tsx`;
 const ROUTES_FILE = fileURLToPath(new URL("../../../../../../../reference-implementation/vendor/operator-ui/src/components/views/routes.ts", import.meta.url));
 const SHELL_FILE = fileURLToPath(new URL("../../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url));
-const CONNECT_PAGE_FILE = `${HERE}../../connect/page.tsx`;
+const CONNECT_PAGE_FILE = `${HERE}../../connect/connect-page.tsx`;
 const ADD_SUPPORT_FILE = `${HERE}../../lib/source-add-support.ts`;
 const SOURCE_SETUP_PRESENTATION_FILE = `${HERE}../../lib/source-setup-presentation.ts`;
 const SOURCE_GROUPS_FILE = `${HERE}../../lib/source-groups.ts`;
@@ -38,7 +38,7 @@ const NAV_CONNECT_APP_CHILD_RE = /\{ label: "Connect an app", href: "\/connect" 
 const CONNECT_PAGE_TITLE_RE = /title="Connect an app"/;
 // The heading subtitle left (it used banned words); the "Need more data first?" note now points setup to Sources.
 // DIRECTION.md Home: setup remains reachable from the app-read page's Add a data source link.
-const CONNECT_PAGE_SETUP_POINTER_RE = /href=\{dashboardRoutes\.section\.addSource\}>Add a data source/;
+
 
 async function sourceFile(name: string): Promise<string> {
   return readFile(`${SOURCES}${name}`, "utf8");
@@ -59,11 +59,12 @@ test("Sources header and empty state use the specified copy and route", async ()
 
 // DIRECTION.md, “Data sources /sources”: controls L1–L21 stay on the list, menu, pager, or source page.
 test("each existing list control L1–L21 still has a visible destination", async () => {
-  const [view, page, model, sourcePage] = await Promise.all([
+  const [view, page, model, sourcePage, technicalPage] = await Promise.all([
     sourceFile("sources-view.tsx"),
     sourceFile("page.tsx"),
     sourceFile("sources-view-model.ts"),
-    readFile(`${SOURCES}[connector]/page.tsx`, "utf8"),
+    readFile(`${SOURCES}[connector]/source-page.tsx`, "utf8"),
+    readFile(`${SOURCES}[connector]/technical/page.tsx`, "utf8"),
   ]);
   const evidence: Array<[string, RegExp]> = [
     ["L1/L2 add source", /Add a data source/],
@@ -84,12 +85,15 @@ test("each existing list control L1–L21 still has a visible destination", asyn
     ["L16 reactivate", /Reactivate resumes collection/],
     ["L17 sync link", /See this sync/],
     // DIRECTION.md, “One data source”: stream rows keep their Explore destination on the data source page.
-    ["L18 explore records", /href=\{`\/sources\/\$\{encodeURIComponent\(connectionId\)\}\/\$\{encodeURIComponent\(s\.name\)\}`\}/],
+    ["L18 explore records", /href=\{`\/sources\/\$\{encodeURIComponent\(connectionId\)\}\/\$\{encodeURIComponent\(stream\.name\)\}`\}/],
     ["L19/L20 paging", /<ConnectorSummaryPager/],
     ["L21 saved-session retry", /Remove saved browser session/],
   ];
   const corpus = `${view}\n${page}\n${model}\n${sourcePage}`;
   for (const [control, pattern] of evidence) assert.match(corpus, pattern, `${control} is missing`);
+  assert.match(technicalPage, /<SourceTechnicalDetails/);
+  assert.match(sourcePage, /<ConnectionIdentityLine/);
+  assert.match(sourcePage, /href=\{`\/sources\/\$\{encodeURIComponent\(connectionId\)\}\/technical/);
   assert.match(page, /purgeRetryId/);
   assert.match(page, /SourcesHeader error=\{params\.error\} message=\{params\.message\} purgeRetryId=\{params\.purge_retry\}/);
 });
@@ -240,8 +244,10 @@ test("shared navigation distinguishes Data sources from app access", async () =>
 
 test("Connect apps stays a read-access page that points setup to Sources", async () => {
   const connect = await readFile(CONNECT_PAGE_FILE, "utf8");
+  const technical = await readFile(`${HERE}../../connect/technical/page.tsx`, "utf8");
   assert.match(connect, CONNECT_PAGE_TITLE_RE);
-  assert.match(connect, CONNECT_PAGE_SETUP_POINTER_RE);
+  assert.match(connect, /href="\/connect\/technical"/);
+  assert.match(technical, /href=\{dashboardRoutes\.section\.addSource\}[\s\S]{0,50}Add a data source/);
   assert.doesNotMatch(connect, LIST_CONNECTOR_MANIFESTS_RE);
   assert.doesNotMatch(connect, ADD_SOURCE_TITLE_RE);
 });

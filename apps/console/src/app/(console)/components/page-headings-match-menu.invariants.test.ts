@@ -20,7 +20,7 @@ const SKIPPED = new Set(["/", "/sources"]);
 
 const HEADING_FILE: Record<string, string> = {
   "/audit": `${CONSOLE}audit/page.tsx`,
-  "/connect": `${CONSOLE}connect/page.tsx`,
+  "/connect": `${CONSOLE}connect/connect-page.tsx`,
   "/deployment": `${CONSOLE}deployment/page.tsx`,
   "/device-exporters": `${CONSOLE}device-exporters/page.tsx`,
   "/event-subscriptions": `${CONSOLE}event-subscriptions/page.tsx`,
@@ -29,7 +29,7 @@ const HEADING_FILE: Record<string, string> = {
   "/notifications": `${CONSOLE}notifications/page.tsx`,
   "/schedules": `${CONSOLE}schedules/page.tsx`,
   "/settings": `${CONSOLE}settings/page.tsx`,
-  "/syncs": `${CONSOLE}syncs/syncs-view.tsx`,
+  "/syncs": `${CONSOLE}syncs/daily-syncs-view.tsx`,
 };
 
 function menuItems(items: NavItem[]): NavItem[] {
