@@ -43,15 +43,15 @@ export function buildSettingsPractice(
 		? "tailscale-private"
 		: name === "typed-step"
 			? "ngrok-https-edge"
-			: "localhost-run";
+      : name === "service-sign-in" ? "tailscale-funnel" : "localhost-run";
 	const provider = {
 		providerId,
-		label: privateRoute
+		label: providerId.startsWith("tailscale-")
 			? "Tailscale"
 			: providerId === "ngrok-https-edge"
 				? "ngrok"
 				: "Temporary address",
-		reach: privateRoute ? "private" : "internet",
+		reach: privateRoute ? "tailnet" : "internet",
 		transport: "https_tunnel",
 		availability: { session: { state: "available", reason: "admitted" } },
 		configuration: {
@@ -62,7 +62,7 @@ export function buildSettingsPractice(
 			credentials: {},
 		},
 		facts: [],
-		prerequisites: [],
+		prerequisites: providerId.startsWith("tailscale-") ? [{ id: "local-setup", state: "unknown", version: { known: false, reason: "not-observed" }, observedAt: null }] : [],
 	};
 	const catalog = {
 		catalogRevision: "practice-1",
@@ -72,8 +72,8 @@ export function buildSettingsPractice(
 			provider,
 			{
 				...provider,
-				providerId: "tailscale-funnel",
-				label: "Tailscale",
+				providerId: "ngrok-tls-passthrough",
+				label: "ngrok",
 				availability: {
 					session: { state: "unsupported", reason: "not-installed" },
 				},
@@ -113,16 +113,17 @@ export function buildSettingsPractice(
 	].includes(name);
 	const hasSetup = name === "service-sign-in" || name === "typed-step";
 	const action = {
-		id: name === "typed-step" ? "auth" : "browser-sign-in",
+		id: name === "typed-step" ? "auth" : "tailscale-browser",
 		kind: name === "typed-step" ? "provide-secret" : "open-url",
 		label:
 			name === "typed-step"
 				? "Provide your ngrok details"
 				: "Sign in to Tailscale",
-		secretLabel: "ngrok account key",
+		secretLabel: "ngrok agent authtoken",
 		digest: "practice-digest",
 		href: "https://login.example.test/sign-in",
 		disclosure: { revision: "1", text: "Sign in to continue.", links: [] },
+    consent: { facts: [], consentFactsDigest: "practice-facts", scope: { kind: "setup", providerId, actionDigest: "practice-digest", actionId: name === "typed-step" ? "auth" : "tailscale-browser", disclosureRevision: "1" }, disclosures: { action: { disclosure: { revision: "1", text: "Sign in to continue.", links: [] } } } },
 		step: {
 			actor: "owner",
 			browser: { expiresAt: iso(600_000), pollAfterMs: 2000 },
@@ -162,11 +163,12 @@ export function buildSettingsPractice(
 		},
 	};
 	const state = {
-		routes: name.startsWith("on-") ? [route] : [],
+		routes: name === "off-unconfirmed" ? [{ ...route, cleanup: { state: "unconfirmed", nextAction: null } }] : name.startsWith("on-") ? [route] : [],
+    ...(name === "off-unconfirmed" ? { lifecycle: { phase: "stopping", stopRequested: true, cleanup: "unconfirmed", confinement: { known: false }, handle: route.handle } } : {}),
 		reasons: {},
 		starting: name === "turning-on",
 		passwordSet: !["desktop-fresh", "password"].includes(name),
-		operations: hasOperation ? [operation] : [],
+		operations: hasOperation && name !== "off-unconfirmed" ? [operation] : [],
 		services: hasSetup
 			? [
 					{

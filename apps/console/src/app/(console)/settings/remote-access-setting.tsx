@@ -136,10 +136,16 @@ export function RemoteAccessSetting({
   request = requestReachability,
   appVersion,
   technical = false,
+  canOpenPasswordWindow = canOpenOwnerPasswordWindowAction,
+  openPasswordWindow = requestOwnerPasswordWindowAction,
+  migrateReservations = migrateLegacySetupReservations,
 }: {
   request?: typeof requestReachability;
   appVersion?: string;
   technical?: boolean;
+  canOpenPasswordWindow?: typeof canOpenOwnerPasswordWindowAction;
+  openPasswordWindow?: typeof requestOwnerPasswordWindowAction;
+  migrateReservations?: typeof migrateLegacySetupReservations;
 }) {
   const [host, setHost] = useState<{ known: true; value: HostSettings } | { known: false; reason: string }>({
     known: false,
@@ -373,7 +379,7 @@ export function RemoteAccessSetting({
     };
     // Setups an older console kept in the browser move to the host first, and
     // polling starts only after that finishes.
-    void migrateLegacySetupReservations(request)
+    void migrateReservations(request)
       .catch(() => undefined)
       .then(async () => {
         if (!active) {
@@ -397,7 +403,7 @@ export function RemoteAccessSetting({
         clearInterval(timer);
       }
     };
-  }, [request]);
+  }, [request, migrateReservations]);
 
   useEffect(() => {
     if (!operation || operation.stage !== "applying") {
@@ -466,7 +472,7 @@ export function RemoteAccessSetting({
   useEffect(() => {
     if (!passwordMissing) return;
     let current = true;
-    void canOpenOwnerPasswordWindowAction()
+    void canOpenPasswordWindow()
       .then((available) => {
         if (current) setCanSetPasswordHere(available);
       })
@@ -476,7 +482,7 @@ export function RemoteAccessSetting({
     return () => {
       current = false;
     };
-  }, [passwordMissing]);
+  }, [passwordMissing, canOpenPasswordWindow]);
   // Read by actions already under way, which can outlive the state they started in.
   const passwordMissingNow = useRef(false);
   passwordMissingNow.current = passwordMissing;
@@ -959,7 +965,7 @@ export function RemoteAccessSetting({
     // reopened afterwards.
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${PASSWORD_SET_FRAGMENT}`);
     await change(async () => {
-      const result = await requestOwnerPasswordWindowAction();
+      const result = await openPasswordWindow();
       if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
     }, "change");
   }

@@ -29,7 +29,8 @@ mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
 });
 for (const name of settingsPracticeNames) {
 	test(`practice ${name} renders the real remote access component from host inputs`, async () => {
-		const practice = buildSettingsPractice(name)!;
+		const practice = buildSettingsPractice(name);
+    assert.ok(practice);
 		const dom = new JSDOM('<div id="root"></div>', {
 			url: "http://localhost/settings",
 		});
@@ -43,7 +44,9 @@ for (const name of settingsPracticeNames) {
 			HTMLButtonElement: dom.window.HTMLButtonElement,
 		});
 		const { RemoteAccessSetting } = await import("./remote-access-setting.tsx");
-		const root = createRoot(dom.window.document.querySelector("#root")!);
+		const container = dom.window.document.querySelector("#root");
+    assert.ok(container);
+    const root = createRoot(container);
 		try {
 			await act(async () =>
 				root.render(
