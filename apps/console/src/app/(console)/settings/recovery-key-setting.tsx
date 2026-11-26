@@ -5,7 +5,7 @@
 
 import { Button } from "@/components/ui/button.tsx"
 import { Diagnostics } from "./diagnostics.tsx"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
 
 /**
@@ -52,13 +52,21 @@ export function RecoveryKeySetting({
   const [notice, setNotice] = useState<Notice | null>(
     practiceState === "wrong" ? "wrong" : practiceState === "no-password" ? "not-set" : null
   )
-  const [asking, setAsking] = useState(practiceState !== undefined && practiceState !== "shown")
+  const [view, setView] = useState<"hidden" | "asking" | "revealed">(
+    practiceState === "shown" ? "revealed" : practiceState !== undefined ? "asking" : "hidden"
+  )
+  const attempt = useRef(0)
+  useEffect(() => () => { attempt.current += 1 }, [])
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
 
   const cancel = () => {
-    setAsking(false)
+    attempt.current += 1
+    setView("hidden")
+    setCode(null)
+    setCopyState("idle")
+    setBusy(false)
     setPassword("")
     setNotice(null)
     setError(null)
@@ -75,22 +83,24 @@ export function RecoveryKeySetting({
       setError("This is a practice state. Your recovery code is unchanged.")
       return
     }
+    const ticket = ++attempt.current
     setBusy(true)
     setError(null)
     setNotice(null)
     setCopyState("idle")
     void exportKit(typed)
       .then(result => {
+        if (ticket !== attempt.current) return
         if (!result.ok) {
           if (result.reason === "failed") setError(result.message)
           else setNotice(result.reason)
           return
         }
         setCode(result.code)
-        setAsking(false)
+        setView("revealed")
       })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusy(false))
+      .catch(reason => { if (ticket === attempt.current) setError(String(reason)) })
+      .finally(() => { if (ticket === attempt.current) setBusy(false) })
   }
 
   const copyCode = () => {
@@ -98,10 +108,11 @@ export function RecoveryKeySetting({
       setCopyState("failed")
       return
     }
+    const ticket = attempt.current
     void navigator.clipboard
       .writeText(code)
-      .then(() => setCopyState("copied"))
-      .catch(() => setCopyState("failed"))
+      .then(() => { if (ticket === attempt.current) setCopyState("copied") })
+      .catch(() => { if (ticket === attempt.current) setCopyState("failed") })
   }
 
   return (
@@ -136,7 +147,7 @@ export function RecoveryKeySetting({
         <Diagnostics><pre>{error}</pre></Diagnostics></>
       ) : null}
 
-      {code ? (
+      {view === "revealed" && code ? (
         <div className="grid gap-2">
           <pre className="select-all break-all rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-[15px] text-foreground">
             {code}
@@ -149,6 +160,9 @@ export function RecoveryKeySetting({
             >
               {copyState === "copied" ? "Copied" : "Copy"}
             </Button>
+            <Button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px]" onClick={cancel} type="button">
+              Done
+            </Button>
             {copyState === "failed" ? (
               <span className="pdpp-caption text-muted-foreground">
                 Could not copy automatically. Select the code above and copy it manually.
@@ -158,7 +172,7 @@ export function RecoveryKeySetting({
         </div>
       ) : null}
 
-      {asking ? (
+      {view === "asking" ? (
         <form className="grid max-w-xl gap-3" onSubmit={runExport}>
           <label className="grid gap-1 text-sm">
             Enter your password to show your recovery code
@@ -194,18 +208,18 @@ export function RecoveryKeySetting({
             </Button>
           </div>
         </form>
-      ) : (
+      ) : view === "hidden" ? (
         <Button
           className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           onClick={() => {
             setCode(null)
-            setAsking(true)
+            setView("asking")
           }}
           type="button"
         >
-          {code ? "Show recovery code again" : "Show recovery code"}
+          Show recovery code
         </Button>
-      )}
+      ) : null}
     </div>
   )
 }

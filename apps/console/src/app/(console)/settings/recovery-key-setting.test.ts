@@ -182,3 +182,38 @@ for (const [state, expected] of [
     })
   })
 }
+
+
+test("Done hides the recovery code and showing it again requires a password", async () => {
+  let calls = 0
+  await mountSetting({ exportKit: async (): Promise<Result> => { calls++; return { ok: true, code: "TEST-RECOVERY-CODE" } } }, async ({ container, press, type, submit }) => {
+    await press("Show recovery code")
+    await type(PASSWORD)
+    await submit()
+    assert.equal(container.querySelector("pre")?.textContent, "TEST-RECOVERY-CODE")
+    await press("Done")
+    assert.equal(container.querySelector("pre"), null)
+    assert.equal(container.querySelector("input"), null)
+    await press("Show recovery code")
+    assert.equal(container.querySelector("input")?.getAttribute("type"), "password")
+    assert.equal((container.querySelector("input") as HTMLInputElement).value, "")
+    assert.equal(calls, 1)
+  })
+})
+
+test("Done ignores late copy feedback when the code is revealed again", async () => {
+  let finishCopy!: () => void
+  const copy = new Promise<void>(resolve => { finishCopy = resolve })
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: () => copy } } })
+  await mountSetting({ exportKit: async (): Promise<Result> => ({ ok: true, code: "TEST-RECOVERY-CODE" }) }, async ({ container, press, submit }) => {
+    await press("Show recovery code")
+    await submit()
+    await press("Copy")
+    await press("Done")
+    await press("Show recovery code")
+    await submit()
+    await act(async () => finishCopy())
+    assert.ok([...container.querySelectorAll("button")].some(button => button.textContent === "Copy"))
+    assert.doesNotMatch(container.textContent ?? "", /Copied/)
+  })
+})
