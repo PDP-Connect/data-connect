@@ -26,12 +26,12 @@ test("browser-session setup keeps one clear action and one way back", async () =
   // Reconnect still works where adding a new account is unavailable.
   assert.match(page, /if \(!\(repairMode \|\| canConnect\)\)/);
   assert.match(await readFile(fileURLToPath(new URL("./page.tsx", import.meta.url)), "utf8"), /notFound\(\)/);
-  // The live sign-in pages are not part of this change (design "Not in this trial").
-  assert.match(launch, /title=\{`Connect \$\{displayName\}`\}/);
-  assert.match(launch, /Back to Data sources/);
-  assert.match(panel, /The browser could not open\. Try again\./);
-  assert.match(panel, /Open sync history/);
-  assert.match(panel, /state\.error\.replaceAll\(\/PDPP/);
+  assert.match(launch, /<BrowserSessionLaunchPanel/);
+  assert.match(panel, /Opening \$\{displayName\}…/);
+  assert.match(panel, /couldn't be opened/);
+  assert.match(panel, /Back to all services/);
+  assert.match(panel, /<WentWrong/);
+  assert.doesNotMatch(panel, /Open sync history/);
 });
 
 test("browser-session copy examples use plain words in start, repair, unavailable, and failed states", () => {

@@ -57,8 +57,8 @@ const LAUNCH_PANEL_RECOVER_RE =
   /fetch\(\s*`\/connect\/browser-session\/\$\{encodeURIComponent\(connectorId\)\}\/launch\/recover\?/;
 const LAUNCH_PANEL_LOST_TRANSPORT_RECOVERY_RE = /recoverStartedBrowserRun\(connectorId, connectionId, 6\)/;
 // DIRECTION.md, “Words”: keep the failure copy plain and tell the person to try again.
-const LAUNCH_PANEL_INLINE_FAILURE_RE = /The browser could not open\. Try again\./;
-const LAUNCH_PANEL_RUNS_FALLBACK_RE = /href="\/syncs"/;
+const LAUNCH_PANEL_INLINE_FAILURE_RE = /couldn't be opened/;
+const LAUNCH_PANEL_RUNS_FALLBACK_RE = /href="\/sources\/add"/;
 const LAUNCH_START_ROUTE_RUN_RE = /runConnectionNow\(connectionId\)/;
 const LAUNCH_START_ROUTE_ENROLLMENT_ADMISSION_RE = /runAdmission: "browser_enrollment"/;
 const LAUNCH_START_ROUTE_CLEANUP_RE = /abandonBrowserEnrollmentShell\(connectionId\)/;

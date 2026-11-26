@@ -3,10 +3,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
+import { buttonVariants, type ConnectorIconLike } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import { ConnectHeader, WentWrong } from "../../../../sources/add/connect-parts.tsx";
 import { flowPreview } from "../../../flow-preview.ts";
 
 interface LaunchState {
@@ -112,12 +113,14 @@ export function BrowserSessionLaunchPanel({
   displayName,
   draft,
   previewState,
+  icon,
 }: {
   connectionId: string;
   connectorId: string;
   displayName: string;
   draft: boolean;
   previewState?: string;
+  icon?: ConnectorIconLike | null;
 }) {
   const [state, setState] = useState<LaunchState>({ error: previewState && previewState !== "opening" ? (previewState === "busy" ? flowPreview.busyError : flowPreview.startError) : null, networkLost: previewState === "lost-contact", starting: !previewState || previewState === "opening" });
   const startedRef = useRef(false);
@@ -149,46 +152,19 @@ export function BrowserSessionLaunchPanel({
       });
   }, [connectionId, connectorId, draft, previewState]);
 
-  return (
-    <section className="grid gap-4">
-      <p className="pdpp-body text-muted-foreground">
-        {state.starting ? (
-          `DataConnect is opening the browser for ${displayName}. Keep this page open.`
-        ) : state.networkLost ? (
-          <>
-            This page lost contact with DataConnect. Check <Link href="/syncs">sync history</Link> before trying again.
-          </>
-        ) : (
-          "The browser could not open. Try again."
-        )}
-      </p>
+  return <LaunchPresentation connectorId={connectorId} displayName={displayName} icon={icon} onRetry={start} state={state} />;
+}
 
-      {state.error ? (
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={buttonVariants({ className: "min-h-11", size: "sm", variant: "default" })}
-            onClick={start}
-            type="button"
-          >
-            Try again
-          </button>
-        </div>
-      ) : null}
-      {state.error ? (
-        <details className="pdpp-caption text-muted-foreground">
-          <summary className="inline-flex min-h-11 cursor-pointer items-center">Details</summary>
-          <p className="mt-2">{state.error.replaceAll(/PDPP/giu, "DataConnect")}</p>
-          <Link className="mt-2 inline-flex min-h-11 items-center underline underline-offset-2" href="/syncs">
-            Open sync history
-          </Link>
-          <Link
-            className="mt-2 inline-flex min-h-11 items-center underline underline-offset-2"
-            href={`/connect/browser-session/${encodeURIComponent(connectorId)}`}
-          >
-            Connect {displayName}
-          </Link>
-        </details>
-      ) : null}
+export function LaunchPresentation({ connectorId, displayName, icon, onRetry, state }: { connectorId: string; displayName: string; icon?: ConnectorIconLike | null; onRetry: () => void; state: LaunchState }) {
+  const title = state.starting ? `Opening ${displayName}…` : state.networkLost ? "This page lost contact with DataConnect." : `${displayName}'s sign-in page couldn't be opened.`;
+  return <>
+    <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
+    <ConnectHeader connectorKey={connectorId} icon={icon} name={displayName} title={title} />
+    <section className="grid max-w-xl gap-4">
+      {state.starting ? <p className="text-muted-foreground">This can take a minute. Keep this page open.</p> : null}
+      {!state.starting && !state.networkLost && /busy|queued|deferred/i.test(state.error ?? "") ? <p className="text-muted-foreground">DataConnect is signing in to another service right now. Try again in a moment.</p> : null}
+      {!state.starting ? <div className="flex flex-wrap gap-2"><button className={buttonVariants({ size: "sm", variant: "default" })} onClick={onRetry} type="button">{state.networkLost ? "Check again" : "Try again"}</button>{!state.networkLost ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">Back to all services</Link> : null}</div> : null}
+      {state.error && !state.networkLost ? <WentWrong message={state.error.replaceAll(/secure browser/giu, "the browser")} /> : null}
     </section>
-  );
+  </>;
 }

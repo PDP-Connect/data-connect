@@ -8,12 +8,12 @@ import { fileURLToPath } from "node:url";
 
 const PAGE_FILE = fileURLToPath(new URL("./[connectorId]/page.tsx", import.meta.url));
 
-test("provider authorization has the account action and one way back", async () => {
+test("provider authorization has the account action and shared service heading", async () => {
   const page = await readFile(PAGE_FILE, "utf8") + await readFile(new URL("./[connectorId]/provider-auth-body.tsx", import.meta.url), "utf8");
-  assert.match(page, /title=[\s\S]{0,200}Connect \{displayName\}/);
-  assert.match(page, /Allow DataConnect to read your \{displayName\} account\./);
+  assert.match(page, /<ConnectHeader/);
+  assert.match(page, /DataConnect never sees your/);
   assert.match(page, /Continue to \{displayName\}/);
-  assert.equal((page.match(/Back to Data sources/g) ?? []).length, 1);
+  assert.equal((page.match(/Back to Data sources/g) ?? []).length, 0);
   // The setup status message is specific to the provider authorization page.
   assert.match(page, /supportsProviderAuth\(/);
   assert.match(page, /notFound\(\)/);

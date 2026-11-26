@@ -1,13 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
 import { formatConnectorKeyForDisplay } from "@pdpp/display";
-import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { loadBrowserConnectSupport } from "../../../../lib/load-browser-connect-support.ts";
 import { findManifestForConnectorId } from "../../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../../lib/rs-client.ts";
@@ -57,29 +53,13 @@ export default async function BrowserSessionLaunchPage({
 
   return (
     <RecordroomShellWithPalette>
-      <PageHeader
-        actions={
-          <Link className={buttonVariants({ className: "min-h-11", size: "sm", variant: "ghost" })} href="/sources">
-            Back to Data sources
-          </Link>
-        }
-        description={
-          <span className="inline-flex items-center gap-2">
-            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            <span>Sign in to {displayName} in the browser below.</span>
-          </span>
-        }
-        title={`Connect ${displayName}`}
-      />
-
-      <div className="mx-auto max-w-lg px-4 py-8">
         <BrowserSessionLaunchPanel
           connectionId={connectionId}
           connectorId={connectorId}
           displayName={displayName}
           draft={draft}
+          icon={connectorIcon}
         />
-      </div>
     </RecordroomShellWithPalette>
   );
 }

@@ -78,9 +78,9 @@ test("browser-session launch fails closed when the controller returns no run id"
   assert.match(result.message, NO_RUN_ID_RE);
 });
 
-test("a lost network connection points to sync history without claiming the browser failed to open", async () => {
+test("a lost network connection asks for a check without claiming the browser failed to open", async () => {
   const panel = await readFile(LAUNCH_PANEL_FILE, "utf8");
-  assert.match(panel, /state\.networkLost \? \([\s\S]*This page lost contact with DataConnect/);
-  assert.match(panel, /<Link href="\/syncs">sync history<\/Link>/);
+  assert.match(panel, /state\.networkLost \? "This page lost contact with DataConnect\."/);
+  assert.match(panel, /state\.networkLost \? "Check again" : "Try again"/);
   assert.match(panel, /networkLost: isLostTransportError\(err\)/);
 });

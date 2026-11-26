@@ -1,12 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { formatConnectorKeyForDisplay } from "@pdpp/display";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { buildOwnerConnectorCatalog } from "../../../lib/connection-catalog.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../../lib/rs-client.ts";
+import { loadServiceContext } from "../../../sources/add/service-context.ts";
 import { supportsProviderAuth } from "./provider-auth-support.ts";
 
 import { flowPreview, flowPreviewState } from "../../flow-preview.ts";
@@ -33,7 +33,7 @@ export default async function ProviderAuthPage({
 }) {
   const previewQuery = await searchParams;
   const preview = flowPreviewState("provider", previewQuery);
-  if (preview) return <RecordroomShellWithPalette><ProviderAuthBody connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} error={preview === "could-not-start" ? flowPreview.startError : undefined} existing={preview === "already-have-one"} /></RecordroomShellWithPalette>;
+  if (preview) return <RecordroomShellWithPalette><ProviderAuthBody connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} error={preview === "could-not-start" ? flowPreview.startError : undefined} accounts={preview === "already-have-one" ? [{ connectionId: flowPreview.connectionId, displayName: "Northwind, home" }] : []} /></RecordroomShellWithPalette>;
   const [{ connectorId }, query, manifests, templates] = await Promise.all([
     params,
     searchParams,
@@ -43,11 +43,12 @@ export default async function ProviderAuthPage({
   if (!supportsProviderAuth(buildOwnerConnectorCatalog(manifests, templates), connectorId)) {
     notFound();
   }
-  const displayName = formatConnectorKeyForDisplay(connectorId);
+  const context = await loadServiceContext(connectorId);
+  const displayName = context.displayName;
   const connectorIcon = findManifestForConnectorId(manifests, connectorId)?.icon;
   return (
     <RecordroomShellWithPalette>
-      <ProviderAuthBody connectorId={connectorId} connectorIcon={connectorIcon} displayName={displayName} error={query.error} />
+      <ProviderAuthBody connectorId={connectorId} connectorIcon={connectorIcon} displayName={displayName} error={query.error} accounts={context.accounts} tier={context.tier} kinds={findManifestForConnectorId(manifests, connectorId)?.streams?.map((stream) => stream.name) ?? []} />
     </RecordroomShellWithPalette>
   );
 }
