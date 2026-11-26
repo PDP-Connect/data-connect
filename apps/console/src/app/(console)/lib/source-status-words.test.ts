@@ -369,9 +369,9 @@ test("relative time and old dates have the required human forms and omit missing
 
 test("source page sentences use the same row and named slots for page-owned facts", () => {
   const sentence = (candidate: RefConnectorSummary) => sourceStateSentence(candidate, { now: NOW, name: "Example source" });
-  assert.deepEqual(sentence(fixture(3)), { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" });
+  assert.deepEqual(sentence(fixture(3)), { text: "Disconnected. Your records stay.", slot: null });
   assert.deepEqual(sentence(fixture(5)), { text: "The first copy of Example source may not be complete.", slot: "what_you_can_do" });
-  assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again. Last successful sync 2 hours ago.", slot: null });
+  assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again.", slot: null });
   assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do.", slot: null });
   assert.deepEqual(sentence(fixture(14)), { text: "Some optional data is missing. Last synced 2 hours ago.", slot: null });
   assert.deepEqual(sentence(fixture(22)), { text: "Nothing imported yet.", slot: null });
@@ -403,7 +403,7 @@ test("coming times are relative, and a late schedule is said plainly", () => {
   const schedulerBackoff = scheduleOf.scheduler_backoff;
   assert.ok(schedulerBackoff);
   const inFourHours = new Date(NOW.getTime() + 4 * 60 * 60 * 1000).toISOString();
-  assert.equal(sentence(source({ ...fixture(19), schedule: { ...scheduleOf, scheduler_backoff: null, next_due_at: inFourHours } })), "Up to date. Synced 2 hours ago; next in 4 hours.");
+  assert.equal(sentence(source({ ...fixture(19), schedule: { ...scheduleOf, scheduler_backoff: null, next_due_at: inFourHours } })), "Up to date. Synced 2 hours ago.");
   assert.equal(sentence(fixture(19)), "Up to date. Synced 2 hours ago.");
   assert.equal(sentence(source({ ...fixture(19), connection_health: health({ lateness: { state: "late" } }) })), "Synced 2 hours ago. The next sync is late.");
   const inTwentyMinutes = new Date(NOW.getTime() + 20 * 60 * 1000).toISOString();

@@ -17,8 +17,7 @@ import type { StreamSummary } from "../../lib/rs-client.ts";
 import { type SourceStatusRow, sourceStatusWords } from "../../lib/source-status-words.ts";
 import type { ConnectorPageModel } from "./source-page.tsx";
 
-const DEMO_NOW = new Date();
-const DEMO_SUCCESS = new Date(DEMO_NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
+function demoSuccess() { return new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); }
 
 function toRunRef(summary: RefConnectorRunSummary | null) {
   if (!summary) {
@@ -46,10 +45,10 @@ export function buildRecoveryDemoModel(
     connector_instance_id: connectionId,
     event_count: 14,
     failure_reason: "local collector outbox has dead-lettered rows",
-    first_at: "2026-07-01T11:15:00.000Z",
+    first_at: new Date(Date.now() - 2700000).toISOString(),
     grant_id: null,
     kinds: ["messages"],
-    last_at: "2026-07-01T11:18:00.000Z",
+    last_at: new Date(Date.now() - 2520000).toISOString(),
     needs_input: false,
     object: "run_summary",
     run_id: "run_demo_recovery",
@@ -57,13 +56,13 @@ export function buildRecoveryDemoModel(
   };
   const streams: StreamSummary[] = [
     {
-      last_updated: "2026-07-01T10:40:00.000Z",
+      last_updated: new Date(Date.now() - 7200000).toISOString(),
       name: "messages",
       object: "stream",
       record_count: 428,
     },
     {
-      last_updated: "2026-06-30T17:12:00.000Z",
+      last_updated: new Date(Date.now() - 64800000).toISOString(),
       name: "sessions",
       object: "stream",
       record_count: 36,
@@ -94,7 +93,7 @@ export function buildRecoveryDemoModel(
     progress: {
       gaps_drained_last_run: null,
       headline: "3 local rows need recovery before collection can resume.",
-      last_refreshed_at: "2026-07-01T12:00:00.000Z",
+      last_refreshed_at: new Date(Date.now() - 0).toISOString(),
       mode: "local_device",
       records_committed_last_run: 24,
       retained_records: 464,
@@ -157,7 +156,7 @@ export function buildRecoveryDemoModel(
         expires_at: null,
         id: "cond_demo_dead_letter",
         message: "The local collector reported dead-lettered rows.",
-        observed_at: "2026-07-01T11:58:00.000Z",
+        observed_at: new Date(Date.now() - 120000).toISOString(),
         origin: "local_collector",
         reason: "dead_letter_backlog",
         remediation: {
@@ -182,7 +181,7 @@ export function buildRecoveryDemoModel(
     },
     dominant_condition_id: "cond_demo_dead_letter",
     forward_disposition: "awaiting_owner",
-    last_success_at: "2026-07-01T10:40:00.000Z",
+    last_success_at: new Date(Date.now() - 7200000).toISOString(),
     next_action: null,
     next_attempt_at: null,
     reason_code: "local_collector_dead_letter",
@@ -199,9 +198,9 @@ export function buildRecoveryDemoModel(
       device_id: "device_demo_workstation",
       display_name: "workstation",
       last_error: null,
-      last_heartbeat_at: "2026-07-01T11:58:00.000Z",
+      last_heartbeat_at: new Date(Date.now() - 120000).toISOString(),
       last_heartbeat_status: "ok",
-      last_ingest_at: "2026-07-01T10:40:00.000Z",
+      last_ingest_at: new Date(Date.now() - 7200000).toISOString(),
       local_binding_name: "workstation",
       object: "device_source_instance",
       outbox_diagnostics: { dead_letter: 3, pending: 3, total: 27 },
@@ -228,7 +227,7 @@ export function buildRecoveryDemoModel(
     lastRun: toRunRef({
       event_count: run.event_count,
       failure_reason: run.failure_reason,
-      finished_at: "2026-07-01T11:18:00.000Z",
+      finished_at: new Date(Date.now() - 2520000).toISOString(),
       first_at: run.first_at,
       last_at: run.last_at,
       run_id: run.run_id,
@@ -238,17 +237,17 @@ export function buildRecoveryDemoModel(
     lastSuccessfulRun: toRunRef({
       event_count: 8,
       failure_reason: null,
-      finished_at: "2026-07-01T10:40:00.000Z",
-      first_at: "2026-07-01T10:39:00.000Z",
-      last_at: "2026-07-01T10:40:00.000Z",
+      finished_at: new Date(Date.now() - 7200000).toISOString(),
+      first_at: new Date(Date.now() - 7260000).toISOString(),
+      last_at: new Date(Date.now() - 7200000).toISOString(),
       run_id: "run_demo_previous_success",
-      started_at: "2026-07-01T10:39:00.000Z",
+      started_at: new Date(Date.now() - 7260000).toISOString(),
       status: "succeeded",
     }),
     localDeviceProgress: {
-      last_heartbeat_at: "2026-07-01T11:58:00.000Z",
+      last_heartbeat_at: new Date(Date.now() - 120000).toISOString(),
       last_heartbeat_status: "ok",
-      last_ingest_at: "2026-07-01T10:40:00.000Z",
+      last_ingest_at: new Date(Date.now() - 7200000).toISOString(),
       outbox_counts: { dead_letter: 3, pending: 3, total: 27 },
       records_pending: 3,
       source_count: 1,
@@ -346,11 +345,11 @@ export function withStatusDemoVariant(model: ConnectorPageModel, variant: string
       last_run: {
         event_count: 0,
         failure_reason: "The source did not return records.",
-        finished_at: DEMO_SUCCESS,
-        first_at: DEMO_SUCCESS,
-        last_at: DEMO_SUCCESS,
+        finished_at: demoSuccess(),
+        first_at: demoSuccess(),
+        last_at: demoSuccess(),
         run_id: "run_demo_failed_without_rows",
-        started_at: DEMO_SUCCESS,
+        started_at: demoSuccess(),
         status: "failed",
       },
     };
@@ -403,7 +402,7 @@ function statusSchedule(
     automation_mode: "unattended",
     automation_summary: effectiveMode === "manual" ? "Manual" : "Automatic",
     connector_id: "claude-code",
-    created_at: DEMO_SUCCESS,
+    created_at: demoSuccess(),
     effective_mode: effectiveMode,
     enabled: effectiveMode === "automatic",
     human_attention_needed: false,
@@ -413,7 +412,7 @@ function statusSchedule(
     last_error_code: null,
     last_finished_at: null,
     last_started_at: null,
-    last_successful_at: DEMO_SUCCESS,
+    last_successful_at: demoSuccess(),
     minimum_interval_warning: null,
     next_due_at: nextDueAt,
     notification_posture: "none",
@@ -421,7 +420,7 @@ function statusSchedule(
     recommended_policy: null,
     scheduler_backoff: backoff,
     trigger_kind: "scheduled",
-    updated_at: DEMO_SUCCESS,
+    updated_at: demoSuccess(),
   };
 }
 
@@ -462,20 +461,20 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
   const demoHealth = model.connectionHealth!;
   const statusActionSource = {
     ...model.source,
-    connection_health: { ...demoHealth, last_success_at: DEMO_SUCCESS },
+    connection_health: { ...demoHealth, last_success_at: demoSuccess() },
     display_name: `Status example ${row}`,
     last_successful_run: {
       event_count: 8,
       failure_reason: null,
-      finished_at: DEMO_SUCCESS,
-      first_at: DEMO_SUCCESS,
-      last_at: DEMO_SUCCESS,
+      finished_at: demoSuccess(),
+      first_at: demoSuccess(),
+      last_at: demoSuccess(),
       run_id: "run_demo_previous_success",
-      started_at: DEMO_SUCCESS,
+      started_at: demoSuccess(),
       status: "succeeded",
     },
     owner_state: {
-      evidence_as_of: DEMO_SUCCESS,
+      evidence_as_of: demoSuccess(),
       owner_of_state: "system" as const,
       posture: "observed" as const,
       resolver: "healthy" as const,
@@ -507,12 +506,12 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
       source = { ...source, source_kind: "local_device", source_visibility: "archived", status: "paused" };
       break;
     case 2:
-      source = { ...source, total_records: 0, total_records_state: "known_zero", connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, revoked_at: DEMO_SUCCESS, source_visibility: "setup_failed", status: "revoked" };
+      source = { ...source, total_records: 0, total_records_state: "known_zero", connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, revoked_at: demoSuccess(), source_visibility: "setup_failed", status: "revoked" };
       connectionStatus = "revoked";
       setupFailed = true;
       break;
     case 3:
-      source = { ...source, revoked_at: DEMO_SUCCESS, status: "revoked" };
+      source = { ...source, revoked_at: demoSuccess(), status: "revoked" };
       connectionStatus = "revoked";
       break;
     case 4:
@@ -537,7 +536,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
     case 8:
       source = {
         ...source,
-        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "needs_owner" },
+        owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "owner", posture: "observed", resolver: "needs_owner" },
         rendered_verdict: {
           ...source.rendered_verdict!,
           pill: { label: "Can't collect", tone: "red" },
@@ -549,19 +548,19 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
     case 9:
       source = {
         ...source,
-        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "setup_in_progress" },
+        owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "owner", posture: "observed", resolver: "setup_in_progress" },
       };
       break;
     case 10:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "owner_paused" }, status: "paused" };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "owner", posture: "observed", resolver: "owner_paused" }, status: "paused" };
       connectionStatus = "paused";
       break;
     case 11: {
-      const startedAt = "2026-11-24T11:58:00.000Z";
+      const startedAt = new Date(Date.now() - 120000).toISOString();
       source = {
         ...source,
         last_run: { event_count: 0, failure_reason: null, finished_at: null, first_at: startedAt, last_at: startedAt, run_id: "run_demo_active", started_at: startedAt, status: "started" },
-        owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "collecting" },
+        owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "collecting" },
       };
       running = true;
       break;
@@ -574,36 +573,36 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
         reason_class: "retry",
         recommended_health_state: "cooling_off",
       });
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Missing data", tone: "amber" } }, schedule };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Missing data", tone: "amber" } }, schedule };
       break;
     case 13:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "blocked_maintainer" } };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "blocked_maintainer" } };
       break;
     case 14:
     case 15: {
       const label = row === 14 ? "Missing optional data" : "Some records stuck";
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label, tone: "amber" } } };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "system_degraded" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label, tone: "amber" } } };
       break;
     }
     case 17:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "owner", posture: "observed", resolver: "refresh_due" }, schedule: statusSchedule("manual") };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "owner", posture: "observed", resolver: "refresh_due" }, schedule: statusSchedule("manual") };
       schedule = source.schedule;
       break;
     case 18:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Import complete", tone: "green" } }, source_kind: "manual" };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "healthy" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Import complete", tone: "green" } }, source_kind: "manual" };
       break;
     case 19:
-      schedule = statusSchedule("automatic", null, new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString());
-      source = { ...source, connection_health: { ...source.connection_health, lateness: { state: "on_time" } }, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "healthy" }, schedule };
+      schedule = statusSchedule("automatic", null, new Date(Date.now() + 30 * 60 * 1000).toISOString());
+      source = { ...source, connection_health: { ...source.connection_health, lateness: { state: "on_time" } }, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "healthy" }, schedule };
       break;
     case 20:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "frozen-since-last-run", resolver: "healthy" } };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "frozen-since-last-run", resolver: "healthy" } };
       break;
     case 21:
-      source = { ...source, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Collected, not independently checked", tone: "grey" } } };
+      source = { ...source, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: { ...source.rendered_verdict!, pill: { label: "Collected, not independently checked", tone: "grey" } } };
       break;
     case 22:
-      source = { ...source, connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, owner_state: { evidence_as_of: DEMO_SUCCESS, owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: null, source_kind: "manual" };
+      source = { ...source, connection_health: { ...source.connection_health, last_success_at: null }, last_successful_run: null, owner_state: { evidence_as_of: demoSuccess(), owner_of_state: "system", posture: "observed", resolver: "not_measured" }, rendered_verdict: null, source_kind: "manual" };
       break;
     case 23:
       source = { ...source, owner_state: undefined };
@@ -613,7 +612,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
       break;
   }
 
-  const status = sourceStatusWords(source, { now: DEMO_NOW });
+  const status = sourceStatusWords(source, { now: new Date() });
   if (["review_setup", "review_result"].includes(status.action?.kind ?? "")) {
     const action = status.action;
     source = {

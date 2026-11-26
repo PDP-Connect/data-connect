@@ -1,7 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import Link from "next/link";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { RecordroomShellWithPalette } from "../../../components/recordroom-shell-with-palette.tsx";
 import {
@@ -22,7 +21,7 @@ export default async function TechnicalPage({
 	const sp = await searchParams;
 	const model =
 		process.env.NODE_ENV !== "production" && sp.demo
-			? (await import("../source-detail-demo-data.ts")).buildRecoveryDemoModel(
+			? (await import("../source-page-practice.ts")).buildSourcePracticeModel(sp.demo) ?? (await import("../source-detail-demo-data.ts")).buildRecoveryDemoModel(
 					16,
 					true,
 				)
@@ -32,13 +31,6 @@ export default async function TechnicalPage({
 			<PageHeader breadcrumbs={[{ href: "/sources", label: "Data sources" }, { href: `/sources/${encodeURIComponent(model.connectionId)}`, label: model.displayName }, { href: `/sources/${encodeURIComponent(model.connectionId)}/technical`, label: "Technical details" }]} title={`Technical details for ${model.displayName}`} />
 			<p className="mb-4 text-muted-foreground">
 				Ids, logs and measurements for whoever is helping you with a problem.
-			</p>
-			<p className="mb-6">
-				<Link
-					href={`/sources/${encodeURIComponent(model.connectionId)}${process.env.NODE_ENV !== "production" && sp.demo ? "?demo=atlas" : ""}`}
-				>
-					Back to {model.displayName}
-				</Link>
 			</p>
 			<SourceTechnicalDetails
 				model={model}

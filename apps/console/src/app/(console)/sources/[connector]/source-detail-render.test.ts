@@ -259,7 +259,8 @@ test("the technical practice route has its heading, explanation and way back", a
   const document = new JSDOM(renderToStaticMarkup(html)).window.document;
   assert.equal(document.querySelector("h1")?.textContent, "Technical details for Claude Code workstation");
   assert.match(document.body.textContent ?? "", /Ids, logs and measurements for whoever is helping you with a problem\./);
-  assert.ok(document.querySelector('a[href$="?demo=atlas"]'));
+  assert.ok(document.querySelector('nav a[href="/sources/cin_demo_claude_code_workstation"]'));
+  assert.doesNotMatch(document.body.textContent ?? "", /Back to/);
 });
 
 test("the main device steps keep exactly the technical page's resolved commands", async () => {
@@ -290,11 +291,11 @@ test("unknown counts are omitted while known zero remains a fact", async () => {
   assert.match(document.body.textContent ?? "", /Nothing in: Sessions/);
 });
 
-test("a local-device sign-in action opens device steps instead of a sign-in address", async () => {
+test("a device without server steps says what to look for and offers no empty panel", async () => {
   const document = (await renderDemo("status-8-owner-device")).window.document;
   const control = [...document.querySelectorAll("a, button")].find((node) => node.textContent?.trim() === "See what to do on that computer");
-  assert.equal(control?.tagName, "BUTTON");
-  assert.equal(control?.getAttribute("href"), null);
+  assert.equal(control, undefined);
+  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /Check DataConnect on/);
 });
 
 test("an overdue real schedule never prints a next check", async () => {
@@ -392,6 +393,10 @@ test("real-data shapes never expose raw errors or actionless waiting states", as
 test("pending settings summarize codes and hide machine changes", async () => {
   const machine = await renderDemo("settings-machine-change");
   assert.doesNotMatch(visibleOutsideDetails(machine), /Awaiting your confirmation|migration:|C000/);
+  const explicit = await renderDemo("settings-migration-choice");
+  assert.match(visibleOutsideDetails(explicit), /DataConnect asked to change this/);
+  assert.match(visibleOutsideDetails(explicit), /250 channels/);
+  assert.doesNotMatch(visibleOutsideDetails(explicit), /C000|migration:/);
   const app = await renderDemo("settings-long-list");
   assert.match(visibleOutsideDetails(app), /250 channels/);
   assert.doesNotMatch(visibleOutsideDetails(app), /C000|migration:/);
@@ -411,9 +416,34 @@ test("empty kinds collapse and missing measurement never claims permanent loss",
 
 test("short service names stay in sentences and other accounts exclude this source", async () => {
   const document = (await renderDemo("long-account-name")).window.document;
-  assert.match(document.querySelector("h1")?.textContent ?? "", /deliberately long account name/);
+  assert.match(document.querySelector("h1")?.textContent ?? "", /deliberately long account/);
   const schedule = [...document.querySelectorAll("section")].find((node) => node.querySelector("h2")?.textContent === "Schedule");
   assert.doesNotMatch(schedule?.textContent ?? "", /deliberately/);
   const others = (await renderDemo("own-account")).window.document;
   assert.equal(others.querySelectorAll('a[href="/sources/cin_demo_claude_code_workstation"]').length, 0);
+});
+
+
+test("timing and controls follow disconnected, paused and running states", async () => {
+  const signedIn = (await renderDemo("status-8")).window.document;
+  assert.equal((signedIn.body.textContent ?? "").match(/Last updated|Last successful sync/gu)?.length, 1);
+  const disconnected = (await renderDemo("status-3")).window.document;
+  const schedule = [...disconnected.querySelectorAll("section")].find((node) => node.querySelector("h2")?.textContent === "Schedule");
+  assert.doesNotMatch(schedule?.textContent ?? "", /Change/);
+  assert.equal([...disconnected.querySelectorAll("a")].filter((node) => node.textContent === "Set up again").length, 2);
+  assert.match(visibleOutsideDetails(await renderDemo("status-10")), /Not checked while paused/);
+  const running = visibleOutsideDetails(await renderDemo("status-11"));
+  assert.equal(running.match(/Syncing now/gu)?.length, 1);
+  assert.doesNotMatch(running, /Syncing…/);
+});
+
+
+test("raw gap evidence stays intact under What went wrong on the technical page", async () => {
+  const { default: TechnicalPage } = await import("./technical/page.tsx");
+  const page = await TechnicalPage({ params: Promise.resolve({ connector: "cin_demo_claude_code_workstation" }), searchParams: Promise.resolve({ demo: "raw-error" }) });
+  const document = new JSDOM(renderToStaticMarkup(page)).window.document;
+  const evidence = document.querySelector('[data-testid="raw-source-errors"]');
+  assert.equal(evidence?.querySelector("summary")?.textContent, "What went wrong");
+  assert.match(evidence?.textContent ?? "", /offset=480/);
+  assert.match(evidence?.textContent ?? "", /machine_failure_/);
 });

@@ -46,6 +46,7 @@ import { getConnectionConfig, listConnectionConfigRevisions } from "../../lib/co
 import {
   type AutoPausedBanner,
   deriveAutoPausedBanner,
+  summarizeOutboxStallRemediation,
   derivePrimaryRowAction,
   type PrimaryRowAction,
   syncActionIdleLabel,
@@ -80,6 +81,7 @@ import {
 } from "../../lib/rs-client.ts";
 import {
   hasPrimaryOwnerLocalDeviceRemediation,
+  primaryOwnerActionRemediation,
   isSetupInProgressConnector,
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
@@ -450,7 +452,7 @@ export default async function ConnectorPage({
   } else {
     try {
       model = await loadConnectorPageModel(routeId, sp.connection_id ?? null);
-      otherAccounts = <Suspense fallback={null}><OtherAccounts connectionId={model.connectionId} connectorId={model.connectorId} /></Suspense>;
+      otherAccounts = <Suspense fallback={null}><OtherAccounts connectionId={model.connectionId} connectorInstanceId={model.connectorInstanceId} connectorId={model.connectorId} /></Suspense>;
       addAnotherAccountAction = <Suspense fallback={null}><AddAnotherAccount connectorKey={model.connectorId} /></Suspense>;
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
@@ -829,8 +831,9 @@ function ConnectorPageView({
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
   let stateSentence = sourceStateSentence(source, { now: renderedAt, name: serviceName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
-  const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? { kind: "sync_now" as const, label: "Try again", filled: true } : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
-  const hasDeviceLocalRemediation = primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
+  const pageStatusAction = sourceStatus.row === 8 && !connectionPrimaryAction ? canStartSyncFromSummary(source) ? { kind: "sync_now" as const, label: "Try again", filled: true } : null : sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
+  const hasDeviceLocalRemediation = !archived && (primaryActionSurface === "local_device" || hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict) || (source.source_kind === "local_device" && sourceStatus.row === 8));
+  const deviceStepsAvailable = Boolean(primaryOwnerActionRemediation(connectionRenderedVerdict)?.commands.length || summarizeOutboxStallRemediation(connectionHealth, overview.localDeviceProgress));
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const partial = source.collection_report?.some((entry) => ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)) || gaps.length > 0;
   const markedMissing = model.streams.some((stream) => gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(entry.coverage_condition)));
@@ -838,8 +841,8 @@ function ConnectorPageView({
     const device = sourceInstances[0];
     const deviceName = device?.display_name ?? device?.local_binding_name;
     const pending = device?.records_pending ?? overview.localDeviceProgress?.records_pending;
-    stateSentence = { text: `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.`, slot: null };
-  } else if (running) {
+    stateSentence = { text: deviceStepsAvailable ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send${typeof pending === "number" ? ` ${pending.toLocaleString()} records` : " some records"}.` : `Check DataConnect on ${deviceName ?? "the computer that holds this data"} for a message about what stopped this data source.`, slot: null };
+  } else if (!archived && running) {
     stateSentence = { text: "Syncing now.", slot: null };
   } else if (partial && markedMissing && [19, 20, 21].includes(sourceStatus.row)) {
     const when = sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at);
@@ -855,9 +858,9 @@ function ConnectorPageView({
     <RecordroomShellWithPalette>
       <PageHeader
         actions={
-          hasDeviceLocalRemediation ? <DeviceSteps>
+          hasDeviceLocalRemediation ? deviceStepsAvailable ? <DeviceSteps panelTargetId="source-device-steps">
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
-          </DeviceSteps> : <ConnectorHeaderActions
+          </DeviceSteps> : null : running ? null : <ConnectorHeaderActions
             browserSessionRepairHref={browserSessionRepairHref}
             canStartSync={!archived && canStartSyncFromSummary(source)}
             connectionId={connectorInstanceId}
@@ -891,11 +894,11 @@ function ConnectorPageView({
       {otherAccounts}
       <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
 
-      {revoked && !setupFailed ? <RevokedConnectionSection revokedAt={overview.revokedAt ?? null} /> : null}
+      <div className="min-w-0 max-w-full" id="source-device-steps" />
 
-      {!/synced|syncing|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="pdpp-body mb-6 text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
+      {!/synced|syncing|imported|last updated|last successful sync/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="pdpp-body mb-6 text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
       <Suspense fallback={null}>
-        <SourceUpdateSlot demoModel={updateDemo} displayName={displayName} updates={updates} version={null} />
+        <SourceUpdateSlot demoModel={updateDemo} displayName={serviceName} updates={updates} version={null} />
       </Suspense>
       {!neverConnected ? <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         <SourceRecords model={model} />
@@ -905,8 +908,8 @@ function ConnectorPageView({
         </div> : null}
       </Section> : null}
       {apps}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} /> : null}
-      <RecentRunsSection recentRuns={recentRuns} />
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} /> : null}
+      <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} />
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
               config={configuration}
@@ -921,6 +924,7 @@ function ConnectorPageView({
               currentLabel={connectionLabelSeed}
               typeName={formatConnectorKeyForDisplay(connectorId)}
             /> : null}
+            {revoked && !neverConnected ? <p className="mt-5"><Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link></p> : null}
             {scheduleSyncAvailable ? ( <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" /> ) : null}
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
             <CredentialRepairLinks
@@ -943,20 +947,20 @@ function ConnectorPageView({
             />
           </Section>
 
-      <p className="mb-8 text-sm text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? "?demo=technical" : ""}`}>Technical details</Link></p>
+      <p className="mb-8 text-sm text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? `?demo=${encodeURIComponent(practiceState)}` : ""}`}>Technical details</Link></p>
     </RecordroomShellWithPalette>
   );
 }
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
-  const { connectionId, streams, source, manifest, displayName } = model;
+  const { connectionId, streams, source, manifest } = model;
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const label = (name: string) => {
     const entry = (manifest.streams ?? []).find((stream) => stream.name === name);
     const declared = entry ? streamDisplayLabel(name, entry as StreamManifestEntry) : null;
     return declared && declared !== name ? declared : humanizeFieldLabel(name);
   };
-  const missing = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && gaps.some((gap) => gap.stream === stream.name));
+  const missing = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
   const empty = streams.filter((stream) => knownStreamRecordCount(stream) === 0 && !missing.includes(stream));
   const present = streams.filter((stream) => !missing.includes(stream) && !empty.includes(stream));
   return <>
@@ -988,10 +992,10 @@ function SourceRecords({ model }: { model: ConnectorPageModel }) {
       <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
       <DataList ariaLabel="Didn't come">{missing.map((stream) => {
         const relevant = gaps.filter((gap) => gap.stream === stream.name);
-        const message = [...new Set(relevant.map(() => "DataConnect could not copy this."))].join(" ");
+        const message = "DataConnect could not copy this.";
         return <li className="flex flex-col gap-1 px-3 py-3" key={stream.name}>
           <span className="text-foreground">{label(stream.name)}</span>
-          <span className="pdpp-caption text-muted-foreground">{message}{relevant.some((gap) => gap.recovery_hint?.retryable === true) ? ` It will try again the next time DataConnect checks ${displayName}.` : ""}</span>
+          <span className="pdpp-caption text-muted-foreground">{message}{relevant.some((gap) => gap.recovery_hint?.retryable === true) ? ` It will try again the next time DataConnect checks ${source.connector_display_name ?? manifest.display_name ?? manifest.name}.` : ""}</span>
         </li>;
       })}</DataList>
     </> : null}
@@ -1010,9 +1014,9 @@ function recordDateLabel(value: string | null): string | null {
   return sourceDateLabel(value);
 }
 
-async function OtherAccounts({ connectionId, connectorId }: { connectionId: string; connectorId: string }) {
+async function OtherAccounts({ connectionId, connectorInstanceId, connectorId }: { connectionId: string; connectorInstanceId: string | null; connectorId: string }) {
   const accounts = await listConnectionsByConnector(connectorId).catch(() => []);
-  const others = accounts.filter((account) => account.connector_instance_id !== connectionId && account.status !== "revoked");
+  const others = accounts.filter((account) => account.connector_instance_id !== connectionId && account.connector_instance_id !== connectorInstanceId && account.status !== "revoked");
   if (others.length === 0) return null;
   return <OtherAccountsLine accounts={others.map((account) => ({ connectionId: account.connector_instance_id, displayName: connectionDisplayName(account.display_name, null, connectorId) }))} />;
 }
@@ -1040,6 +1044,10 @@ export function SourceTechnicalDetails({ model, now, dangerError, dangerMessage 
   const installPromptShown = connectorNotInstalled && !isRevokedConnection(overview) && !model.setupFailed;
   const autoPausedBanner = deriveAutoPausedBanner(schedule);
   return <>
+    {latestKnownGaps?.length ? <details className="mb-4 min-w-0 max-w-full" data-testid="raw-source-errors">
+      <summary className="cursor-pointer text-sm text-muted-foreground">What went wrong</summary>
+      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(latestKnownGaps, null, 2)}</pre>
+    </details> : null}
     {autoPausedBanner ? <div data-testid="auto-paused-banner"><AutoPausedBannerRow banner={autoPausedBanner} connectorId={connectorId} /></div> : null}
             <div className="pt-4">
               <ConnectionIdentityLine
@@ -1420,7 +1428,7 @@ function RenderedVerdictHeaderAction({
     // below, the only place the owner can actually act.
     // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
     if (action.remediation?.target.kind === "local_device") {
-      return <DeviceSteps><p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p></DeviceSteps>;
+      return <p className="pdpp-body text-muted-foreground">Check DataConnect on the computer that holds this data for a message about what stopped this data source.</p>;
     }
     // A non-device add_info is only clickable when the server attached a
     // validated exact sync target from structured attention. Otherwise the
@@ -1677,7 +1685,7 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
               >
                 <span className="pdpp-caption flex items-center gap-2">
                   <span>{syncOutcome(r)}</span>
-                  {syncFailureSentence(r.failure_reason) ? <span>{syncFailureSentence(r.failure_reason)}</span> : null}
+                  {syncOutcome(r) === "Failed" ? <span>{syncFailureSentence(r.failure_reason) ?? "DataConnect could not copy this."}</span> : null}
                 </span>
                 <span className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums">
                   <span>{sourceTimeLabel(r.first_at) ?? "Time unavailable"}</span>
@@ -1694,7 +1702,7 @@ function RecentRunsSection({ recentRuns }: { recentRuns: RunSummary[] }) {
 function syncFailureSentence(reason: string | null): string | null {
   if (reason === "assistance_timed_out") return "The sign-in was not finished. Start again when you are ready.";
   if (reason === "local collector outbox has dead-lettered rows") return "The computer that holds this data could not send some records.";
-  if (reason === "provider_unavailable") return "The service could not be reached. Try again later.";
+  if (reason === "provider_unavailable") return "The service could not be reached.";
   if (reason === "credential_invalid" || reason === "credentials_invalid") return "Sign in again to keep syncing.";
   return null;
 }
@@ -1903,15 +1911,15 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
   );
 }
 
-export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false }: {
-  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean;
+export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false }: {
+  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean;
 }) {
-  const text = disconnected ? "Not checked while disconnected." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
-  const next = !disconnected && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
+  const text = disconnected ? "Not checked while disconnected." : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const next = !disconnected && !paused && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
   const deviceName = device?.display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);
-  return <Section title="Schedule" action={<Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
+  return <Section title="Schedule" action={disconnected ? undefined : <Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
     {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
     {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}
     {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}

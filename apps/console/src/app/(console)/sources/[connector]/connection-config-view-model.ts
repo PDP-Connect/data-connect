@@ -121,6 +121,20 @@ const UNIT_SUFFIXES: ReadonlyArray<readonly [string, string]> = Object.freeze([
  * place: stripping it can collide two distinct keys onto one label.
  */
 export function optionLabel(optionKey: string): string {
+  const labels: Record<string, string> = {
+    HISTORY_DAYS: "Days of messages to copy",
+    CHANNELS: "Channels to copy",
+    SLACK_CHANNELS: "Channels to copy",
+    CHANNEL_ALLOWLIST: "Channels to copy",
+    CHANNEL_TYPES: "Types of channels to copy",
+    MEMBER_ONLY: "Only channels you joined",
+    SKIP_FILES: "Leave out files",
+    LOOKBACK_DAYS: "Days of history to copy",
+    RECLAIM_UPLOADS: "Copy files sent in messages",
+    CLAUDE_CODE_PROJECT_EXCLUDE: "Projects to leave out",
+    CLAUDE_CODE_PROJECT_INCLUDE: "Projects to copy",
+  };
+  if (labels[optionKey]) return labels[optionKey];
   let base = optionKey;
   let unit: string | null = null;
   for (const [suffix, rendered] of UNIT_SUFFIXES) {

@@ -22,8 +22,6 @@ import {
   type ConfigRevisionWire,
   type ConfigValue,
   type ConnectionConfigWire,
-  confirmationReason,
-  describeAgentActor,
   describeCommit,
   diffDraft,
   findPendingProposal,
@@ -122,7 +120,7 @@ function ConfigEditor({
   const fieldErrors = useMemo(() => validateDraft(schema, draft), [schema, draft]);
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
   const proposal = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
-  const pending = proposal?.revision === dismissed || (proposal?.origin === "migration" || (proposal?.origin === "agent" && proposal.source_of_change.startsWith("migration:") && !proposal.set_by.startsWith("app:"))) ? null : proposal;
+  const pending = proposal?.revision === dismissed || (proposal && !proposal.is_explicit && (proposal.origin === "migration" || proposal.source_of_change.startsWith("migration:"))) ? null : proposal;
 
   const resetToSummary = useCallback(() => {
     setStep("edit");
@@ -199,7 +197,7 @@ function ConfigEditor({
   return (
     <ConfigShell>
       {applied ? (
-        <div className="pdpp-caption border-y border-border py-2.5">
+        <div className="pdpp-body border-y border-border py-2.5">
           <span className="font-medium text-muted-foreground">
             Saved. Future syncs use these settings.
           </span>
@@ -207,7 +205,7 @@ function ConfigEditor({
       ) : null}
 
       {failure ? (
-        <div className="pdpp-caption py-2.5" role="alert">
+        <div className="pdpp-body py-2.5" role="alert">
           <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
           <details className="mt-1 text-muted-foreground">
             <summary className="cursor-pointer">What went wrong</summary>
@@ -217,7 +215,7 @@ function ConfigEditor({
       ) : null}
 
       {stale ? (
-        <div className="pdpp-caption flex flex-col gap-2 border-y border-border py-2.5" role="alert">
+        <div className="pdpp-body flex flex-col gap-2 border-y border-border py-2.5" role="alert">
           <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
           <details className="text-muted-foreground">
             <summary className="cursor-pointer">What went wrong</summary>
@@ -272,7 +270,7 @@ function ConfigEditor({
         />
       ) : null}
 
-      {config.active_revision?.set_at ? <p className="pdpp-caption text-muted-foreground">Last changed {formatRelative(new Date(config.active_revision.set_at), Date.now())}.</p> : null}
+      {config.active_revision?.set_at ? <p className="pdpp-body text-muted-foreground">Last changed {formatRelative(new Date(config.active_revision.set_at), Date.now())}.</p> : null}
     </ConfigShell>
   );
 }
@@ -292,13 +290,13 @@ function CurrentSettings({
       {groups.map(([group, rowsInGroup]) => (
         <div className="flex flex-col gap-1" key={group.id}>
           <h3 className="pdpp-body font-medium text-foreground">{group.title}</h3>
-          <p className="pdpp-caption text-muted-foreground">{group.description}</p>
+          <p className="pdpp-body text-muted-foreground">{group.description}</p>
           <dl className="mt-1 flex flex-col gap-1">
             {rowsInGroup.map((row) => (
               <div className="flex flex-wrap items-baseline justify-between gap-2" key={row.optionKey}>
-                <dt className="pdpp-caption text-foreground">{row.label}</dt>
-                <dd className="pdpp-caption flex items-baseline gap-2">
-                  <span className="text-foreground">{row.valueLabel}</span>
+                <dt className="pdpp-body text-foreground">{row.label}</dt>
+                <dd className="pdpp-body flex items-baseline gap-2">
+                  <span className="text-foreground">{formatWireValue(row.option, row.value)}</span>
                   <span className="text-muted-foreground/70">{row.provenanceLabel}</span>
                 </dd>
               </div>
@@ -306,16 +304,7 @@ function CurrentSettings({
           </dl>
         </div>
       ))}
-      {revision ? (
-        <p className="pdpp-caption text-muted-foreground">
-          Last changed by {revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by)} — “
-          {revision.source_of_change}”
-        </p>
-      ) : (
-        <p className="pdpp-caption text-muted-foreground">
-          These are the data source's own defaults.
-        </p>
-      )}
+      {!revision ? <p className="pdpp-body text-muted-foreground">These are the data source's own defaults.</p> : null}
       <div>
         <IcButton onClick={onEdit} size="sm" type="button" variant="ghost">
           Change settings
@@ -401,24 +390,18 @@ function OptionControl({
   return (
     <div className="flex flex-col gap-1">
       {option.type === "boolean" ? (
-        <label className="pdpp-caption flex items-center gap-2 text-foreground" htmlFor={controlId}>
+        <label className="pdpp-body flex items-center gap-2 text-foreground" htmlFor={controlId}>
           <input checked={value === true} id={controlId} onChange={(e) => onChange(e.target.checked)} type="checkbox" />
           <span>{label}</span>
         </label>
       ) : (
-        <label className="pdpp-caption flex flex-col gap-1 text-foreground" htmlFor={controlId}>
+        <label className="pdpp-body flex flex-col gap-1 text-foreground" htmlFor={controlId}>
           <span>{label}</span>
           <ValueControl controlId={controlId} onChange={onChange} option={option} value={value} />
         </label>
       )}
-      <p className="pdpp-caption text-muted-foreground">{option.description}</p>
-      {option.type === "integer" && (option.minimum !== null || option.maximum !== null) ? (
-        <p className="pdpp-caption text-muted-foreground/70">
-          {option.minimum ?? "any"}–{option.maximum ?? "any"}
-        </p>
-      ) : null}
-
-      {error ? <p className="pdpp-caption text-destructive">{error}</p> : null}
+      <p className="pdpp-body text-muted-foreground">{option.description}</p>
+      {error ? <p className="pdpp-body text-destructive">{error}</p> : null}
     </div>
   );
 }
@@ -439,7 +422,8 @@ interface ControlProps {
  * connector has not said what the allowed values are.
  */
 function ValueControl(props: ControlProps) {
-  const { option } = props;
+  const { option, value } = props;
+  if (option.type === "string_array" && Array.isArray(value) && (value.length > 5 || value.some((entry) => !/^[a-z][a-z -]{1,39}$/iu.test(String(entry))))) return <span className="pdpp-body break-words">{summarizeSettingList(option.option_key, value)}</span>;
   if (option.type === "integer") {
     return <IntegerControl {...props} />;
   }
@@ -556,26 +540,26 @@ function ReviewChanges({
         <h3 className="pdpp-body font-medium text-foreground">What changes</h3>
         {changes.map((change) => (
           <div className="flex flex-col gap-0.5" key={change.optionKey}>
-            <span className="pdpp-caption text-foreground">{change.label}</span>
-            <span className="pdpp-caption text-muted-foreground">
-              <span>{change.currentLabel}</span>
+            <span className="pdpp-body text-foreground">{change.label}</span>
+            <span className="pdpp-body text-muted-foreground">
+              <span>{formatWireValue(change.option, change.currentValue)}</span>
               <span aria-hidden className="mx-2">
                 →
               </span>
-              <span className="text-foreground">{change.proposedLabel}</span>
+              <span className="text-foreground">{formatWireValue(change.option, change.proposedValue)}</span>
             </span>
           </div>
         ))}
         {unchanged > 0 ? (
-          <p className="pdpp-caption text-muted-foreground/70">
+          <p className="pdpp-body text-muted-foreground/70">
             {unchanged} unchanged {unchanged === 1 ? "setting" : "settings"}
           </p>
         ) : null}
       </div>
 
-      <p className="pdpp-caption text-muted-foreground">{commit.expectedStatus === "active" ? "These settings take effect when you save." : "This change needs your confirmation before it takes effect."}</p>
+      <p className="pdpp-body text-muted-foreground">{commit.expectedStatus === "active" ? "These settings take effect when you save." : "This change needs your confirmation before it takes effect."}</p>
 
-      <label className="pdpp-caption flex flex-col gap-1 text-foreground" htmlFor="config-reason">
+      <label className="pdpp-body flex flex-col gap-1 text-foreground" htmlFor="config-reason">
         <span>Why are you changing this?</span>
         <IcInput
           className="w-full max-w-md"
@@ -585,7 +569,7 @@ function ReviewChanges({
           value={reason}
         />
       </label>
-      {reasonMessage ? <p className="pdpp-caption text-destructive">{reasonMessage}</p> : null}
+      {reasonMessage ? <p className="pdpp-body text-destructive">{reasonMessage}</p> : null}
 
       <div className="flex flex-wrap gap-2">
         <IcButton onClick={onBack} size="sm" type="button" variant="ghost">
@@ -625,10 +609,11 @@ function PendingProposal({
     <div className="flex flex-col gap-3 border-y border-border py-4">
       <div className="flex flex-col gap-0.5">
         <h3 className="pdpp-body font-medium text-attention">Awaiting your confirmation</h3>
-        <p className="pdpp-caption text-muted-foreground">
+        <p className="pdpp-body text-muted-foreground">
           Nothing changes until you confirm.
         </p>
       </div>
+      <p className="pdpp-body text-muted-foreground">{revision.origin === "owner" ? "You" : revision.set_by.startsWith("app:") ? revision.set_by.slice(4) : "DataConnect"} asked to change this:</p>
       <dl className="flex flex-col gap-1">
         {Object.keys(revision.config)
           .sort()
@@ -637,13 +622,12 @@ function PendingProposal({
             const raw = revision.config[key];
             return (
               <div className="flex flex-wrap items-baseline gap-2" key={key}>
-                <dt className="pdpp-caption text-foreground">{optionLabel(key)}</dt>
-                <dd className="pdpp-caption text-foreground">{option ? <>{formatWireValue(option, activeRevision?.config[key] ?? option.default)} → {formatWireValue(option, raw)}</> : "This setting changed."}</dd>
+                <dt className="pdpp-body text-foreground">{optionLabel(key)}</dt>
+                <dd className="pdpp-body text-foreground">{option ? <>{formatWireValue(option, activeRevision?.config[key] ?? option.default)} → {formatWireValue(option, raw)}</> : "This setting changed."}</dd>
               </div>
             );
           })}
       </dl>
-      <p className="pdpp-caption text-muted-foreground">{revision.origin === "owner" ? "You" : revision.set_by.startsWith("app:") ? revision.set_by.slice(4) : "DataConnect"} asked to change this:</p>
       <div className="flex gap-2">
         <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
           {isPending ? "Confirming…" : "Confirm"}
@@ -669,7 +653,7 @@ function HistoryBlock({
     [revisions, schema, activeRevision]
   );
   if (entries.length === 0) {
-    return <p className="pdpp-caption text-muted-foreground">No configuration changes have been recorded yet.</p>;
+    return <p className="pdpp-body text-muted-foreground">No configuration changes have been recorded yet.</p>;
   }
   return (
     <div className="flex flex-col gap-2">
@@ -677,10 +661,10 @@ function HistoryBlock({
       <ol className="flex flex-col gap-3">
         {entries.map((entry) => (
           <li className="flex flex-col gap-0.5" key={entry.revision.revision}>
-            <span className="pdpp-caption font-medium text-foreground">{entry.statusLabel}</span>
-            <span className="pdpp-caption text-foreground">{entry.summary}</span>
-            <span className="pdpp-caption text-muted-foreground">Reason: “{entry.reason}”</span>
-            <span className="pdpp-caption text-muted-foreground/70">{entry.attribution}</span>
+            <span className="pdpp-body font-medium text-foreground">{entry.statusLabel}</span>
+            <span className="pdpp-body text-foreground">{entry.summary}</span>
+            <span className="pdpp-body text-muted-foreground">Reason: “{entry.reason}”</span>
+            <span className="pdpp-body text-muted-foreground/70">{entry.attribution}</span>
           </li>
         ))}
       </ol>
@@ -708,7 +692,7 @@ function HistoryBlock({
 /** Exact machine evidence, never the default visible panel. */
 function TechnicalDetails({ children }: { children: React.ReactNode }) {
   return (
-    <details className="pdpp-caption">
+    <details className="pdpp-body">
       <summary className="cursor-pointer text-muted-foreground">Technical details</summary>
       <div className="mt-2 overflow-x-auto text-muted-foreground">{children}</div>
     </details>
@@ -722,7 +706,8 @@ function formatWireValue(option: ConfigOptionWire, raw: unknown): string {
   if (Array.isArray(raw)) {
     return summarizeSettingList(option.option_key, raw);
   }
-  return raw === "" ? "Not set" : String(raw);
+  if (option.type === "integer") return typeof raw === "number" && Number.isFinite(raw) ? raw.toLocaleString() : "Not set";
+  return typeof raw === "string" && /^[a-z][a-z .,-]{0,79}$/iu.test(raw) ? raw : raw === "" ? "Not set" : "Set";
 }
 
 function groupRows(rows: ReturnType<typeof buildCurrentSettings>) {

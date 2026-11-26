@@ -356,7 +356,7 @@ function matchStateSentence(
   switch (status.row) {
     case 1: return { text: "Archived. It no longer syncs. Your records are kept." };
     case 2: return { text: sourceNeverConnected(source) ? `${options.name} was never connected.` : "Setup was never completed." };
-    case 3: return { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" };
+    case 3: return { text: "Disconnected. Your records stay." };
     case 4: return { text: `DataConnect needs to get ${options.name} ready again.` };
     case 5: return { text: `The first copy of ${options.name} may not be complete.`, slot: "what_you_can_do" };
     case 6: return { text: "First sync found no records.", slot: "what_you_can_do" };
@@ -377,7 +377,7 @@ function matchStateSentence(
         : source.rendered_verdict?.pill.label === "Missing optional data"
           ? " Some optional data is missing."
           : "";
-      return { text: `${sentence}${extra}${when ? ` Last successful sync ${when}.` : ""}` };
+      return { text: `${sentence}${extra}` };
     }
     case 9: return { text: "Setup is in progress." };
     case 10:
@@ -419,8 +419,7 @@ function matchStateSentence(
     case 17: return { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}${source.schedule?.effective_mode === "manual" ? " This one syncs only when you ask." : ""}` };
     case 18: return { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.` };
     case 19: {
-      const coming = formatComing(source.schedule?.next_due_at, options.now);
-      return { text: `Up to date.${when ? ` Synced ${when}${coming ? `; next ${coming}` : ""}.` : ""}` };
+      return { text: `Up to date.${when ? ` Synced ${when}.` : ""}` };
     }
     case 20: {
       const lateness = source.connection_health.lateness?.state;

@@ -223,9 +223,9 @@ export function ConnectionRecoverySummary(props: ConnectionRecoverySummaryProps)
 }
 
 export function ConnectionDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">) {
-  if (!connectionHealth) return <p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p>;
-  const remediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);
-  if (!remediation) return <p>Open DataConnect on the computer that holds this data to follow its recovery steps.</p>;
+  const verdictRemediation = primaryOwnerActionRemediation(renderedVerdict);
+  const remediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress) ?? (verdictRemediation?.commands.length ? { label: verdictRemediation.label, reason: null, scale: null } : null);
+  if (!remediation) return null;
   return <OutboxStallRemediationPanel
     connectionId={connectionId}
     connectorId={connectorId}
@@ -1064,7 +1064,7 @@ function plainCommandCaption(kind: RefActionRemediation["commands"][number]["kin
     case "local_collector_recover_preview": return "Shows what recovering saved data would do and changes nothing.";
     case "local_collector_recover_apply": return "Recovers saved data and sends waiting records to DataConnect.";
     case "local_collector_retry_dead_letters_preview": return "Shows which saved records would be sent again and changes nothing.";
-    case "local_collector_retry_dead_letters_apply": return "Backs up the saved data and marks failed uploads to be sent again.";
+    case "local_collector_retry_dead_letters_apply": return "Backs up the saved data and marks failed uploads to be sent again; it does not send them yet.";
     case "local_collector_run": return "Copies data on this computer and sends waiting records to DataConnect.";
     case "local_collector_doctor": return "Checks what is blocking this computer and changes nothing.";
     default: return "Follow this step on the computer that holds the data.";
@@ -1206,7 +1206,7 @@ function OutboxStallRemediationPanel({
     : `Retryable outbound work on the local collector is not draining. The dashboard cannot clear it remotely — run these on ${hostPhrase}, in order:`;
   return (
     <div
-      className="flex flex-col gap-1.5 border-y border-border py-2"
+      className="flex w-full min-w-0 max-w-full flex-col gap-1.5 border-y border-border py-2"
       data-testid="diagnostics-outbox-remediation"
     >
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-outbox-remediation-label">
@@ -1230,9 +1230,9 @@ function OutboxStallRemediationPanel({
           Stuck on the device: {remediation.scale}.
         </p>
       ) : null}
-      <ol className="flex flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
+      <ol className="flex min-w-0 max-w-full flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
         {steps.map((step, index) => (
-          <li className="flex flex-col gap-0.5" key={step.label}>
+          <li className="flex min-w-0 max-w-full flex-col gap-0.5" key={step.label}>
             <span className="pdpp-caption font-medium text-foreground">{plain ? `Step ${index + 1}` : step.label}</span>
             {step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
             {step.command === null ? (
@@ -1245,7 +1245,7 @@ function OutboxStallRemediationPanel({
                 Command unavailable — open this source on the host that holds the data to recover it.
               </p>
             ) : (
-              <div className="flex min-w-0 items-center gap-2 py-1">
+              <div className="flex w-full min-w-0 max-w-full items-center gap-2 py-1">
                 <code
                   className={plain ? "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-foreground !break-normal" : "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"}
                   data-testid="diagnostics-outbox-remediation-command"

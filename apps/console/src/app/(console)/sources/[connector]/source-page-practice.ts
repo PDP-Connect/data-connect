@@ -11,7 +11,7 @@ import type { ConnectorPageModel } from "./source-page.tsx";
 
 export const SOURCE_PRACTICE_STATES = [
   "apps-some", "apps-none",
-  "raw-error", "settings-machine-change", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
+  "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
 	"unknown-count",
   "atlas",
@@ -170,7 +170,7 @@ function buildPracticeModel(
 			option_kind: "collection_scope",
 			origin: "owner",
 			revision: 1,
-			set_at: "2026-11-24T10:00:00Z",
+			set_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
 			set_by: "owner",
 			source_of_change: "Copy a month of messages.",
 			status: "proposed",
@@ -220,11 +220,11 @@ function buildPracticeModel(
     model.streams = [...model.streams, { name: "coverage_diagnostics", object: "stream", record_count: 0, count_state: "known_zero", last_updated: null }];
     model.manifest = { ...model.manifest, streams: [...model.manifest.streams ?? [], { name: "coverage_diagnostics", display: { label: "Copy checks" }, description: "Copy checks" }] };
   }
-  if (state === "long-account-name") model.source = { ...model.source, display_name: "Northwind - a deliberately long account name" };
+  if (state === "long-account-name") model.source = { ...model.source, display_name: "Northwind - a deliberately long account." };
   if (state === "own-account") model.otherAccounts = [{ connectionId: model.connectionId, displayName: "Northwind" }, { connectionId: "cin_sample_other", displayName: "Northwind (work)" }];
-  if (state === "settings-machine-change" || state === "settings-long-list") {
+  if (state === "settings-machine-change" || state === "settings-migration-choice" || state === "settings-long-list") {
     const base = buildPracticeModel("settings-question")!;
-    const revision = { ...base.configRevisions[0]!, origin: "agent" as const, set_by: state === "settings-machine-change" ? "migration" : "app:Sample app", source_of_change: "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
+    const revision = { ...base.configRevisions[0]!, is_explicit: state !== "settings-machine-change", origin: "agent" as const, set_by: state !== "settings-long-list" ? "migration" : "app:Sample app", source_of_change: "migration:synthetic_machine_reason", config: { CHANNELS: Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(10, "0")}`) } };
     model.configuration = { ...base.configuration!, options_schema: { ...base.configuration!.options_schema!, options: [{ ...base.configuration!.options_schema!.options[0]!, option_key: "CHANNELS", description: "Choose which channels to copy.", type: "string_array", default: [], minimum: null, maximum: null }] } };
     model.configRevisions = [revision];
   }

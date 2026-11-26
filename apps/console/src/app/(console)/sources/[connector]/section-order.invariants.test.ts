@@ -66,17 +66,17 @@ test("the header shows the account line and a 48px source mark", async () => {
   assert.match(src, /\[&_\.pdpp-connector-icon\]:size-12/);
 });
 
-test("a disconnected source has one set-up link", async () => {
+test("a disconnected source has setup in the header and Manage", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   // DIRECTION.md §One data source: the two disconnected-source links share one setup destination.
-  assert.equal((src.match(/>Set up again<\/Link>/g) ?? []).length, 1);
+  assert.equal((src.match(/>Set up again<\/Link>/g) ?? []).length, 2);
   // DIRECTION.md §One data source: keep one “Set up again” action, not the duplicate reconnect label.
   assert.doesNotMatch(src, />Reconnect source</);
 });
 
 test("device recovery evidence stays on the technical page", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /hasDeviceLocalRemediation \? <DeviceSteps>/);
+  assert.match(src, /hasDeviceLocalRemediation \? deviceStepsAvailable \? <DeviceSteps/);
   assert.match(src, /export function SourceTechnicalDetails/);
 });
 

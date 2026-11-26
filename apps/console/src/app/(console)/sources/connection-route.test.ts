@@ -76,11 +76,8 @@ test("a setup-failed list row still resolves when the scoped route omits retired
   sourcesOnly = true;
   // Scoped reads currently do not apply the Sources visibility rule. Exercise that empty response.
   const original = failed.connection_id;
-  failed.connection_id = "temporary";
-  failed.connector_instance_id = "temporary";
   responseRows = [];
-  // Return the retired shell only for the bounded Sources inventory fallback.
-  fallbackRows = [{ ...failed, connection_id: original, connector_instance_id: original }];
+  fallbackRows = [failed];
   assert.equal((await resolveConnectionForRecordsRoute(original))?.connection_id, original);
   fallbackRows = null;
   sourcesOnly = false;

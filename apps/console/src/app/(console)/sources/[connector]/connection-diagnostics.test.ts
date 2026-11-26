@@ -429,7 +429,7 @@ test("active local-device drain renders calm background upload progress, not rec
   assert.match(src, BACKGROUND_DRAIN_RENDERED_IN_SUMMARY);
   // Brief decision 5: recovery progress and diagnostics stay inside folded Details.
   assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf('>Technical details</Link>'));
-  assert.ok(page.includes("hasDeviceLocalRemediation ? <DeviceSteps>"));
+  assert.ok(page.includes("hasDeviceLocalRemediation ? deviceStepsAvailable ? <DeviceSteps"));
   assert.match(page, /showRecoverySummary=\{false\}/);
 });
 

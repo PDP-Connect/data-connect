@@ -336,7 +336,7 @@ test("a change renders current and proposed as owner-readable words", () => {
   const [change] = diffDraft(model, null, draft);
   assert.equal(change?.currentLabel, "On");
   assert.equal(change?.proposedLabel, "Off");
-  assert.equal(change?.label, "Skip files");
+  assert.equal(change?.label, "Leave out files");
 });
 
 test("an empty selection says so rather than rendering an empty list", () => {
@@ -465,7 +465,7 @@ test("history answers what changed, why, and by whom before any machine field", 
   );
   assert.equal(entries[0]?.revision.revision, 8, "newest first");
   assert.equal(entries[0]?.statusLabel, "Current");
-  assert.equal(entries[0]?.summary, "Changed Lookback (days)");
+  assert.equal(entries[0]?.summary, "Changed Days of history to copy");
   assert.equal(entries[0]?.reason, "Include the launch period");
   assert.equal(entries[0]?.isCurrent, true);
   assert.equal(entries[1]?.statusLabel, "Replaced by a newer revision");
@@ -487,16 +487,16 @@ test("history summarises multiple changed settings in plain words", () => {
     schema(),
     1
   );
-  assert.equal(entry?.summary, "Changed Channel types, Lookback (days), and Skip files");
+  assert.equal(entry?.summary, "Changed Types of channels to copy, Days of history to copy, and Leave out files");
 });
 
 // ─── Labels ─────────────────────────────────────────────────────────────────
 
 test("a raw option key becomes readable, keeping its unit", () => {
-  assert.equal(optionLabel("LOOKBACK_DAYS"), "Lookback (days)");
+  assert.equal(optionLabel("LOOKBACK_DAYS"), "Days of history to copy");
   assert.equal(optionLabel("GMCLI_TIMEOUT_MS"), "Gmcli timeout (ms)");
-  assert.equal(optionLabel("CHANNEL_ALLOWLIST"), "Channel allowlist");
-  assert.equal(optionLabel("MEMBER_ONLY"), "Member only");
+  assert.equal(optionLabel("CHANNEL_ALLOWLIST"), "Channels to copy");
+  assert.equal(optionLabel("MEMBER_ONLY"), "Only channels you joined");
 });
 
 // ─── Stale write (409) ──────────────────────────────────────────────────────

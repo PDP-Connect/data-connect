@@ -41,7 +41,7 @@ export function previewStatus(state: string): ConnectionSetupStatus {
     account_identity: null, connection_id: flowPreview.connectionId, connector_id: "northwind", created_at: null,
     credential: { captured_at: null, credential_kind: null, present: false, rotated_at: null },
     display_name: "Northwind", health_state: "healthy", import_receipt: null,
-    last_error: state === "never-started" ? { reason: "The sign-in page could not be opened.", remediation: "Try again." } : state === "failed" ? { reason: "The service could not be reached.", remediation: "Something went wrong while copying your data." } : null,
+    last_error: state === "never-started" ? { reason: "browser_surface_start_failed: synthetic launch failure", remediation: "Try again." } : state === "failed" ? { reason: "The service could not be reached.", remediation: "Something went wrong while copying your data." } : null,
     object: "connection_setup_status", pending: copying, running: copying,
     run: { finished_at: null, records_emitted: null, reported_records_emitted: null, run_id: flowPreview.runId, started_at: null, status: state === "never-started" ? "surface_failed" : copying ? "active" : "completed" },
     setup_kind: "browser_session", setup_material: { captured_at: null, kind: "browser_session", label: "Sign-in", present: false },

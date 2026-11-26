@@ -180,7 +180,7 @@ test("a device-local add_info recovery renders non-clickable guidance, not a /ru
   // non-clickable guidance span instead.
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, DEVICE_LOCAL_GUARD);
-  assert.match(src, /return <DeviceSteps>/);
+  assert.match(src, /return <p className="pdpp-body text-muted-foreground">Check DataConnect on the computer/);
 });
 
 test("empty records omit invented counts", async () => {
