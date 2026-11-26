@@ -107,6 +107,7 @@ import {
   createBrowserProfilePurger,
 } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { createInstanceIdentityProvider } from "./instance-identity.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -5120,6 +5121,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     allowUnauthenticatedWhenDisabled: allowUnauthenticatedOwnerWhenDisabled,
     loginRateLimit: ownerAuthConfig.loginRateLimit,
     providerName,
+    // Same resolver as OAuth metadata: PDPP_REFERENCE_ORIGIN on a hosted server,
+    // otherwise the configured public URL, then the request.
+    resolvePublicOrigin: (req) =>
+      resolvePublicUrl(
+        req as unknown as Parameters<typeof resolvePublicUrl>[0],
+        opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL)
+      ),
+    // Created on first use under PDPP_DATA_DIR, so a server that never pairs a desktop writes nothing.
+    instanceIdentity: createInstanceIdentityProvider(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   });
   app.use((..._args: never[]) => {
     const [req, res, next] = _args as unknown as [ReqLike, ResLike, () => void];

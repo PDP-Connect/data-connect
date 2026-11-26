@@ -30,6 +30,14 @@ import {
   renderResultState,
   renderSurface,
 } from "./hosted-ui.ts";
+import { instanceProofMessage, type InstanceIdentity } from "./instance-identity.ts";
+import {
+  createDesktopPairingStore,
+  DESKTOP_PAIRING_SESSION_TTL_SECONDS,
+  DESKTOP_PAIRING_TTL_SECONDS,
+  sanitizeDesktopPairingLabel,
+  type DesktopPairingStore,
+} from "./owner-desktop-pairing.ts";
 import {
   buildOwnerCsrfClearCookie,
   buildOwnerCsrfSetCookie,
@@ -188,6 +196,18 @@ export interface OwnerAuthPlaceholderOptions {
   passwordManagedByDesktop?: boolean;
   passwordVerifier?: OwnerPasswordVerifier | null;
   providerName?: string;
+  /**
+   * Resolves this server's canonical public origin for a request, the same way
+   * OAuth metadata does (never from an untrusted Host header on a hosted
+   * server). The desktop-pairing routes are mounted only when the host
+   * supplies it.
+   */
+  resolvePublicOrigin?: (req: AuthRequest) => string;
+  /**
+   * This server's Ed25519 identity, loaded lazily. Required (with
+   * `resolvePublicOrigin`) for the desktop-pairing routes to mount.
+   */
+  instanceIdentity?: () => InstanceIdentity;
   sameSite?: OwnerSessionSameSite;
   sessionTtlSeconds?: number;
   subjectId?: string | null;
@@ -484,8 +504,15 @@ function readReturnToFromBodyOrQuery(req: AuthRequest): string {
 interface SessionHelpers {
   clearSession: (res: AuthResponse, req: AuthRequest) => void;
   issueSession: (res: AuthResponse, req: AuthRequest, credentialRevision?: string) => Promise<boolean>;
+  issueToken: (
+    req: AuthRequest,
+    label: string,
+    ttlSeconds: number
+  ) => ReturnType<OwnerSessionController["issueSessionToken"]>;
   readSession: (req: AuthRequest) => Promise<OwnerSessionPayload | null>;
   readSessionRecord: (req: AuthRequest) => Promise<OwnerSessionRecord | null>;
+  isSessionLive: (idHash: string) => Promise<boolean>;
+  revokeSessionId: (sessionId: string) => Promise<boolean>;
   revokeSession: (req: AuthRequest) => Promise<boolean>;
   listSessions: (req: AuthRequest, subjectId: string) => ReturnType<OwnerSessionController["listSessions"]>;
   revokeSessionByPublicId: (subjectId: string, publicId: string) => Promise<boolean>;
@@ -535,11 +562,27 @@ function buildSessionHelpers(controller: OwnerSessionController): SessionHelpers
       appendSetCookie(res, cookieHeader);
       return true;
     },
+    issueToken(req: AuthRequest, label: string, ttlSeconds: number) {
+      return controller.issueSessionToken(
+        {
+          ipAddress: req.ip ?? req.socket?.remoteAddress ?? req.connection?.remoteAddress ?? null,
+          label,
+          userAgent: req.headers["user-agent"] ?? null,
+        },
+        ttlSeconds
+      );
+    },
     readSession(req: AuthRequest): Promise<OwnerSessionPayload | null> {
       return controller.readSessionFromCookieHeader(req.headers.cookie);
     },
     readSessionRecord(req: AuthRequest): Promise<OwnerSessionRecord | null> {
       return controller.readSessionRecordFromCookieHeader(req.headers.cookie);
+    },
+    isSessionLive(idHash: string): Promise<boolean> {
+      return controller.isSessionLive(idHash);
+    },
+    revokeSessionId(sessionId: string): Promise<boolean> {
+      return controller.revokeSessionFromCookieValue(sessionId);
     },
     revokeSession(req: AuthRequest): Promise<boolean> {
       return controller.revokeSessionFromCookieHeader(req.headers.cookie);
@@ -598,6 +641,8 @@ interface OwnerAuthRouteContext {
   readonly notifySessionLogout: (req: AuthRequest) => void;
   readonly passwordMatches: (submitted: string) => Promise<OwnerPasswordMatch>;
   readonly credentialSource: () => OwnerCredentialSource;
+  readonly desktopPairings: DesktopPairingStore;
+  readonly instanceIdentity: (() => InstanceIdentity) | undefined;
   readonly changeAppPassword: (
     password: string,
     subjectId: string,
@@ -993,6 +1038,181 @@ function isCsrfAuthorized(req: AuthRequest, res: AuthResponse, context: OwnerAut
   return true;
 }
 
+function replyInvalidPairingCode(res: AuthResponse): void {
+  res.status(401).setHeader("Content-Type", "application/json").json({
+    error: {
+      code: "invalid_pairing_code",
+      message: "This pairing code is not valid. Create a new one in the server's settings.",
+    },
+  });
+}
+
+async function handleDesktopPairingCreate(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext,
+  resolvePublicOrigin: (req: AuthRequest) => string
+): Promise<void> {
+  if (!isCsrfAuthorized(req, res, context)) return;
+  if (!(await requireSignedInSession(req, res, context))) return;
+  // The code belongs to this session: it stops working when this session is signed out.
+  const issuer = await context.session.readSessionRecord(req);
+  if (!issuer) {
+    denyOwnerAccess(req, res);
+    return;
+  }
+  const { code, expiresAtMs } = context.desktopPairings.create(issuer.idHash);
+  const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
+  const identity = requireInstanceIdentity(context);
+  res
+    .status(201)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      object: "desktop_pairing",
+      code,
+      expires_at: new Date(expiresAtMs).toISOString(),
+      expires_in_seconds: DESKTOP_PAIRING_TTL_SECONDS,
+      server_origin: serverOrigin,
+      server_public_key: identity.publicKey,
+      server_fingerprint: identity.fingerprint,
+      // The fragment never reaches a server; /settings is the page that made the code.
+      link: `${serverOrigin}/settings#code=${code}&key=${identity.publicKey}`,
+    });
+}
+
+function requireInstanceIdentity(context: OwnerAuthRouteContext): InstanceIdentity {
+  if (!context.instanceIdentity) throw new Error("instance identity is not configured");
+  return context.instanceIdentity();
+}
+
+const IDENTITY_NONCE_RE = /^[A-Za-z0-9_-]+$/u;
+const IDENTITY_NONCE_MIN_BYTES = 16;
+const IDENTITY_NONCE_MAX_BYTES = 64;
+
+/**
+ * Public and unauthenticated: it changes nothing and reveals only the public
+ * key. The desktop sends a fresh nonce and checks the signature against the key
+ * it pinned before it sends a stored session.
+ */
+function handleDesktopPairingIdentity(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext,
+  resolvePublicOrigin: (req: AuthRequest) => string
+): void {
+  const body: Record<string, unknown> | undefined =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : undefined;
+  const nonce = body?.nonce;
+  const rawBytes = typeof nonce === "string" && IDENTITY_NONCE_RE.test(nonce) ? Buffer.from(nonce, "base64url") : null;
+  if (
+    typeof nonce !== "string" ||
+    rawBytes === null ||
+    rawBytes.toString("base64url") !== nonce ||
+    rawBytes.length < IDENTITY_NONCE_MIN_BYTES ||
+    rawBytes.length > IDENTITY_NONCE_MAX_BYTES
+  ) {
+    res.status(400).json({
+      error: {
+        code: "invalid_request",
+        message: "Send a JSON body with a base64url nonce of 16 to 64 bytes.",
+      },
+    });
+    return;
+  }
+  const identity = requireInstanceIdentity(context);
+  const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
+  res
+    .status(200)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      public_key: identity.publicKey,
+      fingerprint: identity.fingerprint,
+      signature: identity.sign(instanceProofMessage(serverOrigin, nonce)),
+    });
+}
+
+async function handleDesktopPairingRedeem(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext
+): Promise<void> {
+  if (!context.enabled) {
+    res.status(404).json({
+      error: { code: "owner_auth_disabled", message: "Desktop pairing is unavailable." },
+    });
+    return;
+  }
+  const body: Record<string, unknown> | undefined =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : undefined;
+  const code = body?.code;
+  const label = body?.label;
+  if (
+    typeof code !== "string" ||
+    code.trim() === "" ||
+    code.length > 64 ||
+    (label !== undefined && typeof label !== "string")
+  ) {
+    res.status(400).json({
+      error: { code: "invalid_request", message: "Send a JSON body with a pairing code." },
+    });
+    return;
+  }
+  // Same throttle as sign-in: checked before the comparison so every guess counts.
+  const retryAfterSeconds = context.loginRateLimiter.check(req);
+  if (retryAfterSeconds !== null) {
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    res.status(429).json({
+      error: {
+        code: "owner_login_rate_limited",
+        message: "Too many attempts. Retry after the indicated delay.",
+        type: "slow_down",
+      },
+    });
+    return;
+  }
+  // One answer for unknown, expired, used and orphaned codes: no oracle. A code
+  // whose issuing session was signed out since is orphaned.
+  const issuerIdHash = context.desktopPairings.redeem(code);
+  if (issuerIdHash === null || !(await context.session.isSessionLive(issuerIdHash))) {
+    replyInvalidPairingCode(res);
+    return;
+  }
+  context.loginRateLimiter.recordSuccess(req);
+  const identity = requireInstanceIdentity(context);
+  const sessionLabel = sanitizeDesktopPairingLabel(label);
+  const minted = await context.session.issueToken(req, sessionLabel, DESKTOP_PAIRING_SESSION_TTL_SECONDS);
+  if (!minted) {
+    res.status(503).json({
+      error: { code: "pairing_unavailable", message: "Could not start a session. Create a new pairing code." },
+    });
+    return;
+  }
+  // Sign-out everywhere can land while the session is being written, and it
+  // only revokes sessions that already exist. Check again now that the new one
+  // does, and take it back if its issuer is gone.
+  if (!(await context.session.isSessionLive(issuerIdHash))) {
+    await context.session.revokeSessionId(minted.sessionId);
+    replyInvalidPairingCode(res);
+    return;
+  }
+  // The session id leaves only in this body: never a Set-Cookie, never logged.
+  res
+    .status(200)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      object: "desktop_pairing_session",
+      session: minted.sessionId,
+      expires_at: new Date(minted.expiresAtSeconds * 1000).toISOString(),
+      expires_in_seconds: DESKTOP_PAIRING_SESSION_TTL_SECONDS,
+      label: sessionLabel,
+      server_public_key: identity.publicKey,
+      server_fingerprint: identity.fingerprint,
+    });
+}
+
 function handleDisabledOwnerSession(
   req: AuthRequest,
   res: AuthResponse,
@@ -1037,6 +1257,8 @@ export function createOwnerAuthPlaceholder({
   allowUnauthenticatedWhenDisabled = true,
   csrfSecret: csrfSecretOverride = null,
   loginRateLimit = {},
+  resolvePublicOrigin,
+  instanceIdentity,
   sessionStore,
   passwordVerifierStore,
 }: OwnerAuthPlaceholderOptions = {}): OwnerAuthPlaceholder {
@@ -1061,6 +1283,7 @@ export function createOwnerAuthPlaceholder({
   const { enabled, subjectId: resolvedSubjectId } = sessionController;
   const session = buildSessionHelpers(sessionController);
   const logoutListeners = new Map<string, Set<() => void>>();
+  const desktopPairings = createDesktopPairingStore();
 
   function ownerSessionKey(req: AuthRequest): string | null {
     const cookie = parseCookieHeader(req.headers.cookie)[OWNER_SESSION_COOKIE_NAME];
@@ -1238,6 +1461,8 @@ export function createOwnerAuthPlaceholder({
       csrfPairValid,
       credentialSource: () => credentialSource,
       changeAppPassword,
+      desktopPairings,
+      instanceIdentity,
       enabled,
       ensureCsrfToken,
       loginRateLimiter,
@@ -1463,6 +1688,18 @@ export function createOwnerAuthPlaceholder({
       }
       res.status(204).end();
     });
+
+    if (resolvePublicOrigin && instanceIdentity) {
+      app.post("/owner/desktop-pairings/identity", (req, res) => {
+        handleDesktopPairingIdentity(req, res, context, resolvePublicOrigin);
+      });
+      app.post("/owner/desktop-pairings", async (req, res) => {
+        await handleDesktopPairingCreate(req, res, context, resolvePublicOrigin);
+      });
+      app.post("/owner/desktop-pairings/redeem", async (req, res) => {
+        await handleDesktopPairingRedeem(req, res, context);
+      });
+    }
   }
 
   async function requireOwnerSession(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): Promise<void> {
