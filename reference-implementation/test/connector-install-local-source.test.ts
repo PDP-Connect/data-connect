@@ -12,6 +12,7 @@ import {
   lstatSync,
   readFileSync,
   renameSync,
+  symlinkSync,
 } from "node:fs"
 import { join } from "node:path"
 import { afterEach, test } from "node:test"
@@ -218,4 +219,17 @@ test("a confined read refuses a file replaced after its check and stops one byte
   writeFileSync(path, "x".repeat(100))
   assert.equal(readConfinedFile(current, 10).byteLength, 11)
   assert.equal(readConfinedFile(current, 1000).byteLength, 100)
+})
+
+test("a confined read refuses a parent directory swapped for a link outside the root after its check", () => {
+  const root = fixture()
+  const outside = fixture({ key: "outside-fixture" })
+  const path = join(root, "profile", "collection-profile.json")
+  const checked = { label: "Manifest", path, stat: lstatSync(path) }
+  renameSync(join(root, "profile"), join(root, "profile-checked"))
+  symlinkSync(join(outside, "profile"), join(root, "profile"))
+  assert.throws(
+    () => readConfinedFile(checked, 1024),
+    /Manifest changed while it was being read/
+  )
 })

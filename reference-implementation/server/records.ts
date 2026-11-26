@@ -366,6 +366,9 @@ interface ResponseRecord {
   // (`getRecordAcrossBindings`/`postgresGetRecord`) — never on a list
   // response. `undefined`/absent, not `0`, when unmeasured.
   record_json_bytes?: number;
+  // Why an owner tombstone left the result (Core: owner tombstones). The wire
+  // shape strips it from client tombstones.
+  removal?: "deleted" | "left_query";
   stream: string;
 }
 type EffectiveParentRow = VisibleRecordRow & { responseRecord: ResponseRecord };
@@ -5329,6 +5332,7 @@ function resolveChangeGroupRecord(
       emitted_at: current.emitted_at,
       id: group.record_key,
       object: "record",
+      removal: "deleted",
       stream,
     };
     decorateRecordWithConnectionIdentity(deletedRecord, recordIdentity);
