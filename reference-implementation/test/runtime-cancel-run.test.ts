@@ -155,16 +155,32 @@ main();
   return { stubPath, tmpDir };
 }
 
+interface FreshDb {
+  dir: string;
+  handle: ReturnType<typeof getDb>;
+}
+
 // Opens the DB without registering its teardown, for a test that must close it
-// only after something else has finished using it.
-function openFreshDb(): void {
+// only after something else has finished using it. Returns what it opened.
+function openFreshDb(): FreshDb {
   closeDb();
-  initDb(join(mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-")), "pdpp.sqlite"));
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-"));
+  initDb(join(dir, "pdpp.sqlite"));
+  return { dir, handle: getDb() };
+}
+
+// Closes only the handle openFreshDb opened, and only while it is still the
+// current one: a teardown that runs late must not close a later test's DB.
+function closeFreshDb({ dir, handle }: FreshDb): void {
+  if (getDb() === handle) {
+    closeDb();
+  }
+  rmSync(dir, { force: true, recursive: true });
 }
 
 function freshDb(t: TestContext): void {
-  openFreshDb();
-  t.after(() => closeDb());
+  const fresh = openFreshDb();
+  t.after(() => closeFreshDb(fresh));
 }
 
 interface SpineEventRow {
@@ -367,29 +383,38 @@ for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
   { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
 ]) {
   test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 10_000 }, async (t) => {
-    openFreshDb();
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
     const controller = new AbortController();
     let releaseHandler: () => void = () => undefined;
     let outcome: Promise<unknown> | undefined;
-    // One ordered teardown, registered before anything can fail. Node runs
-    // after hooks in registration order, so separate hooks for the DB, the
-    // directory and the release would close the DB and delete the stub before
-    // the run had ended. Whether the test passes, fails or times out: release
-    // the pending handler, re-request cancellation, wait for the run to settle
-    // (its terminal write and child cleanup), then close the DB and remove the
-    // directory. The hook timeout bounds a run that never settles; it is
-    // Node's own, not a timer in this file.
+    let fresh: FreshDb | undefined;
+    let tmpDir: string | undefined;
+    // One ordered teardown, registered before anything can fail, so it
+    // tolerates what was never opened. Node runs after hooks in registration
+    // order, so separate hooks for the DB, the directory and the release would
+    // close the DB and delete the stub before the run had ended. Whether the
+    // test passes, fails or times out: release the pending handler, re-request
+    // cancellation, wait for the run to settle (its terminal write and child
+    // cleanup), then close this test's DB and remove its directories. Node
+    // does not cancel this continuation when the hook's timeout fires, so it
+    // closes the DB only while it is still the current one. The hook timeout
+    // bounds a run that never settles; it is Node's own, not a timer in this
+    // file.
     t.after(
       async () => {
         releaseHandler();
         controller.abort(abortReason);
         await outcome;
-        closeDb();
-        rmSync(tmpDir, { force: true, recursive: true });
+        if (fresh) {
+          closeFreshDb(fresh);
+        }
+        if (tmpDir) {
+          rmSync(tmpDir, { force: true, recursive: true });
+        }
       },
       { timeout: 10_000 }
     );
+    fresh = openFreshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
     const stubPath = join(tmpDir, "stub.mjs");
     writeFileSync(
       stubPath,
