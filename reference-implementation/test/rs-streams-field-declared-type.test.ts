@@ -53,6 +53,7 @@ const baseManifest = {
   connector_id: CONNECTOR_ID,
   display_name: "Declared-Type Test Connector",
   protocol_version: "0.1.0",
+  source: { id: CONNECTOR_ID, kind: "connector" },
   streams: [
     {
       consent_time_field: "posted_at",

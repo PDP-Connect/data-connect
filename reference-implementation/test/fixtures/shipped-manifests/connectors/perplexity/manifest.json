@@ -1,0 +1,266 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/perplexity",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/perplexity",
+		"display": {
+			"name": "Perplexity"
+		}
+	},
+	"connector_key": "perplexity",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
+	"version": "0.1.10",
+	"display_name": "Perplexity (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#1FB8CD"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"],
+				"constraints": {
+					"hosts": ["https://www.perplexity.ai"]
+				}
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_navigation", "page_script_evaluation"],
+				"constraints": {
+					"navigate": ["https://www.perplexity.ai"]
+				}
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection reads the JSON that www.perplexity.ai serves the owner's own signed-in session, through the page's own fetch. Perplexity shows a Cloudflare human check on signed-in pages, so the owner may need to complete it before collection continues. A valid session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "conversations",
+			"required": true,
+			"description": "Threads (question-and-answer conversations) in the owner's Perplexity library. One record per thread, keyed by Perplexity's stable thread context uuid.",
+			"display": {
+				"label": "Your Perplexity threads",
+				"detail": "Each thread in your library: title, search mode, model, last activity time, entry count and access level. Questions and answers are the separate messages stream."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The thread's context uuid, stable across renames and new answers."
+					},
+					"title": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title",
+						"description": "The thread title Perplexity shows in the library. Null when the thread has none yet."
+					},
+					"slug": {
+						"type": ["string", "null"],
+						"description": "The URL slug of the thread's latest entry, which addresses the thread page. Null when the list did not carry one."
+					},
+					"mode": {
+						"type": ["string", "null"],
+						"description": "The search mode the thread ran in (web, academic, writing, ...)."
+					},
+					"model": {
+						"type": ["string", "null"],
+						"description": "The display model that answered, as the library shows it."
+					},
+					"create_time": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the thread was created, taken from its first entry's creation time while the thread's entries are being read. Null on a conversations-only run or when the thread has no readable entry, because the list endpoint carries no creation time."
+					},
+					"update_time": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The thread's last activity (its last query time)."
+					},
+					"entry_count": {
+						"type": ["integer", "null"],
+						"description": "The number of question-and-answer entries Perplexity reports for the thread."
+					},
+					"access": {
+						"type": ["integer", "null"],
+						"description": "The thread's access level code as the library carries it."
+					}
+				},
+				"required": [
+					"id",
+					"title",
+					"slug",
+					"mode",
+					"model",
+					"create_time",
+					"update_time",
+					"entry_count",
+					"access"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "update_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"],
+					"update_time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"],
+					"group_by": ["mode"]
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "messages",
+			"required": false,
+			"description": "The questions and answers inside each Perplexity thread. Every entry becomes two records: the user's question and the assistant's answer, including the citations the answer used. A thread is read again when it changes or when a run asks for messages outside the time range or resources it was collected under. A full refresh limited to a time range re-reads the threads inside it and keeps what earlier runs collected about threads outside it.",
+			"display": {
+				"label": "Your Perplexity messages",
+				"detail": "Each question you asked and each answer Perplexity gave, with the model, the time, and the web citations behind the answer."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The entry's uuid with the role appended: <entry uuid>:user or <entry uuid>:assistant."
+					},
+					"conversation_id": {
+						"type": "string",
+						"description": "The thread's context uuid, matching a conversations record."
+					},
+					"role": {
+						"type": "string",
+						"x_pdpp_role": "actor",
+						"enum": ["user", "assistant"]
+					},
+					"content": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title",
+						"description": "The question text, or the answer's full markdown. Null when the entry carried none."
+					},
+					"create_time": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "For a question, its entry's creation time; for an answer, the entry's last update time, which is when the answer finished."
+					},
+					"model": {
+						"type": ["string", "null"],
+						"description": "The model that produced the answer. Null on a question."
+					},
+					"citations": {
+						"type": "array",
+						"description": "The web results the answer cited: [{ title, url }]. Empty for questions.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"title": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": "string",
+									"format": "uri"
+								}
+							},
+							"required": ["title", "url"]
+						}
+					}
+				},
+				"required": [
+					"id",
+					"conversation_id",
+					"role",
+					"content",
+					"create_time",
+					"model",
+					"citations"
+				]
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "create_time",
+			"parent_streams": ["conversations"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"relationships": [
+				{
+					"name": "conversation",
+					"stream": "conversations",
+					"foreign_key": "conversation_id",
+					"cardinality": "has_one"
+				}
+			],
+			"query": {
+				"search": {
+					"lexical_fields": ["content"],
+					"semantic_fields": ["content"]
+				},
+				"range_filters": {
+					"create_time": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["create_time"]
+				}
+			},
+			"coverage_strategy": "parent_detail_accounting",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
+		"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
+		"nothing_in_range": "There are no Perplexity threads in the selected time range.",
+		"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
+		"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
+		"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
+		"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
+		"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "perplexity",
+			"login_url": "https://www.perplexity.ai/auth/signin?callbackUrl=%2F",
+			"login_message": "Sign in to Perplexity, then return here.",
+			"collect_export": "collectPerplexity",
+			"probe_export": "probePerplexitySession",
+			"summary": {
+				"singular": "item",
+				"plural": "items"
+			}
+		}
+	}
+}

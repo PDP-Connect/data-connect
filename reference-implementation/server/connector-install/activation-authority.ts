@@ -5,13 +5,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ConnectorManifestStorageContext,
-  assertIncomingSourceDeclarationPublisher,
-  assertLegacyOwnershipPostgres,
-  assertLegacyOwnershipSqlite,
+  assertExclusiveLegacySourceOwnershipPostgres,
+  assertExclusiveLegacySourceOwnershipSqlite,
   assertRetainedSourceIdentities,
   moveSourceIdentityPostgres,
   moveSourceIdentitySqlite,
   normalizeConnectorManifestForStorage,
+  normalizeIncomingConnectorManifest,
   retainMovedFromIdentity,
   retainedSourceIdentityChange,
   retainedStorageContext,
@@ -140,7 +140,7 @@ function parseRow(row: ActivationRow | undefined): ConnectorActivation | null {
 
 /** Atomically publish the registry manifest, generation advance, and executable tuple. */
 export async function publishConnectorActivation(record: ConnectorInstallRecord): Promise<ConnectorActivation> {
-  record = { ...record, manifest: await assertIncomingSourceDeclarationPublisher(record.manifest) };
+  record = { ...record, manifest: await normalizeIncomingConnectorManifest(record.manifest) };
   const attemptId = randomUUID();
   const id = record.connectorId;
   // Only a record that carries the digest of the sidecar its installer core verified supplies a verified declaration.
@@ -164,7 +164,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
       if (identityMove) {
         await moveSourceIdentityPostgres(client, identityMove);
       }
-      await assertLegacyOwnershipPostgres(client, id, JSON.parse(derived.canonicalManifestJson));
+      await assertExclusiveLegacySourceOwnershipPostgres(client, id, JSON.parse(derived.canonicalManifestJson));
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)
          ON CONFLICT(connector_id) DO UPDATE SET manifest = EXCLUDED.manifest
@@ -220,7 +220,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
         if (identityMove) {
           moveSourceIdentitySqlite(identityMove);
         }
-        assertLegacyOwnershipSqlite(id, JSON.parse(derived.canonicalManifestJson));
+        assertExclusiveLegacySourceOwnershipSqlite(id, JSON.parse(derived.canonicalManifestJson));
         if (!old || canonicalJson(JSON.parse(old.manifest)) !== derived.canonicalManifestJson) {
           db.prepare(
             "INSERT INTO connectors(connector_id,manifest) VALUES(?,?) ON CONFLICT(connector_id) DO UPDATE SET manifest=excluded.manifest"

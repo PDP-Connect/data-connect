@@ -1,0 +1,359 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/fitbit",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/fitbit",
+		"display": {
+			"name": "Fitbit"
+		}
+	},
+	"connector_key": "fitbit",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
+	"version": "0.1.11",
+	"display_name": "Fitbit",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#00B0B9"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": false
+			},
+			"filesystem": {
+				"required": true
+			}
+		}
+	},
+	"setup": {
+		"modality": "manual_or_upload",
+		"manual_or_upload": {
+			"label": "Fitbit data from Google Takeout",
+			"description": "Ask Google Takeout for a copy of your Fitbit data, wait for Google's email, then upload the ZIP files here. Google usually sends the download link the same day, but it can take a few days, and the link expires after about 7 days.",
+			"acquisition_methods": [
+				{
+					"label": "Request your Fitbit data from Google Takeout",
+					"platform": "web",
+					"posture": "primary",
+					"detail": "Open takeout.google.com, select only Fitbit (it may be listed as Google Health), then choose Send download link via email, Export once, file type .zip and file size 2 GB, and create the export. Google emails a download link, usually the same day. Download every ZIP file it offers before the link expires, about 7 days later, and upload them here together, as they are: don't unzip them or zip them again. If there are several, put them in a folder of their own and upload the folder. The import can't always tell if one is missing, so upload every one.",
+					"help_url": "https://support.google.com/accounts/answer/3024190?hl=en"
+				}
+			],
+			"accepted_file_extensions": [".zip"],
+			"import_dir_env_var": "FITBIT_EXPORT_DIR",
+			"help_url": "https://support.google.com/googlehealth/answer/14236615?hl=en",
+			"help_text": "This imports the Fitbit data you export with Google Takeout. It needs no Fitbit developer account and no Google password, and it reads only the ZIP files you upload. Only the exercise, sleep, sleep score, steps, distance, active minutes and resting heart rate files are read, plus the time zone setting in your profile file: it is used to add up steps and distance by day, and nothing else in that file is kept. Every other file, including devices, heart rate through the day, locations and notes, is never unpacked. From the files that are read, local times of day, links to route files, heart rate during exercise, calories, device details and every identifier except Fitbit's own exercise and sleep log ids are left out. An exercise name is kept only as one of the Fitbit exercise types this import recognises, so a name you typed yourself is left out unless it matches one.",
+			"large_file_fallback": "Google Takeout splits a large export into several ZIP files. This import reads all the parts of one export together, and can't always tell if the last one is missing, so upload every part. Choose 2 GB parts when you request the export: larger parts may use a ZIP format this import can't read. It can't read a .tgz export.",
+			"validation_expectations": [
+				"Reads the ZIP files from Google Takeout as they are, so there's no need to unzip them",
+				"Reads all the parts of one export together. When the upload holds several Takeout exports, it reads only the newest, so upload only your Fitbit export",
+				"Reports for each kind of data how many records arrived and which fields your export did not carry",
+				"States a missing, unreadable, damaged or too-large export, or a gap in its numbered parts, instead of silently importing nothing"
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "low",
+			"bot_detection_sensitivity": "low",
+			"background_safe": false,
+			"rationale": "Collection reads an export the owner requested from Google Takeout; there is no credential, no session and nothing to poll, so an unattended run has nothing to collect. Refreshing means requesting a new export and uploading it, which Google usually delivers the same day, sometimes a few days later."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "activities",
+			"required": false,
+			"description": "Exercises Fitbit logged, read from the exercise files in the owner's Google Takeout export. Start times are UTC; no local time is read. Links to route files, heart rate, calories and device details are excluded at the schema. An exercise name is published only as the code of a Fitbit exercise type this import lists, so a name the owner typed is left out unless it matches one.",
+			"display": {
+				"label": "Your Fitbit exercise",
+				"detail": "Each exercise Fitbit logged: its kind, when it is one of the common Fitbit exercise types this import recognises (a name you typed yourself shows as a type only when it matches one), the start date and time (UTC), distance and elapsed time. Each keeps Fitbit's own log id. No other exercise names, no route or route link, no local start times, no heart rate or calories, and no device details."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Fitbit's own exercise log id: a number Fitbit assigns in time order, stable across exports, so a later export replaces the earlier record."
+					},
+					"activity_type": {
+						"type": ["string", "null"],
+						"description": "Fitbit's standard exercise name as a lowercase snake_case code, such as walk, run, outdoor_bike, aerobic_workout or weights. Fitbit also lets an owner name an exercise themselves. A name not on this import's list, including one the owner typed, is never published, and this field is then null, as it is when the log carries no name; a typed name that matches a listed name, ignoring case and extra spaces, becomes that code. The list of codes is this import's and may grow; a reader should show an unrecognised code as it is.",
+						"x_pdpp_role": "primary-title"
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date",
+						"description": "The UTC calendar day the exercise started, YYYY-MM-DD, taken from start_time. It is not the owner's local day: for anyone east of UTC, an exercise between local midnight and the hour of their offset falls on the previous date, and for anyone west of UTC, a late-evening exercise falls on the next. Aggregates over a window are safe; anything anchored to a local day, such as 'yesterday', must allow for this."
+					},
+					"start_time": {
+						"type": "string",
+						"format": "date-time",
+						"description": "Exercise start as a UTC instant, ISO-8601 to the second, ending in Z. Fitbit's export stores it in UTC. No local start time is read: beside this one it would reveal the owner's UTC offset, and a series of offsets is a travel history.",
+						"x_pdpp_role": "event-time"
+					},
+					"start_time_basis": {
+						"type": "string",
+						"enum": ["utc"],
+						"description": "Which clock start_time is on. Always 'utc' for this source: start_time is a UTC instant and start_date its UTC day. Kept so a reader of several activity sources branches on it the same way; a reader must not make local time-of-day claims from start_time."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"description": "Metres, converted from the kilometres or miles Fitbit recorded. Null when the exercise has no distance, and when the export gave a distance without a unit this import knows; the run's coverage diagnostic then names distance_m in fields_unreadable."
+					},
+					"elapsed_time_s": {
+						"type": ["number", "null"],
+						"description": "Seconds from start to finish, pauses included. Fitbit exports milliseconds. Null when the log carries no duration."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"],
+						"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the export. Present in the payload because a reader holds records, not the manifest."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the export was made, as near as this import can tell: the date and time Google Takeout put in the uploaded file's name (takeout-YYYYMMDDTHHMMSSZ-...), or, for a file not named that way, its modification time, which may be later. The records hold readings from about this time or earlier. The same on every record of one import. Null only when neither could be read."
+					}
+				},
+				"required": [
+					"id",
+					"activity_type",
+					"start_date",
+					"start_time",
+					"start_time_basis",
+					"distance_m",
+					"elapsed_time_s",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_time",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"start_time": ["gte", "gt", "lte", "lt"],
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date", "start_time"],
+					"group_by": ["activity_type"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "daily_summaries",
+			"required": false,
+			"description": "One record per local day with activity data, read from the steps, distance, active minutes and resting heart rate files in the owner's Google Takeout export. Days that carry only zeros, such as the days Fitbit pads its files with after the export date, are not records.",
+			"display": {
+				"label": "Your Fitbit daily activity",
+				"detail": "For each day: steps, distance, lightly, moderately and very active minutes, and resting heart rate. Steps and distance are added up by day in the time zone set in your Fitbit profile when you exported, so on days you spent in another time zone they can differ from the totals the Fitbit app showed. No calories, floors or heart rate through the day, and no location."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, YYYY-MM-DD; identical to date. One record per day, so a later export replaces the earlier record for that day."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day. Active minutes and resting heart rate are Fitbit's own values for the day as it filed them. Steps and distance are added up here from Fitbit's minute-by-minute counts, which it stores in UTC, using the time zone in the owner's profile at export time: one zone for the whole history, so a day spent in another zone is counted on the profile zone's clock.",
+						"x_pdpp_role": "event-time"
+					},
+					"steps": {
+						"type": ["integer", "null"],
+						"description": "Steps that day: the sum of Fitbit's minute counts. Null when Fitbit counted no minutes that day. Also null when the total cannot be trusted: on a day where a minute's count could not be read; on a day covered, or possibly covered, by a part of Fitbit's minute-by-minute steps files that could not be read, since a partial sum would be wrong; and on every day when the export's time zone setting could not be read, since minutes cannot be placed on days without it. The run's coverage diagnostic then names steps in fields_unreadable. Each record replaces the earlier one for its day, so such a null also replaces the steps an earlier import stored for that day, until an import reads the files in full."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"description": "Metres covered that day: the sum of Fitbit's minute distances, which it exports in centimetres. Null in the same cases as steps, judged on Fitbit's minute-by-minute distance files, with the same effect on earlier records, and distance_m is then named in fields_unreadable."
+					},
+					"lightly_active_minutes": {
+						"type": ["integer", "null"],
+						"description": "Fitbit's lightly active minutes for the day."
+					},
+					"moderately_active_minutes": {
+						"type": ["integer", "null"],
+						"description": "Fitbit's moderately active minutes for the day."
+					},
+					"very_active_minutes": {
+						"type": ["integer", "null"],
+						"description": "Fitbit's very active minutes for the day."
+					},
+					"resting_heart_rate_bpm": {
+						"type": ["number", "null"],
+						"description": "Fitbit's resting heart rate for the day, beats per minute, as exported and not rounded. Null when Fitbit had no estimate for the day. Also null when the value, or the part of Fitbit's resting heart rate files that would hold it, could not be read; the run's coverage diagnostic then names resting_heart_rate_bpm in fields_unreadable."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"],
+						"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the export. Present in the payload because a reader holds records, not the manifest."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the export was made, as near as this import can tell: the date and time Google Takeout put in the uploaded file's name (takeout-YYYYMMDDTHHMMSSZ-...), or, for a file not named that way, its modification time, which may be later. The records hold readings from about this time or earlier. The same on every record of one import. Null only when neither could be read."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"steps",
+					"distance_m",
+					"lightly_active_minutes",
+					"moderately_active_minutes",
+					"very_active_minutes",
+					"resting_heart_rate_bpm",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "sleep",
+			"required": false,
+			"description": "One record per sleep Fitbit logged, naps included, read from the sleep files and the sleep score file in the owner's Google Takeout export, and dated by the day the sleep ended. Bedtimes and wake times are excluded at the schema.",
+			"display": {
+				"label": "Your Fitbit sleep",
+				"detail": "For each sleep Fitbit logged, dated by the day you woke: whether it was your main sleep, its sleep score, time asleep and awake, and time in deep, light and REM sleep. Not when you went to bed or woke up."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Fitbit's own sleep log id: a number Fitbit assigns in time order, stable across exports, so a later export replaces the earlier record."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The day the sleep ended, as Fitbit filed it: the owner's local day, so last night's sleep is dated today. A date can have several records: naps, and nights Fitbit logged in parts.",
+						"x_pdpp_role": "event-time"
+					},
+					"is_main_sleep": {
+						"type": ["boolean", "null"],
+						"description": "Whether Fitbit counted this log as a main sleep rather than a nap. Null when the log does not say."
+					},
+					"sleep_score": {
+						"type": ["number", "null"],
+						"description": "Fitbit's overall sleep score for the log, 0 to 100, from the export's sleep score file. Null when Fitbit gave the log no score, and when the uploaded files include no sleep score file; the run's coverage diagnostic then names sleep_score in fields_unavailable, when the rest of the sleep files were read in full. Also null when the score, or part of the sleep score file, could not be read; the report then names sleep_score in fields_unreadable.",
+						"x_pdpp_role": "amount"
+					},
+					"asleep_duration_s": {
+						"type": ["number", "null"],
+						"description": "Seconds asleep in the log, as Fitbit counts them."
+					},
+					"awake_duration_s": {
+						"type": ["number", "null"],
+						"description": "Seconds Fitbit counted as awake in the log. What counts differs by log type: a log with sleep stages counts all time awake in bed, while a classic log counts awake and restless time between falling asleep and waking."
+					},
+					"deep_sleep_duration_s": {
+						"type": ["number", "null"],
+						"description": "Seconds of deep sleep. Null for a classic log, which Fitbit records without sleep stages."
+					},
+					"light_sleep_duration_s": {
+						"type": ["number", "null"],
+						"description": "Seconds of light sleep. Null for a classic log."
+					},
+					"rem_sleep_duration_s": {
+						"type": ["number", "null"],
+						"description": "Seconds of REM sleep. Null for a classic log."
+					},
+					"freshness": {
+						"type": "string",
+						"enum": ["live", "snapshot"],
+						"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the export. Present in the payload because a reader holds records, not the manifest."
+					},
+					"exported_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the export was made, as near as this import can tell: the date and time Google Takeout put in the uploaded file's name (takeout-YYYYMMDDTHHMMSSZ-...), or, for a file not named that way, its modification time, which may be later. The records hold readings from about this time or earlier. The same on every record of one import. Null only when neither could be read."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"is_main_sleep",
+					"sleep_score",
+					"asleep_duration_s",
+					"awake_duration_s",
+					"deep_sleep_duration_s",
+					"light_sleep_duration_s",
+					"rem_sleep_duration_s",
+					"freshness",
+					"exported_at"
+				]
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"exported_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"awaiting_upload": "Nothing to read yet. Request your Fitbit data from Google Takeout at takeout.google.com, selecting only Fitbit (it may be listed as Google Health), with file type .zip and file size 2 GB. Google emails you a download link, usually the same day. Upload every ZIP file from that link here, together: this import can't always tell if one is missing.",
+		"collection_interrupted": "Part of your export couldn't be read to the end, so some of your data is missing. Request a fresh export from Google Takeout and upload the new download.",
+		"device_storage_unavailable": "This device couldn't finish reading your export. Nothing is wrong with the export itself. Try the import again, and check that the device has free storage space.",
+		"export_format_changed": "We couldn't read this part of your Fitbit export because its layout isn't the one we expect. Google may have changed the format, or one of the export's ZIP files may be missing. If you uploaded every ZIP file, please report this rather than retrying.",
+		"records_unreadable": "Some entries in your export couldn't be read and were skipped. Importing the same file again won't recover them.",
+		"source_limit_reached": "Your export is larger than this import can read, so some or all of it wasn't imported. If Takeout gave you several ZIP files, upload every one together: this import can't always tell if one is missing. If you chose Takeout files larger than 2 GB, request the export again with 2 GB files; otherwise, please report this.",
+		"source_unreadable": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip."
+	}
+}

@@ -1,0 +1,499 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/garmin-browser",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/garmin_browser",
+		"display": { "name": "Garmin (Browser Sign-In)" }
+	},
+	"connector_key": "garmin-browser",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
+	"version": "0.1.9",
+	"display_name": "Garmin (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": { "required": true },
+			"browser": { "required": true }
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection reads the daily summaries, sleep, HRV, training status and activities that connect.garmin.com loads for the owner's own signed-in session, from inside that page, with the page's own request token; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Garmin's own sign-in page. The first run reads from the start of the grant, or the last 90 days when the grant sets no start, oldest first. Each later run first re-reads recent days and then continues from where the last run stopped. It re-reads the last week of daily summaries and training status, which Garmin may still be scoring. It re-reads sleep, HRV and activities from four weeks before the last run's day, so a night or an activity that a watch syncs up to four weeks late is still collected. Days whose records did not read cleanly are kept and read again on later runs until they do, up to 366 such days per stream: past that, the oldest are no longer kept, and the run reports how many. For sleep, HRV and activities, the whole four-week window that held such a record is kept. A run stops re-reading kept days for a stream once a week of them, or one four-week window, still fails. One run reads at most 90 days per daily stream and 40 four-week windows per range stream, re-reads included. A window holding more activities than one request returns is read again in smaller parts. Requests go one at a time with pauses."
+		},
+		"public_listing": { "tier": "development" }
+	},
+	"streams": [
+		{
+			"name": "daily_summaries",
+			"required": false,
+			"description": "Garmin's summary of each of the owner's local calendar days: steps, resting and lowest heart rate, average stress, and the day's highest and lowest Body Battery. A day the watch recorded nothing for has no record.",
+			"display": {
+				"label": "Your Garmin daily summaries",
+				"detail": "Steps, resting and lowest heart rate, average stress and the Body Battery range for each day."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, YYYY-MM-DD; one record per day."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time",
+						"description": "The owner's local calendar day, as Garmin dates it."
+					},
+					"steps": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Steps over the day."
+					},
+					"resting_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Resting heart rate for the day, in beats per minute. Not Garmin's seven-day average."
+					},
+					"min_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Lowest heart rate over the day, in beats per minute."
+					},
+					"average_stress_level": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Average stress level on Garmin's 0 to 100 scale; null when it was not measured."
+					},
+					"body_battery_high": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Highest Body Battery over the day, on Garmin's 0 to 100 scale."
+					},
+					"body_battery_low": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Lowest Body Battery over the day, on Garmin's 0 to 100 scale."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"steps",
+					"resting_heart_rate_bpm",
+					"min_heart_rate_bpm",
+					"average_stress_level",
+					"body_battery_high",
+					"body_battery_low"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"steps": ["gte", "gt", "lte", "lt"],
+					"resting_heart_rate_bpm": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "sleep",
+			"required": false,
+			"description": "Garmin's record of each night's sleep, dated by the day the owner woke: when sleep began and ended, time in deep, light and REM sleep and awake, the sleep score and its rating, breathing rate and, on watches with Pulse Ox, blood oxygen. A night the watch did not record has no record.",
+			"display": {
+				"label": "Your Garmin sleep",
+				"detail": "Bedtime and wake time, sleep stages, sleep score, breathing rate and blood oxygen for each night."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day the sleep ended on, as Garmin dates the night."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the sleep began (RFC 3339, UTC)."
+					},
+					"end_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When the sleep ended (RFC 3339, UTC)."
+					},
+					"total_sleep_duration_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"x_pdpp_role": "amount",
+						"description": "Time asleep, in seconds: deep, light and REM sleep together."
+					},
+					"deep_sleep_duration_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"description": "Deep sleep, in seconds."
+					},
+					"light_sleep_duration_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"description": "Light sleep, in seconds."
+					},
+					"rem_sleep_duration_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"description": "REM sleep, in seconds."
+					},
+					"awake_duration_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"description": "Time awake between falling asleep and waking, in seconds."
+					},
+					"sleep_score": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
+						"description": "Garmin's sleep score, from 0 to 100."
+					},
+					"sleep_quality": {
+						"type": ["string", "null"],
+						"description": "Garmin's rating of the sleep score, as Garmin writes it, such as GOOD or FAIR. Garmin's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"respiratory_rate_rpm": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 100,
+						"description": "Breathing rate during the sleep, in breaths per minute."
+					},
+					"blood_oxygen_pct": {
+						"type": ["number", "null"],
+						"minimum": 50,
+						"maximum": 100,
+						"description": "Blood oxygen saturation during the sleep, as a percentage; null on watches without Pulse Ox."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"start_at",
+					"end_at",
+					"total_sleep_duration_s",
+					"deep_sleep_duration_s",
+					"light_sleep_duration_s",
+					"rem_sleep_duration_s",
+					"awake_duration_s",
+					"sleep_score",
+					"sleep_quality",
+					"respiratory_rate_rpm",
+					"blood_oxygen_pct"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"end_at": ["gte", "gt", "lte", "lt"],
+					"date": ["gte", "gt", "lte", "lt"],
+					"total_sleep_duration_s": ["gte", "gt", "lte", "lt"],
+					"sleep_score": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at", "date"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "hrv",
+			"required": false,
+			"description": "Garmin's overnight heart rate variability for each night a watch with HRV Status measured it, dated by the day the owner woke: last night's average, the seven-day average and the HRV status Garmin assigns. Watches without HRV Status have no records here.",
+			"display": {
+				"label": "Your Garmin HRV status",
+				"detail": "Last night's HRV, its seven-day average and Garmin's HRV status for each night."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time",
+						"description": "The owner's local calendar day the night ended on, as Garmin dates it."
+					},
+					"last_night_average_ms": {
+						"type": ["integer", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"x_pdpp_role": "amount",
+						"description": "Average overnight heart rate variability, in milliseconds; null for a night with no overnight reading, while the status and seven-day average carry on."
+					},
+					"weekly_average_ms": {
+						"type": ["integer", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "Seven-day average of overnight heart rate variability, in milliseconds; null while Garmin is still establishing a baseline."
+					},
+					"status": {
+						"type": ["string", "null"],
+						"description": "Garmin's HRV status, as Garmin writes it, such as BALANCED, UNBALANCED, LOW, or NONE while it establishes a baseline. Garmin's vocabulary, which may grow: show an unrecognised value as it is."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"last_night_average_ms",
+					"weekly_average_ms",
+					"status"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"last_night_average_ms": ["gte", "gt", "lte", "lt"],
+					"weekly_average_ms": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"],
+					"group_by": ["status"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "training_status",
+			"required": false,
+			"description": "Garmin's training status for each of the owner's local calendar days: the status it assigned, its numeric code, the week's training load and whether training status was paused. A day without a status of its own has no record, and watches that do not compute training status have none.",
+			"display": {
+				"label": "Your Garmin training status",
+				"detail": "Training status, weekly training load and whether it was paused, for each day."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, YYYY-MM-DD; one record per day."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"x_pdpp_role": "event-time",
+						"description": "The owner's local calendar day, as Garmin dates it."
+					},
+					"training_status": {
+						"type": ["string", "null"],
+						"description": "Garmin's training status phrase for the day, as Garmin writes it: the status, such as PRODUCTIVE or MAINTAINING, with Garmin's qualifiers appended. Garmin's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"training_status_code": {
+						"type": ["integer", "null"],
+						"description": "Garmin's numeric code for the training status, as Garmin sends it."
+					},
+					"weekly_training_load": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Training load over the seven days to this one, in Garmin's load units; null where the watch does not report it."
+					},
+					"training_paused": {
+						"type": ["boolean", "null"],
+						"description": "Whether the owner had paused training status on this day."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"training_status",
+					"training_status_code",
+					"weekly_training_load",
+					"training_paused"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"weekly_training_load": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"],
+					"group_by": ["training_status"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "activities",
+			"required": false,
+			"description": "Activities recorded in Garmin Connect: the sport, when each started (UTC) and on which local day, elapsed and moving time, distance, calories and heart rate. Activity names, routes, coordinates, places and device details are not read.",
+			"display": {
+				"label": "Your Garmin activities",
+				"detail": "Sport, start time, duration, distance, calories and heart rate for each activity. No names, routes or locations."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Garmin's activity id. It is also the address of the activity's page on Garmin Connect, which others can open only if the owner made the activity public."
+					},
+					"activity_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title",
+						"description": "Garmin's activity type key, as Garmin writes it, such as running or cycling. Garmin's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"start_at": {
+						"type": "string",
+						"format": "date-time",
+						"x_pdpp_role": "event-time",
+						"description": "When the activity started (RFC 3339, UTC)."
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day the activity started on."
+					},
+					"elapsed_time_s": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Time from start to finish, pauses included, in seconds."
+					},
+					"moving_time_s": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Time spent moving, in seconds."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Distance, in metres; null for an activity without one."
+					},
+					"calories_kcal": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Energy expended, in kilocalories."
+					},
+					"average_heart_rate_bpm": {
+						"type": ["number", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Average heart rate, in beats per minute."
+					},
+					"max_heart_rate_bpm": {
+						"type": ["number", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Highest heart rate, in beats per minute."
+					}
+				},
+				"required": [
+					"id",
+					"activity_type",
+					"start_at",
+					"start_date",
+					"elapsed_time_s",
+					"moving_time_s",
+					"distance_m",
+					"calories_kcal",
+					"average_heart_rate_bpm",
+					"max_heart_rate_bpm"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_at",
+			"consent_time_field": "start_at",
+			"selection": { "fields": true, "resources": true },
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"start_at": ["gte", "gt", "lte", "lt"],
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"distance_m": ["gte", "gt", "lte", "lt"],
+					"elapsed_time_s": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_at", "start_date"],
+					"group_by": ["activity_type"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "Garmin Connect stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+		"sign_in_required": "Garmin Connect needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run read as much Garmin history as one run allows. The next run continues from where this one stopped.",
+		"source_unreadable": "Garmin Connect answered with something this connector doesn't recognise, so nothing more was read. Garmin may have changed its site; please report this rather than retrying."
+	}
+}

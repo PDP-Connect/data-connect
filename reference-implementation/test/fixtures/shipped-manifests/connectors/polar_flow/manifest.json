@@ -1,0 +1,798 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/polar-flow",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/polar_flow",
+		"display": {
+			"name": "Polar Flow"
+		}
+	},
+	"connector_key": "polar-flow",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
+	"version": "0.1.2",
+	"display_name": "Polar Flow",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#E2002B"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"],
+				"constraints": {
+					"hosts": [
+						"https://flow.polar.com",
+						"https://sleep-api.flow.polar.com"
+					]
+				}
+			},
+			"browser": {
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 604800,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the profile, training sessions, daily activity, sleep and Nightly Recharge that flow.polar.com loads for the owner's own signed-in session, from inside that page; the sleep report comes from sleep-api.flow.polar.com, which accepts the same session from that page. Every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Polar's own sign-in page. The first run reads from the start of the grant or, without one, the last two years of training sessions, the last 90 days of daily activity and the last year of sleep and Nightly Recharge, oldest first. Each later run re-reads the last days before where the last one stopped (two weeks of sessions, three days of activity, a week of sleep and Nightly Recharge, which devices may sync late) and continues to today. A day whose record did not read cleanly is reported and read once more on the next run. One run reads at most 40 months of sessions, 400 days of activity, 5 years of sleep and 20 four-week windows of Nightly Recharge; the next run continues from there. Requests go one at a time with pauses."
+		},
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "polar_flow",
+			"login_url": "https://flow.polar.com/login",
+			"login_message": "Sign in to Polar Flow, then return here.",
+			"collect_export": "collectPolarFlow",
+			"probe_export": "probeOnPage",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	},
+	"streams": [
+		{
+			"name": "profile",
+			"required": false,
+			"description": "The owner's Polar Flow profile: name, country, birthday, sex, training background, body measurements and the heart rate, VO2max, power and sleep settings Polar uses for zones and feedback, with the account's UTC offset, unit system and language. The login e-mail and profile picture are not read.",
+			"display": {
+				"label": "Your Polar Flow profile",
+				"detail": "Name, country, birthday, body measurements, heart rate and training settings."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Polar's numeric user id."
+					},
+					"first_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title",
+						"description": "First name as entered in the profile."
+					},
+					"last_name": {
+						"type": ["string", "null"],
+						"description": "Last name as entered in the profile."
+					},
+					"country": {
+						"type": ["string", "null"],
+						"description": "Country, as an ISO 3166-1 alpha-2 code."
+					},
+					"birthday": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "Date of birth."
+					},
+					"sex": {
+						"type": ["string", "null"],
+						"description": "Sex as set in the profile, as Polar writes it, such as FEMALE or MALE."
+					},
+					"training_background": {
+						"type": ["string", "null"],
+						"description": "Training background as set in the profile, as Polar writes it, such as OCCASIONAL, REGULAR or PROFESSIONAL. Polar's vocabulary, which may grow: show an unrecognised value as it is."
+					},
+					"weight_kg": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 700,
+						"description": "Body weight, in kilograms."
+					},
+					"height_cm": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 300,
+						"description": "Height, in centimetres."
+					},
+					"max_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Maximum heart rate setting, in beats per minute."
+					},
+					"resting_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Resting heart rate setting, in beats per minute."
+					},
+					"aerobic_threshold_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Aerobic threshold, in beats per minute."
+					},
+					"anaerobic_threshold_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Anaerobic threshold, in beats per minute."
+					},
+					"vo2max": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 120,
+						"description": "VO2max setting, in ml/kg/min."
+					},
+					"functional_threshold_power_w": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 3000,
+						"description": "Cycling functional threshold power, in watts."
+					},
+					"sleep_goal_hours": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"maximum": 24,
+						"description": "Nightly sleep goal, in hours."
+					},
+					"utc_offset": {
+						"type": ["string", "null"],
+						"description": "The account's UTC offset as Polar holds it, as +HH:MM or -HH:MM."
+					},
+					"measurement_unit": {
+						"type": ["string", "null"],
+						"description": "The unit system the owner sees, METRIC or IMPERIAL. Records are always metric."
+					},
+					"language": {
+						"type": ["string", "null"],
+						"description": "Polar Flow's language for the owner, as an ISO 639-1 code."
+					}
+				},
+				"required": [
+					"id",
+					"first_name",
+					"last_name",
+					"country",
+					"birthday",
+					"sex",
+					"training_background",
+					"weight_kg",
+					"height_cm",
+					"max_heart_rate_bpm",
+					"resting_heart_rate_bpm",
+					"aerobic_threshold_bpm",
+					"anaerobic_threshold_bpm",
+					"vo2max",
+					"functional_threshold_power_w",
+					"sleep_goal_hours",
+					"utc_offset",
+					"measurement_unit",
+					"language"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": ["first_name", "last_name"]
+				},
+				"range_filters": {
+					"birthday": ["gte", "gt", "lte", "lt"],
+					"weight_kg": ["gte", "gt", "lte", "lt"]
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "training_sessions",
+			"required": false,
+			"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name, the owner's note, and its heart rate sample by sample (every second on a recorded session). GPS routes, the other samples (speed, power, altitude, cadence), laps and zones are not read.",
+			"display": {
+				"label": "Your Polar training sessions",
+				"detail": "Sport, start time, duration, distance, calories, training load and second-by-second heart rate for each session. No routes or locations."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Polar's training session id."
+					},
+					"sport_id": {
+						"type": "integer",
+						"description": "Polar's numeric sport id."
+					},
+					"sport_name": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title",
+						"description": "The sport's name in the owner's Polar Flow language, as Polar writes it, such as Running."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "The session's name, when it has one."
+					},
+					"start_date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day the session started on.",
+						"x_pdpp_role": "event-time"
+					},
+					"start_time_local": {
+						"type": "string",
+						"description": "When the session started, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone: Polar keeps none for a session)."
+					},
+					"end_time_local": {
+						"type": ["string", "null"],
+						"description": "When the session ended, on the owner's local clock; null when Polar served no analysis for it."
+					},
+					"duration_s": {
+						"type": "number",
+						"minimum": 0,
+						"maximum": 1209600,
+						"description": "Duration, in seconds."
+					},
+					"distance_m": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Distance, in metres; null for a session without one."
+					},
+					"calories_kcal": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Energy expended, in kilocalories."
+					},
+					"average_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Average heart rate, in beats per minute; null when none was recorded."
+					},
+					"max_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Highest heart rate, in beats per minute; null when none was recorded or Polar served no analysis."
+					},
+					"training_load": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Polar's training load for the session; null when Polar computed none."
+					},
+					"device_name": {
+						"type": ["string", "null"],
+						"description": "The Polar device that recorded the session; null for a session entered by hand."
+					},
+					"note": {
+						"type": ["string", "null"],
+						"description": "The owner's note on the session."
+					},
+					"is_test": {
+						"type": ["boolean", "null"],
+						"description": "Whether the session is a fitness test."
+					},
+					"has_training_target": {
+						"type": ["boolean", "null"],
+						"description": "Whether the session was done against a planned training target."
+					},
+					"heart_rate_samples": {
+						"type": ["array", "null"],
+						"minItems": 1,
+						"maxItems": 100,
+						"description": "The session's heart rate as Polar recorded it, one evenly spaced series per exercise (a multisport session has several), oldest first: every sample, at 1 second on a recorded session. A series longer than 43200 samples (12 hours at 1 second) is thinned evenly, keeping every k-th sample and a k times longer interval, so it still spans the session. Null when the session recorded no heart rate (a manual entry, no sensor). Absent on records collected before version 0.1.2.",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"required": [
+								"exercise_id",
+								"start_time_local",
+								"interval_s",
+								"bpm"
+							],
+							"properties": {
+								"exercise_id": {
+									"type": "string",
+									"pattern": "^[1-9][0-9]*$",
+									"description": "Polar's id for the exercise within the session."
+								},
+								"start_time_local": {
+									"type": ["string", "null"],
+									"description": "When the exercise started, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone); the first sample was recorded then."
+								},
+								"interval_s": {
+									"type": "number",
+									"exclusiveMinimum": 0,
+									"maximum": 3600,
+									"description": "Seconds between consecutive samples."
+								},
+								"bpm": {
+									"type": "array",
+									"minItems": 1,
+									"maxItems": 43200,
+									"items": {
+										"type": ["integer", "null"],
+										"minimum": 1,
+										"maximum": 300
+									},
+									"description": "Heart rate in beats per minute; bpm[i] was recorded i * interval_s seconds after start_time_local. Null where the sensor had no reading."
+								}
+							}
+						}
+					}
+				},
+				"required": [
+					"id",
+					"sport_id",
+					"sport_name",
+					"name",
+					"start_date",
+					"start_time_local",
+					"end_time_local",
+					"duration_s",
+					"distance_m",
+					"calories_kcal",
+					"average_heart_rate_bpm",
+					"max_heart_rate_bpm",
+					"training_load",
+					"device_name",
+					"note",
+					"is_test",
+					"has_training_target"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "start_date",
+			"consent_time_field": "start_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["sport_name", "name", "note"],
+					"semantic_fields": ["note"]
+				},
+				"range_filters": {
+					"start_date": ["gte", "gt", "lte", "lt"],
+					"duration_s": ["gte", "gt", "lte", "lt"],
+					"distance_m": ["gte", "gt", "lte", "lt"],
+					"calories_kcal": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["start_date"],
+					"group_by": ["sport_name"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "daily_activity",
+			"required": false,
+			"description": "Polar's 24/7 activity summary for each of the owner's local calendar days a Polar device recorded: steps, active time, distance from steps, calories, progress toward the daily activity goal, inactivity alerts, time in each activity level, the day's and night's lowest and highest heart rate, and when the device last synced. A day no device recorded has no record.",
+			"display": {
+				"label": "Your Polar daily activity",
+				"detail": "Steps, active time, calories, activity goal and heart rate range for each day."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day, YYYY-MM-DD; one record per day."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day.",
+						"x_pdpp_role": "event-time"
+					},
+					"steps": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"x_pdpp_role": "amount",
+						"description": "Steps over the day."
+					},
+					"active_time_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Active time, in minutes."
+					},
+					"distance_from_steps_m": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"description": "Distance estimated from steps, in metres."
+					},
+					"calories_kcal": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Calories over the day, in kilocalories."
+					},
+					"daily_goal_pct": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 10000,
+						"description": "Progress toward the daily activity goal, in percent; over 100 when the goal was beaten."
+					},
+					"sleep_duration_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Sleep counted for the day, in minutes."
+					},
+					"inactivity_alert_count": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Inactivity alerts the device gave during the day."
+					},
+					"sedentary_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Time sitting or still, in minutes."
+					},
+					"light_activity_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Time in light activity, in minutes."
+					},
+					"moderate_activity_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Time in moderate activity, in minutes."
+					},
+					"vigorous_activity_min": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 1440,
+						"description": "Time in vigorous activity, in minutes."
+					},
+					"day_min_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Lowest heart rate while awake, in beats per minute."
+					},
+					"day_max_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Highest heart rate over the day, in beats per minute."
+					},
+					"night_min_heart_rate_bpm": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 300,
+						"description": "Lowest heart rate during sleep, in beats per minute."
+					},
+					"last_sync_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When a device last synced data for the day (RFC 3339, UTC)."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"steps",
+					"active_time_min",
+					"distance_from_steps_m",
+					"calories_kcal",
+					"daily_goal_pct",
+					"sleep_duration_min",
+					"inactivity_alert_count",
+					"sedentary_min",
+					"light_activity_min",
+					"moderate_activity_min",
+					"vigorous_activity_min",
+					"day_min_heart_rate_bpm",
+					"day_max_heart_rate_bpm",
+					"night_min_heart_rate_bpm",
+					"last_sync_at"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"steps": ["gte", "gt", "lte", "lt"],
+					"calories_kcal": ["gte", "gt", "lte", "lt"],
+					"active_time_min": ["gte", "gt", "lte", "lt"],
+					"last_sync_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "sleep",
+			"required": false,
+			"description": "Polar's record of each night's sleep from a device with Sleep Plus Stages, dated by the day the owner woke: when the night began and ended on the owner's local clock, the offsets to falling asleep and waking, time in bed, the sleep score, continuity, sleep cycles and the owner's own rating. A night no device recorded has no record.",
+			"display": {
+				"label": "Your Polar sleep",
+				"detail": "Bedtime and wake time, sleep score, continuity and cycles for each night."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day the night ended on, as Polar dates it.",
+						"x_pdpp_role": "event-time"
+					},
+					"sleep_start_local": {
+						"type": "string",
+						"description": "When the night began, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone)."
+					},
+					"sleep_end_local": {
+						"type": "string",
+						"description": "When the night ended, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone)."
+					},
+					"fell_asleep_offset_s": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 86400,
+						"description": "Seconds from the start of the night to falling asleep."
+					},
+					"woke_up_offset_s": {
+						"type": ["integer", "null"],
+						"minimum": -86400,
+						"maximum": 86400,
+						"description": "Seconds added to the end of the night to reach the moment of waking."
+					},
+					"time_in_bed_s": {
+						"type": "integer",
+						"minimum": 0,
+						"maximum": 172800,
+						"x_pdpp_role": "amount",
+						"description": "From the start to the end of the night, in seconds."
+					},
+					"sleep_score": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"maximum": 100,
+						"description": "Polar's Sleep Score, from 1 to 100; null when the night has none."
+					},
+					"continuity_index": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 5,
+						"description": "Sleep continuity on Polar's 1 to 5 scale."
+					},
+					"continuity_class": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 10,
+						"description": "Polar's class for the continuity, as Polar sends it."
+					},
+					"sleep_cycles": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 50,
+						"description": "Sleep cycles detected."
+					},
+					"sleep_rating": {
+						"type": ["string", "null"],
+						"description": "The owner's own rating of the night, as Polar writes it, such as SLEPT_WELL. Polar's vocabulary, which may grow: show an unrecognised value as it is."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"sleep_start_local",
+					"sleep_end_local",
+					"fell_asleep_offset_s",
+					"woke_up_offset_s",
+					"time_in_bed_s",
+					"sleep_score",
+					"continuity_index",
+					"continuity_class",
+					"sleep_cycles",
+					"sleep_rating"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"sleep_score": ["gte", "gt", "lte", "lt"],
+					"time_in_bed_s": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"],
+					"group_by": ["sleep_rating"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "nightly_recharge",
+			"required": false,
+			"description": "Polar's Nightly Recharge for each night a device measured it, dated by the day the owner woke: the Nightly Recharge status, the ANS charge and its rating against the owner's usual, and the night's average beat-to-beat interval, heart rate variability (RMSSD) and breathing interval, each beside its 28-day average. A night without a measurement has no record.",
+			"display": {
+				"label": "Your Polar Nightly Recharge",
+				"detail": "Nightly Recharge status, ANS charge, heart rate variability and breathing for each night."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+					},
+					"date": {
+						"type": "string",
+						"format": "date",
+						"description": "The owner's local calendar day the night ended on, as Polar dates it.",
+						"x_pdpp_role": "event-time"
+					},
+					"nightly_recharge_status": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 6,
+						"x_pdpp_role": "amount",
+						"description": "Nightly Recharge status on Polar's 1 (very poor) to 6 (very good) scale."
+					},
+					"ans_charge": {
+						"type": ["number", "null"],
+						"minimum": -10,
+						"maximum": 10,
+						"description": "ANS charge on Polar's -10 to +10 scale."
+					},
+					"ans_charge_status": {
+						"type": ["integer", "null"],
+						"minimum": 1,
+						"maximum": 5,
+						"description": "Polar's rating of the ANS charge against the owner's usual level, from 1 (much below) to 5 (much above)."
+					},
+					"beat_to_beat_interval_ms": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 20000,
+						"description": "Average interval between heart beats during the night, in milliseconds."
+					},
+					"beat_to_beat_interval_28d_avg_ms": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 20000,
+						"description": "The 28-day average of the beat-to-beat interval, in milliseconds."
+					},
+					"hrv_rmssd_ms": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "Heart rate variability during the night (RMSSD), in milliseconds."
+					},
+					"hrv_rmssd_28d_avg_ms": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"exclusiveMaximum": 1000,
+						"description": "The 28-day average of heart rate variability (RMSSD), in milliseconds."
+					},
+					"breathing_interval_ms": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 20000,
+						"description": "Average interval between breaths during the night, in milliseconds."
+					},
+					"breathing_interval_28d_avg_ms": {
+						"type": ["number", "null"],
+						"exclusiveMinimum": 0,
+						"exclusiveMaximum": 20000,
+						"description": "The 28-day average of the breathing interval, in milliseconds."
+					}
+				},
+				"required": [
+					"id",
+					"date",
+					"nightly_recharge_status",
+					"ans_charge",
+					"ans_charge_status",
+					"beat_to_beat_interval_ms",
+					"beat_to_beat_interval_28d_avg_ms",
+					"hrv_rmssd_ms",
+					"hrv_rmssd_28d_avg_ms",
+					"breathing_interval_ms",
+					"breathing_interval_28d_avg_ms"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"cursor_field": "date",
+			"consent_time_field": "date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"date": ["gte", "gt", "lte", "lt"],
+					"ans_charge": ["gte", "gt", "lte", "lt"],
+					"hrv_rmssd_ms": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["date"],
+					"group_by": ["nightly_recharge_status"]
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"reason_display_messages": {
+		"collection_interrupted": "Polar Flow stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+		"sign_in_required": "Polar Flow needs you to sign in again before this can continue.",
+		"source_limit_reached": "This run read as much Polar Flow history as one run allows. The next run continues from where this one stopped.",
+		"source_unreadable": "Polar Flow answered with something this connector doesn't recognise, so nothing more was read. Polar may have changed its site; please report this rather than retrying."
+	}
+}

@@ -97,6 +97,17 @@ export class ReachabilityOperations {
     });
     return run;
   }
+  /**
+   * Resolves once every serialized() write chain has settled: those queued so far, and any
+   * queued behind one while waiting. It never rejects. A failed settlement is recorded by
+   * the failure path in start(), so a failed chain only counts as finished here.
+   * Not covered: writes outside serialized() (start()'s initial intent write and the stop
+   * tombstone, both awaited by their callers), and a start whose effect has not returned,
+   * because it has not queued its settlement yet.
+   */
+  async idle(): Promise<void> {
+    while (this.tails.size > 0) await Promise.all(this.tails.values());
+  }
   private async write(record: OperationRecord): Promise<void> {
     await mkdir(this.root, { mode: 0o700, recursive: true });
     const path = this.path(record.operationId);

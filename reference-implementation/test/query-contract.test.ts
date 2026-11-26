@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { createTraceContext, emitSpineEvent } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
@@ -168,7 +168,7 @@ async function startGrantRequest(asUrl: string, params: JsonObject) {
           access_mode: params.access_mode,
           purpose_code: params.purpose_code,
           purpose_description: params.purpose_description,
-          source: params.source || { id: params.connector_id, kind: "connector" },
+          source: params.source,
           streams: params.streams,
           type: "https://pdpp.dev/data-access",
         },
@@ -221,7 +221,7 @@ function setUniqueConnectorKey(manifest: JsonObject, key: string): JsonObject {
 }
 
 function readGmailManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for gmail.json");
   }
@@ -630,7 +630,7 @@ test("connector discovery scopes client tokens to the granted source and streams
       client_id: "longview",
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "schema discovery test",
-      source: { id: spotifyManifest.connector_id, kind: "connector" },
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token, `expected issued grant token, got ${JSON.stringify(approved)}`);
@@ -719,7 +719,7 @@ test("schema discovery scopes a client token to its grant source and streams", a
       client_id: "longview",
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "schema discovery client scope",
-      source: { id: spotifyManifest.connector_id, kind: "connector" },
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token, "expected client token");
@@ -871,7 +871,7 @@ test("stream metadata projects only frozen grant fields for client tokens", asyn
       client_id: "longview",
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "schema discovery test",
-      source: { id: spotifyManifest.connector_id, kind: "connector" },
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token, `expected issued grant token, got ${JSON.stringify(approved)}`);
@@ -905,6 +905,7 @@ test("stream metadata projects only frozen grant fields for client tokens", asyn
       connector_id: gmailManifest.connector_id,
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "Plan message queries using a narrowed field set",
+      source: { id: gmailManifest.source.id, kind: "connector" },
       streams: [
         {
           fields: ["id", "thread_id", "received_at", "subject"],
@@ -1046,6 +1047,7 @@ test("stream aggregate enforces grants and declared aggregate fields", async () 
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "aggregation grant safety test",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token);
@@ -1088,6 +1090,7 @@ test("stream aggregate enforces grant resources and time while rejecting client 
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "aggregation resource and time-range safety test",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [
         {
           fields: ["id", "name", "popularity", "source_updated_at"],
@@ -1410,7 +1413,7 @@ test("fields projection on a manifest-unknown field is rejected under a restrict
       client_id: "longview",
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "projection conformance under a narrowed field grant",
-      source: { id: connectorId, kind: "connector" },
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token, `expected grant token, got ${JSON.stringify(approved)}`);
@@ -1441,7 +1444,7 @@ test("fields projection on a declared but ungranted field is rejected under a re
       client_id: "longview",
       purpose_code: "https://pdpp.dev/purpose/analytics",
       purpose_description: "projection conformance under a narrowed field grant",
-      source: { id: connectorId, kind: "connector" },
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
     });
     assert.ok(approved.token, `expected grant token, got ${JSON.stringify(approved)}`);
@@ -1927,6 +1930,7 @@ test("client expansion rejects before related-stream grant evaluation", async ()
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read saved tracks only",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [
         {
           fields: ["id", "name", "saved_at"],
@@ -2114,6 +2118,7 @@ test("owner Gmail message reads expand hydrated attachments with blob fetch_url"
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read Gmail messages with attachment blobs",
+      source: { id: gmailManifest.source.id, kind: "connector" },
       streams: [
         { fields: ["id", "thread_id", "subject", "received_at", "has_attachments"], name: "messages" },
         {
@@ -2169,6 +2174,7 @@ test("gmail message expansion rejects missing child grant and reverse thread rel
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read Gmail messages only",
+      source: { id: gmailManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "thread_id", "subject", "received_at"], name: "messages" }],
     });
 
@@ -2190,7 +2196,7 @@ test("gmail message expansion rejects missing child grant and reverse thread rel
 });
 
 function readSlackManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "slack.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "slack.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for slack.json");
   }
@@ -2322,7 +2328,7 @@ async function seedSlackExpansionFixture(rsUrl: string, ownerToken: string, conn
 }
 
 test("first-party manifests declare only parent-to-child query.expand entries with FK on child", () => {
-  const manifests = readPolyfillManifests()
+  const manifests = readShippedManifests()
     .map(({ file, manifest }) => ({
       manifest: manifest as JsonObject,
       // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
@@ -2388,7 +2394,7 @@ test("first-party manifests declare only parent-to-child query.expand entries wi
 //   openspec/changes/add-record-relationship-navigation/.
 
 function readGithubManifest() {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "github.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "github.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for github.json");
   }
@@ -2611,6 +2617,7 @@ test("github user expansion rejects requests missing the user_stats grant", asyn
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read GitHub profile only",
+      source: { id: githubManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "login"], name: "user" }],
     });
 
@@ -2790,6 +2797,7 @@ test("slack message expansion rejects requests missing the child grant", async (
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read Slack messages only",
+      source: { id: slackManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "channel_id", "sent_at"], name: "messages" }],
     });
 
@@ -2898,6 +2906,7 @@ test("blob upload requires owner authority and validates binding inputs", async 
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read saved tracks only",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [
         { fields: ["id", "name", "saved_at"], instance_ids: ["cin_query_contract_spotify_blob"], name: "saved_tracks" },
       ],
@@ -3010,6 +3019,7 @@ test("blob upload is content-addressed, idempotent, and fetch-safe through visib
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read saved tracks with uploaded blob access",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "saved_at", "blob_ref"], name: "saved_tracks" }],
     });
 
@@ -3102,6 +3112,7 @@ test("blob fetch injects fetch_url and requires blob_ref visibility under the gr
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read saved tracks with blob access",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "saved_at", "blob_ref"], name: "saved_tracks" }],
     });
 
@@ -3126,6 +3137,7 @@ test("blob fetch injects fetch_url and requires blob_ref visibility under the gr
       connector_id: connectorId,
       purpose_code: "https://pdpp.dev/purpose/personalization",
       purpose_description: "Read saved tracks without blob access",
+      source: { id: spotifyManifest.source.id, kind: "connector" },
       streams: [{ fields: ["id", "name", "saved_at"], name: "saved_tracks" }],
     });
 

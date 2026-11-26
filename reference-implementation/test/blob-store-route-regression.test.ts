@@ -21,7 +21,7 @@ const TOP_LEVEL_REGEX_1 = /^blob_sha256_/;
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
@@ -132,7 +132,7 @@ interface ConnectorManifest {
 }
 
 function loadGmailManifest(): ConnectorManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  const entry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
   if (!entry) {
     throw new Error("no polyfill manifest found for gmail.json");
   }
