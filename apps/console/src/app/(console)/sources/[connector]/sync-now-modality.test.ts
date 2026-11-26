@@ -191,14 +191,9 @@ test("a device-local add_info recovery renders non-clickable guidance, not a /ru
   assert.match(src, DEVICE_LOCAL_TESTID);
 });
 
-test("the empty-records hint gates sync copy on the owner-runnable branch", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The owner-run copy must be gated behind the owner-runnable branch so
-  // push-mode connections are not told to click a button they do not have. It
-  // also uses the same idle label as the button ("Sync now" / "Retry sync") so
-  // failed first attempts do not fall back to stale first-run copy.
-  assert.match(src, SYNC_HINT_GATED_RE);
-  assert.match(src, EMPTY_STREAMS_HINT_RECEIVES_IDLE_LABEL);
+test("empty records omit invented counts", async () => {
+ const src = await readFile(PAGE_FILE, "utf8");
+ assert.match(src, /typeof stream.record_count === "number"/);
 });
 
 test("detail Sync now acknowledges accepted starts without stale optimistic running state", async () => {

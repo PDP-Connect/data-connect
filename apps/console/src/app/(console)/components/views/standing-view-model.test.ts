@@ -577,7 +577,7 @@ test("needs-you rows contain their source or request details and follow the requ
   // Lead decision (home-pictures 1): the sync-started time follows the status words, in lower case.
   assert.match(data.needs[0]?.syncNote ?? "", /^sync started /);
   // Lead decision (home-pictures 1): status words sit on their own line, capital first, as the wording function gives them.
-  assert.equal(data.needs.find((need) => need.name === "Amazon")?.status?.words, "Needs its collector installed");
+  assert.equal(data.needs.find((need) => need.name === "Amazon")?.status?.words, "Needs to get ready again");
   // DIRECTION.md, Home § Needs you: approval rows use the existing review destination.
   assert.equal(data.needs.find((need) => need.kind === "approval")?.actionHref, HREFS.grants);
   // DIRECTION.md, Home § Needs you: source action links land on that source's detail page.

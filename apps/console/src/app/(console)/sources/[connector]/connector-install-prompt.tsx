@@ -49,7 +49,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
         setFeedback({ message: ACTION_ERROR_COPY, rawDetails: result.message, tone: "error" });
         return;
       }
-      setFeedback({ message: "Installed. Refreshing…", tone: "success" });
+      setFeedback({ message: "Ready. Refreshing…", tone: "success" });
       onInstalled?.();
       router.refresh();
     });
@@ -68,10 +68,10 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
       role={notice ? "status" : undefined}
     >
       <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
-        {connectorNotInstalledCopy(displayName)}
+        {`DataConnect needs to get ${displayName} ready again.`}
       </p>
       {notice ? (
-        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Installing adds the latest signed package. Your records stay.</p>
+        <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Your records stay.</p>
       ) : null}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <IcButton
@@ -82,7 +82,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
           type="button"
           variant="default"
         >
-          {isPending ? "Installing…" : actionLabel ?? connectorInstallActionLabel(displayName)}
+          {isPending ? "Getting ready…" : actionLabel ?? `Get ${displayName} ready`}
         </IcButton>
         {feedback ? (
           <div
@@ -96,7 +96,7 @@ export function ConnectorInstallPrompt({ actionLabel, connectorKey, displayName,
             <p>{feedback.message}</p>
             {feedback.rawDetails ? (
               <details className="mt-1 text-muted-foreground">
-                <summary className="cursor-pointer">Details</summary>
+                <summary className="cursor-pointer">What went wrong</summary>
                 <code className="mt-1 block break-words font-mono text-xs">{feedback.rawDetails}</code>
               </details>
             ) : null}

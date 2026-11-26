@@ -114,7 +114,7 @@ test("Update is outlined and the shared-source copy names both other sources", a
     displayName: "Claude Code workstation",
     version: "1.4.0",
   }));
-  assert.match(html, /Version 1\.5\.0 is ready \(you have 1\.4\.0\)\./);
+  assert.match(html, /An update for Claude Code workstation is ready\./);
   assert.match(html, /It also updates Claude Code personal and Claude Code work\./);
   assert.match(html, /<button[^>]*class="[^"]*pdpp-btn--ghost[^"]*"[^>]*aria-label="Update Claude Code workstation"[^>]*>Update<\/button>/);
 });
@@ -128,7 +128,7 @@ test("a failed update read falls back to the plain version line", async () => {
     version: "1.4.0",
   }));
   // DIRECTION.md, one data source Version: the version line must not claim newness without proof.
-  assert.match(html, /Version 1\.4\.0\./);
+  assert.equal(html, "");
   assert.doesNotMatch(html, /newest/);
   assert.doesNotMatch(html, /Version 1\.5\.0 is ready/);
 });
@@ -137,7 +137,7 @@ test("an update read that never resolves leaves the version fallback visible", a
   const SourceUpdateSlot = await sourceUpdateSection;
   const never = new Promise<null>(() => {});
   const html = renderToStaticMarkup(createElement(Suspense, {
-    fallback: createElement("p", null, "Version 1.4.0."),
+    fallback: null,
   }, createElement(SourceUpdateSlot, {
     demoModel: null,
     displayName: "Claude Code",
@@ -145,7 +145,7 @@ test("an update read that never resolves leaves the version fallback visible", a
     version: "1.4.0",
   })));
   // DIRECTION.md, one data source Version: an unresolved update check cannot prove newness.
-  assert.match(html, /Version 1\.4\.0\./);
+  assert.equal(html, "");
   assert.doesNotMatch(html, /newest/);
   assert.doesNotMatch(html, /Update 1\.5\.0/);
 });

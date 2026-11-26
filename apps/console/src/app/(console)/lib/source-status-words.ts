@@ -117,7 +117,7 @@ function lifecycleRow(
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) };
   if (source.connector_implementation?.state === "not_installed") {
-    return { row: 4, words: "Needs its collector installed", tone: "attention", action: action("install", "Install", true) };
+    return { row: 4, words: "Needs to get ready again", tone: "attention", action: action("install", `Get ${source.connector_display_name ?? source.display_name} ready`, true) };
   }
 
   switch (source.terminal_setup_disposition) {
@@ -178,7 +178,7 @@ function lifecycleRow(
       row: 8,
       words,
       tone: "attention",
-      action: requiredAction ? action("server_cta", requiredAction.cta, true) : null,
+      action: requiredAction ? action("server_cta", surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {
@@ -300,10 +300,12 @@ function formatComing(value: string | null | undefined, now: Date): string | nul
 
 export interface SourceStateSentenceOptions extends SourceStatusOptions {
   name: string;
+  deviceName?: string;
+  unsentRecords?: number;
   pendingDetails?: boolean;
 }
 
-const PENDING_DETAILS_SENTENCE = "Some details are still being fetched.";
+const PENDING_DETAILS_SENTENCE = "Still checking a few things.";
 
 export function sourceStateSentence(source: RefConnectorSummary, options: SourceStateSentenceOptions): SourceStateSentence {
   const { text, slot = null } = matchStateSentence(source, options);
@@ -329,8 +331,8 @@ function matchStateSentence(
     case 1: return { text: "Archived. It no longer syncs." };
     case 2: return { text: "Setup was never completed." };
     case 3: return { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" };
-    case 4: return { text: "This data source needs its collector installed before it can sync." };
-    case 5: return { text: "First sync needs a look.", slot: "what_you_can_do" };
+    case 4: return { text: `DataConnect needs to get ${options.name} ready again.` };
+    case 5: return { text: `The first copy of ${options.name} may not be complete.`, slot: "what_you_can_do" };
     case 6: return { text: "First sync found no records.", slot: "what_you_can_do" };
     case 7: return { text: "No records found.", slot: "what_you_can_do" };
     case 8: {
@@ -342,7 +344,7 @@ function matchStateSentence(
           : surface === "provider_interaction"
             ? `${options.name} is waiting for you to finish a step.`
             : surface === "local_device"
-              ? `${options.name} needs attention on your device.`
+              ? `The computer that holds this data${options.deviceName ? ` (${options.deviceName})` : ""} could not send${typeof options.unsentRecords === "number" ? ` ${options.unsentRecords.toLocaleString()} records` : " some records"}.`
               : `${options.name} needs you.`;
       const extra = source.rendered_verdict?.pill.label === "Some records stuck"
         ? " Some records are stuck."

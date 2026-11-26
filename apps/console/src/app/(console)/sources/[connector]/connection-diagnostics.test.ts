@@ -428,8 +428,8 @@ test("active local-device drain renders calm background upload progress, not rec
   assert.match(src, BACKGROUND_DRAIN_USES_HOST_LABELS);
   assert.match(src, BACKGROUND_DRAIN_RENDERED_IN_SUMMARY);
   // Brief decision 5: recovery progress and diagnostics stay inside folded Details.
-  assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf('data-testid="source-details"'));
-  assert.ok(page.indexOf('data-testid="source-details"') < page.indexOf("<ConnectionRecoverySummary"));
+  assert.ok(page.indexOf("<SourceStateSentenceText") < page.indexOf('>Technical details</Link>'));
+  assert.ok(page.indexOf('>Technical details</Link>') < page.indexOf("<ConnectionRecoverySummary"));
   assert.match(page, /showRecoverySummary=\{false\}/);
 });
 

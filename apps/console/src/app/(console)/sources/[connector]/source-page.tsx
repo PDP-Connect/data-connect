@@ -12,6 +12,9 @@ import {
   isSetupFailedSource,
   streamDisplayLabel,
 } from "@pdpp/display";
+import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
+import { classifyKnownGaps, normalizeKnownGaps } from "../../lib/run-gaps.ts";
+import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { buildBreakdownLabel } from "@pdpp/operator-ui/lib/source-storage";
@@ -439,6 +442,7 @@ export default async function ConnectorPage({
 
   let model: ConnectorPageModel;
   let addAnotherAccountAction: ReactNode;
+  let otherAccounts: ReactNode;
   const demoRow = demoStatusRow(sp.demo);
   const updateDemo = process.env.NODE_ENV !== "production" && (sp.demo === "update-ready" || sp.demo === "update-ready-shared")
     ? buildDemoSourceUpdate(sp.demo === "update-ready-shared")
@@ -448,6 +452,7 @@ export default async function ConnectorPage({
     const row = sp.demo === "pending-details" ? 20 : sp.demo === "pending-details-19" ? 19 : demoRow ?? (sp.demo === "atlas" ? 16 : 19);
     model = demo.buildRecoveryDemoModel(row, sp.demo === "pending-details" || sp.demo === "pending-details-19" || row === 16);
     const demoVariant = sp.demo?.replace(/^status-\d{1,2}-?/, "");
+    model = { ...model, source: { ...model.source, display_name: model.displayName } };
     if (demoRow !== null && demoVariant) model = demo.withStatusDemoVariant(model, demoVariant);
     if (sp.demo === "status-10-local-device") {
       model = { ...model, source: { ...model.source, source_kind: "local_device" }, sourceInstances: demo.buildRecoveryDemoModel(1).sourceInstances };
@@ -455,6 +460,7 @@ export default async function ConnectorPage({
   } else {
     try {
       model = await loadConnectorPageModel(routeId, sp.connection_id ?? null);
+      otherAccounts = <Suspense fallback={null}><OtherAccounts connectionId={model.connectionId} connectorId={model.connectorId} /></Suspense>;
       addAnotherAccountAction = <Suspense fallback={null}><AddAnotherAccount connectorKey={model.connectorId} /></Suspense>;
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
@@ -487,6 +493,7 @@ export default async function ConnectorPage({
       dangerError={sp.error}
       dangerMessage={sp.message}
       model={model}
+      otherAccounts={otherAccounts}
       now={now}
       updateDemo={updateDemo}
       updates={updates}
@@ -743,6 +750,7 @@ function StreamDisplayName({
 function ConnectorPageView({
   addAnotherAccountAction,
   model,
+  otherAccounts,
   dangerActiveRunId,
   dangerMessage,
   dangerError,
@@ -752,6 +760,7 @@ function ConnectorPageView({
 }: {
   addAnotherAccountAction?: ReactNode;
   model: ConnectorPageModel;
+  otherAccounts?: ReactNode;
   /** The run that blocked a delete, forwarded from the delete action redirect. */
   dangerActiveRunId?: string;
   dangerMessage?: string;
@@ -780,7 +789,7 @@ function ConnectorPageView({
     coverageHorizons,
     accountDeviceLabels,
     deviceLabels,
-    displayName,
+    displayName: serviceName,
     headerCount,
     latestKnownGaps,
     manifest,
@@ -798,6 +807,7 @@ function ConnectorPageView({
     source,
     streams,
   } = model;
+  const displayName = connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id);
   const { activeRunHref, running } = resolveActiveRunNavigation({
     overview,
     scheduleActiveRunId,
@@ -857,7 +867,7 @@ function ConnectorPageView({
     [...collectionFactsByStream.values()].some((facts) => facts.pendingDetailGaps > 0);
   const signInRepairAvailable = credentialUpdateHref !== null;
   const sourceStatus = sourceStatusWords(source, { now: renderedAt, signInRepairAvailable });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, pendingDetails, signInRepairAvailable });
+  const stateSentence = sourceStateSentence(source, { now: renderedAt, name: displayName, deviceName: sourceInstances[0]?.display_name ?? sourceInstances[0]?.local_binding_name, unsentRecords: sourceInstances[0]?.records_pending ?? undefined, pendingDetails, signInRepairAvailable });
   const pageStatusAction = sourceStatus.action; // never Resume for a local-device source: its paused action is "View this device"
   const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(connectionRenderedVerdict);
   const manifestStreams = Array.isArray(manifest.streams) ? manifest.streams : [];
@@ -893,8 +903,8 @@ function ConnectorPageView({
           />
         }
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
-        count={headerCount}
-        description={accountLine === displayName ? undefined : accountLine}
+        count={/not measured/i.test(headerCount) ? undefined : headerCount}
+        description={undefined}
         title={
           <span>
             <span className="mr-2 inline-block align-middle [&_.pdpp-connector-icon]:size-12">
@@ -907,105 +917,30 @@ function ConnectorPageView({
 
       <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
 
-      {hasDeviceLocalRemediation ? (
-        <section className="mb-6" data-testid="device-collector-trouble">
-          <h2 className="pdpp-title text-foreground">Device needs attention</h2>
-          <p className="pdpp-caption mt-1 text-muted-foreground">
-            Follow the recovery steps in Details on the device that holds this data.
-          </p>
-        </section>
-      ) : null}
       {revoked && !setupFailed ? <RevokedConnectionSection revokedAt={overview.revokedAt ?? null} /> : null}
 
-      <div className="grid min-w-0 gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <div className="min-w-0">
+      {!/synced|imported|last updated/i.test(stateSentence.text) && sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at) ? <p className="mb-6 text-sm text-muted-foreground">Last updated {sourceTimeLabel(source.connection_health.last_success_at ?? source.last_successful_run?.last_at)}.</p> : null}
+      {otherAccounts}
+      <Suspense fallback={null}>
+        <SourceUpdateSlot demoModel={updateDemo} displayName={displayName} updates={updates} version={null} />
+      </Suspense>
       <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
-        {streams.length === 0 ? (
-          <p className="pdpp-caption text-muted-foreground italic">{emptyStreamsHint(primaryAction, syncIdleLabel)}</p>
-        ) : (
-          <DataList>
-            {streams.map((s) => {
-              const countLabel = streamCountLabel(s);
-              const unexpected = isUnexpectedStreamDeclaration(s.declaration_state);
-              const manifestLabel = streamLabelsByName.get(s.name);
-              const displayLabel = manifestLabel && manifestLabel !== s.name ? manifestLabel : humanizeFieldLabel(s.name);
-              const lastUpdated = sourceTimeLabel(s.last_updated);
-              const reportEntry = source.collection_report?.find((entry) => entry.stream === s.name);
-              const incompleteLine = reportEntry &&
-                typeof reportEntry.collected === "number" &&
-                typeof reportEntry.considered === "number" &&
-                reportEntry.collected < reportEntry.considered
-                ? `${reportEntry.collected.toLocaleString()} of ${reportEntry.considered.toLocaleString()} fetched so far.`
-                : null;
-              return (
-                <li key={s.name}>
-                  <Link
-                    className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
-                    href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(s.name)}`}
-                  >
-                    <span className="flex min-w-0 flex-col gap-1">
-                      <StreamDisplayName displayLabel={displayLabel} name={s.name} unexpected={unexpected} />
-                      <span className="pdpp-caption text-muted-foreground tabular-nums" data-count-state={s.count_state ?? "unknown_state"}>
-                        {countLabel.text}{lastUpdated ? ` · latest ${lastUpdated}` : ""}
-                      </span>
-                      {incompleteLine ? <span className="pdpp-caption text-muted-foreground">{incompleteLine}</span> : null}
-                    </span>
-                  </Link>
-                </li>
-              );
-            })}
-          </DataList>
-        )}
+        <SourceRecords model={model} />
+        {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
+          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>Add another export</Link>
+          <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
+        </div> : null}
       </Section>
-
-      <RecentRunsSection
-        activeRunHref={activeRunHref}
-        autoPausedBanner={autoPausedBanner}
-        connectorId={connectorId}
-        hasSyncHistory={Boolean(source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? source.last_run?.last_at)}
-        recentRuns={recentRuns}
-      />
-      {manualUploadHref || scheduleSyncAvailable ? (
-        <Section title="More sync options">
-          <div className="flex flex-wrap items-center gap-3">
-            {manualUploadHref ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>Add another export</Link> : null}
-            {manualUploadHref ? (
-              <SyncNowButton
-                connectionId={connectorInstanceId ?? connectionId}
-                connectorId={connectorId}
-                displayName={displayName}
-                installPromptShown={installPromptShown}
-                idleLabel="Reprocess all exports"
-                initialRunning={running}
-                runningLabel="Import running"
-                title="Reprocesses files already uploaded for this data source. It does not add a new export."
-                variant="outline"
-              />
-            ) : null}
-            {scheduleSyncAvailable ? (
-              <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" />
-            ) : null}
-          </div>
-        </Section>
-      ) : null}
-        </div>
-
-        <aside className="min-w-0">
-          <ScheduleSummary schedule={schedule} />
-          <Suspense fallback={<SourceVersion version={source.manifest_version ?? null} />}>
-            <SourceUpdateSlot
-              demoModel={updateDemo}
-              displayName={displayName}
-              updates={updates}
-              version={source.manifest_version ?? null}
-            />
-          </Suspense>
+      <ScheduleSummary displayName={displayName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} />
+      <RecentRunsSection activeRunHref={activeRunHref} autoPausedBanner={autoPausedBanner} connectorId={connectorId} hasSyncHistory={Boolean(source.last_run)} recentRuns={recentRuns} />
           <Section title="This data source">
+            {addAnotherAccountAction}
             <RenameConnection
               connectionId={renameSelector}
               currentLabel={connectionLabelSeed}
               typeName={formatConnectorKeyForDisplay(connectorId)}
             />
+            {scheduleSyncAvailable ? ( <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel={syncIdleLabel} initialRunning={running} variant="outline" /> ) : null}
             {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
             <CredentialRepairLinks
               revoked={revoked}
@@ -1029,11 +964,76 @@ function ConnectorPageView({
               revisions={configRevisions}
             />
           ) : null}
-          <p className="mb-8 text-sm text-muted-foreground"><Link href={`/sources/${encodeURIComponent(connectionId)}/technical`}>Technical details</Link></p>
-        </aside>
-      </div>
+
+      <p className="mb-8 text-sm text-muted-foreground"><Link href={`/sources/${encodeURIComponent(connectionId)}/technical`}>Technical details</Link></p>
     </RecordroomShellWithPalette>
   );
+}
+
+function SourceRecords({ model }: { model: ConnectorPageModel }) {
+  const { connectionId, streams, source, manifest, displayName } = model;
+  const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
+  const label = (name: string) => {
+    const entry = (manifest.streams ?? []).find((stream) => stream.name === name);
+    const declared = entry ? streamDisplayLabel(name, entry as StreamManifestEntry) : null;
+    return declared && declared !== name ? declared : humanizeFieldLabel(name);
+  };
+  const missing = streams.filter((stream) => !stream.record_count && gaps.some((gap) => gap.stream === stream.name));
+  const present = streams.filter((stream) => !missing.includes(stream));
+  return <>
+    {present.length ? <DataList>{present.map((stream) => {
+      const report = source.collection_report?.find((entry) => entry.stream === stream.name);
+      const partial = report && typeof report.collected === "number" && typeof report.considered === "number" && report.collected < report.considered;
+      const more = report?.forward_disposition === "resumable";
+      const count = typeof stream.record_count === "number" ? `${stream.record_count.toLocaleString()} records` : null;
+      const sentence = partial
+        ? more ? `${report.collected?.toLocaleString()} so far. More at the next sync.` : `${count ? `${count}. ` : ""}Some could not be copied.`
+        : count;
+      const newest = recordDateLabel(stream.last_updated);
+      const cause = gaps.find((gap) => gap.stream === stream.name)?.message;
+      return <li key={stream.name}>
+        <Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="pdpp-body text-foreground">{label(stream.name)}</span>
+            {sentence || newest ? <span className="pdpp-caption text-muted-foreground">{sentence}{sentence && newest ? " · " : ""}{newest ? `newest ${newest}` : ""}</span> : null}
+            {partial && cause ? <span className="pdpp-caption text-muted-foreground">{cause}</span> : null}
+          </span>
+        </Link>
+      </li>;
+    })}</DataList> : null}
+    {missing.length ? <>
+      <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
+      <DataList ariaLabel="Didn't come">{missing.map((stream) => {
+        const relevant = gaps.filter((gap) => gap.stream === stream.name);
+        const message = [...new Set(relevant.map((gap) => gap.message?.trim() || "DataConnect could not copy this."))].join(" ");
+        return <li className="flex flex-col gap-1 px-3 py-3" key={stream.name}>
+          <span className="text-foreground">{label(stream.name)}</span>
+          <span className="pdpp-caption text-muted-foreground">{message}{relevant.some((gap) => gap.recovery_hint?.retryable === true) ? ` It will try again the next time DataConnect checks ${displayName}.` : ""}</span>
+        </li>;
+      })}</DataList>
+    </> : null}
+  </>;
+}
+
+function recordDateLabel(value: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const today = new Date();
+  const days = Math.floor((Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())) / 86_400_000);
+  if (days === 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days > 1 && days <= 7) return `${days} days ago`;
+  return sourceDateLabel(value);
+}
+
+async function OtherAccounts({ connectionId, connectorId }: { connectionId: string; connectorId: string }) {
+  const accounts = await listConnectionsByConnector(connectorId).catch(() => []);
+  const others = accounts.filter((account) => account.connector_instance_id !== connectionId && account.status !== "revoked");
+  if (others.length === 0) return null;
+  return <p className="mb-6 text-sm text-muted-foreground">Also connected: {others.map((account, index) => <span key={account.connector_instance_id}>
+    {index ? ", " : ""}<Link href={`/sources/${encodeURIComponent(account.connector_instance_id)}`}>{connectionDisplayName(account.display_name, null, connectorId)}</Link>
+  </span>)}</p>;
 }
 
 export function SourceTechnicalDetails({ model, now, dangerError, dangerMessage }: {
@@ -1050,7 +1050,9 @@ export function SourceTechnicalDetails({ model, now, dangerError, dangerMessage 
   const primaryAction = derivePrimaryRowAction({ connectorId, hasLocalDeviceProgress: Boolean(overview.localDeviceProgress) });
   const { running } = resolveActiveRunNavigation({ overview, scheduleActiveRunId: model.activeRunId });
   const installPromptShown = connectorNotInstalled && !isRevokedConnection(overview) && !model.setupFailed;
+  const autoPausedBanner = deriveAutoPausedBanner(schedule);
   return <>
+    {autoPausedBanner ? <div data-testid="auto-paused-banner"><AutoPausedBannerRow banner={autoPausedBanner} connectorId={connectorId} /></div> : null}
             <div className="pt-4">
               <ConnectionIdentityLine
                 connectionId={connectionId}
@@ -1199,7 +1201,6 @@ function ConnectorHeaderActions({
         sourceInstances={sourceInstances}
         statusAction={statusAction}
       />
-      {addAnotherAccountAction}
     </div>
   );
 }
@@ -1247,6 +1248,7 @@ function ConnectorPrimaryHeaderAction({
     return (
       <RenderedVerdictHeaderAction
         action={renderedOwnerAction}
+        label={statusAction.label}
         browserSessionRepairHref={browserSessionRepairHref}
         connectionId={connectionId}
         connectorId={connectorId}
@@ -1687,15 +1689,15 @@ function RecentRunsSection({
   hasSyncHistory: boolean;
   recentRuns: RunSummary[];
 }) {
+  if (recentRuns.length === 0) return null;
   return (
     <Section
       action={
         <div className="flex gap-3">
-          {activeRunHref ? <Link className="text-primary hover:underline" href={activeRunHref}>Active sync</Link> : null}
           <Link className="text-primary hover:underline" href="/syncs">All sync history</Link>
         </div>
       }
-      title="Latest syncs"
+      title="Recent syncs"
     >
       {recentRuns.length === 0 ? (
         <p className="pdpp-caption text-muted-foreground">
@@ -1703,12 +1705,7 @@ function RecentRunsSection({
         </p>
       ) : (
         <DataList>
-          {autoPausedBanner ? (
-            <li data-testid="auto-paused-banner">
-              <AutoPausedBannerRow banner={autoPausedBanner} connectorId={connectorId} />
-            </li>
-          ) : null}
-          {recentRuns.map((r) => (
+          {recentRuns.slice(0, 3).map((r) => (
             <li key={r.run_id}>
               <Link
                 className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
@@ -1719,8 +1716,7 @@ function RecentRunsSection({
                 </span>
                 <span className="pdpp-caption inline-flex flex-wrap items-baseline gap-x-1 text-muted-foreground tabular-nums">
                   <span>{sourceTimeLabel(r.first_at) ?? "Time unavailable"}</span>
-                  <span aria-hidden>·</span>
-                  <span>{durationLabel(r.first_at, r.last_at)}</span>
+
                 </span>
               </Link>
             </li>
@@ -1750,7 +1746,7 @@ function syncOutcome(sync: RunSummary): string {
   if (["cancelled", "canceled", "rejected"].includes(sync.status)) return "Stopped";
   if (["failed", "error"].includes(sync.status)) return "Failed";
   if (["pending", "started", "in_progress", "running"].includes(sync.status)) return "Running";
-  if (["waiting_for_input", "needs_input", "waiting_for_owner"].includes(sync.status)) return "Waiting for you";
+  if (["waiting_for_input", "needs_input", "waiting_for_owner"].includes(sync.status)) return "Needs you";
   return "Stopped";
 }
 
@@ -1987,23 +1983,19 @@ function durationLabel(firstAt: string, lastAt: string): string {
   return `${m}m ${s}s`;
 }
 
-function ScheduleSummary({ schedule }: { schedule: RefSchedule | null }) {
-  const retryAt = schedule?.scheduler_backoff?.next_run_at;
-  const retry = sourceTimeLabel(retryAt);
-  const interval = schedule?.interval_seconds ?? null;
-  const intervalLabel = interval === 3600 ? "Every hour" : interval === 21_600 ? "Every 6 hours" : interval === 86_400 ? "Every day" : interval ? `Every ${Math.round(interval / 60)} minutes` : null;
-  const text = retry
-    ? `Trying again ${retry}.`
-    : schedule?.effective_mode === "manual"
-      ? "Only when you ask."
-      : intervalLabel
-        ? `${intervalLabel}, on its own.`
-        : "No schedule is set.";
-  return (
-    <Section title="Schedule" action={<Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
-      <p className="text-sm text-muted-foreground" data-testid="source-schedule-summary">{text}</p>
-    </Section>
-  );
+function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances }: {
+  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[];
+}) {
+  const text = scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const next = sourceTimeLabel(schedule?.next_due_at);
+  const device = sourceInstances[0];
+  const deviceName = device?.display_name ?? device?.local_binding_name;
+  const heard = sourceTimeLabel(device?.last_heartbeat_at);
+  return <Section title="Schedule" action={<Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
+    {text ? <p className="text-sm text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
+    {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}
+    {device && deviceName && heard ? <p className="text-sm text-muted-foreground">It runs on {deviceName}, last heard from {heard}. <Link href={`/device-exporters#${encodeURIComponent(device.device_id)}`}>View this device</Link></p> : null}
+  </Section>;
 }
 
 function SourceVersion({ version }: { version: string | null }) {

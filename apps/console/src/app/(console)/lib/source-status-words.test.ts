@@ -126,7 +126,7 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
 test("row 2 words a setup that never completed", () => assertRow(2, "Setup never completed", "faint", { kind: "continue_setup", label: "Continue setup", filled: false }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
-test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs its collector installed", "attention", { kind: "install", label: "Install", filled: true }));
+test("row 4 words a source whose collector is not installed", () => assertRow(4, "Needs to get ready again", "attention", { kind: "install", label: "Get Example source ready", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
@@ -243,7 +243,7 @@ test("pending detail work uses one shared sentence for rows 19 and 20", () => {
   for (const row of [19, 20] as const) {
     assert.equal(
       sourceStateSentence(fixture(row), { now: NOW, name: "Example source", pendingDetails: true }).text,
-      "Synced 2 hours ago. Some details are still being fetched."
+      "Synced 2 hours ago. Still checking a few things."
     );
   }
 });
@@ -251,7 +251,7 @@ test("pending detail work keeps the sentence of every other row and adds the not
   // Intake repair: before this round the page added the note on every row; row 16 must not lose it.
   assert.equal(
     sourceStateSentence(fixture(16), { now: NOW, name: "Example source", pendingDetails: true }).text,
-    `${sourceStateSentence(fixture(16), { now: NOW, name: "Example source" }).text} Some details are still being fetched.`
+    `${sourceStateSentence(fixture(16), { now: NOW, name: "Example source" }).text} Still checking a few things.`
   );
 });
 test("row 22 words a manual import with no completed import", () => assertRow(22, "Nothing imported yet", "plain"));
@@ -273,7 +273,7 @@ test("row 8 chooses words from each owner action surface and preserves its CTA",
       rendered_verdict: verdict("Can't collect", [requiredAction({ cta, surface: { kind: surface } })]),
     }), { now: NOW });
     assert.equal(result.words, expected);
-    assert.deepEqual(result.action, { kind: "server_cta", label: cta, filled: true });
+    assert.deepEqual(result.action, { kind: "server_cta", label: surface === "local_device" ? "See what to do on that computer" : surface === "stored_credential" ? "Update sign-in details" : cta, filled: true });
   }
 });
 
@@ -370,7 +370,7 @@ test("relative time and old dates have the required human forms and omit missing
 test("source page sentences use the same row and named slots for page-owned facts", () => {
   const sentence = (candidate: RefConnectorSummary) => sourceStateSentence(candidate, { now: NOW, name: "Example source" });
   assert.deepEqual(sentence(fixture(3)), { text: "Disconnected.", slot: "what_is_kept_and_what_set_up_again_does" });
-  assert.deepEqual(sentence(fixture(5)), { text: "First sync needs a look.", slot: "what_you_can_do" });
+  assert.deepEqual(sentence(fixture(5)), { text: "The first copy of Example source may not be complete.", slot: "what_you_can_do" });
   assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again. Last successful sync 2 hours ago.", slot: null });
   assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect. There is nothing for you to do.", slot: null });
   assert.deepEqual(sentence(fixture(14)), { text: "Some optional data is missing. Last synced 2 hours ago.", slot: null });

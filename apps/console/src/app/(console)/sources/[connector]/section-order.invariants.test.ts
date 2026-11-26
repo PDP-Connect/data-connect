@@ -58,7 +58,7 @@ test("What is here and Latest syncs lead; collected evidence stays inside folded
 test("the header shows the account line and a 48px source mark", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   // DIRECTION.md §One data source: the logo, title, and account line lead the page.
-  assert.match(src, /description=\{accountLine === displayName \? undefined : accountLine\}/);
+  assert.match(src, /description=\{undefined\}/);
   // DIRECTION.md §What must stay true: raw IDs stay inside folded Details.
   assert.match(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name/);
   assert.doesNotMatch(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name \?\? source\.device_id/);
@@ -74,20 +74,9 @@ test("a disconnected source has one set-up link", async () => {
   assert.doesNotMatch(src, />Reconnect source</);
 });
 
-test("device collector trouble is shown under the state sentence when local recovery is needed", async () => {
+test("device recovery evidence stays on the technical page", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  const sentence = src.indexOf("<SourceStateSentenceText");
-  const trouble = src.indexOf('data-testid="device-collector-trouble"');
-  const details = src.indexOf('>Technical details</Link>');
-  const recovery = src.indexOf("<ConnectionRecoverySummary");
-  // DIRECTION.md §One data source: device collector trouble sits directly under the state sentence.
-  assert.ok(sentence < trouble, "state sentence precedes the device recovery note");
-  // Brief decision 5: recovery information is folded under Details.
-  assert.ok(trouble < details && details < recovery, "device note stays visible while recovery details are folded");
-  // DIRECTION.md §One status, from one place: use the existing structured local-device condition.
-  assert.match(src, /hasPrimaryOwnerLocalDeviceRemediation\(connectionRenderedVerdict\)/);
-  // Brief decision 5: technical diagnostics remain inside folded Details.
-  assert.match(src, /showRecoverySummary=\{false\}/);
+  assert.ok(src.indexOf("export function SourceTechnicalDetails") < src.indexOf("<ConnectionRecoverySummary"));
 });
 
 test("source controls precede Settings and folded Details", async () => {

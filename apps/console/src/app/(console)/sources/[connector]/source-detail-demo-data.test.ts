@@ -66,7 +66,7 @@ test("pending details replace up-to-date wording on rows 19 and 20", () => {
     const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 
     // Brief decision 5: pending details use the plain sentence and never conflict with “Up to date”.
-    assert.match(visibleText, /^Synced .*\. Some details are still being fetched\.$/);
+    assert.match(visibleText, /^Synced .*\. Still checking a few things\.$/);
     assert.doesNotMatch(visibleText, /Up to date|next in|has not checked this against the source/);
   }
 });

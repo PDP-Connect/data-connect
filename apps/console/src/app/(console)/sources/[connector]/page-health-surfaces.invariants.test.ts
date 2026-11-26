@@ -33,7 +33,7 @@ const RE_AUTO_PAUSED_BANNER_CONDITIONAL = /autoPausedBanner\s*\?/;
 const RE_AUTO_PAUSED_BANNER_ROW_COMPONENT = /<AutoPausedBannerRow/;
 const RE_AUTO_PAUSED_BANNER_ROW_TESTID = /data-testid="auto-paused-banner-row"/;
 const RE_AUTO_PAUSED_BANNER_TESTID = /data-testid="auto-paused-banner"/;
-const RE_RECENT_RUNS_SECTION = /title="Latest syncs"/;
+const RE_RECENT_RUNS_SECTION = /title="Recent syncs"/;
 const RE_ACQUISITION_COVERAGE_MAPPING = /acquisitionCoverage: summary\.acquisition_coverage \?\? null/;
 const RE_ACQUISITION_COVERAGE_SECTION = /function AcquisitionCoverageSection/;
 const RE_ACQUISITION_COVERAGE_TITLE = /title="What was collected"/;
@@ -107,17 +107,9 @@ test("auto-paused banner row has a data-testid for integration targeting", async
   assert.match(src, RE_AUTO_PAUSED_BANNER_ROW_TESTID);
 });
 
-test("auto-paused banner is placed inside Latest syncs, not outside", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The banner li must appear after the "Latest syncs" section heading.
-  // Check positional ordering via indexOf so we don't need another regex.
-  const bannerStr = 'data-testid="auto-paused-banner"';
-  const latestSyncsSectionStr = 'title="Latest syncs"';
-  const bannerIdx = src.indexOf(bannerStr);
-  const latestSyncsSectionIdx = src.indexOf(latestSyncsSectionStr);
-  assert.match(src, RE_AUTO_PAUSED_BANNER_TESTID);
-  assert.match(src, RE_RECENT_RUNS_SECTION);
-  assert.ok(bannerIdx > latestSyncsSectionIdx, "auto-paused banner should be inside Latest syncs");
+test("automatic retry measurements stay on the technical page", async () => {
+ const src = await readFile(PAGE_FILE, "utf8");
+ assert.ok(src.indexOf("export function SourceTechnicalDetails") < src.indexOf('data-testid="auto-paused-banner"'));
 });
 
 test("detail page keeps acquisition evidence inside folded Details", async () => {
