@@ -255,7 +255,7 @@ test("live shell menu uses the requested five destinations and section children"
     "Server",
     "Collectors on your devices",
     "Webhooks",
-    "Experimental",
+    "Advanced",
   ]) {
     assert.match(src, new RegExp(`label(?::|Before:)\\s*["']${label}["']`));
   }

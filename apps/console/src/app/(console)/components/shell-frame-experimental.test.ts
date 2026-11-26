@@ -10,7 +10,7 @@ type Frame = typeof import("../../../../../../reference-implementation/vendor/br
 
 let loaded: Promise<Frame> | null = null;
 
-// The real menu on a settings page, where the experimental links show.
+// The real menu on a settings page, where the Advanced links show.
 function loadFrame(): Promise<Frame> {
   loaded ??= (async () => {
     // The vendor frame compiles to classic JSX here, which reads a global React.
@@ -23,18 +23,19 @@ function loadFrame(): Promise<Frame> {
   return loaded;
 }
 
-test("the menu shows one Experimental group label above both experimental links", async () => {
+test("the menu shows one Advanced group label above Server, Collectors and Webhooks", async () => {
   const { NAV_ITEMS, RecordroomShell } = await loadFrame();
-  const experimental = NAV_ITEMS.filter((item) => item.labelBefore === "Experimental");
-  assert.equal(experimental.length, 2, "both experimental links keep their group label");
+  const advanced = NAV_ITEMS.filter((item) => item.labelBefore === "Advanced");
+  assert.equal(advanced.length, 3, "Server, Collectors and Webhooks share the group label");
 
   const html = renderToStaticMarkup(createElement(RecordroomShell, null, "page"));
   // The sidebar and the phone drawer each render the menu; the drawer is closed in a static render.
   const sidebar = html.slice(html.indexOf('aria-label="Primary"'), html.indexOf("rr-side__spacer"));
-  assert.equal((sidebar.match(/>Experimental</g) ?? []).length, 1);
-  const label = sidebar.indexOf(">Experimental<");
-  for (const item of experimental) {
+  assert.equal((sidebar.match(/>Advanced</g) ?? []).length, 1);
+  assert.doesNotMatch(sidebar, />Experimental</);
+  const label = sidebar.indexOf(">Advanced<");
+  for (const item of advanced) {
     const link = sidebar.indexOf(`href="${item.href}"`);
-    assert.ok(link > label, `${item.label} sits below the Experimental label`);
+    assert.ok(link > label, `${item.label} sits below the Advanced label`);
   }
 });
