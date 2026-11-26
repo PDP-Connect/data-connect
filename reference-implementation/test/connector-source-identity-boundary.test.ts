@@ -192,6 +192,22 @@ scenario("an explicit source.id is the current identity independently of provena
   assert.equal(retainedSourceId(await storedFor("srcid-current")), EXPLICIT_SOURCE);
 });
 
+for (const path of ["registration", "activation"] as const) {
+  scenario(`an explicit declaration cannot claim the reserved projection publisher through ${path}`, async () => {
+    const key = "srcid-reserved-publisher";
+    const declaration = { ...explicitDeclaration(key, EXPLICIT_SOURCE), publisher: { id: "https://pdpp.dev/reference-implementation" } };
+    const manifest = legacyManifest({ connector_key: key, source_declaration: declaration });
+    await assert.rejects(
+      () => path === "registration"
+        ? registerConnector(manifest, { skipDerivedRepair: true })
+        : publishConnectorActivation({ ...installRecord(key, manifest), sourceDeclarationSha256: `sha256:${"a".repeat(64)}` }),
+      /publisher.*reserved/
+    );
+    assert.equal(await storedFor(key), null);
+    assert.equal(await getConnectorActivation(key), null);
+  });
+}
+
 scenario("an uninstalled connector's retained registration still owns its current identity", async () => {
   await publishConnectorActivation(installRecord("srcid-uninstalled", legacyManifest({ connector_key: "srcid-uninstalled", source: { id: EXPLICIT_SOURCE } })));
   await createConnectorInstallStore().deactivateAndRemoveActivation!("srcid-uninstalled");
