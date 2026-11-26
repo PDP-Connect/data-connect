@@ -1914,7 +1914,8 @@ test("PDPP reference implementation integration", async (t) => {
       const { body: approved } = await approveGrantSuccess(asUrl, initiate.request_uri, "u1");
 
       assert.equal(approved.grant.client.client_id, clientId);
-      assert.equal(approved.grant.client.client_display, null);
+      // A CIMD grant keeps the name its metadata document gave, so owner pages can name the app later.
+      assert.equal(approved.grant.client.client_display?.name, "Codex");
       assert.equal(approved.grant.client.registration_mode, undefined);
       assert.ok(approved.token);
 
