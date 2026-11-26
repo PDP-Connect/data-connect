@@ -31,3 +31,15 @@ test("day counts describe copied records, including singular and zero",()=>{
   assert.match(syncDaySentence({...base,records:0},"Northwind"),/Nothing to copy/);
   assert.doesNotMatch(syncDaySentence({...base,records:58000},"Northwind"),/new/);
 });
+
+test("earlier healthy sources collapse and missing kinds remain visible",async()=>{
+  const React=await import("react");(globalThis as typeof globalThis & {React:typeof React}).React=React;
+  const {renderToStaticMarkup}=await import("react-dom/server");
+  const {SyncHistoryDays}=await import("../syncs/daily-syncs-view.tsx");
+  const model=syncPractice("mixed",0);if(model.history.mode!=="days")throw Error("mode");
+  const rows=model.history.data.map(row=>({...row,day:"2026-08-13"}));
+  rows[0]={...rows[0]!,missing:[{stream:"messages",retryable:false}]};
+  const html=renderToStaticMarkup(<SyncHistoryDays rows={rows} sources={model.sources} offset={0} />);
+  assert.match(html,/data sources checked/);assert.match(html,/didn&#x27;t come/);
+  assert.match(html,/Failed 3 times:/);
+});

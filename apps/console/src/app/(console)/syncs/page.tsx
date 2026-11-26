@@ -8,6 +8,7 @@ import { DayCut } from "../history/day-cut-client.tsx";
 import { historyDayCount } from "../history/day-cut.ts";
 import { LivePoller } from "../components/live-poller.tsx";
 import { DailySyncsView } from "./daily-syncs-view.tsx";
+import { loadEarlierSyncDays } from "./load-earlier-sync-days.tsx";
 import { loadSyncHistory } from "./load-sync-history.ts";
 export const dynamic = "force-dynamic";
 export default async function RunsPage({ searchParams }: { searchParams: Promise<Record<string,string | undefined>> }) {
@@ -18,5 +19,5 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   let model: Awaited<ReturnType<typeof loadSyncHistory>>;
   try { model = await loadSyncHistory(params); }
   catch { return <RecordroomShellWithPalette><PageHeader title="Sync history" /><p>This could not be loaded. <Link href="/syncs">Try again</Link>.</p></RecordroomShellWithPalette>; }
-  return <RecordroomShellWithPalette><DayCut /><LivePoller enabled={model.now.length > 0} /><DailySyncsView rows={model.history.mode === "days" ? model.history.data : []} sources={model.sources} current={model.now} offset={model.offset} days={historyDayCount(params.days)} params={params} demo={params.demo} /></RecordroomShellWithPalette>;
+  return <RecordroomShellWithPalette><DayCut /><LivePoller enabled={model.now.length > 0} /><DailySyncsView rows={model.history.mode === "days" ? model.history.data : []} sources={model.sources} current={model.now} offset={model.offset} days={historyDayCount(params.days)} firstDay={model.history.first_day} beforeDay={model.history.before_day} loadMore={loadEarlierSyncDays.bind(null,params)} params={params} demo={params.demo} /></RecordroomShellWithPalette>;
 }
