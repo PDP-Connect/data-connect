@@ -29,6 +29,6 @@ test("the service-worker fallback uses the product name and a neutral next step"
   assert.match(text, /Open DataConnect to see what it needs/)
   assert.doesNotMatch(
     text,
-    /PDPP action needed|A connector run needs owner attention/
+    /PDPP action needed|A connector run needs owner attention|PDPP test notification|This PDPP browser/
   )
 })
