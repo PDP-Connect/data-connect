@@ -14,7 +14,8 @@ test("daily history uses durable totals and a separate bounded live read", () =>
   const loader = source("./load-sync-history.ts");
   assert.ok(loader.includes("listSyncHistory({"));
   assert.ok(loader.includes('listRuns({ status: "in_progress", limit: 100 })'));
-  assert.ok(loader.includes('only_problems: params.only_problems === "true"'));
+  assert.ok(loader.includes('withCurrentSourceState(history.data,sources)'));
+  assert.ok(loader.includes('syncDayProblem(row)'));
   assert.ok(loader.includes("connection_id: params.connection_id"));
 });
 test("history keeps technical facts off its day rows and uses connection identities", () => {

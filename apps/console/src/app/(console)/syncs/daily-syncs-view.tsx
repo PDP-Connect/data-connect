@@ -7,6 +7,7 @@ import { copiedRecords, resolveSyncCause } from "../lib/sync-cause.ts";
 import { AppendHistory, type HistoryPageChunk } from "../history/append-history.tsx";
 import { HistoryFilters } from "../history/history-filters.tsx";
 import { personDay } from "../history/day-cut.ts";
+import type { CurrentSyncDay } from "./current-source-state.ts";
 import type { SyncDay } from "../lib/ref-client.ts";
 import { ConnectorMark } from "../components/connector-mark.tsx";
 import { dayLabel, startedAgo, historyHref, historyTime, visibleDays } from "../history/day-cut.ts";
@@ -15,8 +16,9 @@ export function syncCause(cause: string | null, name: string): string | null {
   const result = resolveSyncCause({reason:cause},name);
   return result.known ? result.sentence : null;
 }
-export function syncDaySentence(row: SyncDay, name: string, missingNames: string[] = []): string {
-  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : "";
+export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames: string[] = []): string {
+  const current = row.currentState ? ` · ${row.currentState}` : "";
+  const missing = row.missing?.length ? ` · ${missingNames.length ? missingNames.join(", ") : "Some records"} didn't come` : current;
   if (!row.ran) return `Not checked · could not start ${row.could_not_start} time${row.could_not_start===1?"":"s"}`;
   if (row.last_outcome === "failed") {
     const cause = resolveSyncCause(row.evidence ?? {reason:row.cause},name).sentence;
@@ -26,8 +28,8 @@ export function syncDaySentence(row: SyncDay, name: string, missingNames: string
   const incomplete = row.failed+row.stopped+row.interrupted;
   return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start} could not start` : ""}${missing}`;
 }
-export function syncDayProblem(row: SyncDay): boolean {
-  return row.failed + row.stopped + row.interrupted > 0 || Boolean(row.missing?.length) || row.could_not_start > 0;
+export function syncDayProblem(row: CurrentSyncDay): boolean {
+  return Boolean(row.currentProblem) || row.failed + row.stopped + row.interrupted > 0 || Boolean(row.missing?.length) || row.could_not_start > 0;
 }
 export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:SyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
   const name=(row:SyncDay)=>sourceName(sources,row.connection_id,row.connector_id);
