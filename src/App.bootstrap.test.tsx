@@ -11,6 +11,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, waitFor } from "@testing-library/react"
+import { flushTelemetry, persistAndFlush } from "@/lib/telemetry/client"
+import { trackHostCompleted, trackHostStarted } from "@/lib/telemetry/events"
 import { TooltipProvider } from "@/components/ui/tooltip"
 // Imported statically so the ~400 ms cold transform of the whole app graph is
 // paid at file import (which has no per-test timeout), not inside the 5 s test
@@ -54,11 +56,27 @@ vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: async () => new Response(JSON.stringify({}), { status: 200 }),
 }))
 
+vi.mock("@/lib/telemetry/client", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry/client")>()),
+  flushTelemetry: vi.fn(async () => {}),
+  persistAndFlush: vi.fn(),
+}))
+
+vi.mock("@/lib/telemetry/events", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry/events")>()),
+  trackHostCompleted: vi.fn(),
+  trackHostStarted: vi.fn(),
+}))
+
 describe("legacy App bootstrap", () => {
   afterEach(() => {
     cleanup()
     invokedCommands.length = 0
     vi.restoreAllMocks()
+    vi.mocked(flushTelemetry).mockClear()
+    vi.mocked(persistAndFlush).mockClear()
+    vi.mocked(trackHostCompleted).mockClear()
+    vi.mocked(trackHostStarted).mockClear()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     delete (window as any).__TAURI_INTERNALS__
   })
@@ -80,6 +98,38 @@ describe("legacy App bootstrap", () => {
       expect(invokedCommands).toContain("start_personal_server")
       expect(invokedCommands).toContain("check_connector_updates")
     })
+  })
+
+  it("records host completion and flushes with keepalive on pagehide", async () => {
+    window.history.pushState({}, "", "/__loading")
+    render(
+      <TooltipProvider delayDuration={0}>
+        <App />
+      </TooltipProvider>
+    )
+
+    await waitFor(() => expect(trackHostStarted).toHaveBeenCalledTimes(1))
+    expect(trackHostCompleted).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event("pagehide"))
+    expect(trackHostCompleted).toHaveBeenCalledTimes(1)
+    expect(trackHostCompleted).toHaveBeenCalledWith(expect.any(Number))
+    expect(persistAndFlush).toHaveBeenCalledTimes(1)
+    expect(flushTelemetry).toHaveBeenLastCalledWith({ keepalive: true })
+  })
+
+  it("stops observing pagehide when the app unmounts", async () => {
+    window.history.pushState({}, "", "/__loading")
+    const { unmount } = render(
+      <TooltipProvider delayDuration={0}>
+        <App />
+      </TooltipProvider>
+    )
+
+    await waitFor(() => expect(trackHostStarted).toHaveBeenCalledTimes(1))
+    unmount()
+    window.dispatchEvent(new Event("pagehide"))
+    expect(trackHostCompleted).not.toHaveBeenCalled()
+    expect(persistAndFlush).not.toHaveBeenCalled()
   })
 })
 
