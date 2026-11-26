@@ -83,7 +83,7 @@ fn a_loopback_dial_accepts_the_other_loopback_names_and_nothing_else_does() {
         // Other hosts: the exact canonical origin only.
         ("https://example.com", "http://localhost", false),
         ("https://example.com", "https://localhost", false),
-        ("http://192.168.1.20:3000", "http://localhost:3000", false),
+        ("http://10.0.0.20:3000", "http://localhost:3000", false),
         ("http://127.8.9.10:3000", "http://localhost:3000", false),
         ("https://example.com", "https://example.com", true),
     ] {
