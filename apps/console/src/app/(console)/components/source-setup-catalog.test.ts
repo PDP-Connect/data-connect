@@ -78,6 +78,20 @@ test("a busy package catalog does not hide an unregistered connector", async () 
   assert.match(await render(true), />Reddit</);
 });
 
+test("catalog search finds a connector by key even when the key is not its title", async () => {
+  const entry = { ...reddit, connectorKey: "fixture-feed", displayName: "Example News" };
+  const html = await render(true, entry, undefined, 0, "  FIXTURE-FEED  ");
+  assert.match(html, />Example News</);
+  assert.doesNotMatch(html, /No connector matched/);
+});
+
+test("catalog search reports no match without hiding the busy package warning", async () => {
+  const html = await render(true, reddit, undefined, 0, "calendar");
+  assert.match(html, /No connector matched .*calendar.*Try the source name or connector key/);
+  assert.match(html, /data-testid="connector-install-catalog-recovery"/);
+  assert.doesNotMatch(html, />Reddit</);
+});
+
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
   const empty = await render(false);
   assert.doesNotMatch(empty, />Reddit</);
