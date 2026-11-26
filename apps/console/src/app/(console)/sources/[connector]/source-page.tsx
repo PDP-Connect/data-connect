@@ -1,3 +1,4 @@
+import { sourceKindLine } from "../../lib/source-kind-line.ts";
 import { sourceRecordCount, sourceStreamRecordCount } from "../../lib/source-record-count.ts";
 import { sourceRecordLabel, isOwnerRecordKind } from "../../lib/source-record-label.ts";
 import { SourceApps, SourceAppsList } from "./source-apps.tsx";
@@ -945,48 +946,19 @@ function SourceManage({ neverConnected, children }: { neverConnected: boolean; c
 
 function SourceRecords({ model }: { model: ConnectorPageModel }) {
   const { connectionId, source, manifest } = model;
-  const streams = model.streams.filter(stream => isOwnerRecordKind(stream.name, canonicalConnectorKey(model.connectorId)));
+  const streams = model.streams.filter((stream,index,all) => all.findIndex(candidate=>candidate.name===stream.name)===index && isOwnerRecordKind(stream.name, canonicalConnectorKey(model.connectorId)));
   const technicalKinds = model.streams.length - streams.length;
   const gaps = classifyKnownGaps(normalizeKnownGaps(model.latestKnownGaps)).coverageGaps;
   const label = (name: string) => sourceRecordLabel(name, manifest.streams as StreamManifestEntry[]);
-  const missing = streams.filter((stream) => sourceStreamRecordCount(stream) === 0 && (gaps.some((gap) => gap.stream === stream.name) || source.collection_report?.some((entry) => entry.stream === stream.name && ["terminal_gap", "retryable_gap"].includes(entry.coverage_condition))));
-  const empty = streams.filter((stream) => sourceStreamRecordCount(stream) === 0 && !missing.includes(stream));
-  const present = streams.filter((stream) => !missing.includes(stream) && !empty.includes(stream));
   return <>
-    {present.length ? <DataList>{present.map((stream) => {
-      const report = source.collection_report?.find((entry) => entry.stream === stream.name);
-      const gap = gaps.find((item) => item.stream === stream.name);
-      const partial = Boolean(gap) || Boolean(report && ["retryable_gap", "terminal_gap", "gaps", "partial"].includes(report.coverage_condition));
-      const more = report ? report.forward_disposition === "resumable" : gap?.recovery_hint?.retryable === true;
-      const lost = report?.coverage_condition === "terminal_gap" && report.forward_disposition === "terminal";
-      const recordCount = sourceStreamRecordCount(stream);
-      const count = recordCount === null ? null : `${recordCount.toLocaleString()} record${recordCount === 1 ? "" : "s"}`;
-      const sentence = partial
-        ? more ? `${recordCount === null ? "" : `${recordCount.toLocaleString()} so far. `}More at the next sync.` : lost ? `${count ? `${count}. ` : ""}Some could not be copied.` : count
-        : count;
-      const newest = recordCount === 0 ? null : recordDateLabel(stream.last_updated);
-      return <li key={stream.name}>
-        <Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
-          <span className="flex min-w-0 flex-col gap-1">
-            <span className="pdpp-body text-foreground">{label(stream.name)}</span>
-            {sentence || newest ? <span className="pdpp-caption text-muted-foreground">{sentence}{sentence && newest ? " · " : ""}{newest ? `newest ${newest}` : ""}</span> : null}
-          </span>
-        </Link>
-      </li>;
-    })}</DataList> : null}
+    <DataList>{streams.map((stream) => {
+      const kind = sourceKindLine(source,stream.name);
+      const newest = kind.count > 0 ? recordDateLabel(stream.last_updated) : null;
+      return <li key={stream.name}><Link className="flex flex-col gap-1 px-3 py-3 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={`/sources/${encodeURIComponent(connectionId)}/${encodeURIComponent(stream.name)}`}>
+        <span className="flex min-w-0 flex-col gap-1"><span className="pdpp-body text-foreground">{label(stream.name)}</span><span className="pdpp-caption text-muted-foreground">{kind.line}{newest ? ` · newest ${newest}` : ""}</span></span>
+      </Link></li>;
+    })}</DataList>
     {technicalKinds > 0 ? <p className="pdpp-body mt-3 text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical`}>and {technicalKinds} technical {technicalKinds === 1 ? "kind" : "kinds"}</Link></p> : null}
-    {empty.length ? <p className="pdpp-body mt-3 text-muted-foreground">Nothing in: {empty.slice(0, 3).map((stream) => label(stream.name)).join(", ")}{empty.length > 3 ? ` and ${empty.length - 3} more` : ""}.</p> : null}
-    {missing.length ? <>
-      <h3 className="pdpp-eyebrow mt-4">Didn't come</h3>
-      <DataList ariaLabel="Didn't come">{missing.map((stream) => {
-        const relevant = gaps.filter((gap) => gap.stream === stream.name);
-        const message = "DataConnect could not copy this.";
-        return <li className="flex flex-col gap-1 px-3 py-3" key={stream.name}>
-          <span className="text-foreground">{label(stream.name)}</span>
-          <span className="pdpp-caption text-muted-foreground">{message}{relevant.some((gap) => gap.recovery_hint?.retryable === true) ? ` It will try again the next time DataConnect checks ${source.connector_display_name ?? manifest.display_name ?? manifest.name}.` : ""}</span>
-        </li>;
-      })}</DataList>
-    </> : null}
   </>;
 }
 

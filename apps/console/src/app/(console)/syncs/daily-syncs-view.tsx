@@ -32,7 +32,7 @@ export function syncDayProblem(row: CurrentSyncDay): boolean {
   if (row.currentProblem !== undefined) return row.currentProblem;
   return Boolean(row.currentProblem) || row.failed + row.stopped + row.interrupted > 0 || Boolean(row.missing?.length) || row.could_not_start > 0;
 }
-export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:SyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
+export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,expand=false}: {rows:CurrentSyncDay[];sources:HistorySource[];offset:number;demo?:string;onlyProblems?:boolean;expand?:boolean}) {
   const name=(row:SyncDay)=>sourceName(sources,row.connection_id,row.connector_id);
   return <>{visibleDays(rows,10_000).map(day=>{
     const all=rows.filter(row=>row.day===day);
@@ -46,6 +46,7 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
           <div className="flex min-w-0 items-center gap-3"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div><p>{name(row)}</p><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,sources.find(source=>source.id===row.connection_id)?.serviceName ?? name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
           <span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(row.last_at,offset)}</span>
         </Link>
+        {row.currentState ? <ul className="text-[13px] text-muted-foreground">{Object.entries(sources.find(source=>source.id===row.connection_id)?.currentKinds ?? {}).map(([kind,value])=><li key={kind}>{historyKindName(sources,row.connection_id,kind)} · {value.line}</li>)}</ul> : null}
         {sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action?.label}</Link></div> : null}
       </li>)}</ul>
     </Section>;
