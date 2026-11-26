@@ -219,7 +219,7 @@ export function buildLogger({
   quiet?: boolean;
   prettyTransportAvailable?: () => boolean;
 } = {}) {
-  return pino(makeLoggerOptions({ quiet, prettyTransportAvailable }));
+  return pino(makeLoggerOptions({ prettyTransportAvailable, quiet }));
 }
 
 export const __test = { makeLoggerOptions };
@@ -389,18 +389,25 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
     reply.send(error);
   });
 
-  // Emit one structured completion record per request carrying req_id, method,
-  // path, statusCode, responseTime, and — when the handler set it via
-  // setReferenceTraceId() — trace_id. Kept at `info`; this is the baseline
-  // record the spec promises, not a per-status-code shape.
+  // Keep completion fields and correlation at either level. Core §11 leaves
+  // operational logs to local policy; fast successful input and polling reads
+  // use debug so they do not crowd out errors, slow requests, and run lifecycle.
+  // One second is the local slow-request threshold, independent of log rounding.
   // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
   fastify.addHook("onResponse", async (request, reply) => {
     const traceId = reply.getHeader?.(PDPP_TRACE_ID_HEADER) || request.__pdppTraceId;
-    request.log.info(
+    const elapsedTime = reply.elapsedTime ?? 0;
+    const route = request.routeOptions.url;
+    const isFrequentRequest =
+      (request.method === "POST" && route === "/_ref/run-interaction-streams/:token/input") ||
+      (request.method === "GET" && (route === "/_ref/runs/:runId" || route === "/_ref/runs/:runId/timeline"));
+    const level =
+      isFrequentRequest && reply.statusCode >= 200 && reply.statusCode < 400 && elapsedTime < 1000 ? "debug" : "info";
+    request.log[level](
       {
         method: request.method,
         req_id: request.id,
-        responseTime: Math.round(reply.elapsedTime ?? 0),
+        responseTime: Math.round(elapsedTime),
         statusCode: reply.statusCode,
         url: request.url,
         ...(traceId ? { trace_id: traceId } : {}),
