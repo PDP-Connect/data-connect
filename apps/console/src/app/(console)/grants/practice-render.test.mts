@@ -150,7 +150,7 @@ test("service-only practice folds into one account and stays an all-accounts row
   const three = buildAppPractice("service-three").apps[0]!;
   assert.equal(one.sources.length, 1);
   assert.equal(one.sourceAccess[0]!.active_grant_ids.length, 2);
-  assert.equal(three.sources.length, 2);
+  assert.equal(three.sources.length, 1);
   assert.ok(three.sources.includes("All Gmail accounts"));
 });
 
@@ -164,10 +164,10 @@ test("app and history practice authorize the same sources and reading clocks",as
  const {historyPracticeSources}=await import("../history/practice.ts");
  const loaded=buildAppPractice("mixed");const app=loaded.apps[0]!;
  assert.deepEqual(app.sourceAccess.map(source=>source.source.connection_id).sort(),practiceHistoryApps("mixed")[0]!.sourceAccess.map(source=>source.source.connection_id).sort());
- assert.equal(loaded.readingHistory.mode,"days");if(loaded.readingHistory.mode!=="days")throw Error("mode");
+ assert.equal(loaded.readingHistory.mode,"days");if(loaded.readingHistory.mode!=="days") { throw Error("mode"); }
  const rows=groupAppHistory(loaded.readingHistory.data,[app]);
  assert.equal(app.lastRead,rows[0]!.last_at);
- for(const source of app.sourceAccess)assert.equal(source.last_read_at,rows[0]!.sources.find(read=>read.connection_id===source.source.connection_id)?.last_at);
+ for(const source of app.sourceAccess) { assert.equal(source.last_read_at,rows[0]!.sources.find(read=>read.connection_id===source.source.connection_id)?.last_at); }
  const html=renderToStaticMarkup(React.createElement(AppPage,{app,recent:{rows,sources:historyPracticeSources(),offset:0}}));
  const list=renderToStaticMarkup(React.createElement(AppAccessList,{apps:[app]}));
  assert.ok(html.includes("Last read"));assert.ok(list.includes("Last read"));

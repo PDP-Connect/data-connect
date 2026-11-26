@@ -116,7 +116,7 @@ export function buildAppPractice(demo: string) {
           },
           kinds: service === "gmail" ? ["messages", "threads", "labels"] : ["records"],
           in_force: !stopped,
-          first_issued_at: at(-30),
+          first_issued_at: at(demo === "forty-eight" && index >= 14 ? -90 : -30),
           expires_at: ended ? at(-1) : demo === "ending" || demo === "app-end" ? at(3) : null,
           stopped_at: stopped ? at(-index - 1) : null,
           stopped_reason: stopped ? (ended ? ("expired" as const) : ("removed" as const)) : null,
@@ -135,10 +135,16 @@ export function buildAppPractice(demo: string) {
       }),
     };
   });
-  if (["app", "mixed"].includes(demo)) for (const app of data) {
+  if (demo === "forty-eight") {
+    for (const [index, registration] of data.entries()) {
+      if(index < 14) {continue;}
+      registration.client_name = new Map([[14,"Codex"],[15,"Claude Code"]]).get(index) ?? `Northwind test ${index+1}`;
+    }
+  }
+  if (["app", "mixed"].includes(demo)) { for (const app of data) {
     const template=app.sources[0]!;
     app.sources=APP_PRACTICE_SOURCES.map(source=>({...structuredClone(template),source:{kind:"connector",id:source.connector,connector_id:source.connector,connection_id:source.id}}));
-  }
+  } }
   if (demo === "app-fifty-six") {
     const template = data[0]!.sources[0]!;
     const rows = Array.from({ length: 56 }, (_, index) => {
@@ -211,7 +217,19 @@ export function buildAppPractice(demo: string) {
         )
       : []
   );
+  if (demo === "service-three") {
+    for (let index=0;index<3;index+=1) { sourceNames.set(`practice-gmail-${index}`, `Gmail account ${index+1}`); }
+    sourceNames.set("practice-other", "Spotify");
+  }
   const apps = groupGrantAccessByApp(data, now, approvals, sourceNames);
+  const kindNames: Record<string,string[]> = {spotify:["Your playlists","Your saved tracks"],amazon:["Your orders"],"google-drive":["Your files"],calendar:["Your events"],notion:["Your pages"],github:["Your repositories"],dropbox:["Your files"],slack:["Your messages"],figma:["Your files"],trello:["Your boards"],airtable:["Your tables"]};
+  for (const app of apps) {
+    for (const source of app.sourceAccess) {
+      if(source.source.connector_id === "google-drive") { source.name = "Google Drive"; }
+      source.kindNames = kindNames[source.source.connector_id || ""];
+    }
+    app.sources=app.sourceAccess.filter(row=>app.state!=="reading" || row.in_force).map(row=>row.name || "Data source");
+  }
   if (demo === "app-never-read") {
     for (const app of apps) {
       app.neverRead = true;
