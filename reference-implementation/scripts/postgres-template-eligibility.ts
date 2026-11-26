@@ -249,6 +249,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   // Runs the retired-id rename and its ledger receipt on a from-scratch database.
   "test/retired-connector-id-migration-postgres.test.ts",
   "test/rs-opaque-cursors.test.ts",
+  // Drops the actor_type column and re-runs the bootstrap migration.
+  "test/run-history-actor-provenance.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
   "test/run-history-device-run-provenance-migration.test.ts",
   // Exercises bounded boot retries and cursor recovery after run_history lock timeouts.

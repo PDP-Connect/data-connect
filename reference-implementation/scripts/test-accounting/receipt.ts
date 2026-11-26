@@ -103,7 +103,6 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "PostgreSQL device-ingest conformance: simultaneous identity matrix",
   "PostgreSQL device-ingest conformance: stranded processing diagnostics",
   "PostgreSQL device-ingest conformance: version-CAS stale-overwrite adversarial matrix",
-  "PostgreSQL scheduler page batches match SQLite semantics and use one typed-array query per non-empty axis",
   "PostgreSQL: a crash before the reconciliation transaction commits leaves scheduler_run_history fully intact for a clean retry",
   "PostgreSQL: an accepted replay of an already-committed batch prefix advances neither the checkpoint nor repair work",
   "PostgreSQL: connector-wide invalidation (deleteAllRecordsForConnector) is detected and repaired by the summary primitive without a per-record dirty hook",
