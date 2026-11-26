@@ -155,7 +155,7 @@ test("the page names this data source by the shared rule, so it is never listed 
   // The page must compare with the same name, or a connection saved as its key ("reddit")
   // fails to match "Reddit" and is listed as another data source.
   const { readFile } = await import("node:fs/promises");
-  const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("./source-page.tsx", import.meta.url), "utf8");
   assert.match(
     page,
     /buildSourceUpdateModel\(\s*model\.connectorId,\s*connectionDisplayName\(model\.source\.display_name, model\.source\.connector_display_name, model\.source\.connector_id\),/

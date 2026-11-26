@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIAG_FILE = `${HERE}connection-diagnostics.tsx`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const PROJECTION_MISSING_TESTID = /data-testid="diagnostics-projection-missing"/;
 const PROJECTION_UNAVAILABLE_COPY = /Projection unavailable/;

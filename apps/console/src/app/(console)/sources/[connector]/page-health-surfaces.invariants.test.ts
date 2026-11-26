@@ -19,7 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 // ─── Top-level regex constants (biome useTopLevelRegex) ───────────────────────
 

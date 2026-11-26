@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 // The connection detail page resolves the connection + manifests first, then
 // derives stream rows from the connection-scoped summary read-model and races

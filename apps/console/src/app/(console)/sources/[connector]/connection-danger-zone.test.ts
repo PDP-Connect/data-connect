@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DANGER_ZONE_FILE = `${HERE}connection-danger-zone.tsx`;
 const ACTIONS_FILE = `${HERE}actions.ts`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const PAGE_RESOLVES_CONNECTION_RE = /resolveConnectionForRecordsRoute/;
 const PAGE_NOT_FOUND_RE = /notFound\(\)/;

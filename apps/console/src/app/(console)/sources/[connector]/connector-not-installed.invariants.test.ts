@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 const INSTALL_PROMPT_FILE = `${HERE}connector-install-prompt.tsx`;
 
 const READS_SERVER_FACT = /const connectorNotInstalled = isConnectorNotInstalled\(summary\);/;

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIAGNOSTICS_CLOSED_BY_DEFAULT_RE = /open=\{hasDeviceLocalRemediation \|\| undefined\}/;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 interface SectionOffsets {
   collected: number;
@@ -37,7 +37,7 @@ async function renderOrder(): Promise<SectionOffsets> {
     collected: src.indexOf("<AcquisitionCoverageSection"),
     configuration: src.indexOf("<ConnectionConfiguration"),
     dangerZone: src.indexOf("<ConnectionDangerZone"),
-    details: src.indexOf('data-testid="source-details"'),
+    details: src.indexOf('>Technical details</Link>'),
     diagnostics: src.indexOf("<ConnectionDiagnostics"),
     runs: src.indexOf("<RecentRunsSection"),
     whatIsHere: src.indexOf('title="What is here"'),
@@ -52,7 +52,7 @@ test("What is here and Latest syncs lead; collected evidence stays inside folded
   // Brief decisions 6–7: the two plain-language sections lead; evidence moves into Details.
   assert.ok(at.whatIsHere < at.runs, "What is here precedes Latest syncs");
   assert.ok(at.runs < at.details, "Latest syncs precedes folded Details");
-  assert.ok(at.details < at.collected, "collected evidence is inside folded Details");
+  assert.ok(at.details < at.collected, "technical evidence is rendered by the separate technical view");
 });
 
 test("the header shows the account line and a 48px source mark", async () => {
@@ -78,7 +78,7 @@ test("device collector trouble is shown under the state sentence when local reco
   const src = await readFile(PAGE_FILE, "utf8");
   const sentence = src.indexOf("<SourceStateSentenceText");
   const trouble = src.indexOf('data-testid="device-collector-trouble"');
-  const details = src.indexOf('data-testid="source-details"');
+  const details = src.indexOf('>Technical details</Link>');
   const recovery = src.indexOf("<ConnectionRecoverySummary");
   // DIRECTION.md §One data source: device collector trouble sits directly under the state sentence.
   assert.ok(sentence < trouble, "state sentence precedes the device recovery note");

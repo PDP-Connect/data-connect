@@ -35,7 +35,7 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const COMPONENT_FILE = `${HERE}connection-configuration.tsx`;
 const ACTIONS_FILE = `${HERE}config-actions.ts`;
 const VIEW_MODEL_FILE = `${HERE}connection-config-view-model.ts`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 // ─── Top-level regex constants (biome useTopLevelRegex) ─────────────────────
 

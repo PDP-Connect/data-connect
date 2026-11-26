@@ -15,7 +15,7 @@ import type {
 } from "../../lib/ref-client.ts";
 import type { StreamSummary } from "../../lib/rs-client.ts";
 import { type SourceStatusRow, sourceStatusWords } from "../../lib/source-status-words.ts";
-import type { ConnectorPageModel } from "./page.tsx";
+import type { ConnectorPageModel } from "./source-page.tsx";
 
 const DEMO_NOW = new Date("2026-11-24T12:00:00.000Z");
 const DEMO_SUCCESS = "2026-11-24T10:00:00.000Z";

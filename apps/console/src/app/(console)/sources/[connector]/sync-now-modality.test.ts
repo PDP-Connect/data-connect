@@ -28,7 +28,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const IMPORTS_SHARED_CLASSIFIER =
   /derivePrimaryRowAction[\s\S]*type PrimaryRowAction[\s\S]*from "\.\.\/\.\.\/lib\/connection-evidence\.ts"/;

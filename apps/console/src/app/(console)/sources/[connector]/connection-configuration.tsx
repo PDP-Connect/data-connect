@@ -771,3 +771,7 @@ function groupRows(rows: ReturnType<typeof buildCurrentSettings>) {
     return bucket ? [bucket] : [];
   });
 }
+
+export function ConnectionSettingsHistory({ config, revisions }: Pick<Props, "config" | "revisions">) {
+  return <Section title="Settings history"><HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={config.options_schema} /></Section>;
+}

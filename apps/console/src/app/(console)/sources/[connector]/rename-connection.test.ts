@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ACTIONS_FILE = `${HERE}actions.ts`;
 const ISLAND_FILE = `${HERE}rename-connection.tsx`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const ACTION_SIGNATURE_RE =
   /export async function renameConnectionAction\(\s*connectionId: string \| null,\s*displayName: string\s*\): Promise<RenameConnectionResult>/;

@@ -260,7 +260,7 @@ test("each status row renders the shared sentence and only the controls for that
     if (row === 12) {
       const details = document.querySelector('details[data-testid="source-details"]');
       assert.ok(document.querySelector('[data-testid="auto-paused-banner"]'), "backoff banner renders with a recent sync");
-      assert.ok(details?.querySelector('[data-testid="auto-pause-reason"]'), "raw backoff reason stays folded");
+      assert.equal(details, null, "technical evidence is on its own page");
       assert.ok(!visibleText.includes("retry"), "raw backoff reason does not appear outside Details");
     }
 
@@ -382,8 +382,9 @@ test("needs-you variants render the matching shared sentence and server action",
 
 test("coverage and recovery facts render inside folded Details", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
-  const dom = await renderDemo("atlas");
-  const details = dom.window.document.querySelector('details[data-testid="source-details"]');
+  const { SourceTechnicalDetails } = await import("./source-page.tsx");
+  const dom = new JSDOM(renderToStaticMarkup(createElement(SourceTechnicalDetails, { model: buildRecoveryDemoModel(16, true), now: NOW.toISOString() })));
+  const details = dom.window.document.body;
   const visibleText = visibleOutsideDetails(dom);
   assert.ok(details);
   assert.ok(details.querySelector('[data-testid="stream-collection-facts"]'));
@@ -392,7 +393,7 @@ test("coverage and recovery facts render inside folded Details", async (t) => {
   assert.ok(details.querySelector('[data-testid="sync-details"] code')?.textContent?.includes("local collector outbox has dead-lettered rows"));
   // Brief decision 7: event counts leave the row but remain reachable in Details.
   assert.match(details.querySelector('[data-testid="sync-details"]')?.textContent ?? "", /14 events/);
-  assert.doesNotMatch(visibleText, /14 events/);
+  assert.ok(details.textContent?.includes("14 events"));
   assert.ok(details.querySelector('[data-testid="diagnostics-recovery-panel"]'));
   assert.ok(details.querySelector('[data-testid="diagnostics-details"]'));
 });
