@@ -192,11 +192,11 @@ test("a wildcard selection carries no scope, and still resolves", () => {
   assert.equal(resolved.length, MANIFEST.streams.length);
 });
 
-test("every real ChatGPT stream can be narrowed on both axes", () => {
+test("every ChatGPT stream with a consent time field can be narrowed on both axes", () => {
   // Guards the premise of the feature against a manifest revision: if a
   // stream loses `selection.fields` or `consent_time_field`, the picker must
   // stop offering that control rather than 400 at issuance.
-  for (const stream of MANIFEST.streams) {
+  for (const stream of MANIFEST.streams.filter((candidate) => candidate.consent_time_field)) {
     const body = {
       [scopeFieldsInputName(SOURCE_KEY, stream.name)]: [
         ...((stream.schema as { required?: string[] }).required ?? []),

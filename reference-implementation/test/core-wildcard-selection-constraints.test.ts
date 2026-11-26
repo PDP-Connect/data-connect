@@ -30,11 +30,22 @@ function declaration() {
 	) as any;
 }
 
+function retainStreams(decl: any, predicate: (stream: any) => boolean): void {
+	decl.streams = decl.streams.filter(predicate);
+	const retainedNames = new Set(decl.streams.map((stream: any) => stream.name));
+	decl.selection_presets = decl.selection_presets
+		?.map((preset: any) => ({
+			...preset,
+			streams: preset.streams.filter((stream: any) => retainedNames.has(stream.name)),
+		}))
+		.filter((preset: any) => preset.streams.length > 0);
+}
+
 const SINCE = "2026-03-01T00:00:00.000Z";
 
 test("wildcard fields keep the projection on every expanded stream", () => {
 	const decl = declaration();
-	decl.streams = decl.streams.filter((s: any) => s.selection.fields);
+	retainStreams(decl, (stream) => stream.selection.fields);
 	const resolved = resolveCoreSelection(
 		{ streams: [{ fields: ["id"], name: "*" }] },
 		decl,
@@ -50,9 +61,7 @@ test("wildcard fields keep the projection on every expanded stream", () => {
 
 test("wildcard resources keep the resource constraint on every expanded stream", () => {
 	const decl = declaration();
-	decl.streams = decl.streams.filter(
-		(s: any) => s.selection.resources && s.primary_key.length === 1,
-	);
+	retainStreams(decl, (stream) => stream.selection.resources && stream.primary_key.length === 1);
 	assert.ok(decl.streams.length > 0);
 	const resolved = resolveCoreSelection(
 		{ streams: [{ name: "*", resources: ["only-this"] }] },
@@ -82,7 +91,7 @@ test("wildcard resources reject when an expanded stream does not support them", 
 
 test("wildcard time_range is kept when every expanded stream has consent_time_field", () => {
 	const decl = declaration();
-	decl.streams = decl.streams.filter((s: any) => s.consent_time_field);
+	retainStreams(decl, (stream) => stream.consent_time_field);
 	assert.ok(decl.streams.length > 0);
 	const resolved = resolveCoreSelection(
 		{ streams: [{ name: "*", time_range: { since: SINCE } }] },
