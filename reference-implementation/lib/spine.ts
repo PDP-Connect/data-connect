@@ -86,7 +86,8 @@ export function listAppAccessSqlite(
     .prepare(`SELECT client_id, handle, internal_id FROM pairwise_identity_handles
     WHERE subject_id = ? AND kind = 'instance'`)
     .all(subjectId) as AppAccessInstanceRow[];
-  return projectAppAccess(grants, events, members, instances, now);
+  const connections = db.prepare(`SELECT connector_id, connector_instance_id FROM connector_instances WHERE owner_subject_id = ?`).all(subjectId) as { connector_id: string; connector_instance_id: string }[];
+  return projectAppAccess(grants, events, members, instances, now, connections);
 }
 
 export function listAppAccess(subjectId: string, now = new Date().toISOString()): AppAccess[] | Promise<AppAccess[]> {

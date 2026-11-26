@@ -38,7 +38,7 @@ export async function postgresListAppAccess(
   query = postgresQuery
 ): Promise<AppAccess[]> {
   const since = new Date(Date.parse(now) - 7 * 86_400_000).toISOString();
-  const [grants, events, members, instances] = await Promise.all([
+  const [grants, events, members, instances, connections] = await Promise.all([
     query<AppAccessGrantRow>(
       `SELECT g.grant_id, g.client_id, g.status, g.issued_at, g.expires_at,
       g.grant_json, g.storage_binding_json, g.trust_signal_json, c.metadata_json
@@ -58,8 +58,9 @@ export async function postgresListAppAccess(
       WHERE subject_id = $1 AND kind = 'instance'`,
       [subjectId]
     ),
+    query<{ connector_id: string; connector_instance_id: string }>(`SELECT connector_id, connector_instance_id FROM connector_instances WHERE owner_subject_id = $1`, [subjectId]),
   ]);
-  return projectAppAccess(grants.rows, events.rows, members.rows, instances.rows, now);
+  return projectAppAccess(grants.rows, events.rows, members.rows, instances.rows, now, connections.rows);
 }
 
 /**

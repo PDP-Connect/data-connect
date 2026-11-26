@@ -15,6 +15,8 @@ export interface AppAccessSourceIdentity {
 
 export interface AppAccessSource {
   source: AppAccessSourceIdentity;
+  all_accounts?: boolean;
+  connection_ids?: string[];
   kinds: string[];
   in_force: boolean;
   first_issued_at: string;
@@ -112,6 +114,7 @@ export function projectAppAccess(
   members: AppAccessMemberRow[],
   instances: AppAccessInstanceRow[],
   now: string,
+  connections: { connector_id: string; connector_instance_id: string }[] = [],
 ): AppAccess[] {
   const apps = new Map<string, AppAccess>();
   const byGrant = new Map<string, AppAccessEventRow[]>();
@@ -294,6 +297,7 @@ export function projectAppAccess(
     }
   }
   for (const app of apps.values()) {
+    app.sources = mergeAppAccessSources(app.sources, connections);
     for (const source of app.sources) {
       if (source.in_force) {
         source.stopped_at = null;
@@ -305,4 +309,55 @@ export function projectAppAccess(
     app.sources.sort((a, b) => JSON.stringify(a.source).localeCompare(JSON.stringify(b.source)));
   }
   return [...apps.values()].sort((a, b) => a.client_id.localeCompare(b.client_id));
+}
+
+/** One persisted connection is one row, regardless of which permission reached it. */
+export function mergeAppAccessSources(
+  sources: readonly AppAccessSource[],
+  connections: readonly { connector_id: string; connector_instance_id: string }[] = [],
+): AppAccessSource[] {
+  const accounts = new Map<string, Set<string>>();
+  for (const row of connections) {
+    const ids = accounts.get(row.connector_id) ?? new Set<string>();
+    ids.add(row.connector_instance_id);
+    accounts.set(row.connector_id, ids);
+  }
+  for (const row of sources) {
+    const service = row.source.connector_id ?? row.source.id;
+    const ids = accounts.get(service) ?? new Set<string>();
+    if (row.source.connection_id) ids.add(row.source.connection_id);
+    accounts.set(service, ids);
+  }
+  const merged = new Map<string, AppAccessSource>();
+  for (const row of sources) {
+    const service = row.source.connector_id ?? row.source.id;
+    const ids = [...(accounts.get(service) ?? [])].sort();
+    const connection = row.source.connection_id ?? (ids.length === 1 ? ids[0]! : null);
+    const identity: AppAccessSourceIdentity = {
+      kind: row.source.connector_id ? "connector" : row.source.kind,
+      id: service, connector_id: row.source.connector_id, connection_id: connection,
+    };
+    const key = connection ? `connection:${connection}` : JSON.stringify(identity);
+    const previous = merged.get(key);
+    if (!previous) {
+      merged.set(key, { ...row, source: identity,
+        ...(!connection && ids.length > 1 ? { all_accounts: true, connection_ids: ids } : {}),
+        kinds: [...row.kinds], grant_ids: [...row.grant_ids], active_grant_ids: [...row.active_grant_ids], package_ids: [...row.package_ids] });
+      continue;
+    }
+    previous.kinds = [...new Set([...previous.kinds, ...row.kinds])].sort();
+    previous.grant_ids = [...new Set([...previous.grant_ids, ...row.grant_ids])].sort();
+    previous.active_grant_ids = [...new Set([...previous.active_grant_ids, ...row.active_grant_ids])].sort();
+    previous.package_ids = [...new Set([...previous.package_ids, ...row.package_ids])].sort();
+    if (Date.parse(row.first_issued_at) < Date.parse(previous.first_issued_at)) previous.first_issued_at = row.first_issued_at;
+    previous.last_read_at = later(previous.last_read_at, row.last_read_at);
+    if (row.in_force) {
+      previous.expires_at = !previous.in_force ? row.expires_at : !previous.expires_at || !row.expires_at ? null : later(previous.expires_at,row.expires_at);
+      previous.in_force = true;
+    }
+    if (row.stopped_at && (!previous.stopped_at || Date.parse(row.stopped_at) > Date.parse(previous.stopped_at))) {
+      previous.stopped_at = row.stopped_at; previous.stopped_reason = row.stopped_reason;
+    }
+  }
+  return [...merged.values()];
 }

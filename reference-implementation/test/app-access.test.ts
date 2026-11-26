@@ -584,3 +584,45 @@ test("Postgres app removal preserves sibling package access, audit fields, token
     },
   );
 });
+
+async function checkMergedSources(write: Write, list: () => Promise<AppAccess[]> | AppAccess[]) {
+  for (const service of ["solo", "multi"]) await write("INSERT INTO connectors(connector_id, manifest) VALUES (?, '{}')", [service]);
+  for (const [id, service] of [["cin_solo", "solo"], ["cin_one", "multi"], ["cin_two", "multi"], ["cin_three", "multi"]]) {
+    await write(`INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_json, source_binding_key, status, created_at, updated_at)
+      VALUES (?, 'merge_owner', ?, 'Practice', 'account', '{}', ?, 'active', ?, ?)`, [id!, service!, id!, ISSUED, ISSUED]);
+  }
+  for (const [id, service, connection, kind, sourceKind] of [
+    ["solo_specific", "solo", "cin_solo", "messages", "connector"],
+    ["solo_service", "solo", null, "threads", "provider_native"],
+    ["multi_specific", "multi", "cin_one", "messages", "connector"],
+    ["multi_service", "multi", null, "threads", "provider_native"],
+  ]) {
+    await write(`INSERT INTO grants(grant_id, subject_id, client_id, grant_json, storage_binding_json, access_mode, issued_at)
+      VALUES (?, 'merge_owner', 'merge_app', ?, ?, 'continuous', ?)`,
+      [id!, JSON.stringify({source:{kind:sourceKind,id:service},streams:[{name:kind,...(connection?{instance_ids:[connection]}:{})}]}),JSON.stringify({connector_id:service}),ISSUED]);
+  }
+  const app=(await list())[0]!;
+  assert.equal(app.sources.length,3);
+  const solo=app.sources.find(s=>s.source.connection_id==='cin_solo')!;
+  assert.deepEqual(solo.kinds,['messages','threads']);
+  assert.deepEqual(solo.active_grant_ids,['solo_service','solo_specific']);
+  const all=app.sources.find(s=>s.source.connector_id==='multi'&&!s.source.connection_id)!;
+  assert.equal(all.all_accounts,true);
+  assert.equal(all.connection_ids?.length,3);
+  const revoked:string[]=[];
+  const deps={list:async()=>{const apps=await list(); for(const a of apps)for(const s of a.sources)s.active_grant_ids=s.active_grant_ids.filter(id=>!revoked.includes(id));return apps;},revokeGrant:async(id:string)=>{revoked.push(id);},revokePackage:async()=>assert.fail('scoped removal must not cascade')};
+  assert.equal((await removeAppAccess({client_ids:['merge_app'],source:solo.source},deps)).ended_count,2);
+  assert.deepEqual(revoked.sort(),['solo_service','solo_specific']);
+  revoked.length=0;
+  assert.equal((await removeAppAccess({client_ids:['merge_app'],source:all.source},deps)).ended_count,1);
+  assert.deepEqual(revoked,['multi_service']);
+}
+test('SQLite merges service-only access using the owner connection inventory and removes exactly its permissions',async()=>{
+  initDb();try{await checkMergedSources(async(sql,values)=>getDb().prepare(sql).run(...values),()=>spine.listAppAccessSqlite('merge_owner',NOW));}finally{closeDb();}
+});
+test('Postgres merges service-only access using the owner connection inventory and removes exactly its permissions',{skip:!process.env.PDPP_TEST_POSTGRES_URL},async()=>{
+  await withTemporaryPostgresDatabase({connectionString:process.env.PDPP_TEST_POSTGRES_URL!,databaseName:`dc_merge_${randomUUID().replaceAll('-','')}`,closeConnections:closePostgresStorage},async databaseUrl=>{
+    await initPostgresStorage({backend:'postgres',databaseUrl});
+    await checkMergedSources(async(sql,values)=>{let i=0;return postgresQuery(sql.replaceAll('?',()=>`$${++i}`),values);},()=>postgresListAppAccess('merge_owner',NOW));
+  });
+});
