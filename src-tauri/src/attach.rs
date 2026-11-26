@@ -256,6 +256,14 @@ pub(crate) enum AttachTarget {
     Saved(Attachment),
 }
 
+impl AttachTarget {
+    /// The console's pages come from a server this computer does not run: a
+    /// saved attachment or an environment-configured server.
+    pub(crate) fn is_remote(&self) -> bool {
+        !matches!(self, Self::Local)
+    }
+}
+
 pub(crate) fn resolve_attach_target(env_override: bool, saved: Option<Attachment>) -> AttachTarget {
     if env_override {
         return AttachTarget::Environment;

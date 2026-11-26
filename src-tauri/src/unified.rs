@@ -845,7 +845,7 @@ fn opens_attach_window_at_launch(
 
 /// No local stack: an environment override or a saved server attachment.
 pub(crate) fn attach_mode() -> bool {
-    crate::attach::current_target() != crate::attach::AttachTarget::Local
+    crate::attach::current_target().is_remote()
 }
 
 fn unified_profile() -> String {
@@ -4683,10 +4683,7 @@ fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> b
     decide_console_navigation_with(
         url,
         console_origin,
-        matches!(
-            crate::attach::current_target(),
-            crate::attach::AttachTarget::Saved(_)
-        ),
+        crate::attach::current_target().is_remote(),
         ask_before_opening_externally,
         open_external_url,
     )
@@ -4696,9 +4693,10 @@ fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> b
 enum NavigationPolicy {
     AllowInternal,
     OpenExternally,
-    /// Attached to a remote server: the page comes from that server, and
-    /// the webview gives no signal that the owner clicked, so the owner
-    /// confirms before the system browser opens anything.
+    /// Remote target (saved attachment or environment-configured server): the
+    /// page comes from that server, and the webview gives no signal that the
+    /// owner clicked, so the owner confirms before the system browser opens
+    /// anything.
     ConfirmThenOpen,
     Refuse,
 }
@@ -9273,6 +9271,32 @@ setInterval(() => {}, 1000);
         assert!(!allowed);
         assert_eq!(asked.as_deref(), Some("https://pdpp.dev"));
         assert_eq!(opened, vec!["https://pdpp.dev/docs?token=SECRET".to_string()]);
+    }
+
+    /// An environment-configured console is a remote server too: the owner
+    /// confirms before its page opens the system browser. Local is the control.
+    #[test]
+    fn environment_configured_console_asks_before_opening_https_links() {
+        use crate::attach::{AttachTarget, Attachment};
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        let external: tauri::Url = "https://pdpp.dev/docs".parse().expect("test url");
+        let saved = AttachTarget::Saved(Attachment {
+            origin: "https://dc.example.com".to_string(),
+            label: "x".to_string(),
+            paired_at: "y".to_string(),
+            server_key: None,
+        });
+        for (target, expected) in [
+            (AttachTarget::Environment, NavigationPolicy::ConfirmThenOpen),
+            (saved, NavigationPolicy::ConfirmThenOpen),
+            (AttachTarget::Local, NavigationPolicy::OpenExternally),
+        ] {
+            assert_eq!(
+                console_navigation_policy(&external, &console, target.is_remote()),
+                expected,
+                "{target:?}"
+            );
+        }
     }
 
     #[test]

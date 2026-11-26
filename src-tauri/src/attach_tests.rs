@@ -1001,3 +1001,14 @@ async fn error_messages_never_include_the_code_session_or_password() {
         }
     }
 }
+
+#[test]
+fn saved_and_environment_targets_are_remote_and_local_is_not() {
+    assert!(!AttachTarget::Local.is_remote());
+    assert!(AttachTarget::Environment.is_remote());
+    assert!(AttachTarget::Saved(attachment("https://dc.example.com")).is_remote());
+    // The same answer through resolution, so an environment-configured
+    // console is never treated as this computer's own.
+    assert!(resolve_attach_target(true, None).is_remote());
+    assert!(!resolve_attach_target(false, None).is_remote());
+}

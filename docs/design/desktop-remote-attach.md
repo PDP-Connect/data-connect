@@ -71,7 +71,7 @@ The requirement that any surface syncs with any surface, read as a constraint on
 
 - The tray header names the active server: `This computer` or `Attached to <host>`. The status line while starting says which.
 - Tray items: `Connect to a server...` (when local), `Disconnect from <host>` (when attached).
-- Disconnect revokes the session on the server (best effort; local deletion happens either way and the notice says whether the server confirmed), deletes the keychain entry and `attach.json`, then restarts the app into "This computer". Local data was never touched and returns.
+- Disconnect removes `attach.json` first (if that fails, nothing else changes and the error is shown), then revokes the session on the server (best effort; the notice says whether the server confirmed) and deletes the keychain entry, then restarts the app into "This computer". Local data was never touched and returns.
 - Attach writes `attach.json` (origin, label, paired-at; no secrets) in the app data directory and restarts the app into the attached state. Switching by restart is deliberate: the unified stack reads attach state in seven places (`attach_mode()` callers), and one mode per process keeps each of them correct. A live swap would need all seven to tolerate a mid-run change. Local and remote never run in the same process.
 - `DATACONNECT_RI_URL` and `DATACONNECT_CONSOLE_URL` keep priority over the saved attachment (developer escape hatch). The attach window says "Set by environment" and disables itself when they are set.
 - Attaching never deletes the local database or keys, and the app does not start local sidecars while attached.
@@ -116,7 +116,7 @@ Jupyter, Syncthing and T3's own pairing docs were researched separately and capt
 An independent review of a parallel design raised five findings. Each was checked against the code.
 
 1. Desktop and Vault recovery settings render on a server where nothing answers them (`settings/page.tsx`, routes mounted unconditionally in `server/index.ts`). Accepted. This PR gates both sections on `PDPP_MANAGED_DESKTOP_HOST`. Remote access stays visible.
-2. `decide_console_navigation` opens the system browser for any https navigation with no gesture (`unified.rs`). Accepted. While attached the desktop asks for a native confirmation naming the target origin. Local mode is unchanged. The webview gives no gesture signal, so the confirm replaces a click check.
+2. `decide_console_navigation` opens the system browser for any https navigation with no gesture (`unified.rs`). Accepted. While the console is a remote target (a saved attachment or an environment-configured server) the desktop asks for a native confirmation naming the target origin. Local mode is unchanged. The webview gives no gesture signal, so the confirm replaces a click check.
 3. Identity before credentials. Accepted, and it corrects Decision 5. Built (see Decision 5).
 4. Cookies are keyed by host, not port, so a forwarded remote and the local console collide. Accepted. Disconnect, an expired pairing and the switch delete the remote session cookie from the webview store, and the walkthrough attaches, disconnects and checks that the local console is signed in as local.
 5. Stale comments claiming no IPC bridge. Not changed. `capabilities/console.json` grants the console window no `remote` URLs, so by Tauri 2 rules IPC is refused from an external origin whatever the injected global is. The walkthrough checks this by calling `window.__TAURI__.core.invoke` from the attached console. Comment wording is not part of this PR.
