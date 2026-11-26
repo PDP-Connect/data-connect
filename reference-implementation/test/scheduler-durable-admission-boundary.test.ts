@@ -63,6 +63,7 @@ import { createScheduler, type Scheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { seedEnabledSchedule } from "./helpers/seed-enabled-schedule.ts";
 
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/scheduler-durable-boundary";
 const CONNECTOR_INSTANCE_ID = "cin_scheduler_durable_boundary";
@@ -198,6 +199,7 @@ function freshDb(t: TestContext): string {
 test("two independent scheduler processes sharing one durable store admit exactly one run, incumbent row is never overwritten", async (t) => {
   freshDb(t);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-two-scheduler-"));
   const connector = writeReleasableConnector(tmpDir);
 
@@ -309,6 +311,7 @@ test("two independent scheduler processes sharing one durable store admit exactl
 test("scheduler restart while an incumbent run is genuinely still live does not launch a second child", async (t) => {
   freshDb(t);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-restart-mid-run-"));
   const connector = writeReleasableConnector(tmpDir);
 
@@ -395,6 +398,7 @@ test("scheduler restart while an incumbent run is genuinely still live does not 
 test("manual controller.runNow racing a scheduled tick for the same connector instance admits exactly one", async (t) => {
   freshDb(t);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-manual-vs-scheduled-"));
   const connector = writeReleasableConnector(tmpDir);
 
@@ -517,6 +521,7 @@ test("manual controller.runNow racing a scheduled tick for the same connector in
 test("next scheduled dispatch is anchored to a run's actual completion time, observed via a real second child start", async (t) => {
   freshDb(t);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-completion-anchor-"));
   const connector = writeImmediateConnector(tmpDir);
 
