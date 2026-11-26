@@ -36,7 +36,10 @@ import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
+import {
+  createRunManagedConnectorViaController,
+  projectManagedRuntimeFailure,
+} from "../server/scheduler-manager-factory.ts";
 import {
   type ConfigRevision,
   getDefaultConnectorInstanceConfigStore,
@@ -56,6 +59,32 @@ const MANIFEST = {
 };
 
 const TERMINAL_EVENT_TYPES = new Set(["run.completed", "run.failed", "run.cancelled", "run.abandoned"]);
+
+test("managed runtime failure projection preserves runtime facts without accepting connector retry claims", () => {
+  const terminalData = {
+    failure_message: "The connector configuration store could not be read.",
+    reason: "store_unreadable",
+    runtime_failure: { retryable: true },
+  };
+  assert.deepEqual(projectManagedRuntimeFailure(terminalData, null), {
+    failure_message: terminalData.failure_message,
+    failure_reason: "store_unreadable",
+    runtime_retryable: true,
+  });
+  assert.equal(
+    projectManagedRuntimeFailure({ ...terminalData, runtime_failure: { retryable: false } }, null).runtime_retryable,
+    false
+  );
+  assert.equal(
+    projectManagedRuntimeFailure({ ...terminalData, runtime_failure: undefined }, null).runtime_retryable,
+    null
+  );
+  assert.equal(projectManagedRuntimeFailure(terminalData, { retryable: true }).runtime_retryable, null);
+  assert.deepEqual(
+    projectManagedRuntimeFailure({ failure_message: 42, reason: 42, runtime_failure: { retryable: "true" } }, null),
+    { failure_message: null, failure_reason: null, runtime_retryable: null }
+  );
+});
 
 function createSchedulerStore(): SchedulerStore {
   const activeRuns = new Map<string, ActiveRunRecord>();

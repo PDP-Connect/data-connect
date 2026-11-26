@@ -256,3 +256,81 @@ test(
 		);
 	}),
 );
+
+function proofFor(runId: string, observedAt: string) {
+	return {
+		connection_id: INSTANCE_ID,
+		evidence_id: runId,
+		kind: "provider_invalidation_proof" as const,
+		observed_at: observedAt,
+		provider: CONNECTOR_ID,
+		verified: true as const,
+	};
+}
+
+// Run order, not wall-clock time, decides which proof is current: a repair
+// supersedes only the proofs recorded before it. Run ids are chosen so that
+// the later failure sorts before AND after the repaired one by key, because
+// neither key order nor timestamp order may decide the result.
+const FAILURE_REPAIR_FAILURE_CASES = [
+	{
+		name: "equal timestamps, later id sorts after",
+		a: "run_a",
+		aAt: NOW,
+		b: "run_z",
+		bAt: NOW,
+	},
+	{
+		name: "equal timestamps, later id sorts before",
+		a: "run_z",
+		aAt: NOW,
+		b: "run_a",
+		bAt: NOW,
+	},
+	{
+		name: "clock moved backwards",
+		a: "run_a",
+		aAt: "2026-05-20T12:00:05.000Z",
+		b: "run_z",
+		bAt: "2026-05-20T12:00:01.000Z",
+	},
+	{
+		name: "clock moved backwards, later id sorts before",
+		a: "run_z",
+		aAt: "2026-05-20T12:00:05.000Z",
+		b: "run_a",
+		bAt: "2026-05-20T12:00:01.000Z",
+	},
+] as const;
+
+for (const scenario of FAILURE_REPAIR_FAILURE_CASES) {
+	test(
+		`failure, repair, failure keeps the later failure current: ${scenario.name}`,
+		withTmpDb(async () => {
+			await seedConnection(SIGN_IN_PATTERN);
+			const store = getDefaultProviderInvalidationProofStore();
+			await store.record(proofFor(scenario.a, scenario.aAt));
+			await store.markRepaired(INSTANCE_ID, scenario.aAt);
+			await appendRun("failed", scenario.b);
+			await store.record(proofFor(scenario.b, scenario.bAt));
+			const loaded = await store.load(INSTANCE_ID);
+			assert.equal(loaded.proof?.evidence_id, scenario.b);
+			assert.deepEqual(loaded.repairedProofKeys, [
+				`${INSTANCE_ID}\n${CONNECTOR_ID}\n${scenario.a}`,
+			]);
+			assert.equal(await reauthSurface(), "browser_session");
+		}),
+	);
+}
+
+test(
+	"a replayed proof keeps its original place in run order",
+	withTmpDb(async () => {
+		await seedConnection(SIGN_IN_PATTERN);
+		const store = getDefaultProviderInvalidationProofStore();
+		await store.record(proofFor("run_a", NOW));
+		await store.record(proofFor("run_z", NOW));
+		await store.record(proofFor("run_a", NOW));
+		assert.equal((await store.load(INSTANCE_ID)).proof?.evidence_id, "run_z");
+	}),
+);

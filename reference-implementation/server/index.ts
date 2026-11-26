@@ -113,7 +113,11 @@ import {
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createInstanceIdentityProvider } from "./instance-identity.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
+import {
+  probeNonPressureRecoverableCount,
+  probeSourcePressureGaps,
+  projectManagedRuntimeFailure,
+} from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
@@ -10075,17 +10079,9 @@ function createReferenceSchedulerManager({
           return {
             checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
-            failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
-            failure_reason: terminalData.reason || null,
+            ...projectManagedRuntimeFailure(terminalData, connectorError),
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
             run_id: handle.run_id,
-            runtime_retryable:
-              connectorError === null &&
-              terminalData.runtime_failure &&
-              typeof terminalData.runtime_failure === "object" &&
-              typeof (terminalData.runtime_failure as { retryable?: unknown }).retryable === "boolean"
-                ? (terminalData.runtime_failure as { retryable: boolean }).retryable
-                : null,
             status: terminalStatus,
             terminal_reason: terminalData.terminal_reason || null,
             trace_id: handle.trace_id,

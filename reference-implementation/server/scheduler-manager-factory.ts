@@ -410,6 +410,25 @@ type ConnectorPathResolver = (
   options?: { priorityClass: "background" }
 ) => string | null | Promise<string | null>;
 
+/** Both managed adapters preserve the controller's runtime facts without minting a connector error. */
+export function projectManagedRuntimeFailure(
+  terminalData: Record<string, unknown>,
+  connectorError: object | null
+) {
+  const runtimeFailure = terminalData.runtime_failure;
+  return {
+    failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
+    failure_reason: typeof terminalData.reason === "string" ? terminalData.reason : null,
+    runtime_retryable:
+      connectorError === null &&
+      runtimeFailure &&
+      typeof runtimeFailure === "object" &&
+      typeof (runtimeFailure as { retryable?: unknown }).retryable === "boolean"
+        ? (runtimeFailure as { retryable: boolean }).retryable
+        : null,
+  };
+}
+
 function projectManagedControllerTerminalRun(
   handle: ManagedRunHandle,
   terminalStatus: string,
@@ -442,7 +461,6 @@ function projectManagedControllerTerminalRun(
     typeof terminalData.checkpoint_commit_status === "string"
       ? { commit_status: terminalData.checkpoint_commit_status }
       : null;
-  const failureReason = typeof terminalData.reason === "string" ? terminalData.reason : null;
   const knownGaps = Array.isArray(terminalData.known_gaps)
     ? terminalData.known_gaps.filter((gap): gap is Record<string, unknown> => Boolean(gap && typeof gap === "object"))
     : [];
@@ -451,17 +469,9 @@ function projectManagedControllerTerminalRun(
   return {
     checkpoint_summary: checkpointSummary,
     connector_error: connectorError,
-    failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
-    failure_reason: failureReason,
+    ...projectManagedRuntimeFailure(terminalData, connectorError),
     known_gaps: knownGaps,
     run_id: handle.run_id,
-    runtime_retryable:
-      connectorError === null &&
-      terminalData.runtime_failure &&
-      typeof terminalData.runtime_failure === "object" &&
-      typeof (terminalData.runtime_failure as { retryable?: unknown }).retryable === "boolean"
-        ? (terminalData.runtime_failure as { retryable: boolean }).retryable
-        : null,
     status: terminalStatus,
     terminal_reason: terminalReason,
     trace_id: handle.trace_id,
