@@ -2463,6 +2463,84 @@ test("a kept catalog older than the high-water mark is never served", async () =
   }
 });
 
+test("a kept catalog preserves the rollback floor when its high-water write fails", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-mark-failure-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    const markA = "2026-11-01T00:00:00Z";
+    const markB = "2026-11-03T00:00:00Z";
+    const replacement = { ...entry, version: "1.1.0", digest: `sha256:${"c".repeat(64)}` };
+    let next: ConnectorCatalogSnapshot | Error = { entries: [entry], generatedAt: markA };
+    let failMark = false;
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      catalogRetryQuietMs: 0,
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: {
+        ...store,
+        async setCatalogHighWater(value) {
+          if (failMark) {
+            failMark = false;
+            throw new Error("mark write failed");
+          }
+          await store.setCatalogHighWater(value);
+        },
+      },
+    });
+    await service.catalog();
+    next = { entries: [replacement], generatedAt: markB };
+    failMark = true;
+    await assert.rejects(() => service.catalog(), /mark write failed/);
+    assert.equal(await store.getCatalogHighWater(), markA);
+    next = new TypeError("fetch failed");
+    const offline = await service.catalogView?.();
+    assert.equal(offline?.fresh, false);
+    assert.deepEqual(offline?.entries, [replacement]);
+    next = { entries: [entry], generatedAt: "2026-11-02T00:00:00Z" };
+    await assert.rejects(() => service.catalog(), RE_ROLLBACK);
+    assert.equal(await store.getCatalogHighWater(), markA);
+    for (const generatedAt of [markB, "2026-11-04T00:00:00Z"]) {
+      next = { entries: [replacement], generatedAt };
+      assert.equal((await service.catalogView?.())?.fresh, true);
+      assert.equal(await store.getCatalogHighWater(), generatedAt);
+    }
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("an invalid kept file or timestamp cannot raise the refresh rollback floor", async () => {
+  for (const invalid of [
+    { entries: [entry], generated_at: "not a date" },
+    { entries: [{ ...entry, digest: "invalid" }], generated_at: "2026-11-03T00:00:00Z" },
+  ]) {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-invalid-floor-"));
+    try {
+      const store = createFileConnectorInstallStore(dataDir);
+      await store.setCatalogHighWater("2026-11-01T00:00:00Z");
+      writeFileSync(join(dataDir, "connector-catalog-snapshot.json"), JSON.stringify({
+        ...invalid,
+        fetched_at: "2026-11-03T00:00:00Z",
+        schema: 1,
+      }));
+      const service = createConnectorInstallService({
+        catalogLoader: async () => ({ entries: [entry], generatedAt: "2026-11-02T00:00:00Z" }),
+        dataDir,
+        registerManifest: () => Promise.resolve(),
+        store,
+      });
+      assert.equal((await service.catalogView?.())?.fresh, true);
+      assert.equal(await store.getCatalogHighWater(), "2026-11-02T00:00:00Z");
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+});
+
 test("a kept catalog never lowers the high-water mark and a fresh fetch replaces it", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-offline-"));
   try {

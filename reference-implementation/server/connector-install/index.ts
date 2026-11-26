@@ -1068,7 +1068,18 @@ export function createConnectorInstallService(options: {
     const release = acquireCatalogStateLock(dataDir);
     try {
       const previousHighWater = await store.getCatalogHighWater();
-      const kept = keptWithinHighWater(readCatalogSnapshotFile(dataDir), previousHighWater);
+      const keptSnapshot = readCatalogSnapshotFile(dataDir);
+      // The snapshot can advance before its mark write succeeds. Once kept,
+      // its verified timestamp must also prevent a subsequent registry rollback.
+      const rollbackFloor =
+        keptSnapshot?.generatedAt &&
+        Number.isFinite(Date.parse(keptSnapshot.generatedAt)) &&
+        (!previousHighWater ||
+          !Number.isFinite(Date.parse(previousHighWater)) ||
+          Date.parse(keptSnapshot.generatedAt) > Date.parse(previousHighWater))
+          ? keptSnapshot.generatedAt
+          : previousHighWater;
+      const kept = keptWithinHighWater(keptSnapshot, previousHighWater);
       if (kept && Date.now() < quietUntil) {
         return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
       }
@@ -1078,7 +1089,7 @@ export function createConnectorInstallService(options: {
           (bounded) =>
             options.catalogLoader
               ? options.catalogLoader({ bounded })
-              : loadCatalogFromPinnedCore(previousHighWater, bounded),
+              : loadCatalogFromPinnedCore(rollbackFloor, bounded),
           kept ? fallbackWaitMs : null
         );
       } catch (error) {
@@ -1111,9 +1122,9 @@ export function createConnectorInstallService(options: {
       }
       if (
         snapshot.generatedAt &&
-        previousHighWater &&
-        Number.isFinite(Date.parse(previousHighWater)) &&
-        Date.parse(snapshot.generatedAt) < Date.parse(previousHighWater)
+        rollbackFloor &&
+        Number.isFinite(Date.parse(rollbackFloor)) &&
+        Date.parse(snapshot.generatedAt) < Date.parse(rollbackFloor)
       ) {
         throw new Error("Catalog rollback refused by high-water mark.");
       }
