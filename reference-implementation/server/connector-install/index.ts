@@ -1055,7 +1055,7 @@ export function createConnectorInstallService(options: {
     const release = acquireCatalogStateLock(dataDir);
     try {
       const previousHighWater = await store.getCatalogHighWater();
-      const kept = keptWithinHighWater(readCatalogSnapshotFile(snapshotPath), previousHighWater);
+      const kept = keptWithinHighWater(readCatalogSnapshotFile(dataDir), previousHighWater);
       if (kept && Date.now() < quietUntil) {
         return { entries: kept.entries, fetchedAt: kept.fetchedAt, fresh: false };
       }
@@ -1497,9 +1497,10 @@ interface KeptCatalogSnapshot {
 }
 
 /** Reads the kept catalog, re-checking every entry; anything unreadable or invalid counts as none kept. */
-function readCatalogSnapshotFile(path: string): KeptCatalogSnapshot | null {
+function readCatalogSnapshotFile(dataDir: string): KeptCatalogSnapshot | null {
+  const snapshotFile = join(dataDir, CATALOG_SNAPSHOT_FILE);
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const parsed = JSON.parse(readFileSync(snapshotFile, "utf8")) as Record<string, unknown>;
     if (
       !isRecord(parsed) ||
       !Array.isArray(parsed.entries) ||
