@@ -1,3 +1,4 @@
+import { readPersonOffset } from "./history/server-day.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -155,7 +156,7 @@ export default async function DashboardPage({
     inputs = await loadHomeInputs(params);
   }
 
-  const data = buildHomeViewModel(inputs);
+  const data = buildHomeViewModel({...inputs,offset:await readPersonOffset()});
   const host = stripScheme(
     await (async () => {
       try {

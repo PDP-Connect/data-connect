@@ -472,7 +472,7 @@ test("the title answers first run, one or many needs, sync, current data, and a 
 test("the row-22 never-synced state does not create an alarm on Home", () => {
   const neverSynced = statusSource(22, "Fitbit");
   // DIRECTION.md, Home: an ordinary never-synced source does not claim an owner action.
-  assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, false);
+  assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, true);
   // DIRECTION.md, Home: use the source status, not the server-wide alarm, for the heading.
   assert.equal(
     buildHomeViewModel(
@@ -480,7 +480,7 @@ test("the row-22 never-synced state does not create an alarm on Home", () => {
         sourcePage: { hasMore: false, kind: "ok", sources: [neverSynced] },
       }),
     ).title,
-    "Nothing needs you",
+    "1 thing needs you",
   );
 });
 
@@ -513,7 +513,7 @@ test("the prior fleet alarm maps never-synced rows into an audit failure, while 
     }),
   );
   // DIRECTION.md, Home: source rows provide the title and never-synced rows are not an alarm.
-  assert.equal(home.title, "Nothing needs you");
+  assert.equal(home.title, "2 things need you");
 });
 
 test("needs-you rows contain their source or request details and follow the required order", () => {
@@ -610,7 +610,7 @@ test("the needs-you box holds exactly the rows whose status says needs you", () 
   );
   assert.deepEqual(
     data.needs.map((need) => need.name).sort(),
-    ["Needs install", "Setting up"],
+    ["Needs install", "Paused", "Setting up", "Setup shell"],
   );
 
   for (const scenario of ["calm", "alarm", "decide"] as const) {

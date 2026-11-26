@@ -123,6 +123,7 @@ export interface HomeInputs extends HomeReads {
   hrefs: HomeHrefs;
   now: Date;
   reloadHref: string;
+  offset?: number;
 }
 
 interface PreparedSource extends HomeSourceRow {
@@ -182,7 +183,7 @@ function lastSuccessfulSync(source: RefConnectorSummary): string | null {
   return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
 }
 
-function prepareSources(sources: readonly RefConnectorSummary[], now: Date, hrefs: HomeHrefs): PreparedSource[] {
+function prepareSources(sources: readonly RefConnectorSummary[], now: Date, hrefs: HomeHrefs, offset?:number): PreparedSource[] {
   const disambiguators = connectionNameDisambiguators(sources);
   return sources.map((source) => ({
     actionSurface: sourceActionSurface(source),
@@ -191,7 +192,7 @@ function prepareSources(sources: readonly RefConnectorSummary[], now: Date, href
     name: connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id, disambiguators.get(source.connection_id)),
     sortAt: sourceSortTime(source),
     source,
-    status: sourceStatusWords(source, { now }),
+    status: sourceStatusWords(source, { now,offset }),
   }));
 }
 
@@ -250,7 +251,7 @@ function counted(value: number, one: string, many: string): string {
 
 export function buildHomeViewModel(input: HomeInputs): HomeData {
   const sourceReadFailed = input.sourcePage.kind === "error";
-  const preparedSources = sourceReadFailed ? [] : prepareSources(input.sourcePage.sources, input.now, input.hrefs);
+  const preparedSources = sourceReadFailed ? [] : prepareSources(input.sourcePage.sources, input.now, input.hrefs,input.offset);
   const knownNames = appNamesByClientId([], input.ownerClientsFailed ? [] : input.ownerClients);
   for (const app of groupGrantAccessByApp(input.appRegistrations ?? [], input.now.getTime())) for (const id of app.clientIds) knownNames.set(id, app.name);
   // Rows 1–3 are archived, disconnected or never set up. The direction keeps

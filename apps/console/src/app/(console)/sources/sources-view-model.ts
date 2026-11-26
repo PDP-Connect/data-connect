@@ -676,6 +676,7 @@ export function toSourceInstanceView(
     fallbackDisambiguator?: string | null;
     manifests?: readonly SourceManifestLike[];
     now?: Date;
+    offset?: number;
   } = {}
 ): SourceInstanceView {
   const connectorId = summary.connector_id;
@@ -828,7 +829,7 @@ export function toSourceInstanceView(
     setupFailed,
     setupFailedForwardStatement: setupFailed ? (summary.rendered_verdict?.forward_statement ?? null) : null,
     status,
-    statusWords: sourceStatusWords(summary, { now: options.now ?? new Date() }),
+    statusWords: sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset }),
     scheduleLabel: formatSourceRowSchedule(summary.schedule),
     recordsLabel: formatSourceRowRecords(sourceRecordCount(summary).count ?? 0, sourceRecordCount(summary).state),
     streams,
@@ -963,6 +964,7 @@ export function toSourcesView(
     connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
     manifests?: readonly SourceManifestLike[];
     now?: Date;
+    offset?: number;
   } = {}
 ): SourceInstanceView[] {
   const now = options.now ?? new Date();

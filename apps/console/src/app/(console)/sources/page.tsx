@@ -1,3 +1,4 @@
+import { readPersonOffset } from "../history/server-day.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -167,7 +168,7 @@ export default async function RecordsIndexPage({
 
   const summaries = [...page.items];
   const runtimeAdvisory: SourcesRuntimeAdvisory | null = buildSourcesRuntimeAdvisory(page.runtime);
-  const instances = toSourcesView(summaries, { connectorIcons, manifests });
+  const instances = toSourcesView(summaries, { connectorIcons, manifests,offset:await readPersonOffset() });
   const updatesReady = readUpdatesReadySafely(readConnectorUpdates);
   // The poller is mounted unconditionally; `running` (derived from any active
   // run) only selects the fast vs. idle cadence. Named `runningCount` to match

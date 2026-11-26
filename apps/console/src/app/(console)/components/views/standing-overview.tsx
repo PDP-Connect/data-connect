@@ -360,7 +360,7 @@ function AppsBlock({ data }: { data: HomeData }) {
       {data.activeTokenCount > 0 ? (
         // Lead decision (home-pictures 7): a quiet line under the apps, not set like an app name.
         <Link
-          className={`${SECOND_LINE} block py-3 tabular-nums hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+          className={`${SECOND_LINE} block py-3 tabular-nums underline underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
           href={data.tokensHref}
         >
           {data.activeTokenCount.toLocaleString("en-US")}{" "}
