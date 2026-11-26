@@ -1399,6 +1399,63 @@ test("logout removes a migrated legacy profile and stays idempotent; no undersco
   );
 });
 
+test("a lookup by the legacy profile name after migration finds the canonical profile", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  for (const profileName of ["claude_code", "claude_code.env"]) {
+    const lookup = findLocalCollectorProfiles({ profileDir, profileName });
+    assert.equal(lookup.matches.length, 1, `lookup by ${profileName}`);
+    assert.equal(lookup.matches[0]?.path, canonicalPath);
+    assert.equal(lookup.matches[0]?.source_instance_id, "dsrc_old");
+  }
+  assert.equal(existsSync(legacyPath), false, "the legacy file was migrated");
+});
+
+test("removing a profile by its legacy name removes the migrated file", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  assert.deepEqual(removeLocalCollectorProfile({ name: "claude_code.env", profileDir }), {
+    path: canonicalPath,
+    removed: true,
+  });
+  assert.equal(existsSync(canonicalPath), false);
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+});
+
+test("runLogout --profile with the legacy name revokes the credential and removes the migrated file", async () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  await withProfileDir(profileDir, async () => {
+    const revoked: string[] = [];
+    const result = await runLogout(
+      { baseUrl: "https://pdpp.example.com", command: "logout", profile: "claude_code", queuePath: "unused.sqlite" },
+      {
+        selfRevoke: (input) => {
+          revoked.push(input.deviceToken);
+          return Promise.resolve({ device_id: input.deviceId, object: "device_exporter_revocation", revoked_at: "now" });
+        },
+      }
+    );
+    assert.equal(result.removed, true);
+    assert.equal(result.revoked, true);
+    assert.equal(result.path, canonicalPath);
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.equal(existsSync(canonicalPath), false);
+  });
+});
+
+test("a profile name with an underscore that is not a legacy spelling stays literal", () => {
+  const profileDir = tempDirSync();
+  const workPath = writeProfile(profileDir, "my_work", "token-1", "dsrc_work");
+  const lookup = findLocalCollectorProfiles({ profileDir, profileName: "my_work" });
+  assert.equal(lookup.matches[0]?.path, workPath);
+  assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "my-work" }).matches.length, 0);
+  assert.deepEqual(removeLocalCollectorProfile({ name: "my_work", profileDir }), { path: workPath, removed: true });
+});
+
 test("the profile migration touches connector names only, not operator-chosen profile names", () => {
   const profileDir = tempDirSync();
   writeProfile(profileDir, "my_work", "token-1", "dsrc_work");

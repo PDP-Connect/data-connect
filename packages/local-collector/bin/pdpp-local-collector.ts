@@ -1358,7 +1358,7 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   migrateLegacyProfileFiles(profileDir, { profileName: name });
-  const path = join(profileDir, safeProfileFileName(name));
+  const path = join(profileDir, selectedProfileFileName(name));
 
   if (!existsSync(path)) {
     return {
@@ -2357,6 +2357,36 @@ function safeProfileFileName(name: string): string {
 }
 
 /**
+ * The current profile name and the pre-manifest underscore spelling of each
+ * bundled connector that has one. Migration and every lookup read this one
+ * mapping.
+ */
+function bundledProfileNames(): Array<{ current: string; legacy: string }> {
+  return LOCAL_COLLECTOR_DEFINITIONS.flatMap((definition) => {
+    const current = definition.connector_id.replaceAll("_", "-");
+    const legacy = current.replaceAll("-", "_");
+    return legacy === current ? [] : [{ current, legacy }];
+  });
+}
+
+/** The current name for a requested profile name; a legacy spelling maps to its connector's name, any other name is unchanged. */
+function canonicalProfileName(name: string): string {
+  const base = name.trim().replace(PROFILE_ENV_EXTENSION, "");
+  return bundledProfileNames().find((names) => names.legacy === base)?.current ?? base;
+}
+
+/**
+ * The file name for a profile the user asked for by name. A legacy spelling
+ * selects the migrated file; the raw writer keeps {@link safeProfileFileName}
+ * so tests can still seed a real legacy file.
+ */
+function selectedProfileFileName(name: string): string {
+  const fileName = safeProfileFileName(name);
+  const canonical = canonicalProfileName(name);
+  return canonical === fileName.replace(PROFILE_ENV_EXTENSION, "") ? fileName : `${canonical}.env`;
+}
+
+/**
  * One-time migration of profile files written before connector ids were
  * manifest keys. A profile named after its connector used the underscore
  * spelling (`claude_code.env`); the same profile is now `claude-code.env`.
@@ -2369,7 +2399,8 @@ function safeProfileFileName(name: string): string {
  * is left in place and reported, because it may hold another device's token.
  * A second run finds nothing to do. Nothing reads an underscore-named file
  * anywhere else: lookup, `connect`'s overwrite guard, `logout` and discovery
- * all see only the hyphen name. The rename keeps the file's contents and
+ * all see only the hyphen name; a request by the underscore spelling is mapped
+ * to the hyphen name first. The rename keeps the file's contents and
  * mode, so a stored device token keeps working. Operator-chosen profile names
  * are never touched.
  *
@@ -2401,16 +2432,12 @@ export function migrateLegacyProfileFiles(
   } = {}
 ): void {
   // The legacy spelling names the same profile, so it selects the same connector.
-  const requested = options.profileName
-    ? options.profileName.trim().replace(PROFILE_ENV_EXTENSION, "").replaceAll("_", "-")
-    : null;
+  const requested = options.profileName ? canonicalProfileName(options.profileName) : null;
   const requestedSource = options.sourceInstanceId?.trim() || null;
   const pending: LegacyProfileEntry[] = [];
-  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const current = definition.connector_id.replaceAll("_", "-");
-    const legacy = current.replaceAll("-", "_");
+  for (const { current, legacy } of bundledProfileNames()) {
     // A lookup for one profile only needs that profile's own legacy file.
-    if (legacy === current || (requested !== null && requested !== current)) {
+    if (requested !== null && requested !== current) {
       continue;
     }
     const entry = {
@@ -2560,7 +2587,7 @@ function isFileExistsError(error: unknown): boolean {
 function existingCollectorProfilePath(name: string): string | null {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   migrateLegacyProfileFiles(profileDir, { profileName: name });
-  const path = join(profileDir, safeProfileFileName(name));
+  const path = join(profileDir, selectedProfileFileName(name));
   return existsSync(path) ? path : null;
 }
 
@@ -2645,7 +2672,7 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
 } {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const fileName = safeProfileFileName(input.name);
+  const fileName = selectedProfileFileName(input.name);
   migrateLegacyProfileFiles(profileDir, { profileName: input.name });
   const path = join(profileDir, fileName);
   if (!existsSync(path)) {
@@ -2665,7 +2692,7 @@ export function findLocalCollectorProfiles(input: {
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
   migrateLegacyProfileFiles(profileDir, { profileName: input.profileName, sourceInstanceId });
   const files = input.profileName
-    ? [safeProfileFileName(input.profileName)]
+    ? [selectedProfileFileName(input.profileName)]
     : (() => {
         try {
           return readdirSync(profileDir)
