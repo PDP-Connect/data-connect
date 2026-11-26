@@ -15,6 +15,7 @@ import {
 import type { OwnerBearerView, OwnerSessionView } from "./owner-sessions-data.ts";
 
 interface OwnerSessionsSettingProps {
+  bearersOnly?: boolean;
   sessions: OwnerSessionView[];
   bearers: OwnerBearerView[];
 }
@@ -25,7 +26,7 @@ function formatTimestamp(value: number | string): string {
   return formatRelative(new Date(milliseconds), Date.now());
 }
 
-export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSettingProps) {
+export function OwnerSessionsSetting({ sessions, bearers, bearersOnly = false }: OwnerSessionsSettingProps) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
         </div>
       ) : null}
 
-      <div className="grid gap-1">
+      {bearersOnly ? null : <div className="grid gap-1">
         <div className="flex flex-wrap items-center justify-between gap-3 py-2">
           <h3 className="text-[13px] font-medium text-muted-foreground">Devices and browsers</h3>
           <div className="flex flex-wrap gap-2">
@@ -139,7 +140,7 @@ export function OwnerSessionsSetting({ sessions, bearers }: OwnerSessionsSetting
             ) : null}
           </div>
         ))}
-      </div>
+      </div>}
 
       <div className="grid gap-1">
         <h3 className="py-2 text-[13px] font-medium text-muted-foreground">Apps and scripts signed in as you</h3>

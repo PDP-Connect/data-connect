@@ -18,7 +18,7 @@ import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
 import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
-import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
+import { SignedInSessions } from "./signed-in-sessions.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessPractice } from "./remote-access-practice.tsx"
 import { buildSettingsPractice } from "./settings-practice.ts"
@@ -69,21 +69,11 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
           ) : null}
           {ownerSessions.enabled ? (
             <div className="border-b border-border/70 py-5">
-              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Signed-in devices</h3>
-              <OwnerSessionsSetting
-                bearers={ownerSessions.bearers}
-                sessions={ownerSessions.sessions}
-              />
+              <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">Where you’re signed in</h3>
+              <SignedInSessions practice={!!practice} sessions={ownerSessions.sessions} />
             </div>
           ) : null}
-          <Text
-            as="a"
-            className="flex min-h-11 items-center justify-between border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            href="/deployment/tokens"
-          >
-            <span>Tokens for scripts and tools</span>
-            <span aria-hidden="true" className="text-muted-foreground">→</span>
-          </Text>
+          <SettingsRow href="/deployment/tokens" title="Tokens for scripts and tools" state={summary.tokens === null ? "Could not check" : summary.tokens ? String(summary.tokens) : "None"} />
         </Section>
         <Section title="Notifications"><NotificationsRow practice={!!practice} /></Section>
         {managedDesktopHost ? (

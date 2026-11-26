@@ -31,7 +31,7 @@ function loadPage(): Promise<Page> {
     mock.module(new URL("./settings-summary-data.ts", import.meta.url).href, { namedExports: { loadSettingsSummary: async () => ({ tokens: 2, collectors: 4, webhooks: 0, updates: 0, publicAddress: null }) } })
     stub("./remote-access-setting.tsx", "RemoteAccessSetting", "remote-access")
     stub("./owner-password-setting.tsx", "OwnerPasswordSetting", "owner-password")
-    stub("./owner-sessions-setting.tsx", "OwnerSessionsSetting", "owner-sessions")
+    stub("./signed-in-sessions.tsx", "SignedInSessions", "owner-sessions")
     stub("./desktop-pairing-setting.tsx", "DesktopPairingSetting", "desktop-pairing")
     stub("./desktop-settings-setting.tsx", "DesktopSettingsSetting", "desktop-settings")
     stub("./recovery-key-setting.tsx", "RecoveryKeySetting", "recovery-key")

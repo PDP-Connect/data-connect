@@ -110,7 +110,7 @@ export function OwnerCredentialSetting({
         onClick={runReveal}
         type="button"
       >
-        {busy ? "Revealing…" : password ? "Reveal again" : "Reveal password"}
+        {busy ? "Revealing…" : password ? "Reveal again" : "Show password"}
       </button>
     </div>
   )

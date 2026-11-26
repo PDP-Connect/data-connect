@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useRouter } from "next/navigation"
+import { Button } from "@/components/ui/button.tsx"
 import { useRef, useState } from "react"
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts"
 import {
@@ -63,7 +64,7 @@ export function OwnerPasswordSetting({
         newPassword
       )
       if (!result.ok) {
-        setMessage(result.message ?? "Could not change the owner password.")
+        setMessage("Could not change the password. Try again.")
         return
       }
       setCurrentPassword("")
@@ -75,9 +76,7 @@ export function OwnerPasswordSetting({
       router.refresh()
     } catch (error) {
       setMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not change the owner password."
+        "Could not change the password. Try again."
       )
     } finally {
       submitting.current = false
@@ -94,7 +93,7 @@ export function OwnerPasswordSetting({
         : await requestOwnerPasswordWindowAction()
       if (!result.ok) {
         setMessage(
-          result.message ?? "Could not open the desktop password window."
+          "Could not open the password window. Try again."
         )
         return
       }
@@ -102,66 +101,26 @@ export function OwnerPasswordSetting({
       router.refresh()
     } catch (error) {
       setMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not open the desktop password window."
+        "Could not open the password window. Try again."
       )
     } finally {
       setBusy(false)
     }
   }
 
-  if (source === "env" && managedDesktop) {
-    return (
-      <div className="grid gap-2">
-        <p className="pdpp-caption text-muted-foreground">
-          Change this password in the server environment, then restart DataConnect.
-        </p>
-        <details>
-          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            Details
-          </summary>
-          <p className="pdpp-caption text-muted-foreground">
-            This password comes from <code>DATACONNECT_OWNER_PASSWORD</code> or{" "}
-            <code>PDPP_OWNER_PASSWORD</code> in the environment DataConnect started with.
-          </p>
-        </details>
-      </div>
-    )
+  if (source === "env") {
+    return <p className="pdpp-caption text-muted-foreground">This password is set where DataConnect was installed. Change it there, then restart DataConnect.</p>
   }
 
-  if (source === "env") {
-    return (
-      <div className="grid justify-items-start gap-2">
-        <button
-          className="rounded-md border border-border px-3 py-1.5 text-sm opacity-60"
-          disabled
-          type="button"
-        >
-          Change password
-        </button>
-        <p className="pdpp-caption text-muted-foreground">
-          Change this password in the server environment, then restart the server.
-        </p>
-        <details>
-          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            Details
-          </summary>
-          <p className="pdpp-caption text-muted-foreground">
-            Password changes are disabled while <code>PDPP_OWNER_PASSWORD</code> is set. The environment value stays authoritative.
-          </p>
-        </details>
-      </div>
-    )
+  if (source === "desktop" && !canReveal) {
+    return <p className="pdpp-caption text-muted-foreground">Change or show the password in the DataConnect app on the computer that runs it.</p>
   }
 
   if (source === "desktop") {
     return (
       <div className="grid justify-items-start gap-3">
         <p className="pdpp-caption text-muted-foreground">
-          DataConnect stores this password on this computer for signing in on
-          other devices. Changing it signs out other browser sessions and
-          access tokens and restarts the server.
+          {passwordSet ? "You chose this password." : "DataConnect made a password for you. You need it only to sign in from another device."}
         </p>
         {canReveal ? <OwnerCredentialSetting /> : null}
         {message ? (
@@ -169,14 +128,14 @@ export function OwnerPasswordSetting({
             {message}
           </p>
         ) : null}
-        <button
+        <Button
           className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
           disabled={busy}
           onClick={() => void requestDesktopChange()}
           type="button"
         >
           {busy ? "Checking…" : passwordSet ? "Change password" : "Set password"}
-        </button>
+        </Button>
       </div>
     )
   }
@@ -230,13 +189,13 @@ export function OwnerPasswordSetting({
           value={confirmation}
         />
       </label>
-      <button
+      <Button
         className="justify-self-start rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
         disabled={busy}
         type="submit"
       >
         {busy ? "Changing…" : "Change password"}
-      </button>
+      </Button>
     </form>
   )
 }
