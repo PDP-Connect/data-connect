@@ -41,6 +41,7 @@ interface DatasetSummary {
 interface ProjectionMetadata {
   computed_at: IsoTimestamp | null;
   last_error: string | null;
+  rebuild_started_at?: IsoTimestamp | undefined;
   rebuild_status: string;
   source_high_watermark: string | null;
   stale_since: IsoTimestamp | null;
@@ -182,25 +183,14 @@ function nowIso(): IsoTimestamp {
   return new Date().toISOString();
 }
 
-// A "running" rebuild_status only fences deltas while its lease is
-// plausibly live. `stale_since` is stamped once when the rebuild starts
-// (markDatasetSummaryProjectionRebuilding) and carried through unchanged
-// by every subsequent stale-mark, so its age is the lease's age. Past
-// REBUILD_LEASE_TIMEOUT_MS, no real rebuild -- even one contending with
-// heavy concurrent writes -- is plausibly still the same in-flight
-// attempt; treat the lease as orphaned so deltas stop deferring to it.
+// Freshness and lease age are independent. A running row from an earlier
+// version without a lease stamp can be reclaimed after restart.
 function isRebuildLeaseActive(metadata: ProjectionMetadata, at: IsoTimestamp = nowIso()): boolean {
-  if (metadata.rebuild_status !== "running") {
-    return false;
-  }
-  if (!metadata.stale_since) {
-    return true;
-  }
-  const leaseAgeMs = Date.parse(at) - Date.parse(metadata.stale_since);
-  if (!Number.isFinite(leaseAgeMs)) {
-    return true;
-  }
-  return leaseAgeMs < REBUILD_LEASE_TIMEOUT_MS;
+  return (
+    metadata.rebuild_status === "running" &&
+    metadata.rebuild_started_at !== undefined &&
+    Date.parse(at) < Date.parse(metadata.rebuild_started_at) + REBUILD_LEASE_TIMEOUT_MS
+  );
 }
 
 // If `projection` carries an orphaned rebuild lease (rebuild_status
@@ -211,7 +201,11 @@ function isRebuildLeaseActive(metadata: ProjectionMetadata, at: IsoTimestamp = n
 // without special-casing the timeout logic themselves. When the lease is
 // still active (or there is no lease), returns `projection` unchanged.
 function reclaimExpiredRebuildLease(projection: DatasetSummaryProjection): DatasetSummaryProjection {
-  if (projection.metadata.rebuild_status !== "running" || isRebuildLeaseActive(projection.metadata)) {
+  if (
+    projection.generation === 0 ||
+    projection.metadata.rebuild_status !== "running" ||
+    isRebuildLeaseActive(projection.metadata)
+  ) {
     return projection;
   }
   const reclaimedAt = nowIso();
@@ -558,6 +552,7 @@ export function markDatasetSummaryProjectionStale(reason: string): void {
         last_error:
           (current.metadata.last_error !== DIRTY_TIME_BOUNDS_REASON && current.metadata.last_error) ||
           sanitizeProjectionError(reason || "dataset summary projection is stale"),
+        rebuild_started_at: current.metadata.rebuild_started_at,
         rebuild_status: current.metadata.rebuild_status || "idle",
         source_high_watermark: current.metadata.source_high_watermark || null,
         stale_since: current.metadata.stale_since || staleAt,
@@ -585,24 +580,41 @@ const MAX_REBUILD_ATTEMPTS = 8;
 
 export async function rebuildDatasetSummaryProjection(
   dependencies: RebuildDatasetSummaryDependencies,
-  { signal }: { signal?: AbortSignal } = {}
+  { retryConflicts = true, signal }: { retryConflicts?: boolean; signal?: AbortSignal } = {}
 ): Promise<DatasetSummaryProjection | (DatasetSummary & { metadata: ProjectionMetadata })> {
   assertSqliteBackendForDatasetSummary("rebuildDatasetSummaryProjection");
   const startedAt = nowIso();
+  const before = getDatasetSummaryProjection();
+  if (isRebuildLeaseActive(before.metadata, startedAt)) {
+    return before;
+  }
+  throwIfAborted(signal);
+  let rebuildGeneration = markDatasetSummaryProjectionRebuilding(before, startedAt);
+  const maxAttempts = retryConflicts ? MAX_REBUILD_ATTEMPTS : 1;
 
   try {
-    for (let attempt = 1; attempt <= MAX_REBUILD_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal);
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const result = await attemptDatasetSummaryRebuild(dependencies, startedAt, signal);
+      const result = await attemptDatasetSummaryRebuild(dependencies, rebuildGeneration, signal);
       if (result.committed) {
+        noteDatasetSummaryAutoHealSuccess();
         return result.value;
       }
       // A concurrent delta or competing rebuild advanced the generation
       // past this attempt's expected value. Loop back and try again with
       // freshly re-read dependencies rather than accepting the loss --
       // sustained writes must not be able to starve every attempt
-      // indefinitely just by outrunning a single pass.
+      // indefinitely just by outrunning a single pass. A replaced lease,
+      // including one reclaimed after expiry, cannot publish on a retry.
+      const after = getDatasetSummaryProjection();
+      if (after.metadata.rebuild_started_at !== startedAt) {
+        return after;
+      }
+      if (!isRebuildLeaseActive(after.metadata)) {
+        return reclaimExpiredRebuildLease(after);
+      }
+      rebuildGeneration = after.generation;
     }
     // Exhausted every attempt without a clean commit: honest behavior is
     // to leave the projection explicitly stale, not to claim freshness
@@ -614,24 +626,20 @@ export async function rebuildDatasetSummaryProjection(
   } catch (err) {
     const endedAt = nowIso();
     const current = getDatasetSummaryProjection();
-    writeDatasetSummaryProjectionPreservingSummary(current, rebuildFailureMetadata(current, err, startedAt), endedAt);
+    if (current.metadata.rebuild_started_at === startedAt) {
+      writeDatasetSummaryProjectionPreservingSummary(current, rebuildFailureMetadata(current, err, startedAt), endedAt);
+    }
     throw err;
   }
 }
 
 async function attemptDatasetSummaryRebuild(
   dependencies: RebuildDatasetSummaryDependencies,
-  startedAt: IsoTimestamp,
+  rebuildGeneration: number,
   signal: AbortSignal | undefined
 ): Promise<
   { committed: true; value: DatasetSummary & { metadata: ProjectionMetadata } } | { committed: false; value: null }
 > {
-  // Advance generation and stamp rebuild_status='running'. Capture the
-  // post-advance generation so this attempt's commit can detect a
-  // concurrent delta or competing rebuild that bumped the counter
-  // further.
-  const rebuildGeneration = markDatasetSummaryProjectionRebuilding(startedAt);
-
   throwIfAborted(signal);
   const [counts, bytes, candidates] = await Promise.all([
     dependencies.getCounts(),
@@ -773,6 +781,10 @@ function datasetSummaryAutoHealExhausted(): boolean {
 
 function noteDatasetSummaryAutoHealFailure(): void {
   datasetSummaryAutoHealConsecutiveFailures += 1;
+  noteDatasetSummaryAutoHealCooldown();
+}
+
+function noteDatasetSummaryAutoHealCooldown(): void {
   datasetSummaryAutoHealRetryAfterMs = datasetSummaryAutoHealNow() + DATASET_SUMMARY_AUTO_HEAL_COOLDOWN_MS;
 }
 
@@ -801,10 +813,9 @@ function datasetSummaryProjectionNeedsHeal(projection: DatasetSummaryProjection)
 }
 
 /**
- * Read-path auto-heal: if the projection has never converged, or a prior
- * rebuild landed in the terminal `failed` state, kick off a rebuild using
- * the same bounded-retry `rebuildDatasetSummaryProjection` that already
- * tolerates concurrent deltas -- no second convergence mechanism.
+ * Read-path auto-heal makes at most one rebuild pass. A generation conflict
+ * leaves the result stale and consumes cooldown. The explicit rebuild can
+ * afford to try again on the same request.
  *
  * This is the fix for "why wouldn't the projection heal automatically":
  * `rebuildDatasetSummaryProjection` had exactly one caller, an
@@ -826,22 +837,11 @@ export async function ensureDatasetSummaryProjectionHealthy(
   dependencies: RebuildDatasetSummaryDependencies
 ): Promise<DatasetSummaryProjection> {
   assertSqliteBackendForDatasetSummary("ensureDatasetSummaryProjectionHealthy");
-  const before = getDatasetSummaryProjection();
+  const before = reclaimExpiredRebuildLease(getDatasetSummaryProjection());
   if (!datasetSummaryProjectionNeedsHeal(before)) {
     return before;
   }
-  // `before.generation === 0` means no projection row has EVER been
-  // written (getDatasetSummaryProjection's `!row` branch) -- the exact
-  // shape of a brand-new/never-rebuilt instance. That branch fabricates a
-  // `rebuild_status: "running"` / `stale_since: now()` placeholder purely
-  // so the summary envelope's shape stays honest ("something must still
-  // compute this") -- it is not a real lease left by a concurrent rebuild,
-  // since a real rebuild's first write (markDatasetSummaryProjectionRebuilding)
-  // always creates the row and bumps generation to 1+. Treating that
-  // placeholder as a live lease would permanently defer auto-heal on
-  // exactly the case it exists to fix. Only a rebuild with a real
-  // persisted row (generation > 0) can hold a live lease.
-  if (before.generation > 0 && isRebuildLeaseActive(before.metadata)) {
+  if (isRebuildLeaseActive(before.metadata)) {
     // A rebuild (this auto-heal or the owner's manual action) is already
     // in flight. Do not start a second one -- the generation guard inside
     // rebuildDatasetSummaryProjection would just make the loser retry for
@@ -852,9 +852,11 @@ export async function ensureDatasetSummaryProjectionHealthy(
     return before;
   }
   try {
-    const healed = await rebuildDatasetSummaryProjection(dependencies);
-    noteDatasetSummaryAutoHealSuccess();
-    return healed as DatasetSummaryProjection;
+    const healed = await rebuildDatasetSummaryProjection(dependencies, { retryConflicts: false });
+    if (healed.metadata.state !== "fresh") {
+      noteDatasetSummaryAutoHealCooldown();
+    }
+    return getDatasetSummaryProjection();
   } catch {
     // rebuildDatasetSummaryProjection already persisted the honest failed
     // metadata; this function only tracks whether to try again on the next
@@ -969,7 +971,7 @@ function commitReconciledDatasetSummaryRows(
       retained_bytes: current.retained_bytes,
       top_connector_candidates: current.top_connector_candidates,
     };
-    if (owesFullRebuild(current.metadata)) {
+    if (isRebuildLeaseActive(current.metadata) || owesFullRebuild(current.metadata)) {
       writeDatasetSummaryProjection(summary, current.metadata, computedAt);
       return;
     }
@@ -1323,19 +1325,13 @@ function hasDeclaredConsentTimeField(field: unknown): field is string {
   return typeof field === "string" && field.length > 0;
 }
 
-function markDatasetSummaryProjectionRebuilding(at: IsoTimestamp): number {
-  const current = getDatasetSummaryProjection();
-  return writeDatasetSummaryProjection(
-    {
-      counts: current.counts,
-      ingested_time_bounds: current.ingested_time_bounds,
-      record_time_bounds: current.record_time_bounds,
-      retained_bytes: current.retained_bytes,
-      top_connector_candidates: current.top_connector_candidates,
-    },
+function markDatasetSummaryProjectionRebuilding(current: DatasetSummaryProjection, at: IsoTimestamp): number {
+  return writeDatasetSummaryProjectionPreservingSummary(
+    current,
     {
       computed_at: current.metadata.computed_at,
       last_error: null,
+      rebuild_started_at: at,
       rebuild_status: "running",
       source_high_watermark: current.metadata.source_high_watermark || null,
       stale_since: current.metadata.stale_since || at,
