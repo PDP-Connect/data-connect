@@ -847,6 +847,51 @@ async fn detach_finishes_locally_when_the_server_does_not_answer() {
     );
 }
 
+/// The record is removed first. When it cannot be removed, nothing else is
+/// touched: the attachment and its session stay and the error reaches the
+/// owner, so the app never shows "Connected" without a session.
+#[cfg(unix)]
+#[tokio::test]
+async fn detach_changes_nothing_when_the_attachment_record_cannot_be_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let data_dir = data_dir(data_root.path());
+    let keychain = MemorySessionStore::default();
+    let memory = MemorySessionStore::default();
+    let origin = closed_origin();
+    save_pairing(
+        &data_dir,
+        &keychain,
+        &memory,
+        &origin,
+        None,
+        "sess-f",
+        "t".into(),
+    )
+    .expect("save");
+    let restore = |mode: u32| {
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(mode))
+            .expect("permissions")
+    };
+    restore(0o555);
+    // A process allowed to write here anyway (root) cannot show the failure.
+    if std::fs::File::create(data_dir.join("probe")).is_ok() {
+        restore(0o755);
+        return;
+    }
+    let result = detach_saved_attachment(&data_dir, &keychain, &memory).await;
+    restore(0o755);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(keychain.load(&origin), Ok(Some("sess-f".to_string())));
+    assert_eq!(
+        attach::load_attachment(&data_dir)
+            .expect("read")
+            .expect("still attached")
+            .origin,
+        origin
+    );
+}
+
 #[test]
 fn detach_from_the_window_restarts_without_a_session() {
     let data_root = tempfile::tempdir().expect("tempdir");

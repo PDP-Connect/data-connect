@@ -584,8 +584,12 @@ impl DetachReport {
     }
 }
 
-/// Revoke (best effort), then delete the session and `attach.json`. Local
-/// deletion happens whether or not the server answered.
+/// Remove `attach.json` first, then revoke (best effort) and delete the
+/// session. The record is the commit point: if it cannot be removed nothing
+/// else is touched, so the app is still attached with a working session and
+/// the owner sees the error. Once it is gone the next start is local, and the
+/// remaining steps cannot leave "Connected" without a session; a failed
+/// revoke or keychain delete is named in the notice.
 pub(crate) async fn detach_saved_attachment(
     data_dir: &Path,
     keychain: &dyn SessionStore,
@@ -593,7 +597,9 @@ pub(crate) async fn detach_saved_attachment(
 ) -> Result<DetachReport, String> {
     let attachment = attach::load_attachment(data_dir)?
         .ok_or_else(|| "DataConnect is not attached to a server.".to_string())?;
-    let server_confirmed = match attach::load_session(keychain, memory, &attachment.origin) {
+    let lookup = attach::load_session(keychain, memory, &attachment.origin);
+    attach::remove_attachment(data_dir)?;
+    let server_confirmed = match lookup {
         SessionLookup::Found(session) => {
             attach::revoke_session(
                 &attachment.origin,
@@ -605,7 +611,6 @@ pub(crate) async fn detach_saved_attachment(
         SessionLookup::Missing | SessionLookup::KeychainUnavailable => false,
     };
     let keychain_error = attach::forget_session(keychain, memory, &attachment.origin).err();
-    attach::remove_attachment(data_dir)?;
     Ok(DetachReport {
         attachment,
         server_confirmed,
