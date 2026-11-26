@@ -783,20 +783,26 @@ export function RemoteAccessSetting({
     }, "turn-off");
   }
   // Renews the proof before its window ends, with no click and no status change.
+  // One read of /state under the same guard as a poll: its answer is applied only while the card is
+  // mounted, no later read has landed and no action has started or ended since. Both rechecks use it.
+  async function readStateFenced() {
+    const seq = ++loadSeq.current;
+    const startedInEpoch = actionEpoch.current;
+    const read = await request("/state");
+    const applied = read.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current;
+    if (applied) {
+      appliedSeq.current = seq;
+      setState(read.data as State);
+    }
+    return { read, applied };
+  }
   async function runRecheck(id: string, generation: number): Promise<CheckOutcome> {
     setRechecking((current) => new Set(current).add(id));
     try {
       const result = await request(`/routes/${encodeURIComponent(id)}/check`, { generation });
       if (!result.ok) return { ok: false, code: result.code };
       const checked = result.data as Route;
-      // Same guard as a poll: a reply that an action or a newer poll has passed is dropped.
-      const seq = ++loadSeq.current;
-      const startedInEpoch = actionEpoch.current;
-      const fresh = await request("/state");
-      if (fresh.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current) {
-        appliedSeq.current = seq;
-        setState(fresh.data as State);
-      }
+      await readStateFenced();
       if (checked.verification.status !== "verified" || !checked.published) {
         return { ok: false, code: publicError("verification_failed").code };
       }
@@ -873,21 +879,20 @@ export function RemoteAccessSetting({
   // Reads the host once. Only a read: it sends no stop, so it cannot change the route.
   const [checkingStop, setCheckingStop] = useState(false);
   async function checkStop() {
-    if (!stopUnconfirmed || checkingStop) return;
-    const { routeId } = stopUnconfirmed;
+    const notice = stopUnconfirmed;
+    if (!notice || checkingStop) return;
     setCheckingStop(true);
+    // The answer belongs to the notice that was on screen when Check again was pressed. A newer stop
+    // clears or replaces that notice, so a late answer changes nothing.
+    const record = (checked: "still-on" | "no-answer") =>
+      setStopUnconfirmed((current) => (current === notice ? { ...notice, checked } : current));
     try {
-      const fresh = await request("/state");
+      const { read, applied } = await readStateFenced();
       if (!mounted.current) return;
-      if (fresh.ok) {
-        const next = fresh.data as State;
-        setState(next);
-        setStopUnconfirmed({ routeId, checked: "still-on" });
-      } else {
-        setStopUnconfirmed({ routeId, checked: "no-answer" });
-      }
+      if (!read.ok) record("no-answer");
+      else if (applied) record("still-on");
     } catch {
-      if (mounted.current) setStopUnconfirmed({ routeId, checked: "no-answer" });
+      if (mounted.current) record("no-answer");
     } finally {
       if (mounted.current) setCheckingStop(false);
     }
@@ -1043,7 +1048,7 @@ export function RemoteAccessSetting({
               ? "Checked just now: remote access is still on. Turn it off again below."
               : stopUnconfirmed.checked === "no-answer"
                 ? "We couldn't reach the host to check. Remote access may still be on."
-                : "We couldn't confirm that remote access turned off. If this page stops loading, it is off. Otherwise it may still be on."}
+                : "We couldn't confirm that remote access turned off. It may still be on. If this page stops loading, that does not show it is off: check again from this computer."}
           </p>
           <div className="flex flex-wrap gap-3">
             <Button disabled={checkingStop} onClick={() => void checkStop()} type="button" variant="outline">

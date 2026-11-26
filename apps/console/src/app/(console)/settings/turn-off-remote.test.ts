@@ -285,6 +285,59 @@ test("Turn on again from far away follows the same rule", async () => {
   });
 });
 
+test("the could-not-confirm notice never claims it is off because the page stopped loading", async () => {
+  const table = {
+    "/state": stateWith(route(REMOTE)),
+    "/routes/route-1/stop": () => {
+      throw new TypeError("Failed to fetch");
+    },
+  };
+  await withScreen(REMOTE, table, async ({ press, text }) => {
+    await press(turnOffCase.label);
+    await press(/^Turn off$/);
+    assert.ok(text().includes(UNCONFIRMED), text());
+    assert.match(text(), /may still be on/i);
+    assert.match(text(), /does not show it is off/i, "an unreachable page is not proof of the host's state");
+    assert.doesNotMatch(text(), /stops loading, it is off/i);
+  });
+});
+
+for (const late of ["a route", "no answer"] as const) {
+  test(`a late ${late} from Check again does not restore the notice after a newer stop`, async () => {
+    let held: ((result: Result) => void) | null = null;
+    let hold = false;
+    let stopsSent = 0;
+    const table: Record<string, Entry> = {
+      "/state": () => (hold ? new Promise<Result>((resolve) => (held = resolve)) : stateWith(route(REMOTE))),
+      "/routes/route-1/stop": () => {
+        stopsSent += 1;
+        if (stopsSent === 1) throw new TypeError("Failed to fetch");
+        return ok({ operationId: "op-2" });
+      },
+    };
+    await withScreen(REMOTE, table, async ({ calls, press, text }) => {
+      await press(turnOffCase.label);
+      await press(/^Turn off$/);
+      assert.ok(text().includes(UNCONFIRMED), text());
+      // Check again is pending: its /state answer is held.
+      hold = true;
+      await press(/^Check again$/);
+      assert.ok(held, "the recheck's read is waiting");
+      const stale = held as (result: Result) => void;
+      // The owner starts a newer stop before that answer arrives.
+      hold = false;
+      await press(turnOffCase.label);
+      await press(/^Turn off$/);
+      assert.equal(stops(calls).length, 2);
+      assert.ok(!text().includes(UNCONFIRMED), "the newer stop cleared the notice");
+      // The older answer arrives last: a route that still shows On, or no answer at all.
+      await act(async () => stale(late === "a route" ? stateWith(route(REMOTE, { origin: "https://stale.example.test" })) : fail("reachability_unavailable")));
+      assert.ok(!text().includes("stale.example.test"), "the older answer's route is not applied over the newer stop");
+      assert.doesNotMatch(text(), /Checked just now: remote access|is still on|couldn.t reach the host|couldn.t confirm/i, text());
+    });
+  });
+}
+
 test("two fast clicks on Turn off send one stop", async () => {
   const table = { "/state": stateWith(route(REMOTE)), "/routes/route-1/stop": ok({ operationId: "op-1" }) };
   await withScreen("http://localhost:3000", table, async ({ calls, pressTwiceAtOnce }) => {
