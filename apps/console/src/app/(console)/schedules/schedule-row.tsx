@@ -15,6 +15,7 @@ import type { RefConnectorSummary, RefSchedule } from "../lib/ref-client.ts";
 import { sourceStatusWords } from "../lib/source-status-words.ts";
 import { activeScheduleRunId, scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
+import { scheduleChoices, scheduleSentence } from "./schedule-presentation.ts";
 import { formatIntervalWords } from "./schedule-cadence-words.ts";
 import { deleteScheduleAction, pauseScheduleAction, resumeScheduleAction, upsertScheduleAction } from "./actions.ts";
 
@@ -22,6 +23,9 @@ interface ScheduleRowProps {
   connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null;
   runsHref: string;
   summary: RefConnectorSummary;
+  deviceName?: string;
+  presentation?: "plain" | "technical";
+  practice?: boolean;
 }
 
 type EditState = "idle" | "editing";
@@ -130,8 +134,9 @@ function ScheduleEditButton({
   );
 }
 
-export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowProps) {
+export function ScheduleRow({ connectorIcon, summary, runsHref, deviceName, presentation = "technical", practice = false }: ScheduleRowProps) {
   const router = useRouter();
+  const [observedAt] = useState(() => Date.now());
   const [isPending, startTransition] = useTransition();
   const [editState, setEditState] = useState<EditState>("idle");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -146,14 +151,14 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
     setTimeout(() => setToast(null), 8000);
   }, []);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback((choice?: string) => {
     startTransition(async () => {
       const res = await upsertScheduleAction(summary.connector_id, {
         // connection_id is non-optional in the current contract; connector_instance_id
         // is a real legacy-server fallback (see recordsHrefForSummary above).
         connectionId: summary.connection_id ?? summary.connector_instance_id ?? null,
         enabled: true,
-        every,
+        every: choice ?? every,
         jitter: jitter || undefined,
       });
       if (!res.ok) {
@@ -255,6 +260,30 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
     nextSync = "Next sync paused";
   }
 
+  if (presentation === "plain") return (
+    <li className="border-border/70 border-b py-3 last:border-b-0">
+      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+        <div className="grid gap-1">
+          <Link className="text-foreground hover:underline" href={recordsHref}>{displayName}</Link>
+          <p className="text-sm text-muted-foreground">{scheduleSentence(summary, observedAt, deviceName)}</p>
+        </div>
+        {!localDevice ? <div className="flex gap-2">
+          <IcButton disabled={isPending} onClick={() => setEditState(editState === "editing" ? "idle" : "editing")} size="sm" variant="ghost">Change</IcButton>
+          {schedule ? <IcButton disabled={isPending || practice} onClick={enabled ? handlePause : handleResume} size="sm" variant="ghost">{enabled ? "Pause" : "Resume"}</IcButton> : null}
+        </div> : null}
+      </div>
+      {editState === "editing" ? <div className="grid justify-items-start gap-1 py-3" aria-label="How often to sync">
+        {scheduleChoices(summary).map((choice) => <IcButton key={choice.seconds ?? "manual"} disabled={isPending || practice} aria-pressed={choice.seconds === (schedule?.interval_seconds ?? null)} variant="ghost" size="sm" onClick={() => choice.seconds === null ? setConfirmingDelete(true) : handleSave(`${choice.seconds}s`)}>{choice.label}</IcButton>)}
+        <IcButton variant="ghost" size="sm" onClick={() => setEditState("idle")}>Cancel</IcButton>
+      </div> : null}
+      {confirmingDelete ? <div role="alertdialog" aria-label="Stop automatic syncs" className="grid gap-2 py-3">
+        <p>Automatic syncs will stop; your records will stay.</p>
+        <div className="flex gap-2"><IcButton disabled={isPending || practice} onClick={handleDelete} size="sm">Stop automatic syncs</IcButton><IcButton variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>Cancel</IcButton></div>
+      </div> : null}
+      {toast ? <div role="status"><p>This change could not be saved. Try again.</p><IcButton variant="ghost" size="sm" onClick={() => navigator.clipboard.writeText(toast.message)}>Copy details for support</IcButton></div> : null}
+    </li>
+  );
+
   return (
     <li className="border-border/70 border-b py-3 last:border-b-0" data-source-id={summary.connection_id} data-status-row={sourceStatus.row}>
       <div className="flex flex-col gap-2">
@@ -328,7 +357,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
             onCancel={() => setEditState("idle")}
             onEveryChange={setEvery}
             onJitterChange={setJitter}
-            onSave={handleSave}
+            onSave={() => handleSave()}
             policy={policy}
             rationale={rationale}
             recInterval={recInterval}

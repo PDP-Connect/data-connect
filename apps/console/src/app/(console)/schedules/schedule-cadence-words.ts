@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export function formatIntervalWords(seconds: number): string {
+  if (seconds === 3600) return "Every hour";
+  if (seconds === 604_800) return "Every week";
   if (seconds === 86_400) return "Every day";
   if (seconds % 86_400 === 0) {
     const days = seconds / 86_400;

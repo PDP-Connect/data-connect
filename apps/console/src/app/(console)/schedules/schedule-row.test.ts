@@ -243,3 +243,16 @@ function makeSchedule(): NonNullable<RefConnectorSummary["schedule"]> {
     updated_at: "2026-11-24T10:00:00.000Z",
   };
 }
+
+for (const state of ["mixed", "paused", "none"]) {
+  test(`plain schedule practice ${state} has one schedule sentence and no diagnostics`, async () => {
+    const { buildSchedulePractice } = await import("./schedule-presentation.ts");
+    const { ScheduleRow } = await import("./schedule-row.tsx");
+    const rows = buildSchedulePractice(state)!;
+    const markup = rows.map((summary) => renderToStaticMarkup(createElement(ScheduleRow, { summary, runsHref: "/syncs", presentation: "plain", practice: true }))).join("");
+    const document = new JSDOM(markup).window.document;
+    assert.equal(document.querySelectorAll("details").length, 0);
+    assert.doesNotMatch(document.body.textContent ?? "", /Synced|Manual|Jitter|heartbeat|connector|PDPP|Last success/);
+    if (state === "paused") assert.equal(document.querySelectorAll("li").length, 32);
+  });
+}

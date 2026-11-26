@@ -17,8 +17,8 @@ test("schedule reads keep their failure recovery and hide technical details", as
   const page = await readFile(new URL("page.tsx", import.meta.url), "utf8");
   assert.match(page, /This could not be loaded\./);
   assert.match(page, /Try again/);
-  assert.match(page, /<details className="mt-4">[\s\S]*?<ServerUnreachable \/>/);
-  assert.match(page, /<ConnectorSummaryPageError/);
+  assert.doesNotMatch(page, /<details/);
+  assert.match(page, /presentation="plain"/);
 });
 
 test("the old schedules address still redirects to the canonical page", async () => {
