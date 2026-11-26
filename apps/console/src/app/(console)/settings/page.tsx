@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   title: "Settings",
 }
 
-export default async function SettingsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> } = {}) {
+export default async function SettingsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> }) {
   const demo = (await searchParams)?.demo
   const practice = process.env.NODE_ENV !== "production" && demo ? buildSettingsPractice(demo) : null
   const identity = getProductIdentity()

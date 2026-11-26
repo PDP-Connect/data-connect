@@ -68,7 +68,7 @@ async function render(managedDesktopHost: boolean, inDesktopWindow = managedDesk
   process.env.PDPP_MANAGED_DESKTOP_HOST = managedDesktopHost ? "1" : "0"
   revealProof = inDesktopWindow
   try {
-    return renderToStaticMarkup(await SettingsPage())
+    return renderToStaticMarkup(await SettingsPage({}))
   } finally {
     revealProof = false
     if (previous === undefined) delete process.env.PDPP_MANAGED_DESKTOP_HOST
