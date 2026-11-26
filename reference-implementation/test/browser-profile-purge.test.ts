@@ -8,7 +8,58 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createBrowserProfilePurger, purgeLocalBrowserProfiles } from "../server/browser-profile-purge.ts";
+import {
+  countOtherConnectionsOfConnector,
+  createBrowserProfilePurger,
+  purgeLocalBrowserProfiles,
+} from "../server/browser-profile-purge.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
+
+// The purge removes a connector's browser profile only when the owner has no
+// other connection of it. A key no build ever saw must still count its own
+// connections, or the profile of a live connection would be deleted.
+test("other connections of a connector no build listed count by their own key", () => {
+  assert.equal(canonicalConnectorKey("whatsapp-web"), "whatsapp-web");
+  assert.equal(
+    countOtherConnectionsOfConnector(
+      [
+        { connectorInstanceId: "cin_a", connectorId: "whatsapp-web" },
+        { connectorInstanceId: "cin_b", connectorId: "whatsapp-web" },
+      ],
+      { connectorInstanceId: "cin_a", connectorKey: "whatsapp-web" },
+      canonicalConnectorKey
+    ),
+    1
+  );
+});
+
+test("connections of different unlisted connectors are not counted together", () => {
+  assert.equal(
+    countOtherConnectionsOfConnector(
+      [
+        { connectorInstanceId: "cin_a", connectorId: "whatsapp-web" },
+        { connectorInstanceId: "cin_b", connectorId: "other-unlisted" },
+      ],
+      { connectorInstanceId: "cin_a", connectorKey: "whatsapp-web" },
+      canonicalConnectorKey
+    ),
+    0
+  );
+});
+
+test("a registry-URL connection and a key connection count as the same connector", () => {
+  assert.equal(
+    countOtherConnectionsOfConnector(
+      [
+        { connectorInstanceId: "cin_a", connectorId: "whatsapp-web" },
+        { connectorInstanceId: "cin_b", connectorId: "https://registry.pdpp.dev/connectors/whatsapp-web" },
+      ],
+      { connectorInstanceId: "cin_a", connectorKey: "whatsapp-web" },
+      canonicalConnectorKey
+    ),
+    1
+  );
+});
 
 function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-purge-unit-"));

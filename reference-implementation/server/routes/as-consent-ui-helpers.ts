@@ -36,6 +36,7 @@ import {
   scopeSinceInputName,
   scopeUntilInputName,
 } from "../hosted-mcp-stream-scope.ts";
+import { isConnectorKey } from "../connector-key.ts";
 import { base64UrlSha256 } from "../oauth-substrate/primitives.ts";
 
 // Hosted-UI rendering surface (injected to avoid importing .js directly).
@@ -1052,7 +1053,7 @@ async function buildConnectorPickerRows(
 
 function ownerFacingConnectorKey(connectorId: string, caps: ConsentPickerCapabilities): string {
   const canonical = caps.canonicalConnectorKey(connectorId);
-  if (canonical) {
+  if (canonical && isConnectorKey(canonical)) {
     return canonical;
   }
   try {

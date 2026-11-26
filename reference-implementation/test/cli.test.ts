@@ -7318,7 +7318,7 @@ rl.on('line', (line) => {
         return;
       }
 
-      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(manifest.connector_id)}`) {
+      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id)}`) {
         let body = "";
         for await (const chunk of req) {
           body += chunk;

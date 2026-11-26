@@ -17,7 +17,13 @@ import {
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
 } from "./polyfill-connectors-runtime.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
+import {
+  canonicalConnectorKey,
+  canonicalConnectorKeyFromManifest,
+  connectorIdMustBeKeyShaped,
+  firstPartyConnectorKeys,
+  isConnectorKey,
+} from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
@@ -617,6 +623,7 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
   }
   // The same identity registration stores and the runtime spawns with.
   const firstPartyKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
+  const isFirstPartyKey = firstPartyKey !== null && firstPartyConnectorKeys().includes(firstPartyKey);
   const seen = new Set<string>();
   for (const [index, key] of declared.entries()) {
     if (typeof key !== "string" || !TUNING_ENVIRONMENT_KEY.test(key)) {
@@ -629,7 +636,7 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
       throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
     }
     seen.add(key);
-    if (firstPartyKey !== null && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
+    if (firstPartyKey !== null && isFirstPartyKey && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
       throw invalidConnectorManifest(
         `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${firstPartyKey} tuning namespace`,
         code
@@ -2198,19 +2205,30 @@ export function validateConnectorManifest(
   if (hasConnectorKey && !isConnectorKey(manifest.connector_key)) {
     throw invalidConnectorManifest("connector_key must be a non-empty slug-like key, not a URL", code);
   }
+  const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
+  if (hasConnectorKey && canonicalConnectorKey(manifest.connector_key) !== (manifest.connector_key as string).trim()) {
+    throw invalidConnectorManifest("connector_key must use its canonical spelling, not a legacy alias", code);
+  }
   if (hasConnectorId && hasConnectorKey) {
     const connectorId = (manifest.connector_id as string).trim();
     const connectorKey = (manifest.connector_key as string).trim();
-    const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
-    if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorKey) {
-      throw invalidConnectorManifest("connector_key must match the canonical key for connector_id", code);
-    }
-    if (!canonicalFromConnectorId && connectorId !== connectorKey) {
+    if (canonicalFromConnectorId !== connectorKey) {
+      // A registry URL or a legacy alias rewrites to a key; a bare id keeps its own spelling.
+      if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorId) {
+        throw invalidConnectorManifest("connector_key must match the canonical key for connector_id", code);
+      }
       throw invalidConnectorManifest(
         "connector_id must match connector_key; use manifest_uri for registry or document provenance",
         code
       );
     }
+  }
+  if (
+    manifest.connector_id !== undefined &&
+    connectorIdMustBeKeyShaped(manifest.connector_id) &&
+    !isConnectorKey(canonicalFromConnectorId)
+  ) {
+    throw invalidConnectorManifest("connector_id must resolve to a valid connector key", code);
   }
   if (isNonEmptyString(manifest.provider_id)) {
     throw invalidConnectorManifest(
