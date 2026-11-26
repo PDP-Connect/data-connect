@@ -3,13 +3,15 @@
 
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { seedableConnectorsFromManifests } from "../cli/commands/seed.ts";
+import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../connectors/seed/index.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
 import { parsePendingConsentRequestUri, registerConnector } from "../server/auth.ts";
@@ -9005,4 +9007,38 @@ test("legacy operator aliases emit a deprecation hint pointing at `pdpp ref ...`
       "legacy `pdpp trace show` alias should emit a single deprecation hint on stderr"
     );
   });
+});
+
+test("cli/commands/seed.ts: seedableConnectorsFromManifests intersects manifest presence with the seed connector's own SUPPORTED_SEED_CONNECTOR_KEYS export, not manifest presence alone", () => {
+  const manifests = [
+    { connector_id: "https://registry.pdpp.dev/connectors/acme", connector_key: "acme" },
+    // connector_key present, no top-level connector_id — the shape a custom
+    // manifest without a registry URL can declare.
+    { connector_key: "bravo" },
+    // provider_id-shaped fixtures (no connector_id/connector_key) are
+    // correctly excluded — same rule northstar-hr.json exercises for real.
+    { provider_id: "charlie" },
+    // delta declares a real connector_key but has no fixture logic in
+    // connectors/seed/index.ts — a manifest declaring connector_id/connector_key
+    // is necessary but not sufficient for seedability. If
+    // seedableConnectorsFromManifests fell back to manifest-presence alone
+    // (the over-claim this closes), "delta" would appear here and later fail
+    // at runtime with zero records emitted instead of being excluded up front.
+    { connector_key: "delta" },
+  ];
+
+  assert.deepEqual(seedableConnectorsFromManifests(manifests, ["acme", "bravo"]), ["acme", "bravo"]);
+});
+
+test("cli/commands/seed.ts: seedableConnectorsFromManifests against the real fixtures/seed-manifests/ and the real seed connector export reproduces the historical [github, reddit, spotify] set", () => {
+  const manifestsDir = join(__dirname, "..", "fixtures", "seed-manifests");
+  const manifests = readdirSync(manifestsDir)
+    .filter((file) => file.endsWith(".json"))
+    .map((file) => JSON.parse(readFileSync(join(manifestsDir, file), "utf8")));
+
+  assert.deepEqual(seedableConnectorsFromManifests(manifests, SUPPORTED_SEED_CONNECTOR_KEYS), [
+    "github",
+    "reddit",
+    "spotify",
+  ]);
 });

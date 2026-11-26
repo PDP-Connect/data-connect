@@ -20,7 +20,6 @@ import {
   canonicalConnectorKey,
   canonicalConnectorKeyFromManifest,
   connectorKeyFromRegistryUrl,
-  firstPartyConnectorKeys,
   isConnectorKey,
   isInternalConnectorId,
   isRegistryUrlConnectorId,
@@ -63,8 +62,14 @@ function readShippedPolyfillManifestEntries(): ManifestFileEntry[] {
   }));
 }
 
-test("connectorKeyFromRegistryUrl returns the canonical slug for every first-party URL", () => {
-  for (const key of firstPartyConnectorKeys()) {
+/** Every connector key the pinned `@pdpp/polyfill-connectors` package ships,
+ * read from its own manifests. No list in this repository stands behind it. */
+function vendoredConnectorKeys(): Set<string> {
+  return shippedConnectorKeysFromEntries(readShippedPolyfillManifestEntries());
+}
+
+test("connectorKeyFromRegistryUrl returns the canonical slug for every vendored connector URL", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}${key}`), key, `expected ${key} round-trip`);
   }
 });
@@ -103,8 +108,8 @@ test("a registry URL whose tail is not a connector key gives no key", () => {
   }
 });
 
-test("canonicalConnectorKey accepts a bare first-party slug", () => {
-  for (const key of firstPartyConnectorKeys()) {
+test("canonicalConnectorKey accepts a bare vendored slug", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(canonicalConnectorKey(key), key);
   }
 });
@@ -125,14 +130,15 @@ test("canonicalConnectorKey does not rewrite a retired underscore id to its curr
   // The four ids older collectors spelled with underscores are plain unknown
   // ids now: nothing at runtime maps one to the other, and a lookup under the
   // old id finds nothing (see retired-connector-id-lookup.test.ts).
+  const vendored = vendoredConnectorKeys();
   for (const retired of ["apple_photos", "claude_code", "google_messages", "google_takeout"]) {
     assert.equal(canonicalConnectorKey(retired), retired);
     assert.equal(isConnectorKey(retired), true, "still a well-formed key, just not a registered connector");
-    assert.ok(!firstPartyConnectorKeys().includes(retired), `${retired} is not a vendored connector key`);
+    assert.ok(!vendored.has(retired), `${retired} is not a vendored connector key`);
   }
   for (const current of ["apple-photos", "claude-code", "google-messages", "google-takeout"]) {
     assert.equal(canonicalConnectorKey(current), current);
-    assert.ok(firstPartyConnectorKeys().includes(current), `${current} is a vendored connector key`);
+    assert.ok(vendored.has(current), `${current} is a vendored connector key`);
   }
 });
 
@@ -180,8 +186,8 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
   }
 });
 
-test("canonicalConnectorKey accepts URL-shaped first-party ids", () => {
-  for (const key of firstPartyConnectorKeys()) {
+test("canonicalConnectorKey accepts URL-shaped vendored ids", () => {
+  for (const key of vendoredConnectorKeys()) {
     assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}${key}`), key);
   }
 });
@@ -287,12 +293,7 @@ test("canonicalConnectorKeyFromManifest gives a manifest that declares only a re
   assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: "custom_thing" } }), "custom_thing");
 });
 
-// -------- First-party key list parity with shipped manifests --------
-//
-// The first-party key list gates nothing; it feeds the tuning-namespace
-// collision rule. These tests guard against drift between it and the shipped
-// JSON manifests: if a new polyfill manifest is added without regenerating
-// the list, the test fails loudly.
+// -------- Keys read from shipped manifests --------
 
 function shippedConnectorKeysFromEntries(entries: ManifestFileEntry[]): Set<string> {
   const keys = new Set<string>();
@@ -354,14 +355,6 @@ test("registry-backed first-party manifests declare connector_key and manifest_u
       assert.equal(manifest.manifest_uri, connectorId, `${name} must preserve registry URI as manifest_uri`);
     }
   }
-});
-
-test("the first-party key list covers every shipped polyfill-connectors manifest", () => {
-  const shipped = shippedConnectorKeysFromEntries(readShippedPolyfillManifestEntries());
-  const known = new Set(firstPartyConnectorKeys());
-  // biome-ignore lint/suspicious/useArraySortCompare: the test relies on the platform default lexical sort behavior.
-  const missing = [...shipped].filter((key) => !known.has(key)).sort();
-  assert.deepEqual(missing, [], `polyfill manifests reference unknown canonical keys: ${missing.join(", ")}`);
 });
 
 test("canonicalConnectorKey passes every shipped reference-implementation manifest key through", () => {

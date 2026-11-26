@@ -330,26 +330,6 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // fabricating a bogus relative-path violation instead of this correct,
   // narrower "genuinely unresolvable, but provably a code load" one).
   "reference-implementation/scripts/hermetic/guard.ts::guardUndiciDispatcher::import(pathToFileURL(resolved).href)",
-  // readPolyfillManifests() in generate-connector-registry.ts:
-  // readFileSync(resolve(manifestsDir, file), "utf8") where `manifestsDir =
-  // process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..",
-  // "manifests")` -- a LogicalExpression (`||`) fallback this scanner's
-  // constant-folder does not evaluate (no rule anywhere folds `||`; only `+`
-  // string concatenation is a value-producing operator here, matching the
-  // sibling identity scanner's own posture). Both branches are legitimate,
-  // non-connector-identity paths: the env var is explicit OPERATOR
-  // OVERRIDE input (same class as `version-disposition.ts:238`'s
-  // `PDPP_COMPACTION_RESIDUE_REVIEW_PATH` above), and the fallback resolves
-  // via `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`
-  // (`packageSrcDir`, one line above) into the real installed
-  // `@pdpp/polyfill-connectors` package's own shipped manifests directory --
-  // this scanner's `POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER`/
-  // `MANIFEST_ROOTS` already sanction that exact directory when reached
-  // directly (see `runtime/controller.ts`'s equivalent, resolver-provable
-  // call site); this one is functionally identical but ONE level of `||`
-  // indirection deeper than the bounded folder follows. Verified by direct
-  // inspection, not by the scanner.
-  'reference-implementation/scripts/generate-connector-registry.ts::readPolyfillManifests::readFileSync(resolve(manifestsDir, file), "utf8")',
   // main(manifestPath, repoRoot) in check-test-backends.ts: readFileSync(manifestPath,
   // "utf8") where `manifestPath` is the operator's own CLI positional
   // argument (process.argv[2]), same class as deploy-canary.ts:606 and
@@ -851,8 +831,7 @@ function isImportMetaUrl(node: Node): boolean {
 /**
  * The ONE `import.meta.resolve(...)` specifier this scanner recognizes as an
  * anchored directory fragment: `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`,
- * the real production shape `runtime/controller.ts` and
- * `scripts/generate-connector-registry.ts` both use to locate the
+ * the real production shape `runtime/controller.ts` uses to locate the
  * `@pdpp/polyfill-connectors` package's shipped manifests without hardcoding
  * a repo-relative path to it (that package is a PINNED TARBALL DEPENDENCY —
  * see `reference-implementation/package.json`'s `@pdpp/polyfill-connectors`
