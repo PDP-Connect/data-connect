@@ -1018,6 +1018,87 @@ test("a private missing-password observation restarts preparation after a true p
   });
 });
 
+test("a poll already in flight cannot overwrite a fresh missing-password observation", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const privateState = deferred<Result>();
+  const oldPoll = deferred<Result>();
+  let states = 0;
+  const handler = host({
+    "/state": () => {
+      states += 1;
+      if (states === 2) return privateState.promise as unknown as Result;
+      if (states === 3) return oldPoll.promise as unknown as Result;
+      return ok({ ...idleState, passwordSet: true });
+    },
+  });
+  await withScreen(handler, async ({ settle, text }) => {
+    assert.equal(states, 2, "the preparation has started its private state read");
+    await act(async () => t.mock.timers.tick(3_000));
+    await settle();
+    assert.equal(states, 3, "a poll started while the preparation read was pending");
+
+    await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
+    await settle();
+    assert.match(text(), /Step 1: Set a password/);
+    await act(async () => oldPoll.resolve(ok({ ...idleState, passwordSet: true })));
+    await settle();
+    assert.match(text(), /Step 1: Set a password/, "the old poll cannot overwrite the newer local fact");
+  });
+});
+
+test("an older missing-password observation cannot overwrite a newer true poll", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const privateState = deferred<Result>();
+  let states = 0;
+  const handler = host({
+    "/state": () => ++states === 2
+      ? privateState.promise as unknown as Result
+      : ok({ ...idleState, passwordSet: true }),
+  });
+  await withScreen(handler, async ({ calls, settle, text }) => {
+    assert.equal(states, 2, "the preparation has started its private state read");
+    await act(async () => t.mock.timers.tick(3_000));
+    await settle();
+    assert.equal(states, 3, "the newer poll has returned true");
+    assert.equal(calls.filter((call) => call.url === "/state").length, 3);
+
+    await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
+    await settle();
+    assert.doesNotMatch(text(), /Step 1: Set a password/, "the older observation cannot overwrite the newer true state");
+    assert.match(text(), /Step 2 of 2/, "the page keeps the turn-on step available");
+  });
+});
+
+test("a route preparation read stops applying after the selected way changes", async () => {
+  const oldState = deferred<Result>();
+  const alternate = { ...provider, providerId: "cloudflare-named", label: "Cloudflare" };
+  const signIn = action({ step: { actor: "owner", purpose: "authorize" } });
+  const handler = host({
+    "/catalog": ok({ ...catalog, providers: [provider, alternate] }),
+    "/state": (() => {
+      let count = 0;
+      return () => ++count === 3 ? oldState.promise as unknown as Result : ok({ ...idleState, passwordSet: true });
+    })(),
+    "/drafts": (call) => ok(draftWith(call.body?.providerId === provider.providerId ? [signIn] : [])),
+    "/setups": ok({ operationId: "op-1" }),
+  });
+  await withScreen(handler, async ({ calls, container, settle, text, press }) => {
+    await settle();
+    assert.equal(calls.filter((call) => call.url === "/state").length, 3, "the sign-in setup's follow-up state read is pending");
+    await press(/^Other ways$/);
+    const radio = [...container.querySelectorAll("label")]
+      .find((node) => /Cloudflare/.test(node.textContent ?? ""))
+      ?.querySelector("input");
+    assert.ok(radio, "the alternate way is available");
+    await act(async () => radio.click());
+    await settle();
+    await act(async () => oldState.resolve(ok({ ...idleState, passwordSet: false })));
+    await settle();
+    assert.doesNotMatch(text(), /Step 1: Set a password/, "the old way's read cannot overwrite the current selection");
+    assert.match(text(), /Turn on remote access/);
+  });
+});
+
 // The transport ends every request at its own deadline (reachability-client.test.ts), so a request
 // that outlives it reaches the chain as this failure. The chain has no timer of its own.
 test("a request that outlives the transport's deadline ends the preparation with Try again and sends nothing more", async (t) => {
