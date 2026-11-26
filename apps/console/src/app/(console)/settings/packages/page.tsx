@@ -5,6 +5,8 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { unstable_rethrow } from "next/navigation";
 import { SupportCopy } from "../../components/support-copy.tsx";
 import type { Metadata } from "next";
+import Link from "next/link";
+import { buttonVariants } from "@pdpp/brand-react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { readAddSourceCatalog } from "../../sources/add/add-source-catalog-read.ts";
 import { PackageTable } from "./package-table.tsx";
@@ -22,7 +24,7 @@ export default async function DataSourcePackagesPage() {
     <RecordroomShellWithPalette>
       <div className="mx-auto grid min-w-0 w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader title={packagesCopy.heading} description="Each service has its own small piece of DataConnect. An update here applies to every account of that service." />
-        {error ? <div role="status"><p>Data source updates could not be loaded. Try again.</p><SupportCopy details={error} /></div> : <PackageTable rows={rows} />}
+        {error ? <div role="status"><p>Data source updates could not be loaded.</p><Link className={buttonVariants()} href="/settings/packages">Try again</Link><SupportCopy details={error} /></div> : <PackageTable rows={rows} />}
       </div>
     </RecordroomShellWithPalette>
   );

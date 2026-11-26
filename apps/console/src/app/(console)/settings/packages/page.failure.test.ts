@@ -34,5 +34,6 @@ test("a catalog read failure renders recovery text rather than rejecting the pag
   const html = renderToStaticMarkup(await Page())
   assert.match(html, /could not be loaded/i)
   assert.match(html, /Copy details for support/)
+  assert.match(html, /<a [^>]*href="\/settings\/packages"[^>]*>Try again<\/a>/)
   assert.doesNotMatch(html, /manifest request|\(500\)/)
 })
