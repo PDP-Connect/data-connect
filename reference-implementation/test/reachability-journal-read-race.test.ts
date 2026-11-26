@@ -17,16 +17,6 @@ import { ReachabilityOperations } from "../server/reachability/operations.ts";
 
 const seed = fakeRouteScenarios().find((route) => route.handle.kind === "attached" && route.published)!;
 
-// In-flight threadpool fs work, as visible from the outside. `getActiveResourcesInfo`
-// does not report libuv requests, and no supported API exposes them, so this reads
-// the long-standing internal accessor. The settle wait bounds every use with a
-// deadline, so a changed or removed accessor can only fail the test loudly.
-function pendingFsRequests(): boolean {
-  const requests = (process as unknown as { _getActiveRequests?(): Array<{ constructor?: { name?: string } }> })
-    ._getActiveRequests?.();
-  return requests?.some((request) => request.constructor?.name?.startsWith("FSReq")) === true;
-}
-
 test("reads that race a start's completion never leave it unsettled", async () => {
   let bad = 0;
   for (let round = 0; round < 30; round++) {
@@ -38,30 +28,20 @@ test("reads that race a start's completion never leave it unsettled", async () =
         const { operationId } = await operations.start("start", null, async (id) => ({ ...seed, handle: { id: `r${round}-${k}`, generation: 1, kind: "session" }, operationId: id }) as Route);
         ids.push(operationId);
       }
-      // The settle wait is a condition, not a fixed read count. On a loaded
-      // machine the journal's fsyncs outlast any number of cached reads, so a
-      // start whose settlement write is still in flight is legitimately applying.
-      // Judging it after a fixed number of list() rounds was the CI flake; a
-      // settlement that never settles is the real defect, so the wait fails
-      // loudly on a deadline instead of falling through.
-      const deadline = Date.now() + 10_000;
-      for (;;) {
-        const records = await operations.list();
-        if (records.every((record) => record.stage === "settled")) break;
-        assert.ok(Date.now() < deadline, `round ${round}: starts never settled: ${records.map((record) => record.stage).join(",")}`);
+      // Let every start's effect return, so each has queued its settlement write.
+      // The effects here are plain promises, so one macrotask turn is enough.
+      await waitTurn();
+      // Reads race the settlements still in flight. A read may see a start as
+      // applying, but never as a crash orphan: that stage is a verdict about a
+      // start that is no longer running, and these starts are running or settled.
+      for (let read = 0; read < 100; read++) {
+        for (const record of await operations.list()) if (record.stage === "unknown-possibly-live") bad++;
       }
+      // Every settlement write is a chain the journal owns, so it reports when the
+      // last one has finished, rename and directory fsync included. Only then is
+      // the scratch directory safe to remove, and every record has settled.
+      await operations.idle();
       for (const id of ids) if ((await operations.read(id)).stage !== "settled") bad++;
-      // A record that reads settled proves only that its rename ran: the same
-      // write still fsyncs the journal's directory, and that tail is what a
-      // premature scratch removal would race — the rename or dir fsync would
-      // fail with ENOENT, and the failure path would recreate the root to
-      // record its unknown-possibly-live verdict, leaking the scratch dir.
-      // libuv's pending fs requests are the only externally visible trace of
-      // that tail, so wait for them to drain before removing the directory.
-      while (pendingFsRequests()) {
-        assert.ok(Date.now() < deadline, `round ${round}: journal writes never drained`);
-        await waitTurn();
-      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

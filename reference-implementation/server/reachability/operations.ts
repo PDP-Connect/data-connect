@@ -97,6 +97,15 @@ export class ReachabilityOperations {
     });
     return run;
   }
+  /**
+   * Resolves once no journal write is in flight: every write chain queued so far, and any
+   * queued behind one while waiting, has settled. It never rejects. A failed settlement is
+   * recorded by the failure path in start(), so a failed chain only counts as finished here.
+   * A start whose effect has not returned has not queued its settlement, so it is not covered.
+   */
+  async idle(): Promise<void> {
+    while (this.tails.size > 0) await Promise.all(this.tails.values());
+  }
   private async write(record: OperationRecord): Promise<void> {
     await mkdir(this.root, { mode: 0o700, recursive: true });
     const path = this.path(record.operationId);
