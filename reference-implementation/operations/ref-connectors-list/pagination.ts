@@ -16,6 +16,16 @@ export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
 export const CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX = 100;
 const CONNECTOR_SUMMARY_CURSOR_VERSION = 1;
 const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
+/**
+ * Upper bound on an issued cursor, in characters. A cursor is the prefix plus
+ * base64url, so every character is ASCII and unreserved: its wire size in a
+ * query string equals its length. Real cursors are about 300 characters (a
+ * connector id, an instance id, a timestamp and a 43-character digest, sealed
+ * with a 28-byte nonce and tag). The bound leaves room for connector and
+ * instance ids of about 200 bytes each (a single-connector cursor carries the
+ * connector id twice).
+ */
+export const CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH = 1024;
 const CURSOR_IV_BYTES = 12;
 const CURSOR_TAG_BYTES = 16;
 const CURSOR_KEY_DOMAIN = "pdpp.ref-connectors-page.cursor.v1";
@@ -72,11 +82,19 @@ export interface ConnectorSummaryPageRequest {
   readonly sourcesVisibility: boolean;
 }
 
+export type ConnectorSummaryPageRequestParam =
+  | "connector_id"
+  | "cursor"
+  | "include_fleet_health"
+  | "limit"
+  | "profile"
+  | "sources_visibility";
+
 export class ConnectorSummaryPageRequestError extends Error {
   readonly code = "invalid_request";
-  readonly param: "cursor" | "include_fleet_health" | "limit" | "profile" | "sources_visibility";
+  readonly param: ConnectorSummaryPageRequestParam;
 
-  constructor(param: "cursor" | "include_fleet_health" | "limit" | "profile" | "sources_visibility", message: string) {
+  constructor(param: ConnectorSummaryPageRequestParam, message: string) {
     super(message);
     this.name = "ConnectorSummaryPageRequestError";
     this.param = param;
@@ -246,13 +264,13 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
     return rawConnectorId;
   }
   if (!Array.isArray(rawConnectorId)) {
-    throw new ConnectorSummaryPageRequestError("limit", "connector_id must be a non-empty string");
+    throw new ConnectorSummaryPageRequestError("connector_id", "connector_id must be a non-empty string");
   }
   if (rawConnectorId.length === 0) {
-    throw new ConnectorSummaryPageRequestError("limit", "connector_id must not be an empty set");
+    throw new ConnectorSummaryPageRequestError("connector_id", "connector_id must not be an empty set");
   }
   if (!rawConnectorId.every(isNonEmptyString)) {
-    throw new ConnectorSummaryPageRequestError("limit", "every connector_id in the set must be a non-empty string");
+    throw new ConnectorSummaryPageRequestError("connector_id", "every connector_id in the set must be a non-empty string");
   }
   if (rawConnectorId.length === 1) {
     // A single-element repeated form is the single-id filter, byte-identical
@@ -261,7 +279,7 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   }
   if (rawConnectorId.length > CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX) {
     throw new ConnectorSummaryPageRequestError(
-      "limit",
+      "connector_id",
       `connector_id set must contain at most ${CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct canonical ids`
     );
   }
@@ -269,7 +287,7 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   const distinct = new Set(canonical);
   if (distinct.size !== canonical.length) {
     throw new ConnectorSummaryPageRequestError(
-      "limit",
+      "connector_id",
       "connector_id set must not contain duplicate ids after canonicalization"
     );
   }
@@ -344,10 +362,11 @@ export function parseConnectorSummaryPageRequest(
  * (when the page was filtered) the exact `connector_id` scope that produced
  * it. `connectorIdFilter` defaults to `null` (unfiltered, fleet-wide page) —
  * every existing caller that omits it preserves the exact prior cursor scope.
- * The cursor stores the scope's canonical FINGERPRINT (`f`), not raw user
- * ordering (design doc: "a canonical ordered scope-set fingerprint, not raw
- * user ordering") — a set supplied in a different order round-trips to the
- * SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
+ * The cursor binds the scope through the fixed-size `s` digest, which hashes
+ * the canonical sorted scope (design doc: "a canonical ordered scope-set
+ * fingerprint, not raw user ordering"). A set scope is not repeated in the
+ * cursor, so cursor size does not grow with the set. A set supplied in a
+ * different order round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
  * Explore page) — every existing caller that omits it preserves the exact
  * prior cursor scope; the Sources page is the only caller that passes `true`.
  */
@@ -361,7 +380,12 @@ export function encodeConnectorSummaryPageCursor(
   const payload = Buffer.from(
     JSON.stringify({
       c: boundary.connectorId,
-      f: connectorIdScopeFingerprint(connectorIdFilter),
+      // The previous release's decoder requires `f`; it is small for these two
+      // scopes, so keep sending it and a cursor survives a rollback. A set's
+      // fingerprint grows with the set and is left out: `s` already binds it.
+      ...(connectorIdFilter === null || typeof connectorIdFilter === "string"
+        ? { f: connectorIdScopeFingerprint(connectorIdFilter) }
+        : {}),
       i: boundary.connectorInstanceId,
       s: scopeDigest(ownerSubjectId, connectorIdFilter, sourcesVisibility).toString("base64url"),
       t: boundary.createdAt,
@@ -372,14 +396,20 @@ export function encodeConnectorSummaryPageCursor(
   const iv = randomBytes(CURSOR_IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", cursorEncryptionKey(keyMaterial), iv);
   const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()]);
-  return `${CONNECTOR_SUMMARY_CURSOR_PREFIX}${Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url")}`;
+  const cursor = `${CONNECTOR_SUMMARY_CURSOR_PREFIX}${Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url")}`;
+  if (cursor.length > CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH) {
+    // The route reserves this many bytes before it reads a page. Failing here
+    // is a server error: row ids are not request input.
+    throw new Error(`connector summary cursor is ${cursor.length} characters; the limit is ${CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH}`);
+  }
+  return cursor;
 }
 
 /**
  * Decode and scope-check a connector-summary continuation without logging it.
  * `connectorIdFilter` is the CURRENT request's `connector_id` scope (`null`
- * when absent) — its canonical fingerprint must exactly match the fingerprint
- * the cursor was issued under (bound into the same scope digest as the owner
+ * when absent) — its canonical fingerprint must exactly match the scope the
+ * cursor was issued under (both are hashed into the `s` digest with the owner
  * subject), so a cursor from a connector- or connector-SET-filtered page
  * cannot be replayed against an unfiltered request, a different connector's
  * page, a different set, or a reordered-but-different set. `sourcesVisibility`
@@ -423,20 +453,13 @@ export function decodeConnectorSummaryPageCursor(
     !isNonEmptyString(payload.c) ||
     !isNonEmptyString(payload.i) ||
     !isNonEmptyString(payload.s) ||
-    !isNonEmptyString(payload.t) ||
-    typeof payload.f !== "string"
+    !isNonEmptyString(payload.t)
   ) {
-    throw new ConnectorSummaryPageCursorError();
-  }
-  const cursorScopeFingerprint = payload.f;
-  if (cursorScopeFingerprint !== connectorIdScopeFingerprint(connectorIdFilter)) {
     throw new ConnectorSummaryPageCursorError();
   }
   // Bound check for the `sources_visibility` surface flag (2026-08-15 review
   // finding): a cursor issued on one surface must not decode on the other,
-  // even before the scope-digest comparison below — this rejects a
-  // cross-surface replay on a cheap plaintext-shaped field the same way `f`
-  // rejects a connector_id-scope mismatch.
+  // even before the scope-digest comparison below.
   // Cursors issued before the Sources-only boundary was introduced have no
   // `w` field. They were unfiltered cursors, so preserve that valid legacy
   // scope while still rejecting them on the Sources page.

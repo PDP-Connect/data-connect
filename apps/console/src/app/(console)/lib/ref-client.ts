@@ -1806,8 +1806,6 @@ export async function listExploreTimeline(
 /** Max page size the reference accepts (`CONNECTOR_SUMMARY_PAGE_LIMIT_MAX`). */
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
 const CONNECTOR_SUMMARY_DEFAULT_PAGE_LIMIT = 100;
-/** Accepted maximum for a repeated `connector_id` SET scope (design doc add-source-perf-design-agy-0730.md "Minimal contract"). */
-export const CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX = 100;
 
 /**
  * Named semantic profile on `GET /_ref/connectors` (Fable ruling §8, R8.1).
@@ -1846,7 +1844,7 @@ export interface RefConnectorRetainedCountSummariesResponse extends ListResponse
 
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1854,7 +1852,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorIdentitySummariesResponse>;
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1862,7 +1860,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorRetainedCountSummariesResponse>;
 export function listConnectorSummaries(options?: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1873,12 +1871,10 @@ export async function listConnectorSummaries(
   options: {
     connectionRouteId?: string;
     /**
-     * Bounded repeated-value SET scope on the paged (non-`connectionRouteId`)
-     * form — design doc "Minimal contract": 1..
-     * {@link CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX} canonical distinct ids,
-     * sent as repeated `connector_id` query values, never CSV-encoded.
+     * Optional connector scope, sent as repeated flat `connector_id` values.
+     * Omit to page through all owner-visible connections.
      */
-    connectorId?: readonly string[];
+    connectorId?: string | readonly string[];
     cursor?: string;
     includeFleetHealth?: boolean;
     limit?: number;
