@@ -1,3 +1,7 @@
+/*
+ * Copyright The PDP-Connect Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 /* Explore's reading layout. Keep this scoped so the shared record components can
    keep their source-page presentation. */
 .explore-page .rr-x-h1 {
