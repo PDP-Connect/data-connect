@@ -29,6 +29,7 @@ import { resolveCoreSelection } from "../server/core-source-authorization.ts";
 import {
   parseSubmittedStreamScopes,
   resolveStreamScopeSelection,
+  resolveStreamScopeCapability,
   scopeFieldsInputName,
   scopeSinceInputName,
   type StreamScopeSelection,
@@ -196,7 +197,9 @@ test("every ChatGPT stream with a consent time field can be narrowed on both axe
   // Guards the premise of the feature against a manifest revision: if a
   // stream loses `selection.fields` or `consent_time_field`, the picker must
   // stop offering that control rather than 400 at issuance.
-  for (const stream of MANIFEST.streams.filter((candidate) => candidate.consent_time_field)) {
+  const timed = MANIFEST.streams.filter((candidate) => candidate.consent_time_field);
+  assert.ok(timed.length > 0, "the shipped manifest must exercise temporal narrowing");
+  for (const stream of timed) {
     const body = {
       [scopeFieldsInputName(SOURCE_KEY, stream.name)]: [
         ...((stream.schema as { required?: string[] }).required ?? []),
@@ -220,5 +223,18 @@ test("every ChatGPT stream with a consent time field can be narrowed on both axe
       `${stream.name} must bind its own consent_time_field`
     );
     assert.ok((resolved[0]?.fields?.length ?? 0) > 0, `${stream.name} must resolve a non-empty field list`);
+  }
+});
+
+test("ChatGPT streams without a time field offer no temporal control", () => {
+  const untimed = MANIFEST.streams.filter((stream) => !stream.consent_time_field);
+  assert.ok(untimed.length > 0, "the shipped manifest must exercise omitted temporal controls");
+  for (const stream of untimed) {
+    assert.equal(resolveStreamScopeCapability(stream).timeField, null, stream.name);
+    assert.ok("error" in resolveStreamScopeSelection(stream, { since: "2026-01-01" }), stream.name);
+    const detail = buildHostedMcpAuthorizationDetailForConnector(CONNECTOR_ID, [stream.name], "continuous", null, { id: CONNECTOR_ID, kind: "connector" });
+    assert.equal(detail.streams[0]?.time_range, undefined, stream.name);
+    const resolved = resolveCoreSelection({ streams: detail.streams }, DECLARATION);
+    assert.equal(resolved[0]?.time_constraint, undefined, stream.name);
   }
 });
