@@ -1,10 +1,10 @@
+"use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
-import { humanizeFieldLabel } from "@pdpp/display";
+import { useState } from "react";
 import Link from "next/link";
-import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type { PendingApproval } from "../lib/ref-client.ts";
 import { appSourceName } from "./app-access.ts";
 
@@ -12,7 +12,6 @@ import { appSourceName } from "./app-access.ts";
 export function PendingApprovalRow({
   approval,
   appName,
-  connectorIcons = {},
   denyAction,
 }: {
   approval: PendingApproval;
@@ -20,31 +19,15 @@ export function PendingApprovalRow({
   connectorIcons?: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   denyAction: (formData: FormData) => void | Promise<void>;
 }) {
-  const previewStreams = Array.isArray(approval.grant_preview?.streams)
-    ? approval.grant_preview.streams.flatMap((stream) => {
-        const name = typeof stream === "string" ? stream : stream?.name || "";
-        return name ? [humanizeFieldLabel(name)] : [];
-      })
-    : [];
-  const connectorId = approval.grant_preview?.source?.kind === "connector" ? approval.grant_preview.source.connector_id ?? approval.grant_preview.source.id : null;
+  const [confirming, setConfirming] = useState(false);
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">
         <p className="text-[15px] font-medium text-foreground">{appName}</p>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          {approval.grant_preview?.source ? `Can read ${appSourceName(approval.grant_preview.source)}` : "Waiting for your choice"}
-          {previewStreams.length ? ` · Kinds of records: ${previewStreams.join(", ")}` : ""}
+          {approval.grant_preview?.source ? `Wants to read ${appSourceName(approval.grant_preview.source)}` : "Wants to read your data"}
         </p>
-        <details className="mt-1">
-          <summary className="min-h-11 cursor-pointer text-[13px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
-          <div className="pdpp-caption flex flex-wrap gap-3 text-muted-foreground">
-            <span>{approval.approval_id}</span>
-            <IcTimestamp value={approval.created_at} />
-            <span>{approval.kind}</span>
-            {approval.client_id ? <span>App id: {approval.client_id}</span> : null}
-            {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={appSourceName(approval.grant_preview?.source) ?? connectorId} /> : null}
-          </div>
-        </details>
+        <IcTimestamp value={approval.created_at} />
       </div>
       <div className="flex flex-wrap items-start gap-2">
         <Link
@@ -53,11 +36,10 @@ export function PendingApprovalRow({
         >
           Review
         </Link>
-        <details>
-          <summary className="flex min-h-11 cursor-pointer items-center rounded-[6px] px-3 text-[13px] text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Don't allow</summary>
+        {!confirming ? <IcButton variant="ghost" onClick={() => setConfirming(true)}>Don't allow</IcButton> : <div role="alertdialog" aria-label={`Don't allow ${appName}?`}>
           <div className="mt-2 rounded-md border border-border-strong p-3">
             <p className="pdpp-caption text-foreground">
-              {approval.kind === "consent" ? "The app will not get access to your data." : "This device will not get owner access."}
+              Don't allow {appName}? It will not get access to your data.
             </p>
             <form action={denyAction} className="mt-3">
               <input name="kind" type="hidden" value={approval.kind} />
@@ -66,7 +48,8 @@ export function PendingApprovalRow({
               <IcButton size="sm" type="submit" variant="destructive">Don't allow</IcButton>
             </form>
           </div>
-        </details>
+          <IcButton variant="ghost" onClick={() => setConfirming(false)}>Cancel</IcButton>
+        </div>}
       </div>
     </div>
   );

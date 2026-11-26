@@ -1,106 +1,35 @@
 "use client";
-
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-import { Menu } from "@base-ui/react/menu";
+import { IcInput, IcButton } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useState } from "react";
 import { formatAppLastRead, type AppAccess } from "./app-access.ts";
-import { RemoveAccessConfirmation } from "./remove-access-confirmation.tsx";
-
-export function AppAccessList({
-  apps,
-  canRemove,
-  removeAction,
-  returnTo,
-}: {
-  apps: readonly AppAccess[];
-  canRemove: boolean;
-  removeAction: (formData: FormData) => void | Promise<void>;
-  returnTo: string;
-}) {
-  if (apps.length === 0) {
-    return <p className="py-4 text-[13px] text-muted-foreground">No app can read your data yet.</p>;
-  }
-
-  return (
-    <ul className="divide-y divide-border border-y border-border">
-      {apps.map((app) => (
-        <AppAccessRow app={app} canRemove={canRemove} key={`${app.name}:${app.hrefId}`} removeAction={removeAction} returnTo={returnTo} />
-      ))}
-    </ul>
-  );
+export function sourcePhrase(names: readonly string[]) {
+  return names.length > 3 ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more` : names.join(", ");
 }
-
-function AppAccessRow({
-  app,
-  canRemove,
-  removeAction,
-  returnTo,
-}: {
-  app: AppAccess;
-  canRemove: boolean;
-  removeAction: (formData: FormData) => void | Promise<void>;
-  returnTo: string;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  return (
-    <li className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 py-3">
-      <Link className="min-w-0 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={`/grants/${encodeURIComponent(app.hrefId)}`}>
-        <span className="block truncate text-[15px] font-medium text-foreground">{app.name}</span>
-        <span className="mt-1 block text-[13px] text-muted-foreground">
-          {app.status ?? `Can read ${app.sources.length ? app.sources.join(", ") : "data from this server"}`}
-        </span>
-        {app.status === "Removed" ? (
-          app.stoppedAt ? (
-            <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
-              Access stopped {formatAppLastRead(app.stoppedAt)}
-            </span>
-          ) : null
-        ) : (
-          <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
-            Last read {formatAppLastRead(app.lastRead)}
-          </span>
-        )}
+export function accessEnd(value: string | null, now = Date.now()) {
+  if (!value) return null;
+  const days = Math.ceil((Date.parse(value) - now) / 86400000);
+  return days > 0 && days <= 7 ? `access ends in ${days} days` : `access ends ${new Date(value).toLocaleDateString("en-US")}`;
+}
+export function AppAccessList({ apps, demo, stopped = false }: { apps: readonly AppAccess[]; demo?: string; stopped?: boolean }) {
+  const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const filtered = apps.filter((app) => `${app.name} ${app.place}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = stopped && !showAll ? filtered.slice(0, 5) : filtered;
+  return <>
+    {!stopped && apps.length > 10 ? <IcInput aria-label="Find an app" placeholder="Find an app" value={query} onChange={(event) => setQuery(event.target.value)} /> : null}
+    <ul className="divide-y divide-border border-y border-border">{visible.map((app) => <li key={app.hrefId}>
+      <Link className="block py-4" href={`/grants/${encodeURIComponent(app.hrefId)}${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}>
+        <span className="block text-[15px] font-medium">{app.name}</span>
+        {!app.verified || apps.some((other) => other !== app && other.name === app.name) ? <span className="block text-[13px] text-muted-foreground">{app.place}{!app.verified ? " · not verified" : ""}</span> : null}
+        {stopped ? <span className="block text-[13px] text-muted-foreground">{app.stoppedReason === "expired" ? "Ended" : "Removed"}{app.stoppedAt ? ` ${formatAppLastRead(app.stoppedAt)}` : ""}</span> : <>
+          <span className="block text-[13px] text-muted-foreground">Can read {sourcePhrase(app.sources)}</span>
+          <span className="block text-[13px] text-muted-foreground">{app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}` : "Has not read anything yet"}{app.expiresAt ? ` · ${accessEnd(app.expiresAt)}` : ""}</span>
+        </>}
       </Link>
-      {canRemove && app.status === null ? (
-        <Menu.Root>
-          <Menu.Trigger
-            aria-label={`More actions for ${app.name}`}
-            className="inline-flex size-11 items-center justify-center rounded-[6px] text-[20px] text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            type="button"
-          >
-            …
-          </Menu.Trigger>
-          <Menu.Portal>
-            <Menu.Positioner className="z-50" sideOffset={6}>
-              <Menu.Popup className="min-w-40 rounded-[6px] border border-border bg-background p-1 shadow-lg">
-                <Menu.Item
-                  className="flex min-h-11 cursor-pointer items-center rounded px-3 text-[13px] text-destructive outline-none data-[highlighted]:bg-muted"
-                  onClick={() => setConfirming(true)}
-                >
-                  Remove access
-                </Menu.Item>
-              </Menu.Popup>
-            </Menu.Positioner>
-          </Menu.Portal>
-        </Menu.Root>
-      ) : null}
-      {confirming ? (
-        <RemoveAccessConfirmation
-          action={removeAction}
-          fields={[
-            ...app.packageIds.map((packageId) => ["package_id", packageId] as const),
-            ...app.grantIds.map((grantId) => ["grant_id", grantId] as const),
-            ["return_to", returnTo] as const,
-          ]}
-          id={`remove-title-${app.hrefId}`}
-          onCancel={() => setConfirming(false)}
-          sentence={`${app.name} will no longer read your data. It keeps what it already read.`}
-          submitLabel="Remove access"
-        />
-      ) : null}
-    </li>
-  );
+    </li>)}</ul>
+    {stopped && apps.length > 5 && !showAll ? <IcButton variant="ghost" onClick={() => setShowAll(true)}>Show all {apps.length}</IcButton> : null}
+  </>;
 }

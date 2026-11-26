@@ -12,7 +12,6 @@ import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../li
 import { type CimdClientDocument, type AppAccess, listCimdClientDocuments, listAppAccess } from "../lib/ref-client.ts";
 import { AppAccessList } from "../grants/app-access-list.tsx";
 import { groupGrantAccessByApp } from "../grants/app-access.ts";
-import { revokeGrantAccessAction } from "../grants/[grantId]/revoke-action.ts";
 import { needsRemoteAccess } from "./remote-access.ts";
 import { createCimdClientIdentityAction, deleteCimdClientIdentityAction } from "./actions.ts";
 
@@ -399,12 +398,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
       </details>
 
       <Section title="Connected apps">
-        {grantsUnavailable ? <p className="py-4 text-[13px] text-muted-foreground">Connected apps could not be loaded. <Link className="text-primary underline-offset-2 hover:underline" href="/connect">Try again</Link>.</p> : <AppAccessList
-          apps={groupGrantAccessByApp(registrations)}
-          canRemove={!grantsHaveMore}
-          removeAction={revokeGrantAccessAction}
-          returnTo="/connect"
-        />}
+        <AppAccessList apps={groupGrantAccessByApp(registrations)} />
       </Section>
     </RecordroomShellWithPalette>
   );
