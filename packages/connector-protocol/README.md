@@ -30,9 +30,11 @@ scalar and compound keys are distinct, and compound member order matters.
 A runtime must advertise `BLOB` only after it can durably ingest the bytes.
 The signed profile's `host_blob_write` declaration separately limits streams,
 spool size, and host permission; protocol capability negotiation does not grant it.
-The local collector currently does not advertise it and rejects any BLOB it
-sees. Merging this PR would trigger a semantic-release minor publication;
-the consumer runtime must be ready before merge.
+The reference runtime (`reference-implementation/runtime`) advertises it and
+stores each blob through the server blob store. The local collector does not
+advertise it and rejects any BLOB it sees. Merging this PR would trigger a
+semantic-release minor publication; the consumer runtime must be ready before
+merge.
 
 Protocol version `0.0.2` (the `CONNECTOR_PROTOCOL_VERSION` constant exported
 from `connector-runtime-protocol.ts`, tracked independently of this package's

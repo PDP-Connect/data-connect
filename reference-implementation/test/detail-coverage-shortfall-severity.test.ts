@@ -60,7 +60,6 @@ const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
-const UNKNOWN_BLOB_MESSAGE_PATTERN = /Connector emitted unknown message type: BLOB/;
 const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (.+)$/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
@@ -1320,8 +1319,7 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
 
 // START.protocol_capabilities lists what this runtime implements (Section
 // 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
-// It also accepts OBSERVATION (Section 5.10). It does not implement BLOB, so it
-// does not list it.
+// It also accepts OBSERVATION (Section 5.10) and ingests BLOB through the host spool.
 test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1335,7 +1333,7 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "STREAM_EVIDENCE"]);
+    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB", "STREAM_EVIDENCE"]);
   }
 });
 
@@ -1403,43 +1401,4 @@ test("reference runtime refuses 0.3.0 before spawn until the whole profile is im
   assert.equal(outcome.start, null, "the connector was not spawned");
   assert.ok(outcome.thrown instanceof Error);
   assert.match(outcome.thrown.message, /protocol_version must be one of 0\.1\.0, 0\.2\.0/);
-});
-
-// BLOB is a runtime-specific extension (Collection Profile Section 7) that this
-// runtime does not implement. chatgpt and anthropic declare it but emit BLOB
-// only for an item over the inline cap, so a declaring connector still starts
-// here. A run that emits no BLOB completes; a run that emits one fails at that
-// line, with the same error as before the capability gate existed.
-test("a 0.1.0 manifest declaring BLOB starts; it completes without BLOB and fails at a BLOB line", async (t) => {
-  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-  t.after(() => closeServer(server));
-  const ownerToken = await registerAndAuthorize(server);
-  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.0" };
-  assert.equal(isAdmitted(await registerManifest(server, blobManifest)), true, "the BLOB manifest is admitted");
-
-  const clean = await runCapturingStart(
-    server,
-    ownerToken,
-    blobManifest,
-    holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
-  );
-  assert.equal(clean.thrown, null);
-  assert.ok(clean.start, "the connector received START");
-  assert.equal(clean.start?.protocol_capabilities instanceof Array, true);
-  assert.equal((clean.start?.protocol_capabilities as string[]).includes("BLOB"), false, "START does not offer BLOB");
-  assert.equal(clean.result?.status, "succeeded");
-
-  const blobLine = {
-    file: "blob-1.json",
-    key: "H",
-    mime_type: "application/json",
-    sha256: "a".repeat(64),
-    size_bytes: 2,
-    stream: "holdings",
-    type: "BLOB",
-  };
-  const withBlob = await runCapturingStart(server, ownerToken, blobManifest, [blobLine, ...holdingsRun([])]);
-  assert.ok(withBlob.start, "the connector received START");
-  const failure = withBlob.thrown instanceof Error ? withBlob.thrown.message : JSON.stringify(withBlob.result);
-  assert.match(failure, UNKNOWN_BLOB_MESSAGE_PATTERN);
 });
