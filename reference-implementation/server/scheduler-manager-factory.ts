@@ -451,6 +451,7 @@ function projectManagedControllerTerminalRun(
   return {
     checkpoint_summary: checkpointSummary,
     connector_error: connectorError,
+    failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
     failure_reason: failureReason,
     known_gaps: knownGaps,
     run_id: handle.run_id,

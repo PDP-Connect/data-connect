@@ -10075,6 +10075,7 @@ function createReferenceSchedulerManager({
           return {
             checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
+            failure_message: typeof terminalData.failure_message === "string" ? terminalData.failure_message : null,
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
             run_id: handle.run_id,

@@ -205,10 +205,11 @@ test("an unreadable config store records a typed terminal and retries with sched
   assert.equal(records[0]?.connectorError, null, "a runtime store failure is not a connector terminal claim");
   const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
   assert.equal(stored?.failureReason, "store_unreadable");
+  assert.equal(stored?.error, "The connector configuration store could not be read.");
 });
 
 test("automatic runs skip an invalid revision once and resume when the active revision changes", async (t) => {
-  const { launches, records, scheduler } = scheduleConfigLaunches(t);
+  const { connectorInstanceId, launches, records, scheduler, schedulerStore } = scheduleConfigLaunches(t);
   let active = { config: [], revision: 1 } as unknown as ConfigRevision;
   let reads = 0;
   t.mock.method(getDefaultConnectorInstanceConfigStore(), "getActiveRevision", () => {
@@ -236,6 +237,8 @@ test("automatic runs skip an invalid revision once and resume when the active re
   assert.equal(terminal?.event_type, "run.failed");
   assert.equal(terminal?.data?.reason, "invalid_active_config");
   assert.ok(String(terminal?.data?.failure_message).includes("Confirm a replacement"));
+  const stored = await schedulerStore.getLatestRunHistoryForConnection(connectorInstanceId, "failed");
+  assert.equal(stored?.error, "Confirm a replacement connector configuration before retrying.");
 
   active = { ...active, config: {}, revision: 2 };
   await waitForScheduledConfig(() => records.length >= 3);

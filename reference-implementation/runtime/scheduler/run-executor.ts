@@ -1388,6 +1388,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       connectorId,
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       connectorInstanceId: connectorInstanceId ?? null,
+      ...(runNowResult.failure_message ? { error: runNowResult.failure_message } : {}),
       failureReason: runNowResult.failure_reason || null,
       knownGaps: runNowResult.known_gaps || [],
       recordsEmitted: 0,

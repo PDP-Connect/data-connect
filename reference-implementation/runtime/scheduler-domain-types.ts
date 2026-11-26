@@ -378,6 +378,7 @@ interface ManagedConnectorRun {
   readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: ConnectorError | null;
+  readonly failure_message?: string | null;
   readonly failure_reason?: string | null;
   readonly known_gaps?: readonly Record<string, unknown>[] | null;
   readonly run_id: string;
