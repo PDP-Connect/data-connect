@@ -304,6 +304,48 @@ fn session_sent(requests: &[String]) -> bool {
         .any(|request| request.contains("pdpp_owner_session="))
 }
 
+#[test]
+fn repairing_the_same_origin_replaces_the_expired_session_and_relaunches() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(15);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    saved_with_key(data_root.path(), &origin, Some(key_text(&key)));
+    let sessions = attach::process_memory_store();
+    sessions
+        .save(&origin, "sess-expired-fixture")
+        .expect("save old session");
+    assert_eq!(
+        sessions.load(&origin),
+        Ok(Some("sess-expired-fixture".into()))
+    );
+
+    let outcome = body(
+        invoke_from(
+            &attach_window,
+            "attach_with_pairing_code",
+            connect_args(&origin, &key),
+        )
+        .expect("re-paired"),
+    );
+    let requests = server.join().expect("server");
+    assert!(requests[2].starts_with("post /owner/desktop-pairings/redeem "));
+    assert_eq!(outcome["origin"], json!(origin));
+    assert_eq!(sessions.load(&origin), Ok(Some("sess-paired".into())));
+    let saved = attach::load_attachment(&data_dir(data_root.path()))
+        .expect("read")
+        .expect("saved");
+    assert_eq!(saved.origin, origin);
+    assert_eq!(saved.server_key, Some(key_text(&key)));
+    assert_eq!(relaunches(&app), vec![Some("sess-paired".to_string())]);
+    sessions.delete(&origin).expect("remove fixture session");
+    assert_eq!(sessions.load(&origin), Ok(None), "no older session remains");
+}
+
 /// Contact order: the server is identified and proves its key, then the
 /// code is redeemed. The key is pinned in attach.json; the session is not.
 #[test]
