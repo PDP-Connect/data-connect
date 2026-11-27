@@ -403,6 +403,20 @@ test("boot listing timeout shows possibly live and offers a recovery check", asy
   });
 });
 
+test("an unrelated unconfirmed cleanup does not hide the earlier-address warning", async () => {
+  const handler = host({
+    "/state": ok({
+      ...idleState,
+      lifecycle: { cleanup: "unconfirmed", handle: { id: "route-1" } },
+      recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] },
+    }),
+  });
+  await withScreen(handler, async ({ mainText }) => {
+    assert.match(mainText(), /DataConnect couldn't confirm that your address closed\./);
+    assert.match(mainText(), /An earlier address may still work\. Check remote access before starting another route\./);
+  });
+});
+
 test("a failed earlier-address check shows the page's error and the button works again", async () => {
   const handler = host({
     "/state": ok({ ...idleState, recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] } }),

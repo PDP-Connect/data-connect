@@ -1220,7 +1220,7 @@ export function RemoteAccessSetting({
       {inventory?.providers.map(provider => provider.configuration.known === false ? (
         <EarlierSetupCard key={provider.providerId} provider={provider} migration={provider.configuration.migration} request={request} disabled={mutationBlocked} onChange={refresh} />
       ) : null)}
-      {journalWarning && state.lifecycle?.cleanup !== "unconfirmed" ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
+      {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
         <Button disabled={checkingEarlier || busy} onClick={() => void checkEarlierAddresses()}>Check earlier addresses</Button>
       ) : null}
