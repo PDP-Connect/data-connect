@@ -2254,8 +2254,15 @@ function safeAttachmentString(value: unknown, maxLength = 160): string | null {
   return trimmed;
 }
 
+// Plain e-mail addresses are masked on the whole value, before the final cut, so no
+// half-cut address can survive at the length bound.
+const ASSISTANCE_EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi;
+
 function sanitizeAssistanceTimelineString(value: unknown, maxLength = ASSISTANCE_TEXT_MAX): string | null {
-  const redacted = boundGapString(value, ASSISTANCE_TEXT_MAX);
+  const redacted = boundGapString(
+    typeof value === "string" ? value.replace(ASSISTANCE_EMAIL_PATTERN, "[REDACTED_EMAIL]") : value,
+    ASSISTANCE_TEXT_MAX
+  );
   if (!redacted) {
     return null;
   }

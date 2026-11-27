@@ -48,3 +48,20 @@ test("a 600-character sign-in instruction is kept whole and still redacted", () 
   );
   assert.equal(String(huge.message).length, 2000);
 });
+
+// Plain e-mail addresses are masked over the whole value, before the final cut, so a
+// half-cut address cannot leak at the 2,000-character boundary.
+test("assistance text masks plain e-mail addresses, also across the final cut", () => {
+  const build = (message: string) =>
+    String(
+      buildAssistanceRequestedDataFromInteraction(
+        { kind: "manual_action", message, request_id: "int_mail" },
+        { id: "run_mail", kind: "connector" }
+      ).message
+    );
+  const short = build("Sign in as dummy.person@example.test then continue.");
+  assert.ok(!short.includes("@"), short);
+  assert.ok(short.includes("[REDACTED_EMAIL]"));
+  const long = build(`${"a".repeat(1990)} dummy.person@example.test and more text`);
+  assert.ok(!long.includes("@") && !/dummy|example/.test(long), "no part of the address survives the cut");
+});
