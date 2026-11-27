@@ -32,6 +32,7 @@ export async function createReachabilityService(
     "readConfigurationDraft",
     "commitConfigurationDraft",
     "discardConfigurationDraft",
+    "discardEarlierConfigurationDraft",
     "clearConfigurationInput",
     "storeSecret",
     "discardSecret",

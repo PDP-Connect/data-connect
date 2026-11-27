@@ -57,9 +57,9 @@ export async function forwardReachability(
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const payload = (await response.json()) as { data?: unknown; error?: { code?: string; message?: string } };
+    const payload = (await response.json()) as { data?: unknown; error?: { code?: string; message?: string; reason?: unknown } };
     if (!response.ok) {
-      return { status: response.status, result: { ok: false, ...publicError(payload.error?.code, payload.error?.message) } };
+      return { status: response.status, result: { ok: false, ...publicError(payload.error?.code, payload.error?.message, "turn-on", payload.error?.reason) } };
     }
     return { status: 200, result: { ok: true, data: payload.data } };
   } catch {

@@ -250,9 +250,8 @@ export function projectCandidate(candidate: RouteCandidate) {
     providerId: candidate.providerId,
   };
 }
-export function projectInventory(list: ProviderList & { earlierSetup?: import("./configuration-compatibility.ts").EarlierSetup }) {
+export function projectInventory(list: ProviderList) {
   return {
-    earlierSetup: list.earlierSetup ?? null,
     catalogRevision: list.catalogRevision,
     observedAt: list.observedAt,
     providers: list.providers.map((provider: ProviderInventory) => ({
@@ -261,7 +260,22 @@ export function projectInventory(list: ProviderList & { earlierSetup?: import(".
           ([usage, availability]) => [usage, { reason: availability.reason, state: availability.state }]
         )
       ),
-      configuration: projectConfiguration(provider.configuration as ProviderConfiguration),
+      configuration: provider.configuration.known === false ? {
+        known: false as const,
+        reason: provider.configuration.reason,
+        migration: {
+          reason: provider.configuration.migration.reason,
+          candidates: provider.configuration.migration.candidates.map(candidate => ({
+            fromRegistryId: candidate.fromRegistryId,
+            draftIds: [...candidate.draftIds],
+            unaddressableSetupOperations: candidate.unaddressableSetupOperations ?? 0,
+          })),
+          ...(provider.configuration.migration.recovery ? { recovery: {
+            available: false as const,
+            reason: provider.configuration.migration.recovery.reason,
+          } } : {}),
+        },
+      } : { ...projectConfiguration(provider.configuration), known: true as const },
       facts: (provider.facts as Fact[]).map(projectFact),
       ...(provider.detection ? { detection: { checkedAt: provider.detection.checkedAt, fresh: provider.detection.fresh, refreshing: provider.detection.refreshing } } : {}),
       label: provider.label,
