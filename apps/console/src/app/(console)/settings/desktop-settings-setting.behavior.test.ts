@@ -8,9 +8,9 @@
  */
 
 import assert from "node:assert/strict"
+import { mock, test } from "node:test"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { JSDOM } from "jsdom"
-import { mock, test } from "node:test"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
@@ -142,6 +142,27 @@ async function mounted(run: (rig: Rig) => Promise<void>) {
 
 const IDS = ["autostart-enabled", "start-minimized", "close-to-tray"]
 
+test("desktop settings render as hairline rows without card boxes", async () => {
+  await mounted(async rig => {
+    const autostartRead = rig.autostartRead[0]
+    const appConfigRead = rig.appConfigRead[0]
+    assert.ok(autostartRead && appConfigRead)
+    autostartRead.resolve({ enabled: true, pending: false })
+    appConfigRead.resolve({ closeToTray: true, startMinimized: false })
+    await rig.settle()
+
+    for (const id of IDS) {
+      const label = rig.checkbox(id).closest("label")
+      assert.ok(label, `expected label for #${id}`)
+      const row = label.parentElement
+      assert.ok(row, `expected row wrapper for #${id}`)
+      // RAISE-RULES.md 3: rows use hairlines instead of bordered cards.
+      assert.match(row.className, /border-b/)
+      assert.doesNotMatch(row.className, /rounded|bg-muted/)
+    }
+  })
+})
+
 function assertNothingActionable(rig: Rig, why: string) {
   for (const id of IDS) {
     assert.equal(rig.checkbox(id).disabled, true, `${id} must be disabled ${why}`)
@@ -172,7 +193,10 @@ test("when one read fails and the other succeeds the section is failed, not part
     rig.autostartRead[0]!.resolve({ enabled: true, pending: false })
     rig.appConfigRead[0]!.reject(new Error("config unreadable"))
     await rig.settle()
-    assert.match(rig.container.textContent ?? "", /could not be read, so they are not\s+shown/)
+    const text = rig.container.textContent ?? ""
+    assert.match(text, /Desktop settings could not be read\./)
+    assert.doesNotMatch(text, /config unreadable/, "the raw error text must not reach the screen")
+    assert.equal(rig.container.querySelector('[role="alert"]'), null)
     assertNothingActionable(rig, "after a partial read failure")
     await interactWithAll(rig)
     assertNoWrites(rig)

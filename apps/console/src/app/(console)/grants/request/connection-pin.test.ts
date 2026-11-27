@@ -97,8 +97,8 @@ test("buildConnectionPinOptions derives an owner-meaningful default for never-re
   // A blank label and a bare-connector-type label are both fallbacks; they get
   // a stable `· account N` disambiguator instead of a placeholder/URL/id.
   const options = buildConnectionPinOptions({ id: "gmail", kind: "connector" }, [
-    { connection_id: "cin_a", connector_id: "gmail", display_name: null, streams: ["messages"] },
-    { connection_id: "cin_b", connector_id: "gmail", display_name: "gmail", streams: ["messages"] },
+    { connection_id: "cin_a", connector_id: "gmail", connector_display_name: "Gmail", display_name: null, streams: ["messages"] },
+    { connection_id: "cin_b", connector_id: "gmail", connector_display_name: "Gmail", display_name: "gmail", streams: ["messages"] },
   ]);
   assert.deepEqual(options, [
     { label: "Gmail · account 1", value: "cin_a" },
@@ -109,6 +109,14 @@ test("buildConnectionPinOptions derives an owner-meaningful default for never-re
     assert.notEqual(opt.label, opt.value);
     assert.doesNotMatch(opt.label, PLACEHOLDER_LABEL_RE);
   }
+});
+
+test("buildConnectionPinOptions uses a generic label when no connector name is available", () => {
+  const options = buildConnectionPinOptions({ id: "new_source", kind: "connector" }, [
+    { connection_id: "cin_a", connector_id: "new_source", display_name: "NEW_SOURCE", streams: ["messages"] },
+  ]);
+
+  assert.deepEqual(options, [{ label: "this data source", value: "cin_a" }]);
 });
 
 test("buildConnectionPinOptions keeps a lone connection's label undisambiguated", () => {

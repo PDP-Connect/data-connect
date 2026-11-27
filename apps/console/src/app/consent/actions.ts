@@ -14,28 +14,66 @@
  * implementation's own digest function rather than a second implementation —
  * keeps the two sides byte-identical by construction.
  *
- * Both actions return the client redirect URL rather than calling `redirect()`
- * themselves: the target is an external origin (the client's `redirect_uri`),
- * and the page navigates to it from the browser.
+ * Both actions return a serializable result rather than calling `redirect()`
+ * themselves: success carries the external client URL, and failure carries
+ * owner-facing copy for the page to show.
  */
 
 import { computeHostedMcpDecisionDigest } from "pdpp-reference-implementation/hosted-mcp-decision-digest";
 import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
-import type { ConsentDecision } from "@/components/consent-screen/consent-screen-model.ts";
+import type { ConsentActionResult, ConsentDecision } from "@/components/consent-screen/consent-screen-model.ts";
 
 interface ChallengeError {
   readonly error?: string;
   readonly error_description?: string;
 }
 
+const OAUTH_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  access_denied: "This request was declined. Nothing was shared.",
+  expired_token: "This request is no longer available. Nothing was shared.",
+  invalid_client: "This app could not be verified. Nothing was shared.",
+  invalid_grant: "This request is no longer available. Nothing was shared.",
+  invalid_request: "This request is no longer valid. Nothing was shared.",
+  invalid_scope: "The requested data is no longer available. Nothing was shared.",
+  not_found: "This request is no longer available. Nothing was shared.",
+  server_error: "This request could not be completed. Nothing was shared.",
+  temporarily_unavailable: "This service is temporarily unavailable. Nothing was shared.",
+  unauthorized_client: "This app is not allowed to request this data. Nothing was shared.",
+  unsupported_response_type: "This app cannot request access in this way. Nothing was shared.",
+};
+
+const GENERIC_FAILURE_MESSAGE = "This request could not be completed. Nothing was shared.";
+
 /**
- * Posts to the challenge API and returns the redirect the AS issued.
+ * The AS writes its owner-facing reasons as one short sentence ("Choose an end
+ * date in the future."), while internal failures carry terse or technical text
+ * (exception messages, stacks, identifiers, URLs). Only the first kind is shown.
+ */
+function isOwnerSentence(description: string): boolean {
+  return (
+    description.length <= 240 &&
+    /^[A-Z][^\n]*[.?!]$/u.test(description) &&
+    !/^(?:Error|[A-Za-z]+Error):/u.test(description) &&
+    !/[a-z]+:\/\/|www\.|[\w-]+\.[a-z]{2,}\//iu.test(description) &&
+    !/\b\w+_\w+\b|[{}<>`\\]/u.test(description)
+  );
+}
+
+function safeFailureMessage(detail: ChallengeError | null): string {
+  const description = typeof detail?.error_description === "string" ? detail.error_description.trim() : "";
+  if (isOwnerSentence(description)) return description;
+  const code = typeof detail?.error === "string" ? detail.error : undefined;
+  const mappedCode = code && Object.hasOwn(OAUTH_ERROR_MESSAGES, code) ? OAUTH_ERROR_MESSAGES[code] : undefined;
+  return mappedCode ?? GENERIC_FAILURE_MESSAGE;
+}
+
+/**
+ * Posts to the challenge API and returns either the AS redirect or safe failure copy.
  *
- * A non-2xx carries the AS's own owner-facing sentence (stale digest, empty
- * selection, bad expiry). Surfacing that text rather than a status code is
- * deliberate: the AS is the only party that knows why the approval was
- * refused, and the owner is the one who has to act on it.
+ * A non-2xx may carry the AS's reason for refusing the decision. A reason
+ * written as an owner-facing sentence is shown as is; otherwise known OAuth
+ * codes map to plain copy, and anything else gets a generic sentence.
  *
  * This server-to-server JSON request carries the owner session, but no
  * `_csrf` token. The AS intentionally exempts application/json from its CSRF
@@ -43,7 +81,11 @@ interface ChallengeError {
  * still require a valid cookie/form token pair. The JSON exemption relies on
  * browsers requiring permission through CORS preflight for cross-origin JSON.
  */
-async function postChallenge(challenge: string, action: "accept" | "reject", body: unknown): Promise<string> {
+async function postChallenge(
+  challenge: string,
+  action: "accept" | "reject",
+  body: unknown
+): Promise<ConsentActionResult> {
   await verifyDashboardSession();
   const response = await fetch(
     `${getAsInternalUrl()}/oauth/authorize/consent-challenges/${encodeURIComponent(challenge)}/${action}`,
@@ -59,23 +101,21 @@ async function postChallenge(challenge: string, action: "accept" | "reject", bod
 
   if (!response.ok) {
     const detail = (await response.json().catch(() => null)) as ChallengeError | null;
-    throw new Error(
-      detail?.error_description || `This request could not be completed (${response.status}). Nothing was shared.`
-    );
+    return { ok: false, message: safeFailureMessage(detail) };
   }
 
   const { redirect_url } = (await response.json()) as { redirect_url?: string };
   if (!redirect_url) {
-    throw new Error("The server approved this request but did not say where to return. Nothing was shared.");
+    return { ok: false, message: GENERIC_FAILURE_MESSAGE };
   }
-  return redirect_url;
+  return { ok: true, redirectUrl: redirect_url };
 }
 
 export async function acceptConsentChallenge(
   challenge: string,
   clientId: string,
   decision: ConsentDecision
-): Promise<string> {
+): Promise<ConsentActionResult> {
   // The digest covers exactly what the screen showed the owner: the client,
   // the access mode, and every chosen stream grouped under its source. Sorted
   // by the digest function itself, so the console never has to match the
@@ -112,6 +152,6 @@ export async function acceptConsentChallenge(
   });
 }
 
-export async function rejectConsentChallenge(challenge: string): Promise<string> {
+export async function rejectConsentChallenge(challenge: string): Promise<ConsentActionResult> {
   return postChallenge(challenge, "reject", {});
 }

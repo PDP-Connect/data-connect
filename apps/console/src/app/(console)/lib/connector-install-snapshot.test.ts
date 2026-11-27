@@ -3,12 +3,21 @@
 
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import * as React from "react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { buildAddSourceList } from "../sources/add/add-source-list-model.ts";
+import { AddSourceList } from "../sources/add/add-source-list.tsx";
+import { appleHealth, claudeCode } from "../sources/add/add-flow-fixtures.ts";
+
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 import { connectorInstallCatalogFixture, connectorInstallStatusFixture } from "./connector-install-fixtures.ts";
 
 let catalogPayload: unknown = connectorInstallCatalogFixture;
 let statusPayload: unknown = connectorInstallStatusFixture;
 /** HTTP status the fake server answers for a route suffix; unlisted routes answer 200. */
 let failingRoutes: Record<string, number> = {};
+let failureBody = "not served";
 /** Milliseconds the fake server waits before answering a route suffix. */
 let routeDelays: Record<string, number> = {};
 
@@ -38,7 +47,7 @@ globalThis.fetch = (async (url: string | URL | Request) => {
   }
   const failing = Object.entries(failingRoutes).find(([suffix]) => path.endsWith(suffix));
   if (failing) {
-    return new Response("not served", { status: failing[1] });
+    return new Response(failureBody, { status: failing[1] });
   }
   const body = path.endsWith("/status")
     ? statusPayload
@@ -179,3 +188,51 @@ for (const order of ["status first", "catalog first"]) {
     }
   });
 }
+
+
+test("a busy catalog with successful status marks the list not fresh", async () => {
+  const { getConnectorInstallSnapshot } = await client;
+  statusPayload = connectorInstallStatusFixture;
+  catalogPayload = connectorInstallCatalogFixture;
+  failureBody = "Another connector catalog refresh is in progress.";
+  failingRoutes = { "/catalog": 500 };
+  try {
+    const snapshot = await getConnectorInstallSnapshot();
+    assert.ok(snapshot);
+    assert.equal(snapshot.catalogUnavailableReason, "transient_busy");
+    assert.deepEqual(snapshot.catalogNotFresh, { fetchedAt: null });
+    assert.equal(snapshot.status.length, STATUS_ROWS.length);
+  } finally {
+    failingRoutes = {};
+    failureBody = "not served";
+  }
+  const fresh = await getConnectorInstallSnapshot();
+  assert.equal(fresh?.catalogNotFresh, undefined);
+});
+
+
+test("a busy catalog on a fresh Core still renders installable services and the not-fresh notice", async () => {
+  const { getConnectorInstallSnapshot } = await client;
+  statusPayload = { ...connectorInstallStatusFixture, data: [] };
+  failureBody = "Another connector catalog refresh is in progress.";
+  failingRoutes = { "/catalog": 500 };
+  try {
+    const snapshot = await getConnectorInstallSnapshot();
+    assert.ok(snapshot);
+    assert.deepEqual(snapshot.status, []);
+    const model = buildAddSourceList({
+      catalog: [appleHealth, claudeCode],
+      catalogTransientlyUnavailable: snapshot.catalogUnavailableReason !== undefined,
+      existingConnectionIds: {},
+      lifecycleFor: () => ({ catalog: null, installed: null }),
+    });
+    assert.equal(model.rows.length, 2, "uninstalled services survive a busy catalog leg");
+    const html = renderToStaticMarkup(createElement(AddSourceList, { model, notFresh: snapshot.catalogNotFresh, query: "" }));
+    assert.match(html, /data-testid="add-source-row-claude-code"/);
+    assert.match(html, /data-testid="add-source-row-apple-health"/);
+    assert.match(html, /data-testid="add-source-not-fresh"/);
+  } finally {
+    failingRoutes = {};
+    failureBody = "not served";
+  }
+});

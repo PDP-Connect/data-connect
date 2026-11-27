@@ -7,7 +7,7 @@ import { afterEach, test } from "node:test";
 import userEvent from "@testing-library/user-event";
 import { JSDOM } from "jsdom";
 import { PathnameContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime";
-import { act, createElement, type ReactNode } from "react";
+import React, { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 interface BrowserGlobals {
@@ -31,6 +31,9 @@ function globalValue(name: string, dom: JSDOM, windowObject: Record<string, unkn
   if (name === "IS_REACT_ACT_ENVIRONMENT") {
     return true;
   }
+  if (name === "React") {
+    return React;
+  }
   return windowObject[name];
 }
 
@@ -38,8 +41,14 @@ function installBrowserGlobals(): BrowserGlobals {
   const dom = new JSDOM("<!doctype html><html data-theme=dark><body></body></html>", {
     url: "http://localhost/",
   });
+  Object.defineProperty(dom.window, "innerWidth", { configurable: true, value: 390 });
   const style = dom.window.document.createElement("style");
-  style.textContent = readFileSync(new URL("./shell.css", import.meta.url), "utf8");
+  style.textContent = [
+    readFileSync(new URL("./shell.css", import.meta.url), "utf8"),
+    // JSDOM does not apply the shell's max-width media rule.
+    ".rr-head { display: flex; }",
+    ".rr-menu-btn { display: inline-flex; }",
+  ].join("\n");
   dom.window.document.head.append(style);
   const host = dom.window.document.createElement("div");
   dom.window.document.body.append(host);
@@ -81,6 +90,7 @@ function installBrowserGlobals(): BrowserGlobals {
     "requestAnimationFrame",
     "cancelAnimationFrame",
     "IS_REACT_ACT_ENVIRONMENT",
+    "React",
   ];
   for (const name of globals) {
     previous.set(name, Object.getOwnPropertyDescriptor(globalObject, name));
@@ -119,7 +129,7 @@ function app(children: ReactNode) {
 }
 
 async function pressTab(user: ReturnType<typeof userEvent.setup>, options?: { shift?: boolean }) {
-  await user.tab(options);
+  await act(async () => user.tab(options));
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
 }
 
@@ -146,7 +156,7 @@ test("mobile drawer opens as a named dialog, traps focus, and restores the trigg
   const trigger = host.querySelector<HTMLButtonElement>(".rr-menu-btn");
   assert.ok(trigger);
   trigger.focus();
-  act(() => trigger.click());
+  await act(async () => user.click(trigger));
   await settle();
 
   const dialog = currentBrowser.dom.window.document.querySelector<HTMLElement>('[role="dialog"]');
@@ -195,12 +205,12 @@ test("mobile drawer opens as a named dialog, traps focus, and restores the trigg
   assert.equal(currentBrowser.dom.window.document.activeElement?.closest('[role="dialog"]'), dialog);
   assert.notEqual(currentBrowser.dom.window.document.activeElement, outside);
 
-  act(() => {
-    dialog.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
-  });
+  await act(async () => user.keyboard("{Escape}"));
   await settle();
-  assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
-  assert.equal(currentBrowser.dom.window.document.activeElement, trigger);
+  const dialogAfterEscape = currentBrowser.dom.window.document.querySelector('[role="dialog"]');
+  assert.equal(dialogAfterEscape, null);
+  const activeAfterEscape = currentBrowser.dom.window.document.activeElement;
+  assert.equal(activeAfterEscape, trigger);
 });
 
 test("backdrop and close button dismiss the drawer", async () => {
@@ -234,4 +244,94 @@ test("backdrop and close button dismiss the drawer", async () => {
   });
   await settle();
   assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
+});
+
+test("search in the drawer closes it before opening the jump dialog", async () => {
+  const { host } = installBrowserGlobals();
+  const currentBrowser = browser;
+  assert.ok(currentBrowser);
+  const jumps: string[] = [];
+  const { RecordroomShell } = await import("./shell-frame.tsx");
+  act(() => {
+    currentBrowser.root.render(
+      app(createElement(RecordroomShell, { onJump: () => jumps.push("opened") }, createElement("p", null, "Content")))
+    );
+  });
+
+  const trigger = host.querySelector<HTMLButtonElement>(".rr-menu-btn");
+  assert.ok(trigger);
+  act(() => trigger.click());
+  await settle();
+
+  const dialog = currentBrowser.dom.window.document.querySelector<HTMLElement>('[role="dialog"]');
+  assert.ok(dialog);
+  const search = dialog.querySelector<HTMLButtonElement>(".rr-search-button");
+  assert.ok(search);
+  await act(async () => {
+    await userEvent.setup({ delay: null, document: currentBrowser.dom.window.document }).click(search);
+  });
+  await settle();
+
+  assert.deepEqual(jumps, ["opened"]);
+  assert.equal(currentBrowser.dom.window.document.querySelector('[role="dialog"]'), null);
+});
+
+test("touch drag tracks an inert copy before release and commits the accessible dialog afterward", async () => {
+  const { host } = installBrowserGlobals();
+  const currentBrowser = browser;
+  assert.ok(currentBrowser);
+  const { document } = currentBrowser.dom.window;
+  const { RecordroomShell } = await import("./shell-frame.tsx");
+  act(() =>
+    currentBrowser.root.render(
+      app(createElement(RecordroomShell, null, createElement("button", { type: "button" }, "Page action")))
+    )
+  );
+  const content = host.querySelector<HTMLElement>(".rr-content");
+  assert.ok(content);
+  const eventWindow = currentBrowser.dom.window;
+  function pointer(type: string, x: number, y: number, time: number) {
+    const event = new eventWindow.Event(type, {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperties(event, {
+      pointerId: { value: 1 },
+      pointerType: { value: "touch" },
+      isPrimary: { value: true },
+      clientX: { value: x },
+      clientY: { value: y },
+      timeStamp: { value: time },
+    });
+    act(() => content?.dispatchEvent(event));
+  }
+  pointer("pointerdown", 100, 100, 0);
+  pointer("pointermove", 108, 100, 20);
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
+  pointer("pointermove", 220, 100, 300);
+  const preview = document.querySelector<HTMLElement>(".rr-drag-panel");
+  assert.ok(preview);
+  assert.equal(preview.style.transform, "translateX(-180px)");
+  assert.equal(preview.getAttribute("aria-hidden"), "true");
+  assert.equal(preview.hasAttribute("inert"), true);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.equal(document.querySelector<HTMLElement>(".rr-drag-backdrop")?.style.opacity, "0.4");
+  const touchMove = new currentBrowser.dom.window.Event("touchmove", {
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.defineProperty(touchMove, "touches", { value: [{}] });
+  content.dispatchEvent(touchMove);
+  assert.equal(touchMove.defaultPrevented, true);
+  pointer("pointermove", 270, 100, 600);
+  pointer("pointerup", 270, 100, 800);
+  await settle();
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
+  assert.ok(document.querySelector('[role="dialog"][aria-label="Primary navigation"]'));
+  pointer("pointerdown", 270, 100, 1000);
+  pointer("pointermove", 100, 100, 1500);
+  pointer("pointerup", 100, 100, 1700);
+  await settle();
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.equal(document.querySelector(".rr-drag-panel"), null);
 });

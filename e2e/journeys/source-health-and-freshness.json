@@ -1,0 +1,15 @@
+{
+  "id": "source-health-and-freshness",
+  "name": "Source and run health overview",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/syncs",
+      "readyText": "Sync history",
+      "desktopReadyHeading": "Sync history",
+      "phoneReadyHeading": "Sync history",
+      "assertText": "Sync history"
+    }
+  ]
+}

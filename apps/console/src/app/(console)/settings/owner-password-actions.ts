@@ -119,7 +119,7 @@ export async function requestReauthenticatedOwnerPasswordWindowAction(): Promise
     grantId: reauth.grantId,
     purpose: "change",
   })
-  revalidatePath("/settings")
+  revalidatePath("/settings", "layout")
   return { ok: true, linuxPolkitUnverified: reauth.linuxPolkitUnverified }
 }
 
@@ -165,7 +165,7 @@ export async function changeOwnerPasswordAction(
     })
   )
   if (response.status === 204) {
-    revalidatePath("/settings")
+    revalidatePath("/settings", "layout")
     return { ok: true }
   }
 

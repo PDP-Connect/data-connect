@@ -27,7 +27,7 @@ async function postOwnerSessionAction(path: string): Promise<ActionResult> {
     await redirectToOwnerLogin("/settings");
   }
   if (response.status === 204) {
-    revalidatePath("/settings");
+    revalidatePath("/settings", "layout");
     return { ok: true };
   }
   const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;

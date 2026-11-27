@@ -6,6 +6,7 @@
 import { buttonVariants } from "@pdpp/brand-react";
 import { useEffect, useState } from "react";
 import { createRetryCounter, nextRetryDelayMs } from "./components/read-resilient-retry.ts";
+import { RecordroomShellWithPalette } from "./components/recordroom-shell-with-palette.tsx";
 import { ListLoadingSkeleton } from "./components/route-loading.tsx";
 
 /**
@@ -32,16 +33,16 @@ import { ListLoadingSkeleton } from "./components/route-loading.tsx";
  * So this boundary retries quietly (same skeleton, no failure copy, capped
  * backoff) for a BOUNDED number of attempts — enough to absorb the ordinary
  * transient race — and only after that repeatedly fails does it fall back to
- * the pre-existing "Something went wrong" / Try again / Sign in again panel.
+ * the "This page could not be loaded." / Try again / Sign in again panel.
  * That is strictly no worse than the boundary's prior behavior (which showed
  * that panel immediately, every time) and materially better for the common
  * case: a lone stream hiccup anywhere in the dashboard no longer flashes
  * failure copy at the owner.
  *
  * Self-contained on purpose: it must not import server-only modules. The
- * dashboard shell (`RecordroomShellWithPalette`) transitively pulls in
- * `lib/owner-token.ts`, which is `server-only`; importing it here would break
- * the client build. See https://nextjs.org/docs/app/getting-started/error-handling.
+ * dashboard shell (`RecordroomShellWithPalette`) is a client component whose
+ * imports are client-safe, so both phases render inside the shared frame and
+ * the menu stays. See https://nextjs.org/docs/app/getting-started/error-handling.
  */
 
 /** Bounded: absorb a handful of quiet retries before conceding this may be a real fault. */
@@ -83,36 +84,49 @@ export default function DashboardError({ error, reset }: { error: Error & { dige
 
   if (!gaveUp) {
     return (
-      <div data-testid="dashboard-read-recovering">
-        <ListLoadingSkeleton label="DataConnect" rows={6} />
-      </div>
+      <RecordroomShellWithPalette>
+        <div data-testid="dashboard-read-recovering">
+          <ListLoadingSkeleton label="DataConnect" rows={6} />
+        </div>
+      </RecordroomShellWithPalette>
     );
   }
 
+  // The raw message and digest stay folded: they help an operator, not the person.
+  const details = [error.message, error.digest ? `Digest: ${error.digest}` : null].filter(Boolean).join("\n");
+
   return (
-    <main className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-start justify-center gap-3 px-6 py-16">
-      <p className="pdpp-eyebrow text-muted-foreground/60 uppercase tracking-widest">DataConnect</p>
-      <h1 className="pdpp-heading text-foreground">Something went wrong</h1>
-      <p className="pdpp-body max-w-prose text-muted-foreground">
-        DataConnect ran into an unexpected error. Your data is safe — this is a display failure, not a change. Try again or
-        sign back in if the problem persists.
-      </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          className={buttonVariants({ size: "sm", variant: "default" })}
-          onClick={() => {
-            retryCounter.attempts = 0;
-            setGaveUp(false);
-            reset();
-          }}
-          type="button"
-        >
-          Try again
-        </button>
-        <a className={buttonVariants({ size: "sm", variant: "ghost" })} href="/owner/login?return_to=%2F">
-          Sign in again
-        </a>
+    <RecordroomShellWithPalette>
+      <div className="flex max-w-xl flex-col items-start gap-3 py-16">
+        <h1 className="pdpp-heading text-foreground">This page could not be loaded.</h1>
+        <p className="pdpp-body max-w-prose text-muted-foreground">
+          Try again. If it keeps happening, check that DataConnect is running.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            className={buttonVariants({ size: "sm", variant: "default" })}
+            onClick={() => {
+              retryCounter.attempts = 0;
+              setGaveUp(false);
+              reset();
+            }}
+            type="button"
+          >
+            Try again
+          </button>
+          <a className={buttonVariants({ size: "sm", variant: "ghost" })} href="/owner/login?return_to=%2F">
+            Sign in again
+          </a>
+        </div>
+        {details ? (
+          <details className="mt-2 w-full">
+            <summary className="pdpp-caption cursor-pointer text-muted-foreground">Details</summary>
+            <pre className="mt-2 max-w-full overflow-x-auto whitespace-pre-wrap font-mono text-muted-foreground text-xs">
+              {details}
+            </pre>
+          </details>
+        ) : null}
       </div>
-    </main>
+    </RecordroomShellWithPalette>
   );
 }

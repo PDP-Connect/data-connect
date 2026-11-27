@@ -7,7 +7,8 @@ import {
   listConnectorSummaries,
   type RefConnectorRetainedCountSummary,
 } from "../lib/ref-client.ts";
-import type { ExistingSourceSetupLink } from "./source-setup-catalog.tsx";
+import { connectionDisplayName } from "../lib/connection-display-name.ts";
+import type { ExistingSourceSetupLink, UncataloguedSourceSetupLink } from "./existing-source-links.ts";
 
 function latestImportFacts(coverage: RefConnectorRetainedCountSummary["acquisition_coverage"]): {
   file: string | null;
@@ -24,7 +25,7 @@ function toExistingSourceSetupLink(row: RefConnectorRetainedCountSummary): Exist
   const importFacts = latestImportFacts(row.acquisition_coverage);
   return {
     connectionId: row.connector_instance_id,
-    displayName: row.display_name,
+    displayName: connectionDisplayName(row.display_name, row.connector_display_name, row.connector_id),
     latestImportFile: importFacts.file,
     latestImportStatus: importFacts.status,
     status: row.status,
@@ -111,6 +112,7 @@ export interface ExistingSourcesByConnectorCatalog {
    * says so, rather than failing the whole page.
    */
   readonly truncated: boolean;
+  readonly uncataloguedSources: readonly UncataloguedSourceSetupLink[];
 }
 
 /** Traverse the owner feed once, then select the requested catalog identities. */
@@ -118,13 +120,22 @@ export async function existingSourcesByConnectorCatalog(
   connectorIds: readonly string[]
 ): Promise<ExistingSourcesByConnectorCatalog> {
   if (connectorIds.length === 0) {
-    return { byConnector: {}, truncated: false };
+    return { byConnector: {}, truncated: false, uncataloguedSources: [] };
   }
   const catalog = new Set(connectorIds);
   const { rows, truncated } = await fetchRetainedCountSummaries(undefined, { tolerateRefusal: true });
   const byConnector: Record<string, ExistingSourceSetupLink[]> = {};
+  const uncataloguedSources: UncataloguedSourceSetupLink[] = [];
   for (const row of rows) {
-    if (!(catalog.has(row.connector_id) && isLive(row))) {
+    if (!isLive(row)) {
+      continue;
+    }
+    if (!catalog.has(row.connector_id)) {
+      uncataloguedSources.push({
+        connectorId: row.connector_id,
+        connectionId: row.connector_instance_id,
+        displayName: connectionDisplayName(row.display_name, row.connector_display_name, row.connector_id),
+      });
       continue;
     }
     const existing = byConnector[row.connector_id];
@@ -139,5 +150,6 @@ export async function existingSourcesByConnectorCatalog(
       a.displayName.localeCompare(b.displayName)
     );
   }
-  return { byConnector, truncated };
+  uncataloguedSources.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return { byConnector, truncated, uncataloguedSources };
 }

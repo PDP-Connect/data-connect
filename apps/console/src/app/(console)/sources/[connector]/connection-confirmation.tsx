@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatRelative } from "@pdpp/display";
 import React from "react";
 import {
   type boundaryClaimGaps,
@@ -14,6 +15,7 @@ import {
   pendingLossAcknowledgements,
 } from "../../lib/generic-confirmation-evidence.ts";
 import type { RefAcknowledgedLossRecord, RefCoverageHorizon } from "../../lib/ref-client.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 type ConfirmationAction = (formData: FormData) => void | Promise<void>;
 
@@ -29,7 +31,21 @@ interface Props {
 }
 
 function formatValue(value: string | null | undefined): string {
-  return value?.trim() ? value : "Not supplied";
+  if (!value?.trim()) return "Not supplied";
+  if (!/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value)) return formatChoice(value);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  const now = Date.now();
+  if (Math.abs(now - date.getTime()) < 7 * 24 * 60 * 60 * 1000) return formatRelative(date, now);
+  return new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeZone: "UTC" }).format(date);
+}
+
+function formatInputDate(value: string | null | undefined): string {
+  return value && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : "";
+}
+
+function formatChoice(value: string): string {
+  return value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function EvidenceField({ label, value }: { label: string; value: string | null | undefined }) {
@@ -48,11 +64,11 @@ function HorizonEvidence({ horizons }: { horizons: readonly RefCoverageHorizon[]
 
   return (
     <div className="flex flex-col gap-3">
-      <h3 className="pdpp-body font-medium text-foreground">Recorded coverage boundaries</h3>
+      <h3 className="pdpp-body font-medium text-foreground">Recorded history boundaries</h3>
       {horizons.map((horizon) => (
-        <div className="rounded-md border border-border p-3" key={horizon.horizonId}>
+    <div className="border-t border-border pt-3" key={horizon.horizonId}>
           <dl className="grid gap-3 sm:grid-cols-2">
-            <EvidenceField label="Stream" value={horizon.stream} />
+            <EvidenceField label="Kind of record" value={horizon.stream} />
             <EvidenceField label="Earliest available" value={horizon.earliestAvailable} />
             <EvidenceField label="Basis" value={horizon.basis} />
             <EvidenceField label="Reason" value={horizon.reason} />
@@ -81,12 +97,12 @@ function HorizonForm({
   candidate: ReturnType<typeof boundaryClaimGaps>[number];
 }) {
   return (
-    <form action={action} className="flex flex-col gap-3 rounded-md border border-border p-4">
+    <form action={action} className="flex flex-col gap-3 border-t border-border pt-4">
       <input name="connection_id" type="hidden" value={connectionId} />
       <input name="stream" type="hidden" value={stream} />
       <div>
         <h3 className="pdpp-body font-medium text-foreground">Confirm {stream} history boundary</h3>
-        <p className="pdpp-caption mt-1 text-muted-foreground">{coverageHorizonCandidateDisclosure(candidate)}</p>
+        <p className="pdpp-caption mt-1 text-muted-foreground">{coverageHorizonCandidateDisclosure(candidate).replace("the connection's health", "the data source's health")}</p>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground">
@@ -102,7 +118,7 @@ function HorizonForm({
             </option>
             {COVERAGE_HORIZON_BASES.map((basis) => (
               <option key={basis} value={basis}>
-                {basis}
+                {formatChoice(basis)}
               </option>
             ))}
           </select>
@@ -120,7 +136,7 @@ function HorizonForm({
             </option>
             {COVERAGE_HORIZON_REASONS.map((reason) => (
               <option key={reason} value={reason}>
-                {reason}
+                {formatChoice(reason)}
               </option>
             ))}
           </select>
@@ -130,9 +146,9 @@ function HorizonForm({
         Earliest available (optional)
         <input
           className="rounded-md border border-border bg-background px-2 py-1.5 text-foreground"
-          defaultValue={candidate.earliestAvailable ?? ""}
+          defaultValue={formatInputDate(candidate.earliestAvailable)}
           name="earliest_available"
-          type="text"
+          type="date"
         />
       </label>
       <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground">
@@ -145,7 +161,7 @@ function HorizonForm({
       </label>
       <div>
         <button className="rounded-md border border-border px-3 py-2 font-medium text-foreground text-sm" type="submit">
-          Record coverage boundary
+          Record history boundary
         </button>
       </div>
     </form>
@@ -154,14 +170,14 @@ function HorizonForm({
 
 function LossEvidence({ record }: { record: RefAcknowledgedLossRecord }) {
   return (
-    <div className="rounded-md border border-border p-3">
+    <div className="border-t border-border pt-3">
       <h3 className="pdpp-body font-medium text-foreground">Recorded loss acknowledgement</h3>
       <dl className="mt-3 grid gap-3 sm:grid-cols-2">
         <EvidenceField label="Cause" value={record.cause} />
         <EvidenceField label="Scope" value={record.scope} />
         <EvidenceField label="Acknowledged by" value={record.acknowledgedBy} />
         <EvidenceField label="Acknowledged at" value={record.acknowledgedAt} />
-        <EvidenceField label="Streams" value={record.streams?.join(", ") || "All streams"} />
+        <EvidenceField label="Kinds of record" value={record.streams?.join(", ") || "All kinds of record"} />
         <EvidenceField label="Note" value={record.note} />
       </dl>
     </div>
@@ -180,12 +196,12 @@ function LossForm({
   candidate: ReturnType<typeof pendingLossAcknowledgements>[number];
 }) {
   return (
-    <form action={action} className="flex flex-col gap-3 rounded-md border border-border p-4">
+    <form action={action} className="flex flex-col gap-3 border-t border-border pt-4">
       <input name="connection_id" type="hidden" value={connectionId} />
       <input name="stream" type="hidden" value={stream} />
       <div>
         <h3 className="pdpp-body font-medium text-foreground">Acknowledge missing {stream} data</h3>
-        <p className="pdpp-caption mt-1 text-muted-foreground">{lossAcknowledgementCandidateDisclosure(candidate)}</p>
+        <p className="pdpp-caption mt-1 text-muted-foreground">{lossAcknowledgementCandidateDisclosure(candidate).replace("the connection's health", "the data source's health")}</p>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground">
@@ -201,7 +217,7 @@ function LossForm({
             </option>
             {LOSS_CAUSES.map((cause) => (
               <option key={cause} value={cause}>
-                {cause}
+                {formatChoice(cause)}
               </option>
             ))}
           </select>
@@ -219,7 +235,7 @@ function LossForm({
             </option>
             {LOSS_SCOPES.map((scope) => (
               <option key={scope} value={scope}>
-                {scope}
+                {formatChoice(scope)}
               </option>
             ))}
           </select>
@@ -280,21 +296,28 @@ export function ConnectionConfirmation({
 
   return React.createElement(
     "section",
-    { className: "flex flex-col gap-4", id: "coverage-confirmation" },
+    { className: "flex flex-col gap-4", id: "history-confirmation" },
     <div>
-      <h2 className="pdpp-heading text-foreground">Coverage and loss confirmation</h2>
+      <h2 className="pdpp-heading text-foreground">History and loss confirmation</h2>
       <p className="pdpp-caption mt-1 text-muted-foreground">
-        Review durable backend evidence and record your acknowledgement. These records do not change retained data or
-        connection health.
+        Review the saved evidence and record your acknowledgement. These records do not change retained data or
+        data source health.
       </p>
     </div>,
     error ? (
-      <div className="pdpp-caption mb-4 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5 text-destructive">
-        {error}
+      <div className="pdpp-caption mb-4 text-destructive" role="alert">
+        <p>{ACTION_ERROR_COPY}</p>
+        <details className="mt-1 text-muted-foreground">
+          <summary className="cursor-pointer">Details</summary>
+          <code className="mt-1 block break-words font-mono text-xs">{error}</code>
+        </details>
       </div>
     ) : null,
     message ? (
-      <div className="pdpp-caption mb-4 rounded-md border border-border px-4 py-2.5 text-foreground">{message}</div>
+      <details className="pdpp-caption mb-4">
+        <summary className="cursor-pointer text-muted-foreground">Details</summary>
+        <code className="mt-1 block break-words font-mono text-xs">{message}</code>
+      </details>
     ) : null,
     pendingBoundaryGaps.map((candidate) => (
       <HorizonForm

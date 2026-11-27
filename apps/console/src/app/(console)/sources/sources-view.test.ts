@@ -4,144 +4,392 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+import React, { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { sourceStatusWords } from "../lib/source-status-words.ts";
+import { SourceRowStatus } from "./source-row-status.tsx";
+import { buildSourcesDemoSummaries, statusSampleConnectionId } from "./sources-demo-data.ts";
+import { SourcesView } from "./sources-view.tsx";
+import { filterSourcesForList, orderSourcesForList, toSourcesView } from "./sources-view-model.ts";
 
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const SOURCES_VIEW_FILE = `${HERE}sources-view.tsx`;
-const INSTANCE_PASSPORT_KEY_RE = /<InstancePassport[\s\S]*key=\{selected\.id\}/;
-const TOAST_STATE_RE = /type ToastState =[\s\S]*runHref\?: string; runId\?: string/;
-const TOAST_RUN_HREF_RE = /runHref: res\.run_id \? `\/syncs\/\$\{encodeURIComponent\(res\.run_id\)\}` : undefined/;
-const TOAST_LINK_RE = /<Link href=\{toast\.runHref\}>Open run \{toast\.runId\}/;
-const ALREADY_RUNNING_MESSAGE_RE = /message: res\.message/;
-const ALREADY_RUNNING_RUN_HREF_RE =
-  /runHref: res\.run_id \? `\/syncs\/\$\{encodeURIComponent\(res\.run_id\)\}` : undefined/;
-const ALREADY_RUNNING_RUN_ID_RE = /runId: res\.run_id/;
-const RUN_VERDICT_KIND_RE =
-  /primaryVerdictAction\.kind === "refresh_now" \|\| primaryVerdictAction\.kind === "retry_gap"/;
-const RUN_VERDICT_LABEL_RE = /\{isPending \? "Starting.*" : primaryVerdictAction\.cta\}/;
-const OWNER_VERDICT_ACTION_TESTID_RE = /data-testid="sources-owner-verdict-action"/;
-const OWNER_VERDICT_ACTION_HREF_RE = /href=\{instance\.detailHref\}/;
-const OWNER_VERDICT_ACTION_TITLE_RE = /Open source details to complete this owner action/;
-const SOURCE_ROW_MARKER_RE = /data-pdpp-source-row=\{instance\.connectionId \?\? instance\.id\}/g;
-const SOURCE_SCOPE_MARKER_RE = /data-pdpp-source-scope=\{instance\.sourceScope\}/g;
-const STREAM_ROW_MARKER_RE =
-  /data-connection-id=\{connectionId\}[\s\S]*data-pdpp-stream-row="true"[\s\S]*data-stream-name=\{stream\.name\}/;
-
-test("SourcesView resets passport-local state when the selected source changes", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  assert.match(src, INSTANCE_PASSPORT_KEY_RE);
+const NOW = new Date("2026-11-24T12:00:00.000Z");
+const BANNED_WORDS_RE =
+  /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
+const noopFormAction = async () => {};
+const noopRunNowAction = async () => ({
+  ok: true as const,
+  run_id: "test-run",
+  trace_id: "test-run",
 });
 
-test("SourcesView success toasts link to the concrete run detail", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  assert.match(src, TOAST_STATE_RE);
-  assert.match(src, TOAST_RUN_HREF_RE, "successful run toast should carry the run detail href");
-  assert.match(src, TOAST_LINK_RE);
+Object.assign(globalThis, { React });
+
+function seededViews(scenario: "mixed" | "healthy" | "attention") {
+  const summaries = buildSourcesDemoSummaries(scenario);
+  return {
+    summaries,
+    instances: toSourcesView(summaries, { now: NOW }),
+  };
+}
+
+function renderedCopy(markup: string): string {
+  const text = markup.replace(/<[^>]*>/g, " ");
+  const accessibleLabels = [...markup.matchAll(/(?:aria-label|alt|placeholder|title)="([^"]*)"/g)]
+    .map((match) => match[1] ?? "")
+    .join(" ");
+  return `${text} ${accessibleLabels}`;
+}
+
+// DIRECTION.md, “Data sources /sources”: status words and row number come from the shared status result.
+test("each rendered source status carries the shared words, status row, and connection id", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const { summaries, instances } = seededViews(scenario);
+    for (const summary of summaries) {
+      const instance = instances.find((row) => row.connectionId === summary.connection_id);
+      assert.ok(instance, `missing projected source ${summary.connection_id}`);
+      const status = sourceStatusWords(summary, { now: NOW });
+      const markup = renderToStaticMarkup(createElement(SourceRowStatus, { instance }));
+      assert.match(markup, new RegExp(`data-status-row="${status.row}"`));
+      assert.match(markup, new RegExp(`data-source-id="${summary.connection_id}"`));
+      // The time may sit in its own item, so compare the words as text, whole and in order; the dot between them is drawn by the style.
+      assert.ok(
+        renderedCopy(markup).replace(/\s+/g, " ").includes(status.words.replace(" · ", " ")),
+        `status words missing for row ${status.row}`
+      );
+      if (status.words.includes(" · ")) {
+        assert.match(markup, /rr-s-row__status-when/, `time not kept whole for row ${status.row}`);
+        assert.doesNotMatch(markup, /rr-s-row__status-when[^>]*>[^<]*·/, `dot inside the time for row ${status.row}`);
+      }
+    }
+  }
 });
 
-test("SourcesView already-running toasts preserve and link the active run id", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
+// DIRECTION.md, “What must stay true” item 1: demo scenarios collectively exercise every list status.
+test("seeded scenarios include every status row the sources list can show", () => {
+  const rows = new Set<number>();
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const { summaries } = seededViews(scenario);
+    for (const summary of summaries) {
+      rows.add(sourceStatusWords(summary, { now: NOW }).row);
+    }
+  }
+  assert.deepEqual(
+    [...rows].sort((a, b) => a - b),
+    Array.from({ length: 24 }, (_, index) => index + 1)
+  );
+});
+
+// DIRECTION.md, “Data sources /sources”: attention rows come first, then syncing, then the rest by name.
+test("source rows sort by shared needs-you and syncing facts before name", () => {
+  const instances = [...seededViews("mixed").instances, ...seededViews("attention").instances];
+  const ordered = orderSourcesForList(
+    instances.filter((instance) => !(instance.archived || instance.revoked || instance.setupFailed))
+  );
+  const firstNonUrgent = ordered.findIndex((instance) => instance.statusWords.tone !== "attention");
+  assert.ok(firstNonUrgent > 0);
+  assert.ok(ordered.slice(0, firstNonUrgent).every((instance) => instance.statusWords.tone === "attention"));
+  assert.equal(ordered[firstNonUrgent]?.statusWords.row, 11);
+  const byName = ordered.slice(firstNonUrgent + 1).map((instance) => instance.displayName);
+  assert.deepEqual(
+    byName,
+    [...byName].sort((a, b) => a.localeCompare(b))
+  );
+});
+
+// DIRECTION.md, “Data sources /sources”: filtering is local and matches a name or account.
+test("source filters match the current page by name or account without changing its order", () => {
+  const { instances } = seededViews("mixed");
+  const rows = orderSourcesForList(instances);
+  assert.deepEqual(
+    filterSourcesForList(rows, "gmail").map((instance) => instance.displayName),
+    ["Gmail (personal)"]
+  );
+  assert.deepEqual(
+    filterSourcesForList(rows, "youtube").map((instance) => instance.displayName),
+    ["YouTube"]
+  );
+  assert.equal(filterSourcesForList(rows, "not here").length, 0);
+});
+
+// DIRECTION.md, “Data sources /sources”: the new row actions use real links/buttons and a Base UI menu.
+test("sources rows link to their own page and use the shared keyboard menu", async () => {
+  const [src, model] = await Promise.all([
+    readFile(new URL("./sources-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./sources-view-model.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(
+    src,
+    /<Link aria-label=\{`Open \$\{instance\.displayName\}`\} className="rr-s-row__link" href=\{instance\.detailHref\}>/
+  );
+  assert.match(src, /import \{ Menu \} from "@base-ui\/react\/menu"/);
+  assert.match(src, /<Menu\.Trigger aria-label=\{`More actions for \$\{instance\.displayName\}`\}/);
+  // DIRECTION.md, “Data sources /sources”: the menu model supplies its visible destination label.
+  assert.match(model, /label: "Open this data source"/);
+  assert.match(src, /UpdatesReadySlot/);
+});
+
+// DIRECTION.md, “Data sources /sources”: without a device id in the list read, the device action keeps the detail route.
+test("View this device links to the data source page when the list has no device id", () => {
+  const base = seededViews("mixed").instances[0];
+  assert.ok(base);
+  const local = {
+    ...base,
+    isLocalDevicePush: true,
+    sourceKind: "local_device" as const,
+    statusWords: {
+      ...base.statusWords,
+      action: { kind: "view_device" as const, label: "View this device", filled: false },
+    },
+  };
+  const html = renderSourcesView([local]);
+  assert.ok(html.includes(`href="${local.detailHref}"`));
+  assert.match(renderedCopy(html), /View this device/);
+});
+
+// DIRECTION.md, “Data sources /sources”: a successful row action links to the returned sync detail.
+test("source row success toast links to the concrete sync page", async () => {
+  const src = await readFile(new URL("./sources-view.tsx", import.meta.url), "utf8");
+  assert.match(src, /syncHref: result\.run_id \? `\/syncs\/\$\{encodeURIComponent\(result\.run_id\)\}` : undefined/);
+  assert.match(src, /<Link href=\{toast\.syncHref\}>See this sync<\/Link>/);
+});
+
+// DIRECTION.md, “Data sources /sources”: an already-running response keeps the server message and active sync link.
+test("source row already-running toast retains the active sync ID", async () => {
+  const src = await readFile(new URL("./sources-view.tsx", import.meta.url), "utf8");
   const branch = src.slice(
-    src.indexOf('if (res.reason === "already_running")'),
-    src.indexOf('setToast({ kind: "error"')
+    src.indexOf('result.reason === "already_running"'),
+    src.indexOf("} else {", src.indexOf('result.reason === "already_running"'))
   );
-  assert.match(branch, ALREADY_RUNNING_MESSAGE_RE);
-  assert.match(branch, ALREADY_RUNNING_RUN_HREF_RE);
-  assert.match(branch, ALREADY_RUNNING_RUN_ID_RE);
+  assert.match(branch, /message: result\.message/);
+  assert.match(branch, /syncHref: result\.run_id \? `\/syncs\/\$\{encodeURIComponent\(result\.run_id\)\}` : undefined/);
 });
 
-test("SourcesView uses server verdict action labels for owner-runnable run actions", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  const action = src.slice(src.indexOf("function CollectionRunAction"));
-  assert.match(action, RUN_VERDICT_KIND_RE);
-  assert.match(action, RUN_VERDICT_LABEL_RE);
+// DIRECTION.md, “What must stay true” item 3: seeded row status copy contains no technical words.
+test("status copy rendered for every seeded scenario avoids banned words", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const summaries = buildSourcesDemoSummaries(scenario);
+    const instances = toSourcesView(summaries, { now: NOW });
+    const router = {
+      back() {},
+      forward() {},
+      push() {},
+      replace() {},
+      refresh() {},
+      prefetch: async () => {},
+      hmrRefresh() {},
+    };
+    const html = renderToStaticMarkup(
+      createElement(
+        AppRouterContext.Provider,
+        { value: router as never },
+        createElement(SourcesView, {
+          instances,
+          interactive: false,
+          reactivateAction: noopFormAction,
+          resumeAction: noopFormAction,
+          resumeScheduleAction: noopFormAction,
+          resumeSetupAction: noopFormAction,
+          revokeAction: noopFormAction,
+          runNowAction: noopRunNowAction,
+        })
+      )
+    );
+    assert.doesNotMatch(renderedCopy(html), BANNED_WORDS_RE, scenario);
+  }
 });
 
-test("SourcesView renders non-run owner actions as subject-scoped detail links, not generic Sync buttons", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  const action = src.slice(src.indexOf("function CollectionRunAction"));
-  assert.match(action, OWNER_VERDICT_ACTION_TESTID_RE);
-  assert.match(action, OWNER_VERDICT_ACTION_HREF_RE);
-  assert.match(action, OWNER_VERDICT_ACTION_TITLE_RE);
+// DIRECTION.md, “Data sources /sources”: the loading placeholder has a title bar and rows without a detail panel.
+test("sources loading placeholder uses the list skeleton shape", async () => {
+  const loading = await readFile(new URL("./loading.tsx", import.meta.url), "utf8");
+  assert.match(loading, /<SourcesLoadingSkeleton \/>/);
+  assert.doesNotMatch(loading, /rr-s-loading__panel|passport|master-detail/);
 });
 
-test("SourcesView emits stable source and stream row markers for acceptance evidence", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  assert.equal(src.match(SOURCE_ROW_MARKER_RE)?.length, 2, "mobile and desktop source rows must both be marked");
-  assert.equal(
-    src.match(SOURCE_SCOPE_MARKER_RE)?.length,
-    2,
-    "mobile and desktop source rows must declare lifecycle scope"
+function renderSourcesView(instances: ReturnType<typeof toSourcesView>, pagingInPlay = false): string {
+  const router = {
+    back() {},
+    forward() {},
+    push() {},
+    replace() {},
+    refresh() {},
+    prefetch: async () => {},
+    hmrRefresh() {},
+  };
+  return renderToStaticMarkup(
+    createElement(
+      AppRouterContext.Provider,
+      { value: router as never },
+      createElement(SourcesView, {
+        instances,
+        interactive: false,
+        pagingInPlay,
+        reactivateAction: noopFormAction,
+        resumeAction: noopFormAction,
+        resumeScheduleAction: noopFormAction,
+        resumeSetupAction: noopFormAction,
+        revokeAction: noopFormAction,
+        runNowAction: noopRunNowAction,
+      })
+    )
   );
-  assert.match(src, STREAM_ROW_MARKER_RE);
+}
+
+// DIRECTION.md, “What must stay true” item 2: each count names what it counts. An archived data source
+// that was also revoked is counted once, under Archived, as the list did before the change.
+test("an archived and revoked data source appears only in the Archived group", () => {
+  const { instances } = seededViews("mixed");
+  const base = instances.find((instance) => !(instance.archived || instance.revoked || instance.setupFailed));
+  assert.ok(base);
+  const html = renderSourcesView([{ ...base, archived: true, id: "archived-revoked", revoked: true }]);
+  assert.match(html, /Archived · 1/);
+  assert.doesNotMatch(html, /Disconnected · /);
 });
 
-const SOURCES_VIEW_CSS_FILE = `${HERE}sources-view.css`;
-const MANIFEST_CONTAINER_TYPE_RE = /\.rr-s-manifest\s*\{[\s\S]{0,120}?container-type:\s*inline-size;/;
-const MANIFEST_CONTAINER_NAME_RE = /\.rr-s-manifest\s*\{[\s\S]{0,120}?container-name:\s*rr-s-manifest;/;
-const MANIFEST_CONTAINER_QUERY_RE =
-  /@container rr-s-manifest \(max-width:\s*34rem\)\s*\{[\s\S]*?--cols:\s*minmax\(0, 1fr\) minmax\(0, 1\.25fr\)\s*!important;/;
-const MANIFEST_VIEWPORT_QUERY_RE = /@media \(max-width:\s*640px\)\s*\{\s*\.rr-s-cols/;
-
-/**
- * The stream-name column is a flexible `minmax(0, 1fr)` track sharing a grid
- * with three FIXED minimums (13rem + 10rem + 6.5rem = 472px). Whenever the
- * manifest's own box is narrower than that sum, the fixed tracks win and the
- * stream track is squeezed to literally 0px — the name becomes invisible while
- * the facts beside it stay legible.
- *
- * That squeeze is a function of the DETAIL PANEL's width, not the viewport's:
- * at a 1024px viewport the panel is only ~366px. A viewport media query cannot
- * see it, which is precisely why the original `@media (max-width: 640px)` rule
- * never fired for the collapse. The breakpoint must therefore be a container
- * query on the panel itself.
- */
-test("stream manifest columns respond to the panel's own width, so the stream name can never be squeezed to zero", async () => {
-  const css = await readFile(SOURCES_VIEW_CSS_FILE, "utf8");
-
-  assert.match(
-    css,
-    MANIFEST_CONTAINER_TYPE_RE,
-    "the manifest must establish an inline-size container to query against"
-  );
-  assert.match(
-    css,
-    MANIFEST_CONTAINER_NAME_RE,
-    "the container must be named so the query cannot bind to a stray ancestor"
-  );
-  // `!important` is what makes the override actually apply: the shared Table
-  // primitive sets --cols as an INLINE style, which outranks any stylesheet
-  // rule. Dropping it silently restores the collapse, so it is pinned here.
-  assert.match(
-    css,
-    MANIFEST_CONTAINER_QUERY_RE,
-    "below the fixed track minimums the manifest must drop to two tracks (with !important, to beat the primitive's inline --cols)"
-  );
-  assert.doesNotMatch(
-    css,
-    MANIFEST_VIEWPORT_QUERY_RE,
-    "the stream-column breakpoint must not key on viewport width — the panel is far narrower than the viewport"
-  );
+// DIRECTION.md, “Data sources /sources” decision 6 (brief): the note counts the rows the filter acts on.
+test("the paging filter note counts only the rows the filter searches", () => {
+  const { instances } = seededViews("mixed");
+  const listed = instances.filter((instance) => !(instance.archived || instance.revoked || instance.setupFailed));
+  assert.ok(listed.length > 10, "the mixed scenario must show the filter");
+  assert.ok(listed.length < instances.length, "the mixed scenario must hold folded rows too");
+  const html = renderSourcesView(instances, true);
+  assert.match(html, new RegExp(`Filtering the ${listed.length.toLocaleString()} data sources on this page\\.`));
 });
 
-// Quiet-expiry defect fix (owner ruling 2026-08-22): the setup-failed
-// passport note must render the server's specific `forward_statement`
-// (`setupFailedForwardStatement`) rather than always showing the same
-// generic sentence regardless of WHY setup failed — that generic-only
-// behavior is exactly the pre-fix defect (a TTL-expired attempt reading
-// identically to an owner-abandoned one).
-const SETUP_FAILED_NOTE_RE =
-  /instance\.setupFailedForwardStatement\s*\?\?\s*\n?\s*"This connection attempt never finished setup\. No records were collected/;
+// Lead decision (list-pictures 3): under the name only an account line, which the list read does not
+// carry (RefConnectorSummary has no account field), so nothing; never "N kinds".
+test("rows show no kind count or kind line under the name", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const html = renderSourcesView(seededViews(scenario).instances);
+    assert.doesNotMatch(renderedCopy(html), /\b\d[\d,]* kinds?\b/, scenario);
+    assert.doesNotMatch(html, /rr-s-row__account/, scenario);
+  }
+});
 
-test("SourcesView's setup-failed passport note prefers the server's specific forward_statement over the generic fallback", async () => {
-  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
-  const block = src.slice(
-    src.indexOf("{instance.setupFailed ? ("),
-    src.indexOf("{instance.revoked && !instance.setupFailed ? (")
+// Lead decision (list-pictures 2, item 2): a renamed data source still says what it is; an unrenamed one adds nothing.
+test("a renamed row shows the connector's name under it; an unrenamed row shows nothing", () => {
+  const { instances } = seededViews("mixed");
+  const renamed = instances.find((instance) => instance.displayName === "workstation");
+  assert.ok(renamed, "the mixed sample must hold a renamed row");
+  assert.equal(renamed.listKind, "Signal");
+  const html = renderSourcesView([renamed]);
+  assert.match(html, /<span class="[^"]*rr-s-row__kind[^"]*"[^>]*>Signal<\/span>/);
+  const same = instances.find((instance) => instance.displayName === "Gmail (personal)");
+  assert.ok(same);
+  assert.doesNotMatch(renderSourcesView([same]), /rr-s-row__kind/);
+});
+
+// Lead decision (list-pictures 1): the retained-history ("Version churn") notice is not on the list.
+test("the list shows no retained-history notice", async () => {
+  const [view, page] = await Promise.all([
+    readFile(new URL("./sources-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(view, /ChurnNotice|sources-version-churn|Retained history/);
+  assert.doesNotMatch(page, /churnAdvisory|buildSourcesChurnAdvisory/);
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const copy = renderedCopy(renderSourcesView(seededViews(scenario).instances));
+    assert.doesNotMatch(copy, /Version churn|retained|\bKB\b/i, scenario);
+  }
+});
+
+// DIRECTION.md, “Data sources /sources” and lead decision (list-pictures 4): the filter box appears only
+// above more than ten rows; its label is for screen readers and the placeholder labels it on screen.
+test("the filter appears only for more than ten rows, labelled by its placeholder", () => {
+  const listed = seededViews("mixed").instances.filter(
+    (instance) => !(instance.archived || instance.revoked || instance.setupFailed)
   );
-  assert.match(
-    block,
-    SETUP_FAILED_NOTE_RE,
-    "the passport note must read setupFailedForwardStatement first, falling back to the generic sentence only when absent"
+  assert.ok(listed.length > 10);
+  const long = renderSourcesView(listed);
+  assert.match(long, /<label class="sr-only" for="sources-filter">Filter data sources<\/label>/);
+  assert.match(long, /placeholder="Filter by name or account"/);
+  const short = renderSourcesView(listed.slice(0, 10));
+  assert.doesNotMatch(short, /sources-filter/);
+});
+
+// DIRECTION.md, Values (changed 2026-11-25) and lead decision (list-pictures 6): every row button is outlined.
+test("a row action is filled only when something needs the person, quiet otherwise", () => {
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const { instances } = seededViews(scenario);
+    const html = renderSourcesView(instances);
+    const rowButtons = [...html.matchAll(/<(?:button|a)[^>]*class="([^"]*pdpp-btn[^"]*)"[^>]*>/g)].map(
+      (match) => match[1] ?? ""
+    );
+    if (instances.some((instance) => instance.statusWords.action)) {
+      assert.ok(rowButtons.length > 0, scenario);
+    }
+    const needed = instances.filter((instance) => instance.statusWords.action && instance.statusWords.needsYou).length;
+    const quiet = rowButtons.filter((className) => /pdpp-btn--ghost/.test(className)).length;
+    assert.equal(rowButtons.length - quiet, needed, `${scenario}: filled row actions are exactly the needed ones`);
+  }
+});
+
+// Lead decision (list-pictures 8): each status row has one real-looking sample, still pinned to its row.
+test("each status sample keeps its status row under a real-looking name", () => {
+  const byConnection = new Map(
+    (["mixed", "healthy", "attention"] as const)
+      .flatMap((scenario) => buildSourcesDemoSummaries(scenario))
+      .map((summary) => [summary.connection_id, summary])
   );
+  for (let row = 1; row <= 24; row++) {
+    const summary = byConnection.get(statusSampleConnectionId(row as Parameters<typeof statusSampleConnectionId>[0]));
+    assert.ok(summary, `row ${row} has a sample`);
+    assert.equal(sourceStatusWords(summary, { now: NOW }).row, row, summary.display_name);
+    assert.doesNotMatch(summary.display_name, /^Sample\b|\d/, `row ${row}`);
+  }
+  for (const scenario of ["mixed", "healthy", "attention"] as const) {
+    const names = buildSourcesDemoSummaries(scenario).map((summary) => summary.display_name);
+    assert.equal(new Set(names).size, names.length, `${scenario} repeats a name`);
+  }
+});
+
+// The duplicate-label notice reviews live data sources only, as before the change: archived and
+// unfinished setups are not part of a set of live accounts.
+test("archived and unfinished setups do not trigger the duplicate-label notice", () => {
+  const { instances } = seededViews("mixed");
+  const base = instances.find((instance) => !(instance.archived || instance.revoked || instance.setupFailed));
+  assert.ok(base);
+  const copies = [1, 2, 3].map((n) => ({
+    ...base,
+    archived: n !== 1,
+    id: `dup-${n}`,
+    needsOwnerLabel: true,
+    setupFailed: false,
+  }));
+  copies.push({ ...base, id: "dup-4", needsOwnerLabel: true, setupFailed: true });
+  assert.doesNotMatch(renderSourcesView(copies), /sources-duplicate-review/);
+  const live = [1, 2].map((n) => ({ ...base, id: `live-${n}`, needsOwnerLabel: true }));
+  assert.match(renderSourcesView(live), /sources-duplicate-review/);
+});
+
+test("only disconnected data sources: say so and show them, never an empty page above a closed group", () => {
+  const { instances } = seededViews("mixed");
+  const base = instances.find((instance) => !(instance.archived || instance.revoked || instance.setupFailed));
+  assert.ok(base);
+  const one = renderSourcesView([{ ...base, id: "gone", revoked: true }]);
+  assert.match(one, /No data sources are connected\./);
+  // Round 8 (F37): "disconnected" once in the summary and once in the row, not in a line and a note as well.
+  assert.ok((one.match(/disconnected/gi) ?? []).length <= 2, "summary and row only");
+  assert.doesNotMatch(one, /No data sources on this page/);
+  assert.match(one, /<details[^>]*\bopen\b[^>]*>\s*<summary>Disconnected · 1/);
+  const two = renderSourcesView([{ ...base, id: "gone", revoked: true }, { ...base, id: "gone-2", revoked: true }]);
+  assert.match(two, /No data sources are connected\./);
+  // A connected source keeps the group closed.
+  assert.doesNotMatch(renderSourcesView([base, { ...base, id: "gone", revoked: true }]), /<details[^>]*\bopen\b/);
+});
+
+test("a source waiting for a security code leads to the sync where the code is entered", () => {
+  const [base] = buildSourcesDemoSummaries("healthy");
+  assert.ok(base);
+  const waiting = {
+    ...base,
+    owner_state: { evidence_as_of: NOW.toISOString(), owner_of_state: "owner" as const, posture: "observed" as const, resolver: "needs_owner" as const },
+    connection_health: { ...base.connection_health, conditions: [{ expires_at: null, id: "AttentionClear:otp_required", message: "x", observed_at: null, origin: "runtime", reason: "otp_required", remediation: null, sensitivity: "owner", severity: "blocked", status: "false", type: "AttentionClear" }] as never },
+    rendered_verdict: {
+      ...base.rendered_verdict!,
+      required_actions: [{ affects: [], audience: "owner" as const, cta: "Complete the requested action", kind: "add_info" as const, satisfied_when: { kind: "attention_resolved" as const }, surface: { kind: "provider_interaction" as const }, target: { kind: "sync" as const, run_id: "run-code" }, terminal: false, urgency: "now" as const }],
+    },
+  };
+  const html = renderSourcesView(toSourcesView([waiting], { now: NOW }));
+  assert.match(html, /<a[^>]*href="\/syncs\/run-code"[^>]*>Enter the code<\/a>/);
 });

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useRouter } from "next/navigation"
+import { Button } from "@/components/ui/button.tsx"
 import { useRef, useState } from "react"
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts"
 import {
@@ -21,10 +22,11 @@ import type { OwnerPasswordSource } from "./owner-password-data.ts"
  */
 export function OwnerPasswordSetting({
   canReveal = false,
-  managedDesktop = false,
   passwordSet = true,
   source,
+  practice = false,
 }: {
+  practice?: boolean
   canReveal?: boolean
   managedDesktop?: boolean
   /** False while the owner has not chosen a password yet (desktop only). */
@@ -45,6 +47,7 @@ export function OwnerPasswordSetting({
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (submitting.current) return
+    if (practice) { setMessage("This is a practice state. Your password is unchanged."); return }
     setMessage(null)
     if (Array.from(newPassword).length < 15) {
       setMessage("Use at least 15 characters for the new password.")
@@ -63,7 +66,7 @@ export function OwnerPasswordSetting({
         newPassword
       )
       if (!result.ok) {
-        setMessage(result.message ?? "Could not change the owner password.")
+        setMessage("Could not change the password. Try again.")
         return
       }
       setCurrentPassword("")
@@ -73,11 +76,9 @@ export function OwnerPasswordSetting({
         "Password changed. Other signed-in devices have been signed out."
       )
       router.refresh()
-    } catch (error) {
+    } catch {
       setMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not change the owner password."
+        "Could not change the password. Try again."
       )
     } finally {
       submitting.current = false
@@ -86,6 +87,7 @@ export function OwnerPasswordSetting({
   }
 
   async function requestDesktopChange() {
+    if (practice) { setMessage("This is a practice state. Your password is unchanged."); return }
     setMessage(null)
     setBusy(true)
     try {
@@ -94,77 +96,48 @@ export function OwnerPasswordSetting({
         : await requestOwnerPasswordWindowAction()
       if (!result.ok) {
         setMessage(
-          result.message ?? "Could not open the desktop password window."
+          "Could not open the password window. Try again."
         )
         return
       }
       setMessage("Password window opened.")
       router.refresh()
-    } catch (error) {
+    } catch {
       setMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not open the desktop password window."
+        "Could not open the password window. Try again."
       )
     } finally {
       setBusy(false)
     }
   }
 
-  if (source === "env" && managedDesktop) {
-    return (
-      <p className="pdpp-caption text-muted-foreground">
-        This password comes from <code>DATACONNECT_OWNER_PASSWORD</code> or{" "}
-        <code>PDPP_OWNER_PASSWORD</code> in the environment DataConnect started
-        with. Change it there, then restart DataConnect.
-      </p>
-    )
+  if (source === "env") {
+    return <p className="text-sm text-muted-foreground">This password is set where DataConnect was installed. Change it there, then restart DataConnect.</p>
   }
 
-  if (source === "env") {
-    return (
-      <div className="grid justify-items-start gap-2">
-        <button
-          className="rounded-md border border-border px-3 py-1.5 text-sm opacity-60"
-          disabled
-          type="button"
-        >
-          Change password
-        </button>
-        <p className="pdpp-caption text-muted-foreground">
-          Password change is disabled because this install uses{" "}
-          <code>PDPP_OWNER_PASSWORD</code>.
-        </p>
-        <p className="pdpp-caption text-muted-foreground">
-          Change that environment variable, then restart the server. The
-          environment value stays authoritative while it is set.
-        </p>
-      </div>
-    )
+  if (source === "desktop" && !canReveal) {
+    return <p className="text-sm text-muted-foreground">Change or show the password in the DataConnect app on the computer that runs it.</p>
   }
 
   if (source === "desktop") {
     return (
       <div className="grid justify-items-start gap-3">
-        <p className="pdpp-caption text-muted-foreground">
-          DataConnect stores this password on this computer for signing in on
-          other devices. Changing it signs out other browser sessions and
-          command-line tokens and restarts the server.
+        <p className="text-sm text-muted-foreground">
+          {passwordSet ? "You chose this password." : "DataConnect made a password for you. You need it only to sign in from another device."}
         </p>
-        {canReveal ? <OwnerCredentialSetting /> : null}
+        {canReveal ? <OwnerCredentialSetting practice={practice} /> : null}
         {message ? (
-          <p className="pdpp-caption text-muted-foreground" role="status">
+          <p className="text-sm text-muted-foreground" role="status">
             {message}
           </p>
         ) : null}
-        <button
-          className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+        <Button
           disabled={busy}
           onClick={() => void requestDesktopChange()}
           type="button"
         >
-          {busy ? "Checking…" : passwordSet ? "Change password" : "Set password"}
-        </button>
+          {busy ? "Checking…" : "Change password"}
+        </Button>
       </div>
     )
   }
@@ -174,12 +147,12 @@ export function OwnerPasswordSetting({
       className="grid max-w-xl gap-3"
       onSubmit={event => void submit(event)}
     >
-      <p className="pdpp-caption text-muted-foreground">
+      <p className="text-sm text-muted-foreground">
         Use at least 15 characters. Your current browser stays signed in; other
         sessions are ended.
       </p>
       {message ? (
-        <p className="pdpp-caption text-muted-foreground" role="status">
+        <p className="text-sm text-muted-foreground" role="status">
           {message}
         </p>
       ) : null}
@@ -218,13 +191,13 @@ export function OwnerPasswordSetting({
           value={confirmation}
         />
       </label>
-      <button
-        className="justify-self-start rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+      <Button
+        className="justify-self-start"
         disabled={busy}
         type="submit"
       >
         {busy ? "Changing…" : "Change password"}
-      </button>
+      </Button>
     </form>
   )
 }

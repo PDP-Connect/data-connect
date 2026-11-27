@@ -19,10 +19,15 @@
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
+import { getAsInternalUrl, getReferencePublicOrigin, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
-import { ConsentScreen } from "@/components/consent-screen/consent-screen-client.tsx";
-import type { ConsentDecision, ConsentScreenModel } from "@/components/consent-screen/consent-screen-model.ts";
+import { ConsentScreen, ConsentUnavailable, ConsentFinished } from "@/components/consent-screen/consent-screen-client.tsx";
+import { resolveConsentDemoState } from "@/components/consent-screen/consent-screen-demo.ts";
+import type {
+  ConsentActionResult,
+  ConsentDecision,
+  ConsentScreenModel,
+} from "@/components/consent-screen/consent-screen-model.ts";
 import { acceptConsentChallenge, rejectConsentChallenge } from "./actions.ts";
 
 // A consent decision is per-request and carries the requesting client's
@@ -60,6 +65,36 @@ export default async function ConsentPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
+  const demo = resolveConsentDemoState(params.demo, process.env.NODE_ENV);
+  if (demo === "answered") return <ConsentUnavailable kind="answered" />;
+  if (demo === "allowed" || demo === "denied") return <ConsentFinished appName="ChatGPT" allowed={demo === "allowed"} />;
+  if (demo === "expired") {
+    return <ConsentUnavailable kind="expired" />;
+  }
+  if (demo === "error") {
+    return <ConsentUnavailable kind="error" />;
+  }
+  if (demo) {
+    const { buildConsentDemoModel } = await import("@/components/consent-screen/consent-screen-demo.ts");
+    const demoModel = buildConsentDemoModel(demo);
+    async function acceptDemoAction(_decision: ConsentDecision): Promise<ConsentActionResult> {
+      "use server";
+      return { ok: true, redirectUrl: "" };
+    }
+    async function rejectDemoAction(): Promise<ConsentActionResult> {
+      "use server";
+      return { ok: true, redirectUrl: "" };
+    }
+    return (
+      <ConsentScreen
+        acceptAction={acceptDemoAction}
+        demoOnly
+        openKinds={demo === "kinds-open"}
+        model={demoModel}
+        rejectAction={rejectDemoAction}
+      />
+    );
+  }
   const challenge = typeof params.challenge === "string" ? params.challenge : "";
 
   // Authoritative session check BEFORE the challenge is read, with a returnTo
@@ -77,14 +112,15 @@ export default async function ConsentPage({
   // Bound here so the challenge id and client identity travel with the action
   // itself and are never re-read from a form field the browser could alter.
   const clientId = model.client.id;
-  async function acceptAction(decision: ConsentDecision): Promise<string> {
+  async function acceptAction(decision: ConsentDecision): Promise<ConsentActionResult> {
     "use server";
     return acceptConsentChallenge(challenge, clientId, decision);
   }
-  async function rejectAction(): Promise<string> {
+  async function rejectAction(): Promise<ConsentActionResult> {
     "use server";
     return rejectConsentChallenge(challenge);
   }
 
-  return <ConsentScreen acceptAction={acceptAction} model={model} rejectAction={rejectAction} />;
+  const origin = await getReferencePublicOrigin().catch(() => null);
+  return <ConsentScreen acceptAction={acceptAction} model={model} rejectAction={rejectAction} dataConnectHost={origin ? new URL(origin).host : undefined} />;
 }

@@ -5,6 +5,7 @@ import { buttonVariants, IcButton, IcInput, IcSelect, IcTimestamp } from "@pdpp/
 import { MetaPill, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { DeveloperModeGate } from "../developer-mode-gate.tsx";
 import {
   buildGrantRequestExamples,
   type ConnectionPinOption,
@@ -66,7 +67,11 @@ function HeaderMeta({ workspace }: { workspace: Workspace | null }) {
 function WorkspaceError({ message }: { message: string }) {
   return (
     <div className="pdpp-caption mb-6 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
-      <span className="font-medium text-destructive">Workspace error:</span> <span>{message}</span>
+      <p className="font-medium text-destructive">The request could not be completed.</p>
+      <details className="mt-2">
+        <summary className="min-h-11 cursor-pointer text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Details</summary>
+        <p className="break-words text-muted-foreground">{message}</p>
+      </details>
     </div>
   );
 }
@@ -201,10 +206,10 @@ function DraftFormActions() {
         Save draft
       </IcButton>
       <IcButton formAction={registerGrantRequestClientAction} size="sm" type="submit" variant="ghost">
-        <span className="font-mono">POST /oauth/register</span>
+        <span>Register app</span><span className="ml-2 text-[11px] text-muted-foreground">POST /oauth/register</span>
       </IcButton>
       <IcButton formAction={stageGrantRequestAction} size="sm" type="submit">
-        <span className="font-mono">POST /oauth/par</span>
+        <span>Ask for access</span><span className="ml-2 text-[11px] text-primary-foreground/70">POST /oauth/par</span>
       </IcButton>
     </div>
   );
@@ -293,22 +298,37 @@ function WorkspaceStateSection({ workspace }: { workspace: Workspace | null }) {
 
 function DriveConsentSection({ ownerLoginUrl, workspace }: { ownerLoginUrl: string; workspace: Workspace }) {
   return (
-    <Section description="Approve or deny the staged request via the public consent routes." title="3. Drive consent">
-      <form className="flex flex-wrap items-center gap-2">
-        <input name="workspace_id" type="hidden" value={workspace.workspaceId} />
-        <IcButton formAction={approveGrantRequestAction} size="sm" type="submit">
-          <span className="font-mono">POST /consent/approve</span>
-        </IcButton>
-        <IcButton formAction={denyGrantRequestAction} size="sm" type="submit" variant="destructive">
-          <span className="font-mono">POST /consent/deny</span>
-        </IcButton>
+    <Section description="Choose how to answer the staged request." title="3. Decide the request">
+      <div className="grid gap-3">
+        <details className="rounded-md border border-border p-3">
+          <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-foreground">Allow</summary>
+          <p className="pdpp-caption my-2 text-muted-foreground">This lets the app read the requested data.</p>
+          <form>
+            <input name="workspace_id" type="hidden" value={workspace.workspaceId} />
+            <input name="decision_confirmation" type="hidden" value="yes" />
+            <IcButton formAction={approveGrantRequestAction} size="sm" type="submit">
+              <span>Allow</span><span className="ml-2 text-[11px] text-primary-foreground/70">POST /consent/approve</span>
+            </IcButton>
+          </form>
+        </details>
+        <details className="rounded-md border border-border p-3">
+          <summary className="min-h-11 cursor-pointer text-[13px] font-medium text-muted-foreground">Don't allow</summary>
+          <p className="pdpp-caption my-2 text-muted-foreground">The app will not get access to the requested data.</p>
+          <form>
+            <input name="workspace_id" type="hidden" value={workspace.workspaceId} />
+            <input name="decision_confirmation" type="hidden" value="yes" />
+            <IcButton formAction={denyGrantRequestAction} size="sm" type="submit" variant="ghost">
+              <span>Don't allow</span><span className="ml-2 text-[11px] text-muted-foreground">POST /consent/deny</span>
+            </IcButton>
+          </form>
+        </details>
         <Link
           className="pdpp-caption ml-2 text-muted-foreground underline-offset-2 hover:underline"
           href="/grants#pending-approvals"
         >
-          pending queue →
+          Requests waiting for you →
         </Link>
-      </form>
+      </div>
       <p className="pdpp-caption mt-3 text-muted-foreground">
         These buttons only work in open local-dev approval mode. If owner sign-in is enabled, open the hosted
         consent page or sign in at{" "}
@@ -350,20 +370,22 @@ export default async function GrantRequestPage({ searchParams }: { searchParams:
 
   return (
     <RecordroomShellWithPalette>
-      <PageHeader
-        actions={<HeaderActions ownerLoginUrl={ownerLoginUrl} />}
-        breadcrumbs={[{ href: "/grants", label: "Grants" }, { label: "Grant request" }]}
-        description="Register a public client, stage a real PAR request with PDPP authorization details, then drive the resulting consent through the public approval path."
-        meta={<HeaderMeta workspace={workspace} />}
-        title="Grant request"
-      />
+      <DeveloperModeGate>
+        <PageHeader
+          actions={<HeaderActions ownerLoginUrl={ownerLoginUrl} />}
+          breadcrumbs={[{ href: "/grants", label: "Apps" }, { label: "Developer request tool" }]}
+          description="Set up and review a test request."
+          meta={<HeaderMeta workspace={workspace} />}
+          title="Developer request tool"
+        />
 
-      {error ? <WorkspaceError message={error} /> : null}
+        {error ? <WorkspaceError message={error} /> : null}
 
-      <DraftSection connectionOptions={connectionPinOptions.options} draft={draft} workspace={workspace} />
-      <WorkspaceStateSection workspace={workspace} />
-      {workspace?.stagedRequest ? <DriveConsentSection ownerLoginUrl={ownerLoginUrl} workspace={workspace} /> : null}
-      {examples ? <EquivalentsSection examples={examples} /> : null}
+        <DraftSection connectionOptions={connectionPinOptions.options} draft={draft} workspace={workspace} />
+        <WorkspaceStateSection workspace={workspace} />
+        {workspace?.stagedRequest ? <DriveConsentSection ownerLoginUrl={ownerLoginUrl} workspace={workspace} /> : null}
+        {examples ? <EquivalentsSection examples={examples} /> : null}
+      </DeveloperModeGate>
     </RecordroomShellWithPalette>
   );
 }

@@ -10,7 +10,7 @@ const RUN_ID_PATTERN = /run_\d/;
 const RUN_PREFIX_PATTERN = /^run_/;
 
 test("runRowLabel leads with the connector, never the run id", () => {
-  assert.equal(runRowLabel({ connector_id: "github" }), "github");
+  assert.equal(runRowLabel({ connector_id: "github" }), "GitHub");
   const label = runRowLabel({ connector_id: "slack" } as Record<string, unknown>);
   assert.equal(label, "slack");
   assert.ok(!RUN_ID_PATTERN.test(label));
@@ -30,8 +30,8 @@ test("runRowLabel uses the source display label without technical kind prefixes"
 });
 
 test("traceRowLabel prefers source, then provider, then client, then kind", () => {
-  assert.equal(traceRowLabel({ source: { id: "github", kind: "connector" } }), "github");
-  assert.equal(traceRowLabel({ provider_id: "github" }), "github");
+  assert.equal(traceRowLabel({ source: { id: "github", kind: "connector" } }), "GitHub");
+  assert.equal(traceRowLabel({ provider_id: "github" }), "GitHub");
   assert.equal(traceRowLabel({ client: { client_name: "Claude" }, client_id: "cli_42" }), "Claude");
   assert.equal(traceRowLabel({ client_id: "abc123" }), "client abc123");
   assert.equal(traceRowLabel({ kinds: ["", "  ", "record.write"] }), "record.write");

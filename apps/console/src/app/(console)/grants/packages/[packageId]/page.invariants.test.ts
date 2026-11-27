@@ -66,6 +66,31 @@ test("package detail page wires its revoke form to the server action with a conf
   assert.match(src, CONFIRM_FIELD_RE);
 });
 
+test("package detail presents app facts and confirms the effect in plain words", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // RAISE-RULES 2 and 5: the app name is the page title and removal names what happens.
+  assert.match(src, /<PageHeader title=\{appName\}/);
+  assert.match(src, /title="What it can read"/);
+  assert.match(src, /title="Remove access"/);
+  assert.match(src, /will no longer read your data\. It keeps what it already read\./);
+});
+
+test("package access removal uses the shared confirmation with Cancel", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // apps-repair.md P2: the app page's remove confirmation has a Cancel control.
+  assert.match(src, /<RemovePackageAccess[\s\S]*?action=\{revokePackageAction\}/);
+});
+
+test("package page displays the returned lifecycle and active access count", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // apps-repair.md P2: package status comes from the server and the count reflects live child accesses.
+  assert.match(src, /pkg\.status === "revoked"/);
+  assert.match(src, /<StatusBadge status=\{pkg\.status\}/);
+  assert.match(src, /const activeChildren = activePackageAccesses\(pkg\.children\)/);
+  assert.match(src, /activeChildren\.flatMap/);
+  assert.match(src, /active access/);
+});
+
 test("package detail page round-trips the package id through decodeURIComponent on the URL segment", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, PACKAGE_ID_DECODE_RE);
@@ -79,6 +104,13 @@ test("package detail page links children to grant detail pages with encodeURICom
 test("package detail page never renders secret-shaped fields", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.doesNotMatch(src, FORBIDDEN_FIELDS_RE);
+});
+
+test("package access uses shared source names without connection identifiers", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md, PAGE-RULES 6: Apps pages use data source names and keep raw IDs out of visible copy.
+  assert.match(src, /appSourceName\(child\.source\)/);
+  assert.doesNotMatch(src, /formatSourceWithConnectionForDisplay/);
 });
 
 test("revoke server action declares 'use server' and re-verifies the owner session", async () => {

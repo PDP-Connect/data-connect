@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatConnectorHeaderCount, reactivateRecordCopy } from "./sources-view-model.ts";
+import { formatConnectorHeaderCount, formatSourceRowRecords, reactivateRecordCopy } from "./sources-view-model.ts";
 
 const COLLECTED_RECORDS_42_RE = /42 collected records are/;
 
@@ -118,4 +118,13 @@ test("reactivateRecordCopy: an unobserved/unknown state never names a number", (
 test("reactivateRecordCopy: an omitted state (reference predating this field) preserves the exact prior >0 numeric behavior", () => {
   const copy = reactivateRecordCopy(42, undefined);
   assert.match(copy, COLLECTED_RECORDS_42_RE);
+});
+
+// DIRECTION.md, “Data sources /sources”: known, stale, and unknown records use distinct list labels.
+test("source list Records column formats known, stale, and unknown totals", () => {
+  assert.equal(formatSourceRowRecords(48_201, "known"), "48,201");
+  assert.equal(formatSourceRowRecords(0, "known_zero"), "0");
+  assert.equal(formatSourceRowRecords(42, "stale"), "42 (not checked lately)");
+  assert.equal(formatSourceRowRecords(42, "unobserved"), "—");
+  assert.equal(formatSourceRowRecords(42, "unknown"), "—");
 });

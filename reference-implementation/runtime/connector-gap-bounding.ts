@@ -176,7 +176,13 @@ export function boundStringList(values: unknown): string[] | null {
   return safe.slice(0, VIOLATION_LIST_MAX).map((v) => boundString(v) as string);
 }
 
-export function boundGapString(value: unknown): string | null {
+/**
+ * Length bound for owner-facing assistance text (sign-in instructions). Separate
+ * from GAP_STRING_MAX: the redaction below is shared; only the length differs.
+ */
+export const ASSISTANCE_TEXT_MAX = 2000;
+
+export function boundGapString(value: unknown, maxLength = GAP_STRING_MAX): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -187,10 +193,10 @@ export function boundGapString(value: unknown): string | null {
   const redacted = trimmed
     .replace(/\b(bearer|token|password|passwd|cookie|secret|otp)\b\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[REDACTED]")
     .replace(/\b\d{6}\b/g, "[REDACTED_OTP]");
-  if (redacted.length <= GAP_STRING_MAX) {
+  if (redacted.length <= maxLength) {
     return redacted;
   }
-  return `${redacted.slice(0, GAP_STRING_MAX - 1)}…`;
+  return `${redacted.slice(0, maxLength - 1)}…`;
 }
 
 /**

@@ -11,9 +11,6 @@ import {
   readDeveloperMode,
 } from "../lib/source-setup-development.ts"
 
-const CATALOG_FILE = fileURLToPath(
-  new URL("../components/source-setup-catalog.tsx", import.meta.url)
-)
 const PANEL_FILE = fileURLToPath(
   new URL("../sources/add/local-connector-sources-panel.tsx", import.meta.url)
 )
@@ -45,18 +42,20 @@ test("developer mode is off by default and persists with the existing local-stor
   assert.equal(readDeveloperMode(storage), false)
 })
 
-test("developer-only connector surfaces share one settings gate", async () => {
-  const [catalog, panel, setting, page, shell] = await Promise.all([
-    readFile(CATALOG_FILE, "utf8"),
+test("developer-only data sources share one settings gate", async () => {
+  const [panel, setting, page, shell] = await Promise.all([
     readFile(PANEL_FILE, "utf8"),
     readFile(SETTING_FILE, "utf8"),
     readFile(PAGE_FILE, "utf8"),
     readFile(SHELL_FILE, "utf8"),
   ])
 
-  assert.match(catalog, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/)
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
+  // RAISE-RULES.md 4: visible copy uses plain words for development data sources.
+  assert.match(setting, /Show data sources that are still being built/)
+  assert.match(setting, /in-development data sources/)
   assert.match(page, /<DeveloperModeSetting \/>/)
-  assert.match(shell, /\{ label: "Settings", href: "\/settings" \}/)
+  // DIRECTION.md "The frame and the menu": Settings is a menu item with an icon and children.
+  assert.match(shell, /label: "Settings",\s+href: "\/settings"/)
 })

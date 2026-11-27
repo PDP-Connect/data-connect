@@ -1,0 +1,15 @@
+{
+  "id": "device-exporters",
+  "name": "Local collector enrollment page",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/device-exporters",
+      "readyText": "Collectors on your devices",
+      "desktopReadyHeading": "ExperimentalCollectors on your devices",
+      "phoneReadyHeading": "ExperimentalCollectors on your devices",
+      "assertText": "Collectors on your devices"
+    }
+  ]
+}

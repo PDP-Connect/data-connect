@@ -1,0 +1,227 @@
+[
+  {
+    "id": "audit-baseline-missing-trace",
+    "path": "/audit/baseline-missing-trace",
+    "title": "One trace\u2019s request and outcome details."
+  },
+  {
+    "id": "audit",
+    "path": "/audit",
+    "title": "Recent audit events and trace links."
+  },
+  {
+    "id": "connect-browser-session-spotify-launch",
+    "path": "/connect/browser-session/spotify/launch",
+    "title": "Browser connector launch and return status."
+  },
+  {
+    "id": "connect-browser-session-spotify",
+    "path": "/connect/browser-session/spotify",
+    "title": "Browser sign-in or session setup instructions."
+  },
+  {
+    "id": "connect-manual-upload-spotify",
+    "path": "/connect/manual-upload/spotify",
+    "title": "Upload a provider export file."
+  },
+  {
+    "id": "connect",
+    "path": "/connect",
+    "title": "MCP URLs and local-client setup commands."
+  },
+  {
+    "id": "connect-provider-auth-spotify",
+    "path": "/connect/provider-auth/spotify",
+    "title": "Authorize a provider account in browser."
+  },
+  {
+    "id": "connect-static-secret-spotify",
+    "path": "/connect/static-secret/spotify",
+    "title": "Enter a provider credential to connect."
+  },
+  {
+    "id": "connect-static-secret-spotify-status-baseline-missing-connection",
+    "path": "/connect/static-secret/spotify/status/baseline-missing-connection",
+    "title": "First import status after credential setup."
+  },
+  {
+    "id": "connect-status-baseline-missing-connection",
+    "path": "/connect/status/baseline-missing-connection",
+    "title": "First sync progress and result."
+  },
+  {
+    "id": "deployment",
+    "path": "/deployment",
+    "title": "Server checks and deployment readiness."
+  },
+  {
+    "id": "deployment-provider-apps",
+    "path": "/deployment/provider-apps",
+    "title": "OAuth application settings for providers."
+  },
+  {
+    "id": "deployment-tokens",
+    "path": "/deployment/tokens",
+    "title": "Owner-issued client and bearer tokens."
+  },
+  {
+    "id": "device-exporters",
+    "path": "/device-exporters",
+    "title": "Enroll and inspect local data collectors."
+  },
+  {
+    "id": "event-subscription-detail",
+    "path": "/event-subscriptions/:subscriptionId",
+    "title": "One event subscription and delivery attempts.",
+    "skipReason": "No event subscription identifier exists in the seeded data."
+  },
+  {
+    "id": "event-subscriptions",
+    "path": "/event-subscriptions",
+    "title": "Client event subscriptions and status."
+  },
+  {
+    "id": "explore",
+    "path": "/explore",
+    "title": "Searchable chronological records from sources."
+  },
+  {
+    "id": "grant-detail",
+    "path": "/grants/:grantId",
+    "title": "One app grant, scope and access history.",
+    "skipReason": "No app grant identifier exists in the seeded data."
+  },
+  {
+    "id": "grant-approval",
+    "path": "/grants/approvals/:approvalId",
+    "title": "Review a pending access request.",
+    "skipReason": "No pending approval identifier exists in the seeded data."
+  },
+  {
+    "id": "grants-bootstrap",
+    "path": "/grants/bootstrap",
+    "title": "Bootstrap an app grant request."
+  },
+  {
+    "id": "grant-package-detail",
+    "path": "/grants/packages/:packageId",
+    "title": "A grant package and revoke controls.",
+    "skipReason": "No grant package identifier exists in the seeded data."
+  },
+  {
+    "id": "grants-packages",
+    "path": "/grants/packages",
+    "title": "Grant packages grouped by connected app."
+  },
+  {
+    "id": "grants",
+    "path": "/grants",
+    "title": "Connected apps, approved access and pending requests."
+  },
+  {
+    "id": "grants-request",
+    "path": "/grants/request",
+    "title": "Request and review data access for a client."
+  },
+  {
+    "id": "notifications",
+    "path": "/notifications",
+    "title": "Browser notification setup and subscriptions."
+  },
+  {
+    "id": "home",
+    "path": "/",
+    "title": "Overview of sources, app access and recent activity."
+  },
+  {
+    "id": "schedules",
+    "path": "/schedules",
+    "title": "Scheduled source collection and next runs."
+  },
+  {
+    "id": "search",
+    "path": "/search",
+    "title": "Search for a record or source artifact."
+  },
+  {
+    "id": "settings",
+    "path": "/settings",
+    "title": "Desktop pairing, credentials and server settings."
+  },
+  {
+    "id": "sources-spotify-top-artists-baseline-missing-record",
+    "path": "/sources/spotify/top_artists/baseline-missing-record",
+    "title": "One record\u2019s fields and provenance."
+  },
+  {
+    "id": "sources-spotify-top-artists-health",
+    "path": "/sources/spotify/top_artists/health",
+    "title": "Stream coverage and health evidence."
+  },
+  {
+    "id": "sources-spotify-top-artists",
+    "path": "/sources/spotify/top_artists",
+    "title": "A stream\u2019s records and schema summary."
+  },
+  {
+    "id": "sources-spotify",
+    "path": "/sources/spotify",
+    "title": "One source, its streams, runs and actions."
+  },
+  {
+    "id": "sources-add",
+    "path": "/sources/add",
+    "title": "Connector catalog and source setup choices."
+  },
+  {
+    "id": "sources-deployment",
+    "path": "/sources/deployment",
+    "title": "Deployment checks for source collection."
+  },
+  {
+    "id": "sources",
+    "path": "/sources",
+    "title": "Source list, health flags and stream summaries.",
+    "readyText": "Sources populate streams in this instance."
+  },
+  {
+    "id": "sources-schedules",
+    "path": "/sources/schedules",
+    "title": "Schedules associated with sources."
+  },
+  {
+    "id": "sources-stream-playground",
+    "path": "/sources/stream-playground",
+    "title": "Source stream presentation playground."
+  },
+  {
+    "id": "stream-playground",
+    "path": "/stream-playground",
+    "title": "Generic stream view playground."
+  },
+  {
+    "id": "syncs-baseline-missing-run",
+    "path": "/syncs/baseline-missing-run",
+    "title": "One run\u2019s progress, result and errors."
+  },
+  {
+    "id": "syncs-baseline-missing-run-stream",
+    "path": "/syncs/baseline-missing-run/stream",
+    "title": "Live or saved run interaction stream."
+  },
+  {
+    "id": "syncs",
+    "path": "/syncs",
+    "title": "Source runs and their states."
+  },
+  {
+    "id": "consent",
+    "path": "/consent",
+    "title": "App identity, requested data and consent controls."
+  },
+  {
+    "id": "design-system",
+    "path": "/design-system",
+    "title": "Design tokens and component examples."
+  }
+]

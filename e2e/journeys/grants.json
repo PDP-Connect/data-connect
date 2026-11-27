@@ -1,0 +1,14 @@
+{
+  "id": "grants",
+  "name": "Seeing which apps have access",
+  "steps": [
+    {
+      "id": "grants-list",
+      "open": "/grants",
+      "readyText": "Apps",
+      "desktopReadyHeading": "Apps",
+      "phoneReadyHeading": "Apps",
+      "assertText": "No app can read your data yet."
+    }
+  ]
+}

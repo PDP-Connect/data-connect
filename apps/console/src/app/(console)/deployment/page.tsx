@@ -1,37 +1,22 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
-import {
-  DeploymentDiagnosticsView,
-  isDeploymentIndexing,
-} from "@pdpp/operator-ui/components/views/deployment-diagnostics-view";
-import { retainedBytesFromDatasetSummary } from "@pdpp/operator-ui/lib/storage-footprint";
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
 import Link from "next/link";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { loadConnectorSummaryPage } from "../components/connector-summary-page.tsx";
-import { DeploymentReadinessPanel } from "../components/deployment-readiness-panel.tsx";
-import { extractReadinessInputs } from "../components/deployment-readiness-rows.ts";
-import { LivePoller } from "../components/live-poller.tsx";
-import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
-import {
-  type DatasetSummaryProjectionMetadata,
-  type DeploymentDiagnostics,
-  getDatasetSize,
-  getDatasetSummary,
-  getDatasetTop,
-  getDeploymentDiagnostics,
-  listConnectorSummaries,
-  type RefConnectorSummary,
-  type RefRetainedSizeRow,
-  type RefRetainedSizeTopRow,
-} from "../lib/ref-client.ts";
-import { rebuildDatasetSummaryAction } from "./actions.ts";
+import { extractReadinessInputs } from "../components/deployment-readiness-rows.ts";
+import { getDeploymentDiagnostics, type DeploymentDiagnostics } from "../lib/ref-client.ts";
+import { ServerChecks } from "./server-checks.tsx";
+import { SupportCopy } from "../components/support-copy.tsx";
+import { buildServerPractice } from "./plain-checks.ts";
+import { settingsTrail } from "../settings/settings-trail.ts"
 
 export const dynamic = "force-dynamic";
 
 interface DeploymentPageParams {
+  demo?: string;
   error?: string;
   notice?: string;
 }
@@ -45,119 +30,48 @@ interface DeploymentPageParams {
 //       specs/reference-implementation-architecture/spec.md
 export default async function DeploymentPage({ searchParams }: { searchParams: Promise<DeploymentPageParams> }) {
   const params = await searchParams;
+  const practice = process.env.NODE_ENV !== "production" && params.demo ? buildServerPractice(params.demo) : null;
+  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-6"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><ServerChecks inputs={practice.inputs} practice={practice} /><nav aria-label="Server settings" className="grid gap-3"><Link className="underline" href="/deployment/tokens">Tokens for scripts and tools</Link><Link className="underline" href="/deployment/provider-apps">Sign-in apps for data sources</Link></nav><TechnicalDetailsLink href="/deployment/technical" /></main></RecordroomShellWithPalette>;
   let report: DeploymentDiagnostics | null = null;
   let unreachable = false;
+  let loadError = "Server checks could not be loaded";
   try {
     report = await getDeploymentDiagnostics();
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       unreachable = true;
+      loadError = err.message;
     } else {
       throw err;
     }
   }
 
-  // The logical retained payload is rendered beside the physical footprint as
-  // a labeled comparison. It is a best-effort fetch — a failed summary read
-  // hides the comparison line rather than failing the deployment page, which
-  // is primarily a retrieval-diagnostics surface.
-  //
-  // `retainedBytesFromDatasetSummary` gates on the global projection's
-  // convergence state — the same fabrication class the per-connection read
-  // model already guards against (`connector-summary-read-model.ts`,
-  // `retained_bytes_state`): an unconverged projection must render as
-  // unknown, never as "0 B".
-  //
-  // `projection` (the full metadata, not just the derived byte count) is
-  // threaded through separately so the storage section can say WHY the
-  // number is missing and offer a recovery action, rather than a bare "—".
-  let retainedBytes: number | null = null;
-  let projection: DatasetSummaryProjectionMetadata | null = null;
-  try {
-    const summary = await getDatasetSummary();
-    retainedBytes = retainedBytesFromDatasetSummary(summary);
-    projection = summary.projection ?? null;
-  } catch {
-    retainedBytes = null;
-    projection = null;
-  }
-
-  // Per-source retained payload. The `database` block answers "how big is the
-  // database" and "which tables" but never "which source"; the connector
-  // summaries already carry `total_retained_bytes`, `total_records` +
-  // `total_records_state`, and the `retained_bytes` breakdown, so this needs
-  // no new endpoint or query.
-  //
-  // ONE bounded page, via the shared primitive — never the unscoped fan-out
-  // (`ref-client-pagination.test.ts` route invariant). A failed read leaves the
-  // table off rather than failing the page, matching the best-effort summary
-  // fetch above.
-  //
-  // `has_more` is threaded through, NOT discarded: one page may not hold every
-  // configured source, and a truncated list rendered as if it were the whole
-  // fleet is the same class of defect as fabricating a `0` — it implies a
-  // completeness the read does not have. The view states the bound instead.
-  const sourcePage = await loadConnectorSummaryPage({ cursor: undefined }, (opts) => listConnectorSummaries(opts));
-  const sources: readonly RefConnectorSummary[] = sourcePage.kind === "ok" ? sourcePage.items : [];
-  const sourcesTruncated = sourcePage.kind === "ok" && sourcePage.hasMore;
-
-  // Stream-grain and record/blob top-N retained bytes. Both are already
-  // computed by the retained-size projection and already exposed over HTTP
-  // (`GET /_ref/dataset/size?grain=stream`, `GET /_ref/dataset/top`) — this
-  // is the first console page to read them. `top` responses are already
-  // bounded server-side (`MAX_TOP_LIMIT = 25`); rendered as-is, no further
-  // pagination or fan-out. Best-effort, in parallel, same posture as the
-  // summary/source fetches above: a failed read hides its section rather
-  // than failing the page.
-  const [streamSizesResult, topRecordsResult, topBlobsResult] = await Promise.allSettled([
-    getDatasetSize("stream"),
-    getDatasetTop("record", "total_retained_bytes"),
-    getDatasetTop("blob", "blob_bytes"),
-  ]);
-  const streamSizes: readonly RefRetainedSizeRow[] =
-    streamSizesResult.status === "fulfilled" ? streamSizesResult.value.rows : [];
-  const topRecords: readonly RefRetainedSizeTopRow[] =
-    topRecordsResult.status === "fulfilled" ? topRecordsResult.value.rows : [];
-  const topBlobs: readonly RefRetainedSizeTopRow[] =
-    topBlobsResult.status === "fulfilled" ? topBlobsResult.value.rows : [];
-
   if (unreachable || !report) {
     return (
       <RecordroomShellWithPalette>
-        <ServerUnreachable />
+        <main className="mx-auto grid max-w-5xl gap-4"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><p>This could not be loaded. <Link href="/deployment">Try again</Link>.</p><SupportCopy details={loadError} /></main>
       </RecordroomShellWithPalette>
     );
   }
 
   return (
     <RecordroomShellWithPalette>
-      <LivePoller enabled={isDeploymentIndexing(report)} />
-      <DeploymentDiagnosticsView
-        actions={
-          <>
-            <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment/provider-apps">
-              Provider authorization
-            </Link>
-            <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment/tokens">
-              Tokens
-            </Link>
-          </>
-        }
-        beforeDiagnostics={<DeploymentReadinessPanel inputs={extractReadinessInputs(report)} />}
-        breadcrumbs={[{ href: "/", label: "Overview" }, { label: "Deployment" }]}
-        description="Operator diagnostics for the reference retrieval surfaces. Read-only. Secret environment values are redacted before reaching this page."
-        projection={projection}
-        projectionActionError={params.error ?? null}
-        projectionActionNotice={params.notice === "dataset_summary_rebuilt" ? "Dataset summary rebuilt." : null}
-        rebuildDatasetSummaryAction={rebuildDatasetSummaryAction}
-        report={report}
-        retainedBytes={retainedBytes}
-        sources={sources}
-        sourcesTruncated={sourcesTruncated}
-        streamSizes={streamSizes}
-        topBlobs={topBlobs}
-        topRecords={topRecords}
-      />
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
+        <PageHeader breadcrumbs={settingsTrail("Server")} title="Server" />
+        {params.error ? <div role="status"><p>This could not be completed. Try again from Technical details.</p><SupportCopy details={params.error} /></div> : null}
+        {params.notice === "dataset_summary_rebuilt" ? <p role="status">The stored data list was rebuilt.</p> : null}
+        <ServerChecks desktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"} inputs={extractReadinessInputs(report)} />
+        <nav aria-label="Server settings" className="grid border-y border-border/70 sm:grid-cols-2">
+          <Link className="flex min-h-11 items-center border-b border-border/70 py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:border-b-0 sm:border-r sm:pr-4" href="/deployment/provider-apps">
+            Sign-in apps for data sources
+          </Link>
+          <Link className="flex min-h-11 items-center py-3 text-[15px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:pl-4" href="/deployment/tokens">
+            Tokens for scripts and tools
+          </Link>
+        </nav>
+        <TechnicalDetailsLink href="/deployment/technical" />
+
+      </main>
     </RecordroomShellWithPalette>
   );
 }

@@ -23,8 +23,8 @@ async function withClipboard(clipboard: unknown, run: (screen: { press: () => Pr
     await run({
       text: () => container.textContent ?? "",
       press: async () => {
-        const button = [...container.querySelectorAll("button")].find((node) => /^Copy diagnostics$|^Copied$/.test(node.textContent ?? ""))
-        assert.ok(button, "no Copy diagnostics button")
+        const button = [...container.querySelectorAll("button")].find((node) => /^Copy details for support$|^Copied$/.test(node.textContent ?? ""))
+        assert.ok(button, "no Copy details for support button")
         await act(async () => button.click())
       },
     })

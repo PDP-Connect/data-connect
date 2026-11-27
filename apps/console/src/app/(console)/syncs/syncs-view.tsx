@@ -16,9 +16,11 @@ import {
   BandCell,
   buttonVariants,
   Caption,
-  Endorse,
+  type ConnectorIconLike,
   IcButton,
-  IcSelect,
+  IcPopover,
+  IcPopoverPopup,
+  IcPopoverTrigger,
   IcTimestamp,
   KV,
   KVRow,
@@ -27,24 +29,25 @@ import {
   TableCell,
   TableHeader,
   TableHeaderRow,
-  type ConnectorIconLike,
 } from "@pdpp/brand-react";
 import { formatCoverageAxis, humanizeFieldLabel } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
+import type { ReactNode } from "react";
 import Link from "next/link";
-
-import { SOURCE_WORK_GROUP_COPY } from "../lib/source-actionability.ts";
 import { ConnectorMark } from "../components/connector-mark.tsx";
-import {
-  type DuplicateSyncGroup,
-  describeRecentSyncOutcome,
-  type FailureCard,
-  type PendingSetupCard,
-  type RecentSyncEntry,
-  type SyncGroup,
-  type SyncRhythmTick,
-  type SyncRow,
-  type SyncsViewModel,
+import { SourceStatusText } from "../components/source-status-text.tsx";
+import { sourceStatusWords } from "../lib/source-status-words.ts";
+import type { RefConnectorSummary } from "../lib/ref-client.ts";
+import { SOURCE_WORK_GROUP_COPY } from "../lib/source-actionability.ts";
+import type {
+  DuplicateSyncGroup,
+  FailureCard,
+  PendingSetupCard,
+  RecentSyncEntry,
+  SyncGroup,
+  SyncRhythmTick,
+  SyncRow,
+  SyncsViewModel,
 } from "./syncs-model.ts";
 
 /** One filterable/pageable option for a recent-syncs filter control. */
@@ -70,6 +73,7 @@ export interface RecentSyncsPaging {
    * that can only ever return nothing.
    */
   connectorOptions: readonly RecentSyncsFilterOption[];
+  sourceFilterNote?: string | null;
   hasMore: boolean;
   isPaged: boolean;
   nextCursor: string | undefined;
@@ -153,7 +157,7 @@ function HealthBandStrip({ band }: { band: SyncsViewModel["band"] }) {
 function FailureCardPanel({ card, connectorIcons }: { card: FailureCard; connectorIcons: ConnectorIconMap }) {
   const { summary } = card;
   const ownerActionLabel = summary.actionLabel ?? (summary.cta === "reconnect" ? "Reconnect" : "Open source");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: card.work is SourceWorkItem | null; tsc rejects removing this guard.
+  // card.work is SourceWorkItem | null; tsc rejects removing this guard.
   const sourceWorkGroup = card.work?.group ?? "other";
   return (
     <section className="rr-fix" data-cta={summary.cta} data-source-work={sourceWorkGroup}>
@@ -327,64 +331,82 @@ function DuplicateSyncGroupPanel({ group, connectorIcons }: { group: DuplicateSy
 
 // ─── Recent syncs (one run per row) ───────────────────────────────────────────
 
-const RECENT_COLS = "minmax(0,1.4fr) minmax(0,1fr) minmax(0,0.9fr) minmax(0,0.8fr)";
-
 /**
  * One recent run. The whole row links to `/syncs/[runId]`, so the primary
  * gesture on this page is "open the sync I am looking at".
  */
-function RecentSyncRow({ connectorIcons, entry }: { connectorIcons: ConnectorIconMap; entry: RecentSyncEntry }) {
+export function recentSyncPhrase(entry: RecentSyncEntry, needsYou: boolean): string {
+  if (needsYou) return "Needs you";
+  if (entry.outcome === "ok") {
+    return "Sync finished";
+  }
+  if (entry.outcome === "partial") {
+    return "Sync finished with gaps";
+  }
+  if (entry.outcome === "failed") return "Sync failed";
+  if (entry.outcome === "running") return "Syncing now";
+  return entry.status === "cancelled" ? "Cancelled" : "Status not available";
+}
+
+function RecentSyncRow({
+  connectorIcons,
+  entry,
+  sourceStatus,
+}: {
+  connectorIcons: ConnectorIconMap;
+  entry: RecentSyncEntry;
+  sourceStatus: ReturnType<typeof sourceStatusWords> | null;
+}) {
+  const phrase = recentSyncPhrase(entry, sourceStatus?.needsYou ?? false);
+  const visiblePhrase = sourceStatus?.needsYou ? <SourceStatusText status={sourceStatus} /> : phrase;
   return (
-    <Link className="pdpp-table__row rr-recent-row" href={entry.href} prefetch={false}>
-      <TableCell className="rr-recent-row__name">
-        <span className="rr-recent-row__connection">
+    <li
+      className="border-border/70 border-b last:border-b-0"
+      data-source-id={entry.connectionId ?? undefined}
+      data-status-row={sourceStatus?.row}
+    >
+      <Link className="flex min-h-16 min-w-0 items-center gap-3 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={entry.href} prefetch={false}>
+        <span aria-hidden="true" className="inline-flex size-8 shrink-0 items-center justify-center rounded-[26%] border border-border bg-muted">
           {entry.connectorId ? (
-            <ConnectorMark
-              spacing="after"
-              connectorId={entry.connectorId}
-              icon={connectorIcons[entry.connectorId]}
-              name={entry.connectionName}
-            />
+            <ConnectorMark connectorId={entry.connectorId} icon={connectorIcons[entry.connectorId]} name={entry.connectionName} />
           ) : null}
-          {entry.connectionName}
         </span>
-        <span className="rr-recent-row__run">{entry.runId}</span>
-      </TableCell>
-      <TableCell className="rr-recent-row__outcome">
-        <span className="rr-recent-row__chip" data-outcome={entry.outcome}>
-          {describeRecentSyncOutcome(entry.outcome)}
+        <span className="min-w-0 flex-1">
+          <span className="block break-words text-[15px] font-medium text-foreground">{entry.connectionName}</span>
+          <span className="block text-[13px] text-muted-foreground">
+            {visiblePhrase}
+          </span>
         </span>
-        {entry.duration === null ? null : <span className="rr-recent-row__duration">{entry.duration}</span>}
-      </TableCell>
-      <TableCell className="rr-recent-row__records">
-        {entry.eventCount === null ? (
-          <span className="rr-recent-row__empty">—</span>
-        ) : (
-          `${entry.eventCount.toLocaleString()} record${entry.eventCount === 1 ? "" : "s"}`
-        )}
-      </TableCell>
-      <TableCell className="rr-recent-row__when" numeric>
-        <IcTimestamp mode="relative" value={entry.at} />
-      </TableCell>
-    </Link>
+        <span className="shrink-0 text-right text-[13px] tabular-nums text-muted-foreground">
+          <IcTimestamp mode="relative" value={entry.at} />
+        </span>
+      </Link>
+      <details className="pb-2 pl-11 text-[13px] text-muted-foreground">
+        <summary className="min-h-11 cursor-pointer py-2">Details</summary>
+        <p>Sync ID: <span className="font-mono">{entry.runId}</span></p>
+        {entry.duration ? <p>Duration: {entry.duration}</p> : null}
+        {sourceStatus ? <p>Sync status: {phrase}</p> : null}
+      </details>
+    </li>
   );
 }
 
 /**
- * GET-submitted outcome + source filters for recent syncs. A plain server form:
- * no client state on this page, matching the "no useState" invariant — the
- * select's own module owns the minimal client interactivity, same pattern as
- * `/audit`.
+ * Result + data source filters for recent syncs. Each popover lists its options
+ * as plain links, so choosing one applies it at once and the filter state stays
+ * in the URL without page hydration. (The popup is portaled to the document
+ * body and unmounted while closed, so form fields inside it would never be
+ * submitted by a surrounding form.)
  *
  * Both controls are honest about what `_ref/runs` can actually apply. Every
- * status option is a real run status (see `RUN_STATUS_FILTER_OPTIONS` in
- * `page.tsx`), and every source option is a connector the owner really has,
+ * result option is a real run status (see `RUN_STATUS_FILTER_OPTIONS` in
+ * `page.tsx`), and every source option is a data source the owner really has,
  * projected from the fleet page this route already fetches — so neither offers
- * a filter the server can't honour. The two compose: `_ref/runs` takes
- * `status` and `connector_id` together, so submitting the form carries
- * whichever of the pair are set.
+ * a filter the server can't honour. The two compose: each option link keeps
+ * the other filter's current value, and `_ref/runs` takes `status` and
+ * `connector_id` together.
  *
- * `run_cursor` is deliberately NOT carried through this form. A cursor is a
+ * `run_cursor` is deliberately NOT carried by an option link. A cursor is a
  * position inside ONE filtered feed; re-filtering makes it meaningless, so
  * applying a filter restarts at the newest page. Paging preserves both filters
  * instead — see `RecentSyncsPager`, which merges the current params.
@@ -393,45 +415,98 @@ function RecentSyncRow({ connectorIcons, entry }: { connectorIcons: ConnectorIco
  * one client-side would only reorder the current page and read as a whole-feed
  * sort, so the list stays newest-first — the one order the feed guarantees.
  */
-function RecentSyncsFilterForm({ paging }: { paging: RecentSyncsPaging }) {
+export function recentSyncsFilterHref(
+  params: Readonly<Record<string, string | undefined>>,
+  name: "connector_id" | "status",
+  value: string
+): string {
+  return recentSyncsHref(params, { [name]: value === "" ? undefined : value, run_cursor: undefined });
+}
+
+function RecentSyncsFilters({ paging }: { paging: RecentSyncsPaging }) {
   const status = paging.params.status ?? "";
   const connectorId = paging.params.connector_id ?? "";
   const hasFilter = status !== "" || connectorId !== "";
   return (
-    <form
-      action={RECENT_SYNCS_PATH}
-      className="rr-sync__recent-filters"
-      method="get"
-      style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: 8 }}
-    >
-      <IcSelect
-        aria-label="Filter recent syncs by outcome"
-        defaultValue={status}
-        name="status"
-        options={paging.statusOptions}
-        style={{ minWidth: 160 }}
-      />
+    <div className="flex flex-wrap items-center gap-2">
       {paging.connectorOptions.length > 0 ? (
-        <IcSelect
-          aria-label="Filter recent syncs by source"
-          defaultValue={connectorId}
+        <RecentSyncsFilterPopover
+          currentValue={connectorId}
+          label="Data source"
           name="connector_id"
           options={paging.connectorOptions}
-          style={{ minWidth: 160 }}
+          params={paging.params}
         />
       ) : null}
-      <IcButton size="sm" type="submit" variant="ghost">
-        Apply
-      </IcButton>
+      <RecentSyncsFilterPopover
+        currentValue={status}
+        label="Result"
+        name="status"
+        options={paging.statusOptions}
+        params={paging.params}
+      />
       {hasFilter ? (
         <a
-          className={buttonVariants({ size: "sm", variant: "ghost" })}
+          className={`${buttonVariants({ size: "sm", variant: "ghost" })} h-11 min-h-11 min-[860px]:h-[30px] min-[860px]:min-h-0`}
           href={recentSyncsHref(paging.params, { connector_id: undefined, run_cursor: undefined, status: undefined })}
         >
-          Clear filter
+          Clear filters
         </a>
       ) : null}
-    </form>
+      {paging.sourceFilterNote ? (
+        <p className="basis-full text-[13px] text-muted-foreground">{paging.sourceFilterNote}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function RecentSyncsFilterPopover({
+  currentValue,
+  label,
+  name,
+  options,
+  params,
+}: {
+  currentValue: string;
+  label: string;
+  name: "connector_id" | "status";
+  options: readonly RecentSyncsFilterOption[];
+  params: Readonly<Record<string, string | undefined>>;
+}) {
+  const selectedLabel = options.find((option) => option.value === currentValue)?.label ?? label;
+  return (
+    <IcPopover>
+      <IcPopoverTrigger
+        aria-label={`${label}: ${selectedLabel}`}
+        className="inline-flex h-11 min-h-11 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border border-border-strong bg-background px-3 py-2 text-[13px] font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-[860px]:h-[30px] min-[860px]:min-h-0"
+        type="button"
+      >
+        <span className="truncate">{selectedLabel}</span>
+        <span aria-hidden="true" className="text-muted-foreground">⌄</span>
+      </IcPopoverTrigger>
+      <IcPopoverPopup
+        aria-label={`Filter by ${label.toLowerCase()}`}
+        className="max-h-[min(24rem,calc(100vh-2rem))] w-[min(20rem,calc(100vw-2rem))] overflow-y-auto p-2"
+      >
+        <ul>
+          {options.map((option) => {
+            const selected = option.value === currentValue;
+            return (
+              <li key={option.value}>
+                <a
+                  aria-current={selected ? "true" : undefined}
+                  className="flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-[14px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  href={recentSyncsFilterHref(params, name, option.value)}
+                >
+                  <span aria-hidden="true" className="w-4 shrink-0 text-center">{selected ? "✓" : ""}</span>
+                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      </IcPopoverPopup>
+    </IcPopover>
   );
 }
 
@@ -443,7 +518,7 @@ function RecentSyncsPager({ paging }: { paging: RecentSyncsPaging }) {
     Object.entries(paging.params).filter(([key]) => !RECENT_SYNCS_PAGER_OWNED_KEYS.has(key))
   );
   return (
-    <nav aria-label="Recent syncs pagination" className="rr-sync__recent-pager" style={{ display: "flex", gap: 12 }}>
+    <nav aria-label="Sync history pagination" className="mt-4 flex flex-wrap gap-2">
       {paging.isPaged ? (
         <a
           className={buttonVariants({ size: "sm", variant: "ghost" })}
@@ -457,7 +532,7 @@ function RecentSyncsPager({ paging }: { paging: RecentSyncsPaging }) {
           className={buttonVariants({ size: "sm", variant: "ghost" })}
           href={recentSyncsHref(paging.params, { run_cursor: paging.nextCursor })}
         >
-          Older syncs →
+          Show more
         </a>
       ) : null}
     </nav>
@@ -468,36 +543,41 @@ function RecentSyncsSection({
   connectorIcons,
   entries,
   paging,
+  sourceSummaries,
 }: {
   connectorIcons: ConnectorIconMap;
   entries: readonly RecentSyncEntry[];
-  paging: RecentSyncsPaging;
+  paging?: RecentSyncsPaging;
+  sourceSummaries: readonly RefConnectorSummary[];
 }) {
-  const hasFilter = Boolean(paging.params.status) || Boolean(paging.params.connector_id);
+  const hasFilter = Boolean(paging?.params.status) || Boolean(paging?.params.connector_id);
+  const statuses = new Map<string, ReturnType<typeof sourceStatusWords>>();
+  const now = new Date();
+  for (const summary of sourceSummaries) {
+    const status = sourceStatusWords(summary, { now });
+    if (summary.connection_id) statuses.set(summary.connection_id, status);
+    if (summary.connector_instance_id) statuses.set(summary.connector_instance_id, status);
+  }
   return (
-    <section className="rr-sync__recent" data-testid="syncs-recent-list">
-      <div className="rr-sync__section-head">
-        <h2 className="rr-sync__section-title">Recent syncs</h2>
-      </div>
-      <RecentSyncsFilterForm paging={paging} />
+    <section aria-label="Sync history" className="mt-6" data-testid="syncs-recent-list">
+      {paging ? <RecentSyncsFilters paging={paging} /> : null}
       {entries.length > 0 ? (
         <>
-          <Table cols={RECENT_COLS}>
-            <TableHeaderRow>
-              <TableHeader>source</TableHeader>
-              <TableHeader>outcome</TableHeader>
-              <TableHeader>records</TableHeader>
-              <TableHeader numeric>when</TableHeader>
-            </TableHeaderRow>
+          <ul className="mt-3 border-t border-border/70">
             {entries.map((entry) => (
-              <RecentSyncRow connectorIcons={connectorIcons} entry={entry} key={entry.runId} />
+              <RecentSyncRow
+                connectorIcons={connectorIcons}
+                entry={entry}
+                key={entry.runId}
+                sourceStatus={entry.connectionId ? statuses.get(entry.connectionId) ?? null : null}
+              />
             ))}
-          </Table>
-          <RecentSyncsPager paging={paging} />
+          </ul>
+          {paging ? <RecentSyncsPager paging={paging} /> : null}
         </>
       ) : (
-        <div className="rr-sync__empty">
-          <Caption>{hasFilter ? "No syncs match this filter." : "Syncs appear here once a source runs."}</Caption>
+        <div className="border-y border-border/70 py-5 text-[15px] text-muted-foreground">
+          {hasFilter ? "No syncs match these filters." : "Syncs appear here when a data source finishes."}
         </div>
       )}
     </section>
@@ -505,39 +585,6 @@ function RecentSyncsSection({
 }
 
 /** Seeded-demo rendering: no filter form or pager, since the demo has no live runs feed to page against. */
-function RecentSyncsSectionDemo({
-  connectorIcons,
-  entries,
-}: {
-  connectorIcons: ConnectorIconMap;
-  entries: readonly RecentSyncEntry[];
-}) {
-  return (
-    <section className="rr-sync__recent" data-testid="syncs-recent-list">
-      <div className="rr-sync__section-head">
-        <h2 className="rr-sync__section-title">Recent syncs</h2>
-      </div>
-      {entries.length > 0 ? (
-        <Table cols={RECENT_COLS}>
-          <TableHeaderRow>
-            <TableHeader>source</TableHeader>
-            <TableHeader>outcome</TableHeader>
-            <TableHeader>records</TableHeader>
-            <TableHeader numeric>when</TableHeader>
-          </TableHeaderRow>
-          {entries.map((entry) => (
-            <RecentSyncRow connectorIcons={connectorIcons} entry={entry} key={entry.runId} />
-          ))}
-        </Table>
-      ) : (
-        <div className="rr-sync__empty">
-          <Caption>Syncs appear here once a source runs.</Caption>
-        </div>
-      )}
-    </section>
-  );
-}
-
 // ─── Sync row (one stream) ────────────────────────────────────────────────────
 
 /**
@@ -546,10 +593,10 @@ function RecentSyncsSectionDemo({
  */
 function formatCollectedThisRun(row: SyncRow): string | null {
   if (row.streamSkipped) {
-    return "skipped";
+    return "Skipped";
   }
   if (row.collectedThisRun === null) {
-    return row.failed ? "sync failed" : null;
+    return row.failed ? "Sync failed" : null;
   }
   // A real per-stream collected count is per-stream truth and wins over the
   // connection-level failure flag: a stream that collected rows did not fail,
@@ -558,9 +605,9 @@ function formatCollectedThisRun(row: SyncRow): string | null {
     return `+${row.collectedThisRun.toLocaleString()} collected`;
   }
   if (row.failed) {
-    return "sync failed";
+    return "Sync failed";
   }
-  return "no change";
+  return "No change";
 }
 
 /**
@@ -619,12 +666,12 @@ function SyncTableRow({ row }: { row: SyncRow }) {
 // ─── Sync group (one connection) ──────────────────────────────────────────────
 
 function SyncGroupLastRun({
-  delta,
+  outcome,
   duration,
   lastRunAt,
   rhythm,
 }: {
-  delta: string | null;
+  outcome: string | null;
   duration: string | null;
   lastRunAt: string | null;
   rhythm: SyncRhythmTick[];
@@ -632,7 +679,7 @@ function SyncGroupLastRun({
   return (
     <div className="rr-sync-group__last-run">
       {rhythm.length > 0 ? <Rhythm ticks={rhythm} /> : null}
-      {delta === null ? null : <span className="rr-sync-group__delta">{delta}</span>}
+      {outcome === null ? null : <span className="rr-sync-group__delta">{outcome}</span>}
       {duration === null ? null : <span className="rr-sync-group__duration">{duration}</span>}
       {lastRunAt === null ? null : (
         <span className="rr-sync-group__when">
@@ -678,6 +725,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
   return (
     <section
       className="rr-sync-group"
+      data-connection-id={group.connectionId}
       style={{ "--sync-group-intrinsic": `${intrinsicHeight}px` } as Record<string, string>}
     >
       <div className="rr-sync-group__head">
@@ -686,12 +734,11 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
           <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.name} />
           {group.name}
         </span>
-        <span className="rr-sync-group__cin">{group.connectionId}</span>
         <span className="rr-sync-group__count">
-          {group.streams.length} {group.streams.length === 1 ? "stream" : "streams"}
+          {group.streams.length} {group.streams.length === 1 ? "kind of record" : "kinds of records"}
         </span>
         <SyncGroupLastRun
-          delta={group.lastRunDelta}
+          outcome={group.lastRunOutcome}
           duration={group.lastRunDuration}
           lastRunAt={group.lastRunAt}
           rhythm={group.lastRunRhythm}
@@ -725,72 +772,83 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
 // ─── The view ─────────────────────────────────────────────────────────────────
 
 export function SyncsView({
+  title = "Sync history",
   connectorIcons = {},
   model,
   recentSyncsPaging,
+  sourceSummaries = [],
+  sourcePager,
   seeded = false,
 }: {
+  title?: string;
   connectorIcons?: ConnectorIconMap;
   model: SyncsViewModel;
+  sourceSummaries?: readonly RefConnectorSummary[];
+  sourcePager?: ReactNode;
   /** Absent only for the seeded `?demo=` render, which has no live runs feed to page. */
   recentSyncsPaging?: RecentSyncsPaging;
   seeded?: boolean;
 }) {
   return (
-    <div className="rr-sync">
-      <header className="rr-sync__masthead">
-        <h1 className="rr-sync__title">Syncs</h1>
-        <p className="rr-sync__sub">What ran recently and what needs your attention.</p>
-        {seeded ? <Endorse className="rr-sync__seeded" label="seeded demo" status="continuous" /> : null}
+    <div className="mx-auto w-full max-w-5xl">
+      <header className="mb-6">
+        <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]">
+          {title}
+        </h1>
+        {seeded ? <p className="mt-2 text-[13px] text-muted-foreground">Sample data</p> : null}
       </header>
 
-      <HealthBandStrip band={model.band} />
+      <RecentSyncsSection
+        connectorIcons={connectorIcons}
+        entries={model.recentSyncs}
+        paging={recentSyncsPaging}
+        sourceSummaries={sourceSummaries}
+      />
 
-      {model.pendingSetupCards.length > 0 || model.failureCards.length > 0 ? (
-        <div className="rr-sync__fixes">
-          {attentionSections(model).map(({ cards, pendingSetupCards, section }) => (
-            <AttentionSection
-              cards={cards}
-              connectorIcons={connectorIcons}
-              key={section}
-              pendingSetupCards={pendingSetupCards}
-              section={section}
-            />
-          ))}
+      <details className="mt-6 border-t border-border/70">
+        <summary className="min-h-11 cursor-pointer py-3 text-[13px] text-muted-foreground">Details</summary>
+        <div className="grid gap-6 pb-4">
+          <HealthBandStrip band={model.band} />
+          {model.pendingSetupCards.length > 0 || model.failureCards.length > 0 ? (
+            <div className="rr-sync__fixes">
+              {attentionSections(model).map(({ cards, pendingSetupCards, section }) => (
+                <AttentionSection
+                  cards={cards}
+                  connectorIcons={connectorIcons}
+                  key={section}
+                  pendingSetupCards={pendingSetupCards}
+                  section={section}
+                />
+              ))}
+            </div>
+          ) : null}
+          {model.duplicateGroups.length > 0 ? (
+            <div className="rr-sync__duplicates">
+              {model.duplicateGroups.map((group) => (
+                <DuplicateSyncGroupPanel connectorIcons={connectorIcons} group={group} key={group.connectorId} />
+              ))}
+            </div>
+          ) : null}
+          <section className="rr-sync__streams">
+            <div className="rr-sync__section-head">
+              <h2 className="rr-sync__section-title">Streams by source</h2>
+              <Caption>Each source's schedule and what every stream collected last time.</Caption>
+            </div>
+            {model.groups.length > 0 ? (
+              <div className="rr-sync__groups">
+                {model.groups.map((group) => (
+                  <SyncGroupBlock connectorIcons={connectorIcons} group={group} key={group.connectionId} />
+                ))}
+              </div>
+            ) : (
+              <div className="rr-sync__empty">
+                <Caption>Connect a source and its streams appear here.</Caption>
+              </div>
+            )}
+          </section>
+          {sourcePager}
         </div>
-      ) : null}
-
-      {model.duplicateGroups.length > 0 ? (
-        <div className="rr-sync__duplicates">
-          {model.duplicateGroups.map((group) => (
-            <DuplicateSyncGroupPanel connectorIcons={connectorIcons} group={group} key={group.connectorId} />
-          ))}
-        </div>
-      ) : null}
-
-      {recentSyncsPaging ? (
-        <RecentSyncsSection connectorIcons={connectorIcons} entries={model.recentSyncs} paging={recentSyncsPaging} />
-      ) : (
-        <RecentSyncsSectionDemo connectorIcons={connectorIcons} entries={model.recentSyncs} />
-      )}
-
-      <section className="rr-sync__streams">
-        <div className="rr-sync__section-head">
-          <h2 className="rr-sync__section-title">Streams by source</h2>
-          <Caption>Each source's schedule and what every stream collected last time.</Caption>
-        </div>
-        {model.groups.length > 0 ? (
-          <div className="rr-sync__groups">
-            {model.groups.map((group) => (
-              <SyncGroupBlock connectorIcons={connectorIcons} group={group} key={group.connectionId} />
-            ))}
-          </div>
-        ) : (
-          <div className="rr-sync__empty">
-            <Caption>Connect a source and its streams appear here.</Caption>
-          </div>
-        )}
-      </section>
+      </details>
     </div>
   );
 }

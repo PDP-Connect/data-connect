@@ -49,13 +49,16 @@ async function withThemeButton(
 
 test("the shell footer follows externally painted theme changes", async () => {
   await withThemeButton(createElement(ShellThemeButton), async (html, button) => {
-    assert.equal(button.textContent, "Dark");
+    // DIRECTION.md "The frame and the menu": the footer theme control is an icon.
+    assert.ok(button.querySelector("svg"));
+    assert.equal(button.getAttribute("aria-label"), "Switch to light theme");
     await act(async () => {
       html.setAttribute("data-theme", "light");
       html.classList.remove("dark");
     });
-    assert.equal(button.textContent, "Light");
-    assert.equal(button.title, "Switch to dark");
+    // DIRECTION.md "The frame and the menu": the footer theme control is an icon.
+    assert.equal(button.getAttribute("aria-label"), "Switch to dark theme");
+    assert.equal(button.title, "Switch to dark theme");
   });
 });
 
@@ -70,14 +73,16 @@ test("the shell footer requests the provider theme without writing the DOM", asy
     assert.deepEqual(requested, ["light"]);
     assert.equal(html.getAttribute("data-theme"), "dark");
     assert.equal(html.classList.contains("dark"), true);
-    assert.equal(button.textContent, "Dark");
+    // DIRECTION.md "The frame and the menu": the footer theme control is an icon.
+    assert.equal(button.getAttribute("aria-label"), "Switch to light theme");
   });
 });
 
 test("the server renders a neutral label and hydration settles on the painted theme", async () => {
   const markup = renderToString(createElement(ShellThemeButton));
-  assert.match(markup, />Theme</);
-  assert.doesNotMatch(markup, /Switch to/);
+  // DIRECTION.md "The frame and the menu": the footer theme control is an icon.
+  assert.match(markup, /aria-label="Switch theme"/);
+  assert.match(markup, /<svg/);
 
   const dom = new JSDOM(`<!doctype html><html data-theme="light"><body><div id="host">${markup}</div></body></html>`);
   const globals = {
@@ -102,8 +107,9 @@ test("the server renders a neutral label and hydration settles on the painted th
     const button = host.querySelector("button");
     assert.ok(button);
     assert.deepEqual(errors, []);
-    assert.equal(button.textContent, "Light");
-    assert.equal(button.title, "Switch to dark");
+    // DIRECTION.md "The frame and the menu": the footer theme control is an icon.
+    assert.equal(button.getAttribute("aria-label"), "Switch to dark theme");
+    assert.equal(button.title, "Switch to dark theme");
   } finally {
     await act(async () => root?.unmount());
     for (const [name, descriptor] of previous) {

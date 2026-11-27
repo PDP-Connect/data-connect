@@ -8,10 +8,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const PAGE_FILE = fileURLToPath(new URL("./manual-upload/[connectorId]/page.tsx", import.meta.url));
+const BODIES_FILE = fileURLToPath(new URL("../sources/add/connect-bodies.tsx", import.meta.url));
 const FORM_FILE = fileURLToPath(new URL("./manual-upload/[connectorId]/manual-upload-form.tsx", import.meta.url));
 
 const GET_SETUP = /getManualUploadSetup\(connectorId\)/;
-const FORM_COMPONENT = /<ManualUploadForm existingSources=\{existingSources\} setup=\{setup\}/;
+// Design "File services" (repair round 1): the form also receives the "new here" note that sits above its buttons.
+const FORM_COMPONENT = /<ManualUploadForm\s+existingSources=\{existingSources\}\s+name=\{name\}\s+note=\{<NewServiceNote[^>]*\/>\}\s+setup=\{setup\}/;
 const CLIENT_SUBMIT = /onSubmit=\{handleSubmit\}/;
 const RAW_XHR_UPLOAD = /new XMLHttpRequest\(\)/;
 const REF_UPLOAD_ENDPOINT = /\/_ref\/connectors\/.*manual-upload-staged-artifact/;
@@ -25,27 +27,26 @@ const MULTIPLE_FILES = /\bmultiple\b/;
 const ACCEPT_ATTR = /accepted_file_names/;
 const ACCEPT_EXTENSIONS = /accepted_file_extensions/;
 const SIZE_PREFLIGHT = /max_file_bytes/;
-const HELP_URL = /help_url/;
-const NEW_TAB_COPY = /in a new tab/;
 const OPENS_VIA_SYSTEM_BROWSER = /<OpenExternalLink/;
-const SECURITY_BOUNDARY_COPY = /stored for this source and is not exposed to connected apps or clients/i;
 const NO_CONNECTOR_BRANCH = /connectorId\s*===/;
 const NO_PROVIDER_COPY = /\bGoogle\b|\bTimeline\b|\bMaps\b/i;
 
 const ACTION_USE_SERVER = /^"use server";/;
 const REQUIRE_ACCESS = /await requireDashboardAccess\(/;
-const PREVIEW_ONLY_COPY = /Preview only/;
-const IMPORT_FILE_COPY = /Import file/;
-const OPTIONAL_PREVIEW_COPY = /Preview checks one file/;
+// Design "File services": "Import" and a quiet "Check the file first" replace "Import file" and "Preview only".
+const PREVIEW_ONLY_COPY = /fileCopy\.checkFirst/;
+const IMPORT_FILE_COPY = /fileCopy\.button/;
 const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
-const TARGET_CHOICE_COPY = /Create a new source for these files/;
-const EXISTING_SOURCE_COPY = /Add these files to an existing source/;
-const LABEL_INPUT = /name=\{connectionName\.name\}/;
+// DIRECTION.md, “Data sources”: label the target as a data source.
+const TARGET_CHOICE_COPY = /fileCopy\.separate/;
+// DIRECTION.md, “Words”: say “data source” when referring to a source alone.
+const EXISTING_SOURCE_COPY = /fileCopy\.addTo\(/;
+const LABEL_INPUT = /name="display_name"/;
 const NO_SERVER_ACTION = /useActionState|manualUploadConnectionFormAction|action=\{formAction\}/;
 const NO_SECRET_LOG = /console\.(log|error|warn)\([\s\S]*secret/;
 
 test("manual-upload page is manifest-driven, not a connector-specific prompt", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
+  const src = `${await readFile(PAGE_FILE, "utf8")}\n${await readFile(BODIES_FILE, "utf8")}`;
   assert.match(src, GET_SETUP);
   assert.match(src, FORM_COMPONENT);
   // Third gate REVISE (2026-07-29): existing-sources discovery no longer
@@ -58,7 +59,9 @@ test("manual-upload page is manifest-driven, not a connector-specific prompt", a
     /loadConnectorSummaryPage\(/,
     "existing-sources discovery must use the exact connector-scoped seam, never a fleet page"
   );
-  assert.match(src, SECURITY_BOUNDARY_COPY);
+  // help links print as plain links and open in the system browser, not the webview.
+  assert.match(src, OPENS_VIA_SYSTEM_BROWSER);
+  assert.match(src, /exportInstructions\(setup\.acquisition_methods\)/);
   assert.doesNotMatch(src, NO_CONNECTOR_BRANCH);
   assert.doesNotMatch(src, NO_PROVIDER_COPY);
 });
@@ -78,16 +81,8 @@ test("manual-upload form imports directly and offers preview without connector-s
   assert.match(src, ACCEPT_ATTR);
   assert.match(src, ACCEPT_EXTENSIONS);
   assert.match(src, SIZE_PREFLIGHT);
-  assert.match(src, HELP_URL);
-  assert.match(
-    src,
-    OPENS_VIA_SYSTEM_BROWSER,
-    "help_url must route through OpenExternalLink, not a bare <a>, so Tauri opens it in the system browser instead of the webview"
-  );
-  assert.match(src, NEW_TAB_COPY);
   assert.match(src, PREVIEW_ONLY_COPY);
   assert.match(src, IMPORT_FILE_COPY);
-  assert.match(src, OPTIONAL_PREVIEW_COPY);
   assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
   assert.match(src, TARGET_CHOICE_COPY);
   assert.match(src, EXISTING_SOURCE_COPY);

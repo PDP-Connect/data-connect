@@ -1,0 +1,15 @@
+{
+  "id": "product-health",
+  "name": "Deployment readiness",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/deployment",
+      "readyText": "Server",
+      "desktopReadyHeading": "Server",
+      "phoneReadyHeading": "Server",
+      "assertText": "Server"
+    }
+  ]
+}

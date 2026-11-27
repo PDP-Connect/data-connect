@@ -36,6 +36,7 @@ function LocalSourceRow({
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
   const [message, setMessage] = useState<string | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState(false)
   const runAction = useCallback(
     (action: () => Promise<{ ok: boolean; message?: string }>) => {
       setMessage(null)
@@ -53,11 +54,11 @@ function LocalSourceRow({
   )
   return (
     <li
-      className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3"
+      className="grid gap-2 border-b border-border py-3"
       data-testid="local-source-row"
     >
       <div className="flex flex-wrap items-center gap-2">
-        <span className="pdpp-eyebrow rounded border border-status-warning-fg/30 bg-status-warning-bg px-1.5 py-0.5 text-status-warning-fg">
+        <span className="pdpp-caption text-muted-foreground">
           Local
         </span>
         <span className="flex min-w-0 items-center gap-2 pdpp-caption font-medium text-foreground">
@@ -72,8 +73,8 @@ function LocalSourceRow({
           {source.connector_key} · v{source.version}
         </span>
         {source.selected ? (
-          <span className="pdpp-caption text-status-success-fg">
-            Active for runs
+          <span className="pdpp-caption text-muted-foreground">
+          Active
           </span>
         ) : null}
       </div>
@@ -87,6 +88,26 @@ function LocalSourceRow({
         Unsigned developer source. Reload after rebuilding the Collection
         Profile.
       </p>
+      {confirmRemove ? (
+        <div className="grid gap-2 rounded-control border border-border p-3" data-testid="local-source-remove-confirmation">
+          <p className="pdpp-caption">This removes the local data source from DataConnect.</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <IcButton disabled={isPending} onClick={() => setConfirmRemove(false)} size="sm" type="button" variant="ghost">Keep</IcButton>
+            <IcButton
+              disabled={isPending}
+              onClick={() => {
+                setConfirmRemove(false)
+                runAction(() => removeConnectorLocalSourceAction(source.source_id))
+              }}
+              size="sm"
+              type="button"
+              variant="destructive"
+            >
+              Remove
+            </IcButton>
+          </div>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <IcButton
           disabled={isPending || source.selected}
@@ -100,6 +121,7 @@ function LocalSourceRow({
           }
           size="sm"
           type="button"
+          variant="ghost"
         >
           Use local
         </IcButton>
@@ -129,12 +151,10 @@ function LocalSourceRow({
         </IcButton>
         <IcButton
           disabled={isPending}
-          onClick={() =>
-            runAction(() => removeConnectorLocalSourceAction(source.source_id))
-          }
+          onClick={() => setConfirmRemove(true)}
           size="sm"
           type="button"
-          variant="ghost"
+          variant="destructive"
         >
           Remove
         </IcButton>
@@ -185,7 +205,9 @@ export function LocalConnectorSourcesPanel({
     })
   }
   return (
-    <section className="mt-10 grid gap-3 border-t border-border/80 pt-6" data-testid="local-connector-sources">
+    <details className="mt-8 border-t border-border pt-3" data-testid="local-connector-sources">
+      <summary className="pdpp-caption cursor-pointer text-muted-foreground underline decoration-dotted underline-offset-4">Details</summary>
+    <section className="mt-3 grid gap-3" data-testid="local-connector-sources-panel">
       <div>
         <h2 className="pdpp-caption font-medium text-muted-foreground">
           Developer connector sources
@@ -240,5 +262,6 @@ export function LocalConnectorSourcesPanel({
         </p>
       )}
     </section>
+    </details>
   )
 }

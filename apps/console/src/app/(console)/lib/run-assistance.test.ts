@@ -285,3 +285,12 @@ test("a resolved non-browser (app-push) assistance request is not treated as bro
 
   assert.equal(hasResolvedBrowserSurfaceAssistance(events), false);
 });
+
+test("a long sign-in instruction reaches the owner whole, not cut at 200 characters", () => {
+  const message = `${"Finish the security check in the secure browser, then continue. ".repeat(10)}Last words.`;
+  const assistance = getCurrentRunAssistance([
+    event("run.assistance_requested", { assistance_request_id: "a_long", kind: "manual_action", message, owner_action: "operate_attachment" }),
+  ]);
+  assert.equal(assistance?.message, message);
+  assert.ok((assistance?.message.length ?? 0) > 600);
+});

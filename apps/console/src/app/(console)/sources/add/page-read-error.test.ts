@@ -8,43 +8,46 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
-const HANDLES_DETERMINISTIC_REQUEST_RE = /if \(isDeterministicSourcesReadError\(err\)\)/;
-const RENDERS_SERVER_REASON_RE = /The reference server rejected the source catalog request: \{err\.message\}/;
-const PRESERVES_FULL_HEADER_RE = /<AddSourceHeader \/>/;
-const TRANSIENT_INSTALL_CATALOG_STATE_RE =
-  /installCatalogTransientlyUnavailable = installSnapshot\?\.catalogUnavailableReason === "transient_busy";/;
-const TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
-  /installCatalogBusySnapshotId = installCatalogTransientlyUnavailable \? randomUUID\(\) : null;/;
-const PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE =
-  /installCatalogTransientlyUnavailable=\{installCatalogTransientlyUnavailable\}/;
-const PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
-  /installCatalogBusySnapshotId=\{installCatalogBusySnapshotId\}/;
-const TAKES_TRUNCATED_FROM_LOOKUP_RE = /truncated: existingSourcesTruncated \} =\s*await existingSourcesByConnectorCatalog/;
-const WARNS_WHEN_TRUNCATED_RE = /\{existingSourcesTruncated \? \(\s*<div[^>]*role="status"[\s\S]*?could not be loaded/;
+const CATALOG_READ_FILE = `${HERE}add-source-catalog-read.ts`;
+const INSTALLED_SOURCES_FILE = fileURLToPath(new URL("./installed-source-catalog.ts", import.meta.url));
+const SHARED_SOURCE_READER_FILE = fileURLToPath(new URL("../../components/existing-sources-by-connector.ts", import.meta.url));
+const TOLERATES_REFUSAL_RE = /options\.tolerateRefusal && isContinuationRefusal\(err\)/;
+const RETURNS_PARTIAL_SOURCE_ROWS_RE = /return \{ rows: \[\.\.\.rows\.values\(\)\], truncated: true \}/;
 
-test("Add Source renders a deterministic reference request failure before it reaches Next's error boundary", async () => {
+// Design "Page 1": the list that cannot load says one plain sentence and offers "Try again".
+test("Add Source renders a fixed deterministic read failure before it reaches Next's error boundary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, HANDLES_DETERMINISTIC_REQUEST_RE);
-  assert.match(src, RENDERS_SERVER_REASON_RE);
-  assert.match(src, PRESERVES_FULL_HEADER_RE);
-  assert.doesNotMatch(src, /instanceof RefRequestError/);
+  assert.match(src, /isDeterministicSourcesReadError\(err\)/);
+  assert.match(src, /<AddSourceLoadFailed \/>/);
+  assert.doesNotMatch(src, /err\.message/);
+  assert.match(src, /<AddSourceHeader \/>/);
   assert.ok(
-    src.indexOf("if (isDeterministicSourcesReadError(err))") < src.indexOf("throw err;"),
+    src.indexOf("isDeterministicSourcesReadError(err)") < src.indexOf("throw err;"),
     "the known 4xx path must render before the error boundary can redact it"
   );
 });
 
-test("Add Source preserves transient connector catalog-busy state for package presentation", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /import \{ randomUUID \} from "node:crypto";/);
-  assert.match(src, TRANSIENT_INSTALL_CATALOG_STATE_RE);
-  assert.match(src, TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
-  assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE);
-  assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
+// Design "Page 1" (list of connectable services): the transient busy state keeps the list honest.
+test("Add Source passes the transient package-catalog state to the list model", async () => {
+  const src = await readFile(CATALOG_READ_FILE, "utf8");
+  assert.match(src, /catalogTransientlyUnavailable: installSnapshot\?\.catalogUnavailableReason !== undefined/);
 });
 
-test("Add Source warns that existing sources are missing when the lookup was refused part way", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, TAKES_TRUNCATED_FROM_LOOKUP_RE);
-  assert.match(src, WARNS_WHEN_TRUNCATED_RE);
+test("Add Source marks existing accounts from the shared exact reader, even when the lookup was refused part way", async () => {
+  const src = await readFile(CATALOG_READ_FILE, "utf8");
+  const installedSources = await readFile(INSTALLED_SOURCES_FILE, "utf8");
+  const sharedReader = await readFile(SHARED_SOURCE_READER_FILE, "utf8");
+  assert.match(src, /readInstalledSourceCatalog\(catalog\.map/);
+  assert.match(installedSources, /return existingSourcesByConnectorCatalog\(catalogConnectorIds\)/);
+  assert.match(sharedReader, TOLERATES_REFUSAL_RE);
+  assert.match(sharedReader, RETURNS_PARTIAL_SOURCE_ROWS_RE);
+});
+
+// Any other failure (for example the package registry cannot be reached) lands in the segment's error
+// boundary. It must keep the page's frame: navigation, title and breadcrumb, not a bare sentence.
+test("Add Source's error boundary keeps the shell and the page header around the failed state", async () => {
+  const src = await readFile(`${HERE}error.tsx`, "utf8");
+  assert.match(src, /<RecordroomShellWithPalette>/);
+  assert.match(src, /<AddSourceHeader \/>/);
+  assert.match(src, /ADD_SOURCE_COPY\.loadFailed/);
 });

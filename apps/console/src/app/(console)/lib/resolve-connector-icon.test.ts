@@ -57,12 +57,12 @@ test("ConnectorMark SSR uses stable connector identity when no optional icon was
   assert.equal(markup.includes("Custom account label"), false);
 });
 
-test("ConnectorMark keeps the genuine initials fallback for an unknown connector ID", () => {
+test("ConnectorMark keeps the first-letter fallback for an unknown connector ID", () => {
   const markup = renderToStaticMarkup(
     createElement(ConnectorMark, { connectorId: "unknown-connector", name: "Example Source" })
   );
   assert.equal(markup.includes("<svg"), false);
-  assert.ok(markup.includes('data-initials="ES"'));
+  assert.ok(markup.includes('data-initials="E"'));
 });
 
 test("preserves first-party registry aliases without borrowing brands from unrelated URLs", () => {
@@ -147,7 +147,8 @@ test("product connector mark API reserves geometry and exposes only text spacing
   const markup = renderToStaticMarkup(
     createElement(ConnectorMark, { connectorId: "claude-code", name: "Account", spacing: "after" })
   );
-  assert.ok(markup.includes('class="pdpp-connector-icon mr-2"'));
+  // Brief decision 5: a single-colour untiled mark adds its mask fill class and keeps shared spacing.
+  assert.match(markup, /class="pdpp-connector-icon(?: [^"]+)* mr-2"/);
 });
 
 test("no two bundled connectors answer to the same identity with different marks", () => {

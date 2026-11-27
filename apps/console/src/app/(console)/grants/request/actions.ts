@@ -105,6 +105,9 @@ export async function stageGrantRequestAction(formData: FormData) {
 
 export async function approveGrantRequestAction(formData: FormData) {
   const workspaceId = asString(formData.get("workspace_id"));
+  if (asString(formData.get("decision_confirmation")) !== "yes") {
+    redirect(workspaceReturnTo(workspaceId));
+  }
   await requireDashboardAccess(workspaceReturnTo(workspaceId));
   try {
     await approveGrantRequestWorkspace(workspaceId);
@@ -116,6 +119,9 @@ export async function approveGrantRequestAction(formData: FormData) {
 
 export async function denyGrantRequestAction(formData: FormData) {
   const workspaceId = asString(formData.get("workspace_id"));
+  if (asString(formData.get("decision_confirmation")) !== "yes") {
+    redirect(workspaceReturnTo(workspaceId));
+  }
   await requireDashboardAccess(workspaceReturnTo(workspaceId));
   try {
     await denyGrantRequestWorkspace(workspaceId);

@@ -41,7 +41,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}technical-page.tsx`;
 
 test("the partial-coverage explanation is gated on there being coverage gaps", async () => {
   const src = await readFile(PAGE_FILE, "utf8");

@@ -56,7 +56,7 @@ export default function AuditError({ error, reset }: { error: Error & { digest?:
 
   return (
     <div data-testid="audit-read-recovering">
-      <ListLoadingSkeleton label="audit events" rows={8} />
+      <ListLoadingSkeleton label="activity" rows={8} />
     </div>
   );
 }

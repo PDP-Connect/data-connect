@@ -9,10 +9,11 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
 
-const WEB_PUSH_SETTINGS_RE = /<WebPushSettings config=\{state\.config\} subscriptions=\{state\.subscriptions\} \/>/;
+const WEB_PUSH_SETTINGS_RE = /<WebPushSettings plain config=\{state\.config\} subscriptions=\{state\.subscriptions\} \/>/;
 const WEB_PUSH_CONFIG_RE = /getWebPushConfig\(\)/;
 const WEB_PUSH_SUBSCRIPTIONS_RE = /listWebPushSubscriptions\(\)/;
-const DEVICE_SCOPED_COPY_RE = /Each device is configured separately/;
+const DEVICE_SCOPED_COPY_RE = /A message on this device when a sync needs you\./;
+const OLD_PAGE_COPY_RE = /Enable owner-action alerts|What DataConnect sends/;
 
 test("notifications page renders the Web Push setup surface from live owner state", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -20,5 +21,13 @@ test("notifications page renders the Web Push setup surface from live owner stat
   assert.match(src, WEB_PUSH_CONFIG_RE);
   assert.match(src, WEB_PUSH_SUBSCRIPTIONS_RE);
   assert.match(src, WEB_PUSH_SETTINGS_RE);
+  // DIRECTION.md, Notifications: the page says in one short sentence what the person gets.
   assert.match(src, DEVICE_SCOPED_COPY_RE);
+  assert.doesNotMatch(src, OLD_PAGE_COPY_RE);
+});
+
+test("notifications keeps technical information off the plain page", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.doesNotMatch(page, /<details/);
+  assert.match(page, /<WebPushSettings plain/);
 });

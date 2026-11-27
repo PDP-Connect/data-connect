@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
+import { EXPLORE_LOADING_MESSAGE } from "./explore-presentation.ts";
 
 /**
  * Route-level loading state for the Records Explorer.
@@ -16,7 +17,12 @@ import { ListLoadingSkeleton } from "../components/route-loading.tsx";
 export default function ExploreLoading() {
   return (
     <RecordroomShellWithPalette host="this server">
-      <ListLoadingSkeleton label="records" rows={8} />
+      <div className="mx-auto w-full max-w-5xl">
+        <NamedPageLoadingSkeleton label="records" rows={8} shape="list" title="Explore" />
+        <p aria-live="polite" className="mt-4 text-[13px] text-muted-foreground" role="status">
+          {EXPLORE_LOADING_MESSAGE}
+        </p>
+      </div>
     </RecordroomShellWithPalette>
   );
 }

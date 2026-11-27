@@ -15,6 +15,7 @@
  *   - No hardcoded hex/rgb; all color via CSS custom properties / data-surface.
  */
 
+import Link from "next/link";
 import {
   Band,
   BandCell,
@@ -42,9 +43,11 @@ import {
 import { notFound } from "next/navigation";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { formatRelative } from "@pdpp/display";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
-import { getTraceTimeline, type SpineEvent, type TimelineEnvelope } from "../../lib/ref-client.ts";
+import { getTraceTimeline, refSearch, type SpineEvent, type TimelineEnvelope, type TraceSummary } from "../../lib/ref-client.ts";
 import { eventEndorseStatus, traceOverall } from "../trace-timeline-status.ts";
+import { traceAppName, traceEntryReadFacts, traceEntryTitle } from "../trace-entry-title.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -56,6 +59,15 @@ function getCursor(searchParams: { cursor?: string | string[] }): string | null 
 
 function traceTimelineHref(traceId: string, cursor: string): string {
   return `/audit/${encodeURIComponent(traceId)}?${new URLSearchParams({ cursor }).toString()}`;
+}
+
+async function findTraceSummary(traceId: string): Promise<TraceSummary | null> {
+  try {
+    const search = await refSearch(traceId);
+    return search.traces.find((trace) => trace.trace_id === traceId) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Event status → Endorse variant ──────────────────────────────────────────
@@ -167,6 +179,14 @@ function padIndex(n: number): string {
   return String(n + 1).padStart(3, "0");
 }
 
+function relativeTime(value: string | null | undefined): string {
+  if (!value) {
+    return "Time not available";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
+}
+
 function EventTableRow({ event, index }: { event: SpineEvent; index: number }) {
   const endorseStatus = eventEndorseStatus(event.status);
   return (
@@ -189,16 +209,17 @@ function EventTableRow({ event, index }: { event: SpineEvent; index: number }) {
       </TableCell>
       <TableCell>
         <TypedSm style={{ color: "var(--color-muted-foreground)" }}>
-          {event.occurred_at ? `${event.occurred_at.replace("T", " ").slice(0, 19)}Z` : "—"}
+          {relativeTime(event.occurred_at)}
         </TypedSm>
       </TableCell>
       <TableCell>
         <details>
           <summary className="pdpp-caption" style={{ color: "var(--color-muted-foreground)", cursor: "pointer" }}>
-            data
+            Details
           </summary>
+          {/* Capped to the screen so a long payload scrolls inside its own box at 390px. */}
           <pre
-            className="pdpp-caption mt-1 overflow-x-auto"
+            className="pdpp-caption mt-1 max-w-[calc(100vw-3rem)] overflow-x-auto"
             style={{
               background: "var(--color-card)",
               border: "1px solid var(--color-border)",
@@ -239,8 +260,7 @@ function ProgressGroupTableRow({ events, startIndex }: { events: SpineEvent[]; s
       </TableCell>
       <TableCell>
         <TypedSm style={{ color: "var(--color-muted-foreground)" }}>
-          {first.occurred_at ? first.occurred_at.slice(0, 19).replace("T", " ") : "—"} →{" "}
-          {last.occurred_at ? last.occurred_at.slice(0, 19).replace("T", " ") : "—"}
+          {relativeTime(first.occurred_at)} → {relativeTime(last.occurred_at)}
         </TypedSm>
       </TableCell>
       <TableCell>
@@ -274,8 +294,11 @@ export default async function TraceDetailPage({
   const rsUrl = `${getAsInternalUrl()}/_ref/traces/${encodeURIComponent(traceId)}`;
 
   let envelope: TimelineEnvelope | null;
+  let matchedTrace: TraceSummary | null = null;
   try {
-    envelope = await getTraceTimeline(traceId, { cursor });
+    const [timeline, traceSummary] = await Promise.all([getTraceTimeline(traceId, { cursor }), findTraceSummary(traceId)]);
+    envelope = timeline;
+    matchedTrace = traceSummary;
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -300,6 +323,13 @@ export default async function TraceDetailPage({
   const runIds = collectPivotIds(envelope, "run_id");
 
   const overall = traceOverall(events);
+  const readFacts = traceEntryReadFacts(events, !(cursor || envelope.truncated));
+  const { actor: appWord, kind: firstKind, title } = traceEntryTitle(
+    first,
+    readFacts,
+    traceAppName(matchedTrace)
+  );
+  const what = firstKind === "Data read" ? readFacts ?? "Data read" : firstKind;
 
   // Load-more
   const loadMoreHref =
@@ -313,21 +343,38 @@ export default async function TraceDetailPage({
 
   return (
     <RecordroomShellWithPalette>
+      <nav aria-label="Breadcrumb" className="mb-3 text-primary"><Link href="/audit">Activity</Link></nav>
+      <header className="mb-5">
+        <h1 className="pdpp-heading text-foreground">Technical details for this activity</h1>
+        <p>{title}</p>
+      </header>
+      <Sheet className="mb-6">
+        <SheetBody>
+          <KV>
+            {appWord ? <KVRow k="App">{appWord}</KVRow> : null}
+            <KVRow k="What">{what}</KVRow>
+            <KVRow k="When">{first ? relativeTime(first.occurred_at) : "Time not available"}</KVRow>
+          </KV>
+        </SheetBody>
+      </Sheet>
+      <details className="mb-6">
+        <summary className="cursor-pointer text-sm">Details</summary>
+        <div className="pt-4">
       {/* ─── Breadcrumb ─── */}
       <nav aria-label="Breadcrumb" className="pdpp-caption mb-6" style={{ color: "var(--color-muted-foreground)" }}>
         <a href="/audit" style={{ color: "inherit" }}>
-          Audit
+          Activity
         </a>
         <span aria-hidden="true" style={{ margin: "0 calc(var(--spacing) * 2)" }}>
           /
         </span>
-        <span style={{ color: "var(--color-foreground)" }}>Trace</span>
+        <span style={{ color: "var(--color-foreground)" }}>Details</span>
       </nav>
 
       {/* ─── Identity sheet ─── */}
       <Sheet className="mb-6">
         <SheetHead>
-          <SheetTitle as="h1">Trace</SheetTitle>
+          <SheetTitle as="h2">Details</SheetTitle>
           <SheetSerial>
             <CopyMono text={traceId} />
           </SheetSerial>
@@ -497,6 +544,8 @@ export default async function TraceDetailPage({
           raw: <Typed as="code">{rsUrl}</Typed>
         </Caption>
       </ProtocolSurface>
+        </div>
+      </details>
     </RecordroomShellWithPalette>
   );
 }

@@ -1,3 +1,5 @@
+import { formatConnectionDisplayName } from "@pdpp/display";
+import { resolvePersistentWebPushConfig } from "./web-push-key-config.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -44,6 +46,7 @@ import {
   getRunTerminalEvent,
   getRunTerminalStatus,
   listSpineCorrelations,
+  listAppAccess,
   listSpineEventsPage,
   searchSpine,
 } from "../lib/spine.ts";
@@ -102,6 +105,7 @@ import {
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createBrowserEnrollmentReadinessResolver } from "./connector-readiness.ts";
 import { remoteAccessConfigPath } from "./remote-access-store.ts";
+import { createOwnerPasswordCheck } from "./owner-password-check.ts";
 import { ownerPasswordManagedByDesktop } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
@@ -393,6 +397,7 @@ import {
 } from "./routes/as-agent-connect.ts";
 import { mountAsAuthorize } from "./routes/as-authorize.ts";
 import { mountAsConsent } from "./routes/as-consent.ts";
+import { createConsentSourceNameLookup, type ConsentPickerCapabilities } from "./routes/as-consent-ui-helpers.ts";
 import { mountAsDcr } from "./routes/as-dcr.ts";
 import { mountAsDeviceUi } from "./routes/as-device-ui.ts";
 import { buildApplyGrantRevokeSideEffects, mountAsGrantRevoke } from "./routes/as-grant-revoke.ts";
@@ -550,6 +555,9 @@ import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
 import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
+import { mountRefAppHistory } from "./routes/ref-app-history.ts";
+import { mountRefSyncHistory } from "./routes/ref-sync-history.ts";
+import { mountRefAppAccess } from "./routes/ref-app-access.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
 import { mountRefStaticSecretCredentialCapture } from "./routes/ref-static-secret-credentials.ts";
 import {
@@ -5194,6 +5202,25 @@ export function buildAsApp(opts: ServerOpts = {}) {
   mountRefGrants(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefGrants>[1]);
   mountRefRuns(app, refSpineCorrelationsContext as unknown as Parameters<typeof mountRefRuns>[1]);
 
+  mountRefAppHistory(app, { requireOwnerSession: ownerAuth.requireOwnerSession, ownerSubjectId: (req: ReqLike) => getOwnerTokenSubjectId(req), pdppError, handleError } as unknown as Parameters<typeof mountRefAppHistory>[1]);
+
+  mountRefSyncHistory(app, { requireOwnerSession: ownerAuth.requireOwnerSession, pdppError, handleError } as unknown as Parameters<typeof mountRefSyncHistory>[1]);
+
+  mountRefAppAccess(app, {
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+    ownerSubjectId: (req: ReqLike) => getOwnerTokenSubjectId(req),
+    list: listAppAccess,
+    revokeGrant,
+    revokePackage: revokeGrantPackage,
+    getPackage: getGrantPackageForOwner,
+    applyRevokeSideEffects: buildApplyGrantRevokeSideEffects({
+      getDeliveryWorker: () => ({ tick: () => getDefaultDeliveryWorker().tick().then(() => undefined) }),
+      getStore: getDefaultClientEventSubscriptionStore,
+    }),
+    pdppError,
+    handleError,
+  } as unknown as Parameters<typeof mountRefAppAccess>[1]);
+
   // ────────────────────────────────────────────────────────────────────────
   // /_ref/grant-packages — operator visibility for hosted-MCP grant packages
   // ────────────────────────────────────────────────────────────────────────
@@ -6796,6 +6823,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     resolveIssuer: resolveAsIssuer,
+    resolveSourceName: createConsentSourceNameLookup(
+      consentPickerCaps as unknown as ConsentPickerCapabilities,
+      ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID
+    ),
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 
@@ -8128,8 +8159,18 @@ function buildRsApp(opts: ServerOpts = {}) {
   // routes/owner-recovery-key.ts for the full rationale: this route is a
   // pure relay over short-lived per-command result files, never a
   // computation of the code itself.
+  // One password re-check (one attempt budget) for both recovery exports below.
+  const rsOwnerPasswordCheck = createOwnerPasswordCheck({
+    loginRateLimit: rsOwnerAuthConfig.loginRateLimit,
+    password: rsOwnerAuthConfig.password,
+    store: opts.ownerPasswordVerifierStore
+      ? { readVerifier: async () => (await opts.ownerPasswordVerifierStore?.read()) ?? null }
+      : null,
+    verifier: opts.ownerAuthPasswordVerifier ?? null,
+  });
   mountOwnerRecoveryKey(app, {
     handleError,
+    ownerPassword: rsOwnerPasswordCheck,
     requireOwner,
     requireToken,
     store: createRecoveryKeyStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
@@ -8138,6 +8179,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   mountOwnerRecoveryKit(app, {
     exporter: createServerRecoveryKitExporter(),
     handleError,
+    ownerPassword: rsOwnerPasswordCheck,
     requireOwner,
     requireToken,
   } as unknown as Parameters<typeof mountOwnerRecoveryKit>[1]);
@@ -8618,7 +8660,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
 
-  const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
+  const webPushConfig = opts.webPushConfig || await resolvePersistentWebPushConfig({ store: createRequestProviderAppConfigStore() });
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
   // Reference-internal run-target registry, lifted out of buildAsApp so the
   // controller can hand the same instance the per-run nonce hooks it needs
@@ -8765,7 +8807,7 @@ export async function startServer(opts: ServerOpts = {}) {
         config: webPushConfig,
         connectorDisplayName: async (connectorId) => {
           const summary = await getConnectorSummaryForRoute(connectorId, controller);
-          return summary?.display_name || summary?.connector_display_name || connectorId;
+          return formatConnectionDisplayName(summary?.display_name, summary?.connector_display_name, connectorId);
         },
         log: logger as never,
         ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
@@ -9113,6 +9155,9 @@ export async function startServer(opts: ServerOpts = {}) {
     controller,
     ownerLive: resolveOwnerLive(opts),
     ownerAuthPassword: opts.ownerAuthPassword,
+    // The recovery-code route re-asks for the owner password; it reads the same store and verifier sign-in uses.
+    ownerPasswordVerifierStore: ownerPasswordStore,
+    ownerAuthPasswordVerifier: ownerPasswordVerifier ?? undefined,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
@@ -10312,7 +10357,7 @@ function createReferenceSchedulerManager({
         try {
           const summary = await getConnectorSummaryForRoute(routeId, controller);
           if (summary) {
-            connectorDisplayName = summary.display_name || summary.connector_display_name || connectorId;
+            connectorDisplayName = formatConnectionDisplayName(summary.display_name, summary.connector_display_name, connectorId);
             connectionUrl = `/sources/${encodeURIComponent(summary.connection_id || routeId)}`;
             renderedVerdict = summary.rendered_verdict;
           }
@@ -10346,7 +10391,7 @@ function createReferenceSchedulerManager({
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       onInteraction: async (...args: unknown[]) => {
         const interaction = args[0] as Record<string, unknown>;
-        const connectorDisplayName =
+        let connectorDisplayName =
           // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
           typeof interaction?.connector_display_name === "string" &&
           (interaction.connector_display_name as string).trim()
@@ -10360,6 +10405,9 @@ function createReferenceSchedulerManager({
         const runId = typeof interaction?.run_id === "string" ? (interaction.run_id as string) : null;
         if (runId) {
           try {
+            const routeId = typeof interaction.connector_instance_id === "string" ? interaction.connector_instance_id : typeof interaction.connector_id === "string" ? interaction.connector_id : null;
+            const source = routeId ? await getConnectorSummaryForRoute(routeId, controller).catch(() => null) : null;
+            connectorDisplayName = formatConnectionDisplayName(source?.display_name, source?.connector_display_name || connectorDisplayName, typeof interaction.connector_id === "string" ? interaction.connector_id : null);
             await fanoutPendingInteractionWebPush({
               config: webPushConfig,
               connectorDisplayName,

@@ -48,12 +48,14 @@ function validateReason(raw: string): { ok: true; value: string | null } | { ok:
   return { ok: true, value: raw };
 }
 
-function buildPeekHref(subscriptionId: string, error?: string): string {
-  const params = new URLSearchParams({ peek: subscriptionId });
+function buildReturnHref(subscriptionId: string, returnTo: "list" | "detail", error?: string): string {
+  const base = returnTo === "detail" ? `/event-subscriptions/${encodeURIComponent(subscriptionId)}` : PAGE_PATH;
+  const params = new URLSearchParams(returnTo === "list" ? { peek: subscriptionId } : {});
   if (error) {
     params.set("disable_error", error);
   }
-  return `${PAGE_PATH}?${params.toString()}`;
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
 }
 
 function errorMessage(err: unknown): string {
@@ -65,11 +67,12 @@ function errorMessage(err: unknown): string {
 
 export async function disableSubscriptionAction(formData: FormData): Promise<void> {
   const subscriptionId = asString(formData.get("subscription_id"));
+  const returnTo = asString(formData.get("return_to")) === "detail" ? "detail" : "list";
   if (!subscriptionId) {
     redirect(PAGE_PATH);
   }
 
-  await requireDashboardAccess(buildPeekHref(subscriptionId));
+  await requireDashboardAccess(buildReturnHref(subscriptionId, returnTo));
 
   // Confirmation is enforced server-side rather than via a client-only
   // confirm() dialog (which a scripted client or curl could bypass). The
@@ -77,12 +80,12 @@ export async function disableSubscriptionAction(formData: FormData): Promise<voi
   // to the peek pane with a clear message and no `_ref` call.
   const confirm = asString(formData.get("confirm_disable"));
   if (confirm !== "yes") {
-    redirect(buildPeekHref(subscriptionId, "Confirmation required: tick the box before submitting."));
+    redirect(buildReturnHref(subscriptionId, returnTo, "Confirmation required: tick the box before submitting."));
   }
 
   const reasonResult = validateReason(asString(formData.get("reason")));
   if (!reasonResult.ok) {
-    redirect(buildPeekHref(subscriptionId, reasonResult.message));
+    redirect(buildReturnHref(subscriptionId, returnTo, reasonResult.message));
   }
 
   let error: string | undefined;
@@ -92,5 +95,5 @@ export async function disableSubscriptionAction(formData: FormData): Promise<voi
     error = errorMessage(err);
   }
 
-  redirect(buildPeekHref(subscriptionId, error));
+  redirect(buildReturnHref(subscriptionId, returnTo, error));
 }

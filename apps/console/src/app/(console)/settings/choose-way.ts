@@ -29,44 +29,44 @@ const funnelHelp = "https://tailscale.com/kb/1223/funnel";
 const copy: Record<string, { title: string; line: string; group: GroupId }> = {
   "localhost-run": {
     title: "Temporary address",
-    line: "Free, no account, ready in seconds. Good for a quick test. For everyday use with ChatGPT, pick a lasting address under Other ways.",
+    line: "Free. Needs no account.",
     group: "advanced",
   },
   "tailscale-funnel": {
     title: "Tailscale · public address",
-    line: "Lasting address. Tailscale's relay can't read what passes through. Needs a free account.",
+    line: "Free. Needs a Tailscale account.",
     group: "lasting",
   },
   "cloudflare-named": {
     title: "Cloudflare",
-    line: "Lasting address on a web domain you own (bought separately). Cloudflare can see what passes through.",
+    line: "Needs a domain you own.",
     group: "lasting",
   },
-  "ngrok-https-edge": { title: "ngrok", line: "Lasting address. ngrok can see what passes through.", group: "lasting" },
+  "ngrok-https-edge": { title: "ngrok", line: "Free. Needs an ngrok account.", group: "lasting" },
   "tailscale-private": {
     title: "Tailscale · my devices only",
-    line: "Your phone and laptops signed in to Tailscale. AI apps can't use it.",
+    line: "Free. Needs the Tailscale app on your phone and computer.",
     group: "own-devices",
   },
-  lan: { title: "Same Wi-Fi only", line: "Devices on your home network. AI apps can't use it.", group: "own-devices" },
-  "own-address": { title: "Your own address", line: "You already run a web server or proxy.", group: "advanced" },
+  lan: { title: "Same Wi-Fi only", line: "Free. Your phone and computer need the same Wi-Fi.", group: "own-devices" },
+  "own-address": { title: "Your own address", line: "Needs a web address you already use.", group: "advanced" },
   "ngrok-tls-passthrough": {
-    title: "ngrok (advanced, TLS)",
-    line: "Your computer handles encryption.",
+    title: "ngrok encrypted web address",
+    line: "Needs an ngrok account. Check your plan for cost. The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
   "ngrok-tcp-passthrough": {
-    title: "ngrok (advanced, TCP)",
-    line: "Your computer handles encryption.",
+    title: "ngrok network address",
+    line: "Needs an ngrok account. Check your plan for cost. Uses an address without a domain name. The connection stays encrypted until it reaches this computer.",
     group: "advanced",
   },
-  "tunnl-gg": { title: "tunnl.gg", line: "Free, no account. Turns off after 2 hours idle.", group: "advanced" },
+  "tunnl-gg": { title: "Temporary hosted address", line: "Free. Needs no account.", group: "advanced" },
 };
 
 export const groupTitles: Record<GroupId, { title: string; note: string }> = {
-  lasting: { title: "Lasting address for AI apps", note: "Needs a free account with the service." },
-  "own-devices": { title: "Only my own devices", note: "AI apps like ChatGPT can't use these." },
-  advanced: { title: "Advanced", note: "" },
+  lasting: { title: "Addresses ChatGPT can open", note: "These work from the internet." },
+  "own-devices": { title: "Your phone and computers", note: "These work only on your devices." },
+  advanced: { title: "Details", note: "" },
 };
 export const groupOrder: GroupId[] = ["lasting", "own-devices", "advanced"];
 
@@ -99,7 +99,7 @@ function blockedStep(provider: Provider): Missing | null {
     const missing = provider.prerequisites.find(
       (item) => item.state === "denied" || (item.state === "missing" && !typedDuringSetup(item.remedy))
     );
-    return missing ? { text: `Needs ${plain(missing.label)} (${missing.state}).` } : null;
+    return missing ? { text: "This way needs another step before it can work." } : null;
   }
   const local = prerequisiteState(provider, "local-setup");
   if (local !== "present" && local !== "unknown") {
@@ -107,8 +107,8 @@ function blockedStep(provider: Provider): Missing | null {
   }
   if (provider.prerequisites.some((item) => item.state === "denied" || item.state === "missing")) {
     return provider.providerId === "tailscale-funnel"
-      ? { text: "Funnel isn't allowed on your Tailscale account yet.", link: { label: "How to allow it", href: funnelHelp } }
-      : { text: "Tailscale needs a step before this works." };
+      ? { text: "Your account needs another step before this address can work.", link: { label: "View the account steps", href: funnelHelp } }
+      : { text: "Your Tailscale account needs another step before this works." };
   }
   return null;
 }
@@ -130,7 +130,7 @@ export function funnelPolicyBlock(href: string | undefined): Missing {
   const url = href ? URL.parse(href) : null;
   const safe = url?.protocol === "https:" && !url.username && !url.password ? url.href : funnelHelp;
   return {
-    text: "Funnel isn't allowed on this Tailscale device yet. Ask an administrator to allow it.",
+    text: "An administrator needs to allow this address on the computer.",
     link: { label: "Open Tailscale access controls", href: safe },
   };
 }
@@ -141,7 +141,9 @@ function missingFor(provider: Provider, capabilities: Capabilities, blocks: Bloc
   if (blocked) return blocked;
   const step = blockedStep(provider);
   if (step) return step;
-  return pickUsage(provider, capabilities) === null ? { text: unsupportedText } : null;
+  if (pickUsage(provider, capabilities) !== null) return null;
+  if (provider.providerId.startsWith("ngrok-") && Object.values(provider.availability).some(item => item.reason === "not-installed")) return { text: "Install ngrok on this computer before choosing this way." };
+  return { text: unsupportedText };
 }
 
 /**

@@ -1,0 +1,37 @@
+{
+  "id": "add-data-source",
+  "name": "Adding a data source through the catalog and first setup step",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "source-catalog",
+      "open": "/sources/add",
+      "readyText": "Add source",
+      "desktopReadyHeading": "Add source",
+      "phoneReadyHeading": "Add source",
+      "assertText": "Spotify",
+      "minMainListItems": 20
+    },
+    {
+      "id": "spotify-first-setup-step",
+      "desktopAction": {
+        "type": "click",
+        "role": "link",
+        "name": "Add account",
+        "withinTestId": "source-setup-spotify"
+      },
+      "phoneAction": {
+        "type": "click",
+        "role": "link",
+        "name": "Add account",
+        "withinTestId": "source-setup-spotify"
+      },
+      "readyText": "Spotify",
+      "desktopReadyHeading": "Spotify",
+      "phoneReadyHeading": "Spotify",
+      "readyPathIncludes": "/connect/static-secret/spotify",
+      "phonePathIncludes": "/connect/static-secret/spotify",
+      "assertText": "Spotify"
+    }
+  ]
+}

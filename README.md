@@ -1,31 +1,34 @@
 # DataConnect
 
-DataConnect is a local-first desktop application for collecting data from
-online services and keeping the resulting data on your computer.
+DataConnect keeps a current copy of your own data on a computer you choose and
+lets the apps and assistants you pick read it on your terms.
 
-## Status
+You can connect supported data sources, browse the records DataConnect has
+collected, see when they last synced, and choose which apps can read them.
+An assistant that runs on the web, such as ChatGPT, needs an address it can
+reach. Settings offers several ways to get one, including a free way that
+needs no account.
 
-DataConnect is in active development. Use the
-[Releases page](https://github.com/PDP-Connect/data-connect/releases) for
-binary downloads when a release is available. Release artifacts are manual
-installs. This build does not include an in-app auto-updater.
+## Try sample data
 
-Public code signing is not available yet. Some macOS artifacts do not have a
-signature. For an unsigned macOS build, run this command after installation:
+From the repository folder, run:
 
 ```bash
-xattr -cr /Applications/DataConnect.app
+npm install
+npm run dev --prefix apps/console
 ```
 
-## What DataConnect does now
+Open <http://localhost:3000/?demo=calm>. This development-only demo uses
+fictional sample data. It does not need an account or a Personal Server.
 
-DataConnect writes collected data to local disk by default. Local collection
-does not require a Vana account or a Vana sign-in.
+## Privacy
 
-Every installer bundles and runs a local Personal Server. It gives the desktop
-app loopback-only access to imported and exported data. It also enables local
-PDPP and MCP integrations. Remote registration and tunneling stay disabled
-unless you configure service endpoints.
+- DataConnect stores your records and connection details on its Personal Server.
+  The desktop keeps its vault on that computer.
+- Apps can read records covered by the access you approve. Removing access does
+  not delete what an app already read.
+- Open **Settings > About > Privacy** for storage, access, network details, and
+  what is still unknown.
 
 ## Installation
 
@@ -33,8 +36,12 @@ Download the latest release from [Releases](../../releases).
 
 ### macOS
 
-Install the DMG. If macOS blocks an unsigned build, run the `xattr` command in
-the Status section and open the app again.
+Install the DMG. If macOS blocks an unsigned build, run this command and open
+the app again:
+
+```bash
+xattr -cr /Applications/DataConnect.app
+```
 
 ### Windows
 
@@ -112,9 +119,9 @@ To collect GitHub data:
    collect.
 4. Select **Start import**.
 
-DataConnect uses the token for that import only. The application does not save
-the token. Use a token that you can revoke in GitHub if you no longer want to
-use it.
+The desktop app uses the token for that import only and does not save it. A
+Personal Server can store the token encrypted so it can collect again later.
+Use a token that you can revoke in GitHub if you no longer want to use it.
 
 ### ChatGPT PDPP Collection Profile
 

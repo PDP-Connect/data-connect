@@ -10,6 +10,7 @@ const CONNECTOR_KEY_ALIASES = new Map<string, string>([
   ["gmail", "Gmail"],
   ["google-maps", "Google Maps"],
   ["google-maps-data-portability", "Google Maps (Data Portability)"],
+  ["github", "GitHub"],
 ]);
 
 export interface ConnectorDisplayInput {
@@ -47,7 +48,7 @@ export function formatConnectorKeyForDisplay(connectorId: string | null | undefi
 
   const fromUrl = connectorKeyFromUrl(raw);
   if (fromUrl) {
-    return fromUrl;
+    return CONNECTOR_KEY_ALIASES.get(fromUrl) ?? CONNECTOR_KEY_ALIASES.get(fromUrl.toLowerCase()) ?? fromUrl;
   }
 
   return formatUnknownConnectorKey(raw);
@@ -63,6 +64,27 @@ export function formatConnectorNameForDisplay(input: ConnectorDisplayInput): str
     return name;
   }
   return formatConnectorKeyForDisplay(input.connectorId);
+}
+
+/**
+ * The one name the product shows for a connection. The server saves the
+ * connector key as a new connection's name, so a saved name equal to the
+ * connector key (in any case) is not a name: use the connector's own display
+ * name, else "this data source".
+ */
+export function formatConnectionDisplayName(
+  connectionName: string | null | undefined,
+  connectorDisplayName: string | null | undefined,
+  connectorId: string | null | undefined
+): string {
+  const connectorKey = normalizeText(connectorId).toLowerCase();
+  const rawSavedName = normalizeText(connectionName) || null;
+  const manifestName = normalizeText(connectorDisplayName) || null;
+  const savedNameIsConnectorKey = rawSavedName !== null && rawSavedName.toLowerCase() === connectorKey;
+  // A "legacy" placeholder, a `local-device:` binding id or a registry URL is
+  // also not a name a person gave this connection.
+  const savedName = savedNameIsConnectorKey ? null : displayNameCandidate(rawSavedName);
+  return savedName ?? manifestName ?? "this data source";
 }
 
 /**

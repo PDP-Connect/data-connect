@@ -64,6 +64,44 @@
   }
 }
 
+/* Touch size. On a touch screen every control has a hit area of at least 44 px on its
+   short side. A link or button is not redrawn: an invisible box, centred on it, takes
+   the press. A text field, select or textarea is a replaced element and cannot carry
+   that box, so it takes the height itself and its drawn size does change. A checkbox
+   or radio is left to the label around it (see .rr-s-confirm label in sources-view.css).
+   Written once here, so no page patches its own links or buttons. Utilities
+   (absolute, sticky, an own ::after) win over this base layer on purpose. */
+@media (pointer: coarse) {
+  @layer base {
+    :where(a[href], button, summary, [role="button"], [role="link"]) {
+      position: relative;
+    }
+    :where(a[href], button, summary, [role="button"], [role="link"])::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      transform: translate(-50%, -50%);
+    }
+    /* A field is a replaced element: it takes no ::after, so it gets the height itself. */
+    :where(input:not([type="hidden"], [type="checkbox"], [type="radio"], [type="range"], [type="file"]), select, textarea) {
+      min-height: 44px;
+    }
+    /* A bare checkbox is drawn larger and pressed through its label, which is 44px tall. */
+    :where(input[type="checkbox"], input[type="radio"]) {
+      flex: none;
+      height: 22px;
+      width: 22px;
+    }
+    :where(label:has(> input[type="checkbox"], > input[type="radio"])) {
+      align-items: center;
+      min-height: 44px;
+    }
+  }
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    NAV-vs-ACTION: the overview's "Manage →" links.
 
@@ -90,4 +128,36 @@
 .rr-rel__manage:hover,
 .rr-rel__manage:focus-visible {
   color: var(--primary);
+}
+
+/* One placeholder colour for every field: the muted text token at full strength.
+   The shared sheets set it at 70% opacity, which falls below 4.5:1 on the light theme. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-foreground) !important;
+  opacity: 1 !important;
+}
+
+/* Round 11 (F3): a button that draws its own box is drawn 44px high on a touch screen, not only given an
+   invisible hit area. Unlayered, so it also beats `.pdpp-btn--sm { min-height: 0 }` and the operator-ui
+   size variants (`h-7`, `h-8`), which carry their own heights. One rule for every button. */
+@media (pointer: coarse) {
+  .pdpp-btn,
+  [data-slot="button"],
+  [class~="group/button"],
+  .rr-lens,
+  .rr-x-queryinput__chevron,
+  .rr-x-queryinput__jump,
+  .rr-x-toolbar-button,
+  .rr-x-chip__x,
+  .rr-x-datechip__x {
+    /* !important: several of these carry their own min-height or height from page sheets of equal weight. */
+    min-height: 44px !important;
+  }
+}
+
+/* The brand sheet gives `.pdpp-btn--sm` min-height: 0 outside any layer, which beats the `min-h-11`
+   utility. A small button that asks for the touch floor gets it here, once. */
+.pdpp-btn--sm.min-h-11 {
+  min-height: 44px;
 }

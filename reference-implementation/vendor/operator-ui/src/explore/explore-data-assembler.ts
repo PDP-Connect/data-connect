@@ -6,11 +6,9 @@ import {
   classifyRecordKind,
   type DeclaredFieldRoles,
   type DeclaredFieldTypes,
-  deriveSourceDisplayNameFallback,
   EMPTY_DECLARED_FIELD_ROLES,
   type FieldRole,
-  formatConnectorNameForDisplay,
-  isFallbackConnectionLabel,
+  formatConnectionDisplayName,
   parseFieldRole,
 } from "@pdpp/display";
 import { validateListEnvelope } from "@pdpp/list-envelope";
@@ -199,16 +197,7 @@ function toConnectionFacet(summary: RefConnectorIdentitySummary): ExplorerConnec
 }
 
 function connectorSummaryDisplayName(summary: RefConnectorIdentitySummary): string {
-  const displayInput = {
-    connectorId: summary.connector_id,
-    displayName: summary.display_name,
-    name: summary.connector_display_name,
-  };
-  const display = formatConnectorNameForDisplay(displayInput);
-  if (isFallbackConnectionLabel(displayInput)) {
-    return deriveSourceDisplayNameFallback(displayInput);
-  }
-  return display;
+  return formatConnectionDisplayName(summary.display_name, summary.connector_display_name, summary.connector_id);
 }
 
 function summaryByConnectionId(
@@ -818,7 +807,7 @@ function timelineRecordToEntry(
   const connectionId = summary?.connection_id ?? rec.connector_instance_id;
   const connectionDisplayName = summary
     ? connectorSummaryDisplayName(summary)
-    : formatConnectorNameForDisplay({ connectorId: rec.connector_id });
+    : formatConnectionDisplayName(null, null, rec.connector_id);
   return {
     blobAffordance: buildBlobAffordance(data, fieldCapabilities) ?? undefined,
     connectionDisplayName,

@@ -36,13 +36,13 @@ const NOTICE_ONLY_ON_SERVER_VERDICT =
   /const browserBoundRequest = requestIsBrowserBound === true \? requestedConnector : undefined;/;
 const IMPORTS_BINDING_SUPPORT = /from "\.\.\/lib\/load-browser-connect-support\.ts"/;
 const DEFAULT_ONLY_LOCAL_COLLECTOR =
-  /const defaultConnectorId = resolveLocalCollectorEnrollmentKey\(collectorTemplates, requestedConnector\)/;
+  /const defaultConnectorId =\s*resolveLocalCollectorEnrollmentKey\(\s*collectorTemplates,\s*requestedConnector\s*\)/;
 const KEY_LIST_CLASSIFIERS = /\bisBrowserBoundConnector\b|\bisSupportedLocalCollectorConnector\b/;
 const DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER = /\bisSupportedBrowserCollectorConnector\b/;
 const RENDERS_NOTICE = /browserBoundRequest\s*\?\s*\(?\s*<BrowserBoundEnrollmentNotice/;
 const PENDING_BROWSER_TITLE = /Browser setup not available yet/;
 const PACKAGED_PENDING_COPY = /Browser setup is not available in this dashboard yet/;
-const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add source\s*<\/Link>/;
+const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add a data source\s*<\/Link>/;
 const CONNECT_APPS_LINK = /href="\/connect"[\s\S]{0,120}>\s*Connect apps\s*<\/Link>/;
 const FORBIDDEN_MONOREPO_COPY = /PDPP monorepo checkout|generated monorepo commands|Manual browser setup/;
 

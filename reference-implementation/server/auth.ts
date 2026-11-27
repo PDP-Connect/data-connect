@@ -1596,6 +1596,19 @@ function buildClientDisplayFromRegistration(metadata: Partial<ClientMetadata> = 
   });
 }
 
+function retainCimdClientDisplay(grant: GrantEnvelope, registeredClient: RegisteredClient): void {
+  if (registeredClient.registration_mode !== "client_id_metadata_document") {
+    return;
+  }
+  const display = buildClientDisplayFromRegistration(registeredClient.metadata);
+  if (display) {
+    grant.client = {
+      ...grant.client,
+      client_display: Object.fromEntries(Object.entries(display).filter(([, value]) => value !== null)),
+    };
+  }
+}
+
 function applyRegisteredClientToPendingRequestClient(
   request: { client: PendingRequestClient },
   registeredClient: RegisteredClient
@@ -7600,6 +7613,7 @@ async function persistApprovedBatchGrantAtomically({
       ) as unknown as import("./core-source-authorization.ts").RetainedCoreConsentSnapshot,
       subjectId,
     }) as GrantEnvelope;
+    retainCimdClientDisplay(grant, registeredClient);
     const source = describePackageMemberSource(grant);
     if (!isNonEmptyString(grant.grant_id)) {
       throw bindingError("grant_invalid", "Issued child grant is missing grant_id");
@@ -8268,6 +8282,7 @@ export async function approveGrant(
     subjectId,
   }) as GrantEnvelope;
 
+  retainCimdClientDisplay(grant, registeredClient);
   const token = await persistApprovedSingleGrantAtomically({
     accessMode: selection.access_mode,
     aiTrainingConsented,
@@ -9441,6 +9456,8 @@ function prepareChildGrantForPackage({
     snapshot: snapshot as unknown as import("./core-source-authorization.ts").RetainedCoreConsentSnapshot,
     subjectId,
   }) as GrantEnvelope;
+
+  retainCimdClientDisplay(grant, registeredClient);
 
   const grantIssuedEvent: AuthSpineEventInput = {
     actor_id: "pdpp_as",

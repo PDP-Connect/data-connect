@@ -17,24 +17,26 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
+const INSTALL_PROMPT_FILE = `${HERE}connector-install-prompt.tsx`;
 
 const READS_SERVER_FACT = /const connectorNotInstalled = isConnectorNotInstalled\(summary\);/;
 const STREAM_FACTS_GET_FACT = /formatStreamCollectionFacts\(entry, \{\s*connectorNotInstalled[,\s}]/;
 const PROMPT_GATED = /const installPromptShown = connectorNotInstalled && !revoked && !setupFailed;/;
-const NOTICE_RENDERED =
-  /\{installPromptShown \? \(\s*<ConnectorInstallPrompt[\s\S]{0,200}variant="notice"[\s\S]{0,40}\/>\s*\) : null\}/;
-const NOTICE_BEFORE_RUNS_STRIP = /variant="notice"[\s\S]*\{streakDots\.length > 0 \? <StreakStrip/;
+const INSTALL_ACTION_RENDERED = /if \(statusAction\?\.kind === "install"\)[\s\S]*<ConnectorInstallPrompt[\s\S]*variant="inline"/;
+const INSTALL_STATE_COPY = /connectorNotInstalledWords\(/;
 const DIAGNOSTICS_GET_FACT = /<ConnectionDiagnostics[\s\S]{0,300}connectorNotInstalled=\{connectorNotInstalled\}/;
 const SYNC_BUTTONS = /<SyncNowButton\b[\s\S]*?\/>/g;
 
-test("the source page derives not-installed from the reference summary and shows the notice up front", async () => {
+test("the source page puts install in the status action and keeps its prompt explanation", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
+  const prompt = await readFile(INSTALL_PROMPT_FILE, "utf8");
   assert.match(src, READS_SERVER_FACT);
   assert.match(src, STREAM_FACTS_GET_FACT);
   assert.match(src, PROMPT_GATED);
-  assert.match(src, NOTICE_RENDERED);
-  assert.match(src, NOTICE_BEFORE_RUNS_STRIP);
+  // DIRECTION.md: the status table owns the one top action and the state copy follows its sentence.
+  assert.match(src, INSTALL_ACTION_RENDERED);
+  assert.match(prompt, INSTALL_STATE_COPY);
   assert.match(src, DIAGNOSTICS_GET_FACT);
 });
 

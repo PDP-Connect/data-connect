@@ -1,0 +1,35 @@
+{
+  "id": "sources-list-and-detail",
+  "name": "The list of data sources, and opening one data source",
+  "seed": ["spotify", "github", "reddit"],
+  "steps": [
+    {
+      "id": "sources-list",
+      "open": "/sources",
+      "readyText": "Data sources",
+      "desktopReadyHeading": "Data sources",
+      "phoneReadyHeading": "Data sources",
+      "assertText": "Spotify"
+    },
+    {
+      "id": "spotify-source-detail",
+      "open": "/sources",
+      "desktopAction": {
+        "type": "click",
+        "role": "link",
+        "name": "Open Spotify"
+      },
+      "phoneAction": {
+        "type": "click",
+        "role": "link",
+        "name": "Open Spotify"
+      },
+      "readyText": "What is here",
+      "readyPathIncludes": "/sources/cin_",
+      "phonePathIncludes": "/sources/cin_",
+      "assertText": "Spotify",
+      "desktopReadyHeading": "What is here",
+      "phoneReadyHeading": "What is here"
+    }
+  ]
+}

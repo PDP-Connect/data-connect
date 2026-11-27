@@ -1,3 +1,4 @@
+import { sourceRecordCount } from "../lib/source-record-count.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -27,8 +28,8 @@
  * a false zero or green.
  */
 
-import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
+import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
 import {
   deriveSourceDisplayNameFallback,
   formatConnectorNameForDisplay,
@@ -41,8 +42,9 @@ import {
   manualUploadSetupFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { formatStreamCollectionFacts, indexCollectionReportByStream } from "../lib/collection-report.ts";
-import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import { isConnectorNotInstalled } from "../lib/connector-implementation.ts";
+import { connectionDisplayName, connectionNameDisambiguators } from "../lib/connection-display-name.ts";
+import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
 import type { FormattedNextAction } from "../lib/next-action.ts";
 import type {
   RefConnectorRunSummary,
@@ -53,6 +55,7 @@ import type {
   RefSchedule,
 } from "../lib/ref-client.ts";
 import { scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
+import { formatSourceRowSchedule } from "../lib/schedule-words.ts";
 import {
   isArchivedSource,
   isRevokedConnector,
@@ -63,6 +66,7 @@ import {
   type SourcePrimaryVerdictAction,
   type SourceStatusFlag,
 } from "../lib/source-actionability.ts";
+import { ENTER_THE_CODE, manifestCredentialKind, type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
 import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../lib/total-records-label.ts";
 import { summarizeVersionChurn } from "../lib/version-churn-summary.ts";
 
@@ -144,6 +148,8 @@ export interface SourceInstanceView {
   archived: boolean;
   /** Stable connection selector for routing + revoke (connection_id). */
   connectionId: string | null;
+  /** Acquisition mode sent by the reference, used to guard server-started syncs. */
+  sourceKind: RefConnectorSummary["source_kind"];
   /** Connector type id (e.g. "gmail"), used for sync + add-source. */
   connectorId: string;
   /**
@@ -193,6 +199,8 @@ export interface SourceInstanceView {
    * Sync/Reauthorize controls for a source the owner cannot repair.
    */
   primaryVerdictAction: SourcePrimaryVerdictAction | null;
+  /** The sync where a pending security code is entered; set only while the source waits for one. */
+  codeEntryHref?: string | null;
   revoked: boolean;
   /**
    * A revoked retired-setup-shell row that never had a successful run —
@@ -218,6 +226,12 @@ export interface SourceInstanceView {
   sourceScope: "active" | "draft" | "paused" | "rejected" | "revoked" | "unknown";
   /** Status flag (dot + Endorse) derived from rendered verdict, with legacy fallback. */
   status: SourceStatusFlag;
+  /** Status words shared with Home and the data source page. */
+  statusWords: SourceStatusWords;
+  /** The schedule label used by the compact list. */
+  scheduleLabel: string;
+  /** The record count as shown in the list's Records column. */
+  recordsLabel: string;
   /** Stream manifest rows for the passport table. */
   streams: SourceStreamManifestRow[];
   /** Total retained records across all streams. */
@@ -343,6 +357,52 @@ export function reactivateRecordCopy(totalRecords: number, totalRecordsState?: R
   return isTotalRecordsAuthoritative(totalRecordsState) && totalRecords > 0
     ? `${totalRecords.toLocaleString()} collected record${totalRecords === 1 ? "" : "s"} are`
     : "collected records are";
+}
+
+export function formatSourceRowRecords(totalRecords: number, state?: RefCountState): string {
+  if (state === "stale") {
+    return `${totalRecords.toLocaleString()} (not checked lately)`;
+  }
+  return isTotalRecordsAuthoritative(state) ? totalRecords.toLocaleString() : "—";
+}
+
+export { formatSourceRowSchedule };
+
+export type SourceRowMenuItem =
+  | { kind: "sync"; label: "Sync now" }
+  | { kind: "add_export"; href: string; label: "Add another export" }
+  | { kind: "reprocess"; label: "Reprocess all exports" }
+  | { kind: "revoke"; label: "Revoke" }
+  | { kind: "reactivate"; label: "Reactivate" }
+  | { kind: "open"; href: string; label: "Open this data source" };
+
+/** Only actions and destinations belong in the row menu; status words stay on the row. */
+export function sourceRowMenuItems(instance: SourceInstanceView, interactive = true): SourceRowMenuItem[] {
+  const action = instance.statusWords.action;
+  const rowStartsSync = action?.kind === "sync_now" || action?.kind === "retry_first_sync" ||
+    (action?.kind === "server_cta" && instance.primaryVerdictAction?.ownerRunnable &&
+      (instance.primaryVerdictAction.kind === "refresh_now" || instance.primaryVerdictAction.kind === "retry_gap"));
+  const serverActionBelongsElsewhere = instance.primaryVerdictAction !== null || instance.nextAction !== null;
+  const canSyncFromServer = instance.sourceKind !== "manual" && instance.sourceKind !== "local_device" &&
+    !instance.connectorNotInstalled && !instance.revoked && !instance.archived && !instance.setupFailed &&
+    instance.sourceScope !== "paused" && instance.sourceScope !== "draft" && !instance.isRunning;
+  const items: SourceRowMenuItem[] = [];
+
+  if (canSyncFromServer && !rowStartsSync && !serverActionBelongsElsewhere) {
+    items.push({ kind: "sync", label: "Sync now" });
+  }
+  if (instance.manualUploadHref) {
+    items.push({ kind: "add_export", href: instance.manualUploadHref, label: "Add another export" });
+    items.push({ kind: "reprocess", label: "Reprocess all exports" });
+  }
+  if (interactive && instance.connectionId && !instance.revoked && !instance.setupFailed) {
+    items.push({ kind: "revoke", label: "Revoke" });
+  }
+  if (interactive && instance.connectionId && instance.revoked && !instance.setupFailed) {
+    items.push({ kind: "reactivate", label: "Reactivate" });
+  }
+  items.push({ kind: "open", href: instance.detailHref, label: "Open this data source" });
+  return items;
 }
 
 /**
@@ -516,9 +576,10 @@ function streamNamesForSource(
  * centralized `formatTotalRecordsLabel` primitive as every other renderer.
  */
 function formatSourceListFacts(summary: RefConnectorSummary, streamCountOverride: number | null = null): string {
-  const recordCount = Number.isFinite(summary.total_records) ? Math.max(0, Math.floor(summary.total_records)) : 0;
+  const projected = sourceRecordCount(summary);
+  const recordCount = projected.count ?? summary.total_records;
   const recordNoun = recordCount === 1 ? "record" : "records";
-  const recordsLabel = formatTotalRecordsLabel(recordCount, summary.total_records_state, recordNoun);
+  const recordsLabel = formatTotalRecordsLabel(recordCount, projected.state, recordNoun);
   const streamCountRaw = streamCountOverride ?? summary.stream_count ?? summary.streams.length;
   const streamCount = Number.isFinite(streamCountRaw) ? Math.max(0, Math.floor(streamCountRaw)) : 0;
   const streamNoun = streamCount === 1 ? "stream" : "streams";
@@ -598,6 +659,8 @@ export function toSourceInstanceView(
     connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
     fallbackDisambiguator?: string | null;
     manifests?: readonly SourceManifestLike[];
+    now?: Date;
+    offset?: number;
   } = {}
 ): SourceInstanceView {
   const connectorId = summary.connector_id;
@@ -631,11 +694,9 @@ export function toSourceInstanceView(
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
   const sourceStreamNames = streamNamesForSource(summary, collectionFactsByStream, streamRecordsByStream);
 
-  const baseDisplayName = formatConnectorNameForDisplay({
-    connectorId,
-    displayName: summary.display_name,
-    name: summary.connector_display_name,
-  });
+  const displayName = connectionDisplayName(
+    summary.display_name, summary.connector_display_name, connectorId, options.fallbackDisambiguator
+  );
   const hasFallbackLabel = isFallbackConnectionLabel({
     connectorId,
     displayName: summary.display_name,
@@ -647,9 +708,6 @@ export function toSourceInstanceView(
     name: summary.connector_display_name,
   });
 
-  const displayName = options.fallbackDisambiguator
-    ? `${baseDisplayName} · ${options.fallbackDisambiguator}`
-    : baseDisplayName;
   const listKind = listKindForDisplayName(displayName, kind);
   let accountLine: string;
   if (hasFallbackLabel) {
@@ -663,14 +721,15 @@ export function toSourceInstanceView(
     accountLine = formatSourceListFacts(summary, summary.streams.length);
   }
   const { primaryVerdictAction } = actionability;
+  const manifest = options.manifests
+    ? options.manifests.find((candidate) => manifestMatchesConnectorId(candidate, connectorId))
+    : undefined;
+  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset,streams: manifest?.streams as StreamManifestEntry[] | undefined,credentialKind: manifestCredentialKind(manifest) });
   const nextAction = primaryVerdictAction?.ownerRunnable ? null : actionability.nextAction;
   const { ownerActionCue } = actionability;
   const status = actionability.renderedStatus;
   const { fusedStatus } = actionability;
 
-  const manifest = options.manifests
-    ? options.manifests.find((candidate) => manifestMatchesConnectorId(candidate, connectorId))
-    : undefined;
   const streamsByName = new Map<string, StreamManifestEntry | undefined>();
   if (manifest?.streams) {
     for (const stream of manifest.streams) {
@@ -730,6 +789,7 @@ export function toSourceInstanceView(
   return {
     accountLine,
     connectionId,
+    sourceKind: summary.source_kind,
     connectorId,
     connectorInstanceId,
     connectorNotInstalled,
@@ -749,14 +809,20 @@ export function toSourceInstanceView(
     archived,
     passportFields,
     primaryVerdictAction,
+    codeEntryHref: statusWordsNow.action?.label === ENTER_THE_CODE && actionability.primaryAction?.target?.kind === "sync"
+      ? `/syncs/${encodeURIComponent(actionability.primaryAction.target.run_id)}`
+      : null,
     revoked,
     fusedStatus,
     setupFailed,
     setupFailedForwardStatement: setupFailed ? (summary.rendered_verdict?.forward_statement ?? null) : null,
     status,
+    statusWords: statusWordsNow,
+    scheduleLabel: formatSourceRowSchedule(summary.schedule),
+    recordsLabel: formatSourceRowRecords(sourceRecordCount(summary).count ?? 0, sourceRecordCount(summary).state),
     streams,
-    totalRecords: summary.total_records,
-    totalRecordsState: summary.total_records_state,
+    totalRecords: sourceRecordCount(summary).count ?? 0,
+    totalRecordsState: sourceRecordCount(summary).state,
   };
 }
 
@@ -777,7 +843,8 @@ export function buildDuplicateSourceReview(instances: readonly SourceInstanceVie
   const reviews: DuplicateSourceReview[] = [];
   for (const [connectorId, items] of byConnector) {
     const unnamedItems = items.filter((item) => item.needsOwnerLabel);
-    if (items.length <= 1 || unnamedItems.length === 0) {
+    // One account still unnamed beside named ones can already be told apart; the notice is for look-alikes.
+    if (items.length <= 1 || unnamedItems.length === 0 || (unnamedItems.length === 1 && items.length > 1)) {
       continue;
     }
     reviews.push({
@@ -885,37 +952,33 @@ export function toSourcesView(
   options: {
     connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
     manifests?: readonly SourceManifestLike[];
+    now?: Date;
+    offset?: number;
   } = {}
 ): SourceInstanceView[] {
+  const now = options.now ?? new Date();
+  const viewOptions = { ...options, now };
   const visibleSummaries = summaries;
-  const fallbackCountByConnector = new Map<string, number>();
-  for (const summary of visibleSummaries) {
-    if (
-      isFallbackConnectionLabel({
-        connectorId: summary.connector_id,
-        displayName: summary.display_name,
-        name: summary.connector_display_name,
-      })
-    ) {
-      fallbackCountByConnector.set(summary.connector_id, (fallbackCountByConnector.get(summary.connector_id) ?? 0) + 1);
-    }
-  }
-  const fallbackOrdinalByConnector = new Map<string, number>();
-  return visibleSummaries.map((summary) => {
-    const isAmbiguousFallback =
-      (fallbackCountByConnector.get(summary.connector_id) ?? 0) > 1 &&
-      isFallbackConnectionLabel({
-        connectorId: summary.connector_id,
-        displayName: summary.display_name,
-        name: summary.connector_display_name,
-      });
-    if (!isAmbiguousFallback) {
-      return toSourceInstanceView(summary, options);
-    }
-    const ordinal = (fallbackOrdinalByConnector.get(summary.connector_id) ?? 0) + 1;
-    fallbackOrdinalByConnector.set(summary.connector_id, ordinal);
-    return toSourceInstanceView(summary, { ...options, fallbackDisambiguator: `account ${ordinal}` });
+  const disambiguators = connectionNameDisambiguators(visibleSummaries);
+  return visibleSummaries.map(summary => toSourceInstanceView(summary, {
+    ...viewOptions, fallbackDisambiguator: disambiguators.get(summary.connection_id),
+  }));
+}
+
+export function orderSourcesForList(instances: readonly SourceInstanceView[]): SourceInstanceView[] {
+  return [...instances].sort((a, b) => {
+    const priority = (instance: SourceInstanceView) =>
+      instance.statusWords.tone === "attention" ? 0 : instance.statusWords.row === 11 ? 1 : 2;
+    return priority(a) - priority(b) || a.displayName.localeCompare(b.displayName);
   });
+}
+
+export function filterSourcesForList(instances: readonly SourceInstanceView[], query: string): SourceInstanceView[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...instances];
+  return instances.filter((instance) =>
+    `${instance.displayName} ${instance.accountLine} ${instance.kind}`.toLocaleLowerCase().includes(needle)
+  );
 }
 
 /**

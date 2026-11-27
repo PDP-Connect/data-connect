@@ -27,9 +27,13 @@ import {
   collapseDuplicateFallbackSources,
   collapseSetupFailedSources,
   exploreHrefFor,
+  filterSourcesForList,
   formatSchedule,
+  formatSourceRowSchedule,
   manualUploadHrefForSource,
+  orderSourcesForList,
   sourceDetailHrefFor,
+  sourceRowMenuItems,
   toSourceInstanceView,
   toSourcesView,
 } from "./sources-view-model.ts";
@@ -40,7 +44,7 @@ const HEALTHY_RE = /Healthy/;
 const SYNCING_NOW_RE = /Syncing now/;
 const EXPLORE_HREF_RE = /^\/explore\?connection=conn_1&stream=/;
 const MESSAGES_STREAM_HREF_RE = /stream=messages/;
-const CHURN_SIGNAL_RE = /ynab \/ budgets retains 273\.75 versions/;
+const CHURN_SIGNAL_RE = /this data source \/ budgets retains 273\.75 versions/;
 const CHURN_CLASSIFIED_RE = /classified/;
 const CHURN_NEEDS_REVIEW_RE = /needs review/;
 const RECORDS_42_RE = /42 records/;
@@ -52,6 +56,7 @@ const RECORDS_UNAVAILABLE_RE = /records unavailable/;
 const NUMERIC_RECORDS_RE = /\d records/;
 const PASSPORT_42_UNVERIFIED_RE = /42.*unverified/;
 const PASSPORT_0_UNVERIFIED_RE = /0.*unverified/;
+const BANNED_WORDS_RE = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server)\b/i;
 
 const EMPTY_AXES = {
   attention: {} as RefConnectionHealthSnapshot["axes"]["attention"],
@@ -70,6 +75,35 @@ function health(state: RefConnectionHealthSnapshot["state"]): RefConnectionHealt
     reason_code: null,
     state,
     unknown_reasons: [],
+  };
+}
+
+function scheduleFixture(overrides: Partial<RefSchedule> = {}): RefSchedule {
+  return {
+    active_run_id: null,
+    automation_mode: "unattended",
+    automation_summary: "",
+    connector_id: "sample",
+    created_at: "2026-11-24T10:00:00Z",
+    effective_mode: "automatic",
+    enabled: true,
+    human_attention_needed: false,
+    ineligibility_reason: null,
+    interval_seconds: 86_400,
+    jitter_seconds: 0,
+    last_error_code: null,
+    last_finished_at: null,
+    last_started_at: null,
+    last_successful_at: null,
+    minimum_interval_warning: null,
+    next_due_at: null,
+    notification_posture: "none",
+    object: "schedule",
+    recommended_policy: null,
+    scheduler_backoff: null,
+    trigger_kind: "scheduled",
+    updated_at: "2026-11-24T10:00:00Z",
+    ...overrides,
   };
 }
 
@@ -93,6 +127,18 @@ function summary(partial: Partial<RefConnectorSummary> = {}): RefConnectorSummar
     ...partial,
   };
 }
+
+test("source titles use the manifest or generic label when the saved name is the connector key", () => {
+  const named = toSourceInstanceView(
+    summary({ connector_id: "reddit", connector_display_name: "Reddit", display_name: "REDDIT" })
+  );
+  const unnamed = toSourceInstanceView(
+    summary({ connector_id: "new_source", connector_display_name: "", display_name: "NEW_SOURCE" })
+  );
+
+  assert.equal(named.displayName, "Reddit");
+  assert.equal(unnamed.displayName, "this data source");
+});
 
 function lastRun(status: string): NonNullable<RefConnectorSummary["last_run"]> {
   return {
@@ -199,6 +245,17 @@ test("toSourceInstanceView derives local-device modality from persisted source_k
   );
   assert.equal(localWithoutHeartbeat.isLocalDevicePush, true);
   assert.equal(remoteWithHeartbeatShapedProgress.isLocalDevicePush, false);
+});
+
+// DIRECTION.md, “Data sources /sources”: without a device id in the list read, View this device keeps the safe data source link.
+test("local-device View this device action keeps the data source route when the summary has no device id", () => {
+  const local = toSourceInstanceView(summary({
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "owner", posture: "observed", resolver: "owner_paused" },
+    source_kind: "local_device",
+  }));
+  assert.equal(local.statusWords.action?.kind, "view_device");
+  assert.equal(local.statusWords.action?.label, "View this device");
+  assert.equal(local.detailHref, "/sources/conn_1");
 });
 
 test("toSourceInstanceView treats pending last_run as running and keeps terminal or unknown statuses out", () => {
@@ -1323,6 +1380,19 @@ test("collapseSetupFailedSources coalesces every setup-failed attempt for a conn
   );
 });
 
+// DIRECTION.md, “Data sources /sources”: the folded heading counts one representative row per kind.
+test("setup-failed groups keep one row per data source kind", () => {
+  const views = toSourcesView([
+    summary({ connection_id: "cin_mail_1", connector_id: "mail", revoked_at: "2026-11-20T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+    summary({ connection_id: "cin_mail_2", connector_id: "mail", revoked_at: "2026-11-21T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+    summary({ connection_id: "cin_calendar_1", connector_id: "calendar", revoked_at: "2026-11-20T00:00:00Z", source_visibility: "setup_failed", status: "revoked", total_records: 0 }),
+  ]);
+  const groups = collapseSetupFailedSources(views).setupFailedGroups;
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.connectorId), ["calendar", "mail"]);
+  assert.deepEqual(groups.map((group) => group.attemptCount), [1, 2]);
+});
+
 test("collapseSetupFailedSources keeps a single attempt as its own one-item group — coalescing does not require a minimum count", () => {
   const views = toSourcesView([
     summary({
@@ -1765,6 +1835,99 @@ test("toSourceInstanceView: accountLine preserves owned name (no fallback)", () 
   assert.equal(view.accountLine, "100 records · 2 streams");
 });
 
+// DIRECTION.md, “Data sources /sources”: schedule words, local filtering, and row order follow the shared status result.
+test("list schedule words use the schedule mode and interval as plain language", () => {
+  // DIRECTION.md, “Data sources /sources”: unknown schedules are a dash.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ enabled: undefined as never })), "—");
+  assert.equal(formatSourceRowSchedule(null), "Manual");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 3600 })), "Every hour");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 21_600 })), "Every 6 hours");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 172_800 })), "Every 2 days");
+  // DIRECTION.md, “Data sources /sources”: an enabled schedule keeps its cadence even if it cannot run now.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ ineligibility_reason: "policy" })), "Every day");
+  // DIRECTION.md, “Data sources /sources”: a disabled automatic schedule reads Manual; never Paused.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ enabled: false })), "Manual");
+  // DIRECTION.md, “Data sources /sources”: a known paused schedule reads its cadence.
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ effective_mode: "paused" })), "Every day");
+  assert.equal(formatSourceRowSchedule(scheduleFixture({ interval_seconds: 0 })), "—");
+});
+
+// DIRECTION.md, “Data sources /sources”: Sync now is absent when the server action belongs elsewhere or is not owner-runnable.
+test("row menu sync follows server action ownership and page routing", () => {
+  const base = toSourceInstanceView(summary());
+  const menu = (instance: typeof base) => sourceRowMenuItems(instance, false).map((item) => item.label);
+  assert.ok(menu(base).includes("Sync now"));
+
+  const maintainerAction = {
+    ...base,
+    primaryVerdictAction: {
+      audience: "maintainer" as const,
+      channel: "advisory" as const,
+      cta: "Wait for repair",
+      kind: "wait" as const,
+      ownerRunnable: false,
+      satisfiedWhenKind: "none" as const,
+      terminal: false,
+    },
+  };
+  assert.ok(!menu(maintainerAction).includes("Sync now"));
+
+  const signInAction = {
+    ...base,
+    primaryVerdictAction: {
+      audience: "owner" as const,
+      channel: "attention" as const,
+      cta: "Sign in again",
+      kind: "reauth" as const,
+      ownerRunnable: true,
+      satisfiedWhenKind: "credential_present_and_unrejected" as const,
+      terminal: false,
+    },
+  };
+  assert.ok(!menu(signInAction).includes("Sync now"));
+
+  assert.ok(!menu({ ...base, nextAction: { label: "Wait", actionTarget: null, variant: "fallback" } as never }).includes("Sync now"));
+});
+
+// DIRECTION.md, “Data sources /sources”: the menu has no system facts or raw server action wording.
+test("row menu text excludes raw action and access facts", () => {
+  const instance = toSourceInstanceView(summary({
+    next_action: { kind: "reauth", label: "Access · session / stored credential" } as never,
+    source_kind: "manual",
+  }));
+  const menuText = sourceRowMenuItems(instance).map((item) => item.label).join(" ");
+  assert.doesNotMatch(menuText, /\b(?:access|session|stored credential|owner file import|reauth)\b/i);
+  assert.doesNotMatch(menuText, BANNED_WORDS_RE);
+});
+
+// DIRECTION.md, “Data sources /sources”: needs-you rows come first, then syncing rows, then names; filter matches name/account.
+test("list rows use shared status priority and filter by source name or account", () => {
+  const named = toSourceInstanceView(summary({
+    connection_id: "conn_zebra",
+    connector_id: "gmail",
+    connector_display_name: "Gmail",
+    display_name: "Zebra",
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "owner", posture: "observed", resolver: "needs_owner" },
+  }));
+  const syncing = toSourceInstanceView(summary({
+    connection_id: "conn_bob",
+    connector_id: "sample",
+    connector_display_name: "Sample",
+    display_name: "Bob",
+    owner_state: { evidence_as_of: "2026-11-24T10:00:00Z", owner_of_state: "system", posture: "observed", resolver: "collecting" },
+  }));
+  const ordinary = toSourceInstanceView(summary({
+    connection_id: "conn_alice",
+    connector_id: "sample",
+    connector_display_name: "Sample",
+    display_name: "Alice",
+  }));
+
+  assert.deepEqual(orderSourcesForList([ordinary, syncing, named]).map((row) => row.displayName), ["Zebra", "Bob", "Alice"]);
+  assert.deepEqual(filterSourcesForList([named, syncing], "gmail").map((row) => row.displayName), ["Zebra"]);
+  assert.deepEqual(filterSourcesForList([named, syncing], "bob").map((row) => row.displayName), ["Bob"]);
+});
+
 test("toSourceInstanceView: Google Maps timeline_points displays human label, not protocol identifier", () => {
   const manifest = {
     connector_id: "google-maps",
@@ -1795,4 +1958,13 @@ test("toSourceInstanceView: stream with no manifest available falls back to name
   const sum = summary({ streams: ["messages"] });
   const view = toSourceInstanceView(sum, { manifests: undefined });
   assert.equal(view.streams[0]?.displayLabel, "messages");
+});
+
+// Closing judge, round 6 (F6): the notice goes away once the accounts can be told apart.
+test("duplicate source review is silent when only one account still lacks an owner name", () => {
+  const views = toSourcesView([
+    summary({ connection_id: "cin_old", connector_display_name: "Steam", connector_id: "steam", connector_instance_id: "cin_old", display_name: "Steam (old account)" }),
+    summary({ connection_id: "cin_new", connector_display_name: "Steam", connector_id: "steam", connector_instance_id: "cin_new", display_name: "Steam" }),
+  ]);
+  assert.deepEqual(buildDuplicateSourceReview(views), []);
 });

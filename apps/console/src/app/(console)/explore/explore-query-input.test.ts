@@ -18,6 +18,8 @@ import {
   trailingFragment,
 } from "./explore-query-input.ts";
 
+const DATA_SOURCE_LABEL_RE = /^Data source:/;
+
 // ─── detectRecordIdJump: pasted id → jump affordance, never a 2nd box ─────────
 
 test("detectRecordIdJump recognizes a pasted exact-record-id token", () => {
@@ -127,7 +129,7 @@ test("appendOperatorToken replaces the trailing fragment with the operator token
 
 // ─── Slice 3: section labels, count badges, SEARCH-fallback always last ───────
 
-test("typeahead emits SOURCES section label on first source suggestion only", () => {
+test("typeahead labels source suggestions with plain data source words", () => {
   const suggestions = buildTypeaheadSuggestions({
     connections: CONNECTIONS,
     fragment: "",
@@ -139,11 +141,12 @@ test("typeahead emits SOURCES section label on first source suggestion only", ()
   });
   const sources = suggestions.filter((s) => s.kind === "source");
   assert.ok(sources.length >= 2, "both connections should appear");
-  assert.equal(sources[0]?.sectionLabel, "SOURCES", "first source carries the section label");
+  assert.equal(sources[0]?.sectionLabel, "DATA SOURCES", "first source carries the section label");
   assert.equal(sources[1]?.sectionLabel, undefined, "subsequent sources have no section label");
+  assert.match(sources[0]?.label ?? "", DATA_SOURCE_LABEL_RE);
 });
 
-test("typeahead emits STREAMS section label on first stream suggestion", () => {
+test("typeahead labels stream suggestions as human kinds", () => {
   const suggestions = buildTypeaheadSuggestions({
     connections: [],
     fragment: "",
@@ -154,8 +157,9 @@ test("typeahead emits STREAMS section label on first stream suggestion", () => {
     streams: ["transactions", "budgets"],
   });
   const streams = suggestions.filter((s) => s.kind === "stream");
-  assert.equal(streams[0]?.sectionLabel, "STREAMS");
+  assert.equal(streams[0]?.sectionLabel, "KINDS");
   assert.equal(streams[1]?.sectionLabel, undefined);
+  assert.equal(streams[0]?.label, "Kind: Transactions");
 });
 
 test("typeahead attaches honest record counts when connectionCounts / streamCounts are provided", () => {

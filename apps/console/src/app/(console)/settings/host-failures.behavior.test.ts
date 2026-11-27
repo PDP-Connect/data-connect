@@ -49,7 +49,7 @@ const review = { id: "rev-1", kind: "route", candidate };
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -89,7 +89,8 @@ async function withScreen<T>(
     mainText: () => string;
     alerts: () => number;
     buttons: () => string[];
-  }) => Promise<T>
+  }) => Promise<T>,
+  technical = false
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
@@ -104,7 +105,7 @@ async function withScreen<T>(
   }) as typeof requestReachability;
   const settle = () => act(async () => {});
   try {
-    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
+    await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test", technical })));
     await settle();
     return await run({
       calls,
@@ -122,6 +123,14 @@ async function withScreen<T>(
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
         await settle();
+        // Decision 3: acknowledge the possible disconnect before the start request is sent.
+        const confirm = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Turn on remote access"] button')].find(
+          (node) => node.textContent === "Continue turning on"
+        );
+        if (confirm) {
+          await act(async () => confirm.click());
+          await settle();
+        }
       },
     });
   } finally {
@@ -132,7 +141,7 @@ async function withScreen<T>(
 
 // ---------- folder permissions ----------
 
-const UNSAFE_WORDS = /A DataConnect folder can be changed by other accounts on this computer\. Fix its permissions to continue\./;
+const UNSAFE_WORDS = /A DataConnect folder can be changed by other accounts on this computer\./;
 
 test("unsafe folder permissions offer a fix, and after it the card moves on with no reload", async () => {
   let fixed = false;
@@ -145,8 +154,9 @@ test("unsafe folder permissions offer a fix, and after it the card moves on with
     },
   });
   await withScreen(handler, async ({ calls, press, mainText, text, buttons }) => {
+    // RAISE rule 6: the failed sentence and its one next step are separate.
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.match(mainText(), /Needs your action/);
+    assert.doesNotMatch(mainText(), /Needs your action/);
     assert.doesNotMatch(mainText(), SNAKE);
     assert.ok(buttons().includes("Fix permissions"));
     assert.equal(calls.filter((call) => call.url === "/state-paths/fix").length, 0, "nothing is changed before the click");
@@ -165,9 +175,9 @@ test("a folder outside DataConnect's own directory shows the command to copy and
   });
   await withScreen(handler, async ({ calls, mainText, buttons }) => {
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.ok(mainText().includes(command));
+    assert.ok(!mainText().includes(command));
     assert.ok(!buttons().includes("Fix permissions"));
-    assert.ok(buttons().includes("Copy command"));
+    assert.ok(!buttons().includes("Copy command"));
     assert.ok(!calls.some((call) => call.url === "/state-paths/fix"));
   });
 });
@@ -188,7 +198,7 @@ test("when the fix leaves a folder outside the data directory, the card shows it
   await withScreen(handler, async ({ press, mainText, buttons }) => {
     await press(/^Fix permissions$/);
     assert.match(mainText(), UNSAFE_WORDS);
-    assert.ok(mainText().includes(command));
+    assert.ok(!mainText().includes(command));
     assert.ok(!buttons().includes("Fix permissions"));
   });
 });
@@ -226,9 +236,9 @@ test("when some paths are not fixable, the command shows once with one sentence"
   await withScreen(handler, async ({ mainText, buttons }) => {
     assert.match(mainText(), UNSAFE_WORDS);
     assert.ok(buttons().includes("Fix permissions"));
-    assert.ok(buttons().includes("Copy command"));
-    assert.ok(mainText().includes(command));
-    assert.match(mainText(), /Run this command, then try again:/);
+    assert.ok(!buttons().includes("Copy command"));
+    assert.ok(!mainText().includes(command));
+    assert.match(mainText(), /folder permissions/);
     assert.doesNotMatch(mainText(), /Others need a command/);
   });
 });
@@ -237,11 +247,13 @@ test("when some paths are not fixable, the command shows once with one sentence"
 
 test("a background service that is down says so, copies diagnostics, and shows no code outside Details", async () => {
   await withScreen(host({ "/catalog": fail("host_supervisor_unavailable") }), async ({ mainText, text, buttons }) => {
-    assert.match(mainText(), /DataConnect's background service isn't running\. Quit and reopen DataConnect\./);
+    // RAISE rule 6: one failure sentence is followed by its next step.
+    assert.match(mainText(), /DataConnect's background service isn't running\./);
+    assert.match(mainText(), /Quit and reopen DataConnect\./);
     assert.doesNotMatch(mainText(), SNAKE);
-    assert.ok(buttons().includes("Copy diagnostics"));
-    assert.match(text(), /Code: host_supervisor_unavailable/);
-    assert.match(text(), /Server message: The server's own words with host_code/);
+    assert.ok(buttons().includes("Copy details for support"));
+    assert.doesNotMatch(text(), /Code: host_supervisor_unavailable/);
+    assert.doesNotMatch(text(), /Server message: The server's own words with host_code/);
   });
 });
 
@@ -249,7 +261,7 @@ test("a path that is too long says so and copies diagnostics", async () => {
   await withScreen(host({ "/catalog": fail("host_path_too_long") }), async ({ mainText, buttons }) => {
     assert.match(mainText(), /data folder path is too long for remote access\./);
     assert.doesNotMatch(mainText(), SNAKE);
-    assert.ok(buttons().includes("Copy diagnostics"));
+    assert.ok(buttons().includes("Copy details for support"));
   });
 });
 
@@ -293,7 +305,9 @@ test("a stale configuration retries once on its own, then shows the error and st
   await withScreen(handler, async ({ press, mainText, buttons }) => {
     await press(/^Turn on remote access$/);
     assert.equal(approvals, 2, "one retry, no more");
-    assert.match(mainText(), /Something changed while we were connecting\. Try again\./);
+    // RAISE rule 6: the failure sentence and retry action stay distinct.
+    assert.match(mainText(), /Something changed while we were connecting\./);
+    assert.ok(buttons().includes("Try again"));
     assert.doesNotMatch(mainText(), SNAKE);
     assert.ok(buttons().includes("Try again"));
     assert.ok(buttons().includes("Turn on remote access"), "still Off with step 2 ready");
@@ -338,7 +352,7 @@ test("an unconfirmed cleanup with no listed routes stays possibly live", async (
     "/state": ok({ ...idleState, lifecycle: { cleanup: "unconfirmed", handle: { id: "route-1" } } }),
   });
   await withScreen(handler, async ({ mainText }) => {
-    assert.match(mainText(), /Couldn't confirm the service closed your address\./);
+    assert.match(mainText(), /DataConnect couldn't confirm that your address closed\./);
     assert.match(mainText(), /Unknown, possibly live/);
     assert.doesNotMatch(mainText(), /Only this computer can open/);
   });
@@ -386,6 +400,49 @@ test("boot listing timeout shows possibly live and offers a recovery check", asy
     await press(/^Check earlier addresses$/);
     assert.ok(calls.some(call => call.url === "/recovery/check" && call.body));
     assert.doesNotMatch(mainText(), /Unknown, possibly live/);
+  });
+});
+
+test("an unrelated unconfirmed cleanup does not hide the earlier-address warning", async () => {
+  const handler = host({
+    "/state": ok({
+      ...idleState,
+      lifecycle: { cleanup: "unconfirmed", handle: { id: "route-1" } },
+      recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] },
+    }),
+  });
+  await withScreen(handler, async ({ mainText }) => {
+    assert.match(mainText(), /DataConnect couldn't confirm that your address closed\./);
+    assert.match(mainText(), /An earlier address may still work\. Check remote access before starting another route\./);
+  });
+});
+
+test("a failed earlier-address check shows the page's error and the button works again", async () => {
+  const handler = host({
+    "/state": ok({ ...idleState, recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] } }),
+    "/recovery/check": fail("service_unavailable"),
+  });
+  await withScreen(handler, async ({ press, alerts, buttons, settle }) => {
+    await press(/^Check earlier addresses$/);
+    await settle();
+    assert.ok(alerts() > 0, "the failure is shown, not dropped");
+    assert.ok(buttons().includes("Check earlier addresses"));
+  });
+});
+
+test("the earlier-address check cannot be sent twice while it is pending", async () => {
+  let release: (value: Result) => void = () => {};
+  const pending = new Promise<Result>((resolve) => { release = resolve; });
+  const handler = host({
+    "/state": ok({ ...idleState, recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] } }),
+    "/recovery/check": () => pending,
+  });
+  await withScreen(handler, async ({ press, calls, settle }) => {
+    await press(/^Check earlier addresses$/);
+    await press(/^Check earlier addresses$/).catch(() => {});
+    assert.equal(calls.filter((call) => call.url === "/recovery/check").length, 1);
+    release(ok({ closed: 0, failed: 0, reproved: 0 }));
+    await settle();
   });
 });
 
@@ -452,4 +509,16 @@ test("a blocked provider does not prevent preparing a clean provider", async () 
     assert.ok(drafts.length > 0);
     assert.ok(drafts.every(call => call.body?.providerId === "clean-provider"));
   });
+});
+
+test("folder repair commands remain available on Settings technical details", async () => {
+  const command = "chmod go-w -- '/home/someone'";
+  await withScreen(host({
+    "/catalog": fail("unsafe_state_path"),
+    "/state-paths": ok({ paths: [{ path: "/home/someone", fixable: false }], command }),
+  }), async ({ text, buttons, calls }) => {
+    assert.ok(text().includes(command));
+    assert.ok(buttons().includes("Copy command"));
+    assert.ok(!calls.some(call => call.url === "/state-paths/fix"));
+  }, true);
 });

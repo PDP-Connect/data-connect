@@ -2,19 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The source detail page must lead with what the owner came for.
+ * The source detail page must follow the data-source layout in DIRECTION.md.
  *
  * Owner, 2026-08-07: "There is no information architecture. Diagnostics is open
  * by default and is the first thing you see. […] Streams and Runs/Syncs are the
  * main things a user expects to see."
  *
- * Diagnostics is operator-debug detail — condition rows, evidence, recovery
- * commands. It rendered above the streams and runs the page exists to show, so
- * the page opened with its least-wanted content. This pins the corrected order.
- *
- * Deliberately NOT pinned: the visual design of these sections. The owner is
- * bringing in a designer; this guard is about sequence only, so a redesign that
- * keeps the order does not fight this test.
+ * Main content comes before source controls; then Settings and folded Details.
+ * This pins the requested information order without encoding visual styling.
  */
 
 import assert from "node:assert/strict";
@@ -24,54 +19,85 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIAGNOSTICS_CLOSED_BY_DEFAULT_RE = /open=\{hasDeviceLocalRemediation \|\| undefined\}/;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 interface SectionOffsets {
+  collected: number;
   configuration: number;
-  coverage: number;
   dangerZone: number;
+  details: number;
   diagnostics: number;
   runs: number;
+  whatIsHere: number;
 }
 
 async function renderOrder(): Promise<SectionOffsets> {
   const src = await readFile(PAGE_FILE, "utf8");
   return {
+    collected: src.indexOf("<AcquisitionCoverageSection"),
     configuration: src.indexOf("<ConnectionConfiguration"),
-    coverage: src.indexOf("<AcquisitionCoverageSection"),
     dangerZone: src.indexOf("<ConnectionDangerZone"),
+    details: src.indexOf('<TechnicalDetailsLink'),
     diagnostics: src.indexOf("<ConnectionDiagnostics"),
     runs: src.indexOf("<RecentRunsSection"),
+    whatIsHere: src.indexOf('title="What is here"'),
   };
 }
 
-test("streams and runs render before diagnostics", async () => {
+test("What is here and Latest syncs lead; collected evidence stays inside folded Details", async () => {
   const at = await renderOrder();
   for (const [name, index] of Object.entries(at)) {
     assert.notEqual(index, -1, `${name} must render on this page`);
   }
-  assert.ok(at.coverage < at.diagnostics, "acquisition coverage precedes diagnostics");
-  assert.ok(at.runs < at.diagnostics, "recent runs precede diagnostics");
+  // Brief decisions 6–7: the two plain-language sections lead; evidence moves into Details.
+  assert.ok(at.whatIsHere < at.runs, "What is here precedes Latest syncs");
+  assert.ok(at.runs < at.details, "Latest syncs precedes folded Details");
+  assert.ok(at.details < at.collected, "technical evidence is rendered by the separate technical view");
 });
 
-test("the danger zone stays last", async () => {
+test("the header shows the account line and a 48px source mark", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md §One data source: the logo, title, and account line lead the page.
+  assert.match(src, /description=\{undefined\}/);
+  // DIRECTION.md §What must stay true: raw IDs stay inside folded Details.
+  assert.match(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name/);
+  assert.doesNotMatch(src, /const accountLabel = source\.display_name \?\? source\.local_binding_name \?\? source\.device_id/);
+  // DIRECTION.md §One data source: the source logo is 48px.
+  assert.match(src, /\[&_\.pdpp-connector-icon\]:size-12/);
+});
+
+test("a disconnected source has setup in the header and Manage", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // DIRECTION.md §One data source: the two disconnected-source links share one setup destination.
+  assert.equal((src.match(/>Set up again<\/Link>/g) ?? []).length, 2);
+  // DIRECTION.md §One data source: keep one “Set up again” action, not the duplicate reconnect label.
+  assert.doesNotMatch(src, />Reconnect source</);
+});
+
+test("device recovery evidence stays on the technical page", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /hasDeviceLocalRemediation \? deviceStepsAvailable \? <DeviceSteps/);
+  assert.match(src, /export function SourceTechnicalDetails/);
+});
+
+test("source controls precede Settings and folded Details", async () => {
   const at = await renderOrder();
-  assert.ok(at.diagnostics < at.dangerZone, "destructive actions remain the final section");
+  // DIRECTION.md §One data source: controls come before Settings and Details.
+  assert.ok(at.configuration < at.dangerZone, "Settings precedes Manage");
+  assert.ok(at.configuration < at.details, "Settings precede folded Details");
+  assert.ok(at.details < at.diagnostics, "Diagnostics stays inside folded Details");
 });
 
 /**
  * Configuration is owner-decision content, not operator-debug detail. It
- * belongs with the streams and runs an owner opens this page for — after them,
- * because it is a deliberate act rather than a status read, and before
- * diagnostics for the same reason diagnostics moved below runs. It is not
- * destructive, so it stays above the danger zone.
+ * Settings follows the source controls and precedes Details.
  */
-test("configuration sits after runs and before diagnostics and the danger zone", async () => {
+test("Settings follows source controls and precedes Diagnostics in Details", async () => {
   const at = await renderOrder();
   assert.notEqual(at.configuration, -1, "configuration must render on this page");
-  assert.ok(at.runs < at.configuration, "recent runs precede configuration");
-  assert.ok(at.configuration < at.diagnostics, "configuration precedes operator diagnostics");
-  assert.ok(at.configuration < at.dangerZone, "configuration precedes the danger zone");
+  // DIRECTION.md §One data source: Settings is followed by folded Details.
+  assert.ok(at.configuration < at.dangerZone, "Settings precedes Manage");
+  assert.ok(at.configuration < at.diagnostics, "Settings precedes diagnostics");
 });
 
 test("diagnostics stays collapsed unless it has something actionable", async () => {

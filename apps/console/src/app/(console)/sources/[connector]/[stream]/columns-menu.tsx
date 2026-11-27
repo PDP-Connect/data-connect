@@ -10,6 +10,7 @@ import {
   PopoverPositioner,
   PopoverTrigger,
 } from "@pdpp/operator-ui/components/ui/popover";
+import { humanizeFieldLabel } from "@pdpp/display";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
@@ -115,7 +116,7 @@ export function ColumnsMenu({
                         onChange={() => toggle(column)}
                         type="checkbox"
                       />
-                      <span className="flex-1 font-mono">{column}</span>
+                      <span className="flex-1">{column === "id" ? "Record id" : humanizeFieldLabel(column)}</span>
                     </label>
                   </li>
                 );
@@ -124,7 +125,7 @@ export function ColumnsMenu({
             <div className="pdpp-caption border-border/70 border-t px-3 py-2 text-muted-foreground">
               <Link
                 className="underline-offset-2 hover:underline"
-                href="?columns=*"
+                href="?columns=*&view=table"
                 onClick={() => setOpen(false)}
                 scroll={false}
               >

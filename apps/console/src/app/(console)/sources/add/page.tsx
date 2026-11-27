@@ -1,147 +1,48 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomUUID } from "node:crypto";
-import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
-import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import type { ConnectorIconLike } from "@pdpp/brand-react";
-import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
-import { ServerUnreachable } from "../../components/server-unreachable.tsx";
-import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
-import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
-import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
-import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
-import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
-import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
-import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
-import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
+import { readAddSourceCatalog } from "./add-source-catalog-read.ts";
+import { AddSourceHeader } from "./add-source-header.tsx";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
-import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
+import { ADD_SOURCE_COPY, buildAddSourceList } from "./add-source-list-model.ts";
+import { AddSourceList, AddSourceLoadFailed } from "./add-source-list.tsx";
+import { setupErrorCopy } from "./setup-error-copy.ts";
 
 export const dynamic = "force-dynamic";
 
 interface PageParams {
-  demo?: string;
+  error?: string;
   source_q?: string;
-}
-
-function AddSourceHeader() {
-  return (
-    <PageHeader
-      breadcrumbs={[
-        { href: dashboardRoutes.section.overview, label: "Overview" },
-        { href: dashboardRoutes.section.records, label: "Sources" },
-        { label: "Add source" },
-      ]}
-      description="Add sources that populate this PDPP instance. App and local-client access is configured separately under Connect apps."
-      title="Add source"
-    />
-  );
 }
 
 export default async function AddSourcePage({ searchParams }: { searchParams: Promise<PageParams> }) {
   const params = await searchParams;
-  let catalog: ConnectorCatalogEntry[] = [];
-  let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
-  let existingSourcesTruncated = false;
-  let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
-  let installCatalogBusySnapshotId: string | null = null;
-  let installCatalogTransientlyUnavailable = false;
-  let installSkippedEntries = 0;
-  let localSources: NonNullable<ConnectorInstallSnapshot["localSources"]> = [];
-  let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
-  if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
-    const demo = await import("./add-source-demo-data.ts");
-    ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
-  } else {
-    try {
-      // `null` means a reference server that predates the install routes
-      // (during the RI rollout): no lifecycle claim is shown. Other failures
-      // remain visible to the existing page error path.
-      const [manifests, templates, installSnapshot] = await Promise.all([
-        listConnectorManifests(),
-        listOwnerConnectorTemplates(),
-        getConnectorInstallSnapshot(),
-      ]);
-      connectorIcons = await buildConnectorIconMap(manifests, templates);
-      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []).map((entry) => ({
-        ...entry,
-        icon: catalogEntryIcon(entry, connectorIcons),
-      }));
-      installLifecycleByConnector = installSnapshot
-        ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
-        : null;
-      installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
-      installSkippedEntries = installSnapshot?.skippedEntries ?? 0;
-      installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
-      localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
-      // Existing sources come from one walk of the owner's connections:
-      // ceil(owner connections / 100) sequential `GET /_ref/connectors`
-      // requests, then a selection by catalog connector. The cost follows the
-      // owner's connection count, not the catalog size. A refused continuation
-      // page leaves the rows read so far and sets `truncated`.
-      ({ byConnector: existingSourcesByConnector, truncated: existingSourcesTruncated } =
-        await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey)));
-    } catch (err) {
-      if (err instanceof ReferenceServerUnreachableError) {
-        return (
-          <RecordroomShellWithPalette>
-            <ServerUnreachable />
-          </RecordroomShellWithPalette>
-        );
-      }
-      // Both the authorization-server and resource-server clients throw
-      // status-bearing errors, but they intentionally use different classes.
-      // Classify their shared HTTP contract here so a known 4xx is rendered
-      // before Next can redact the server-side message and erase `status`.
-      if (isDeterministicSourcesReadError(err)) {
-        return (
-          <RecordroomShellWithPalette>
-            <AddSourceHeader />
-            <div className="rr-s-toast" data-tone="error" role="alert" style={{ marginTop: 12 }}>
-              <p>The reference server rejected the source catalog request: {err.message}</p>
-              <p>
-                If the console and reference server image revisions do not match, redeploy both from the same revision.
-                Then reload this page. Review{" "}
-                <Link className="underline underline-offset-2 hover:text-foreground" href="/deployment">
-                  Deployment readiness
-                </Link>{" "}
-                and the service logs if the revisions already match.
-              </p>
-            </div>
-          </RecordroomShellWithPalette>
-        );
-      }
-      throw err;
+  let model: ReturnType<typeof buildAddSourceList>;
+  let notFresh: Awaited<ReturnType<typeof readAddSourceCatalog>>["catalogNotFresh"];
+  try {
+    const read = await readAddSourceCatalog();
+    notFresh = read.catalogNotFresh;
+    model = buildAddSourceList(read);
+  } catch (err) {
+    if (err instanceof ReferenceServerUnreachableError || isDeterministicSourcesReadError(err)) {
+      return (
+        <RecordroomShellWithPalette>
+          <AddSourceHeader />
+          <AddSourceLoadFailed />
+        </RecordroomShellWithPalette>
+      );
     }
+    throw err;
   }
-
   const sourceQuery = typeof params.source_q === "string" ? params.source_q.trim() : "";
+  const setupError = setupErrorCopy(typeof params.error === "string" ? params.error : undefined);
   return (
     <RecordroomShellWithPalette>
       <AddSourceHeader />
-      {existingSourcesTruncated ? (
-        <div className="rr-s-toast" data-tone="warning" role="status" style={{ marginBottom: 12 }}>
-          <p>
-            Some existing sources could not be loaded, so this list may be missing some of them. Check Sources before
-            adding another copy.
-          </p>
-        </div>
-      ) : null}
-      <SourceSetupCatalog
-        action={dashboardRoutes.section.addSource}
-        catalog={catalog}
-        existingSourcesByConnector={existingSourcesByConnector}
-        installCatalogBusySnapshotId={installCatalogBusySnapshotId}
-        installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-        installLifecycleByConnector={installLifecycleByConnector}
-        installSkippedEntries={installSkippedEntries}
-        query={sourceQuery}
-      />
-      <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />
+      {setupError ? <p className="pdpp-caption py-2 text-muted-foreground" role="alert">{setupError}</p> : null}
+      <AddSourceList model={model} notFresh={notFresh} query={sourceQuery} />
     </RecordroomShellWithPalette>
   );
 }

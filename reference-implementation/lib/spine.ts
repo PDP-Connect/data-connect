@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
+import {
+  type AppAccess, type AppAccessGrantRow, type AppAccessEventRow,
+  type AppAccessMemberRow, type AppAccessInstanceRow, projectAppAccess,
+} from "./app-access.ts";
 import { getDb } from "../server/db.ts";
 import { isPostgresStorageBackend } from "../server/postgres-storage.ts";
 import {
@@ -27,6 +31,7 @@ import {
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
   postgresListSpineCorrelations,
+  postgresListAppAccess,
   postgresListSpineEventsPage,
   postgresSearchSpine,
   type RunRecordOutcomesRow,
@@ -52,6 +57,42 @@ export const DEFAULT_SCENARIO_ID = "scn_reference_default";
 const SPINE_VERSION = "reference.spine.v1";
 
 export type SpineDatabase = BetterSqliteDatabase;
+
+export function listAppAccessSqlite(
+  subjectId: string,
+  now = new Date().toISOString(),
+  db: SpineDatabase = getDb()
+): AppAccess[] {
+  const grants = db
+    .prepare(`SELECT g.grant_id, g.client_id, g.status, g.issued_at, g.expires_at,
+    g.grant_json, g.storage_binding_json, g.trust_signal_json, c.metadata_json
+    FROM grants g LEFT JOIN oauth_clients c ON c.client_id = g.client_id WHERE g.subject_id = ?`)
+    .all(subjectId) as AppAccessGrantRow[];
+  const events = db
+    .prepare(`SELECT e.grant_id, e.connector_instance_id,
+    MAX(CASE WHEN e.event_type = 'disclosure.served' THEN e.occurred_at END) AS last_read_at,
+    MAX(CASE WHEN e.event_type = 'grant.revoked' THEN e.occurred_at END) AS revoked_at,
+    SUM(CASE WHEN e.event_type = 'disclosure.served' AND e.occurred_at >= ? AND e.occurred_at <= ? THEN 1 ELSE 0 END) AS reads_last_7_days
+    FROM spine_events e WHERE e.grant_id IN (SELECT grant_id FROM grants WHERE subject_id = ?)
+    AND e.event_type IN ('disclosure.served', 'grant.revoked') GROUP BY e.grant_id, e.connector_instance_id`)
+    .all(new Date(Date.parse(now) - 7 * 86_400_000).toISOString(), now, subjectId) as AppAccessEventRow[];
+  const members = db
+    .prepare(`SELECT m.grant_id, m.package_id, p.package_json, p.created_at FROM grant_package_members m
+    JOIN grants g ON g.grant_id = m.grant_id
+    JOIN grant_packages p ON p.package_id = m.package_id AND p.subject_id = g.subject_id AND p.client_id = g.client_id
+    WHERE g.subject_id = ?`)
+    .all(subjectId) as AppAccessMemberRow[];
+  const instances = db
+    .prepare(`SELECT client_id, handle, internal_id FROM pairwise_identity_handles
+    WHERE subject_id = ? AND kind = 'instance'`)
+    .all(subjectId) as AppAccessInstanceRow[];
+  const connections = db.prepare(`SELECT connector_id, connector_instance_id FROM connector_instances WHERE owner_subject_id = ?`).all(subjectId) as { connector_id: string; connector_instance_id: string }[];
+  return projectAppAccess(grants, events, members, instances, now, connections);
+}
+
+export function listAppAccess(subjectId: string, now = new Date().toISOString()): AppAccess[] | Promise<AppAccess[]> {
+  return isPostgresStorageBackend() ? postgresListAppAccess(subjectId, now) : listAppAccessSqlite(subjectId, now);
+}
 
 export type SpineCorrelationKey = "trace" | "grant" | "run";
 

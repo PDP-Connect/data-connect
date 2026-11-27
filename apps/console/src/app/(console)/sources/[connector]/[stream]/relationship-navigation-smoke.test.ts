@@ -3,15 +3,14 @@
 
 /**
  * Relationship-navigation smoke — proves both directions resolve to the correct,
- * percent-encoded hrefs against the REAL bundled Chase manifest, and pins the two
- * records `page.tsx` server components to the helper composition that produces
- * those hrefs.
+ * percent-encoded hrefs against the REAL bundled Chase manifest, and pins the
+ * record page to the helper composition that produces those hrefs.
  *
  * Why this exists on top of `lib/relationships.test.ts` (52 cases): those tests
  * exercise each helper in isolation with hand-built inputs. They do NOT prove
  * that the *composition* the pages perform — meta + child-declared back-link
- * merge on the detail page, the `hasReverseChildEdges` gate then per-row reverse
- * links on the list page — yields the right href when run against a real
+ * merge and reverse child-list links on the record page — yields the right href
+ * when run against a real
  * connector manifest. And because both pages are React Server Components that
  * import `next/navigation`, they cannot be rendered in a plain node test, so the
  * JSX call sites were previously guarded only by `types:check`. This file closes
@@ -20,7 +19,7 @@
  *   1. Behavior: replicate each page's exact helper call chain against the real
  *      Chase manifest read from disk (the same file `listConnectorManifests()`
  *      loads) and assert the resulting hrefs.
- *   2. Wiring: source-pin both `page.tsx` files to the helper calls and render
+ *   2. Wiring: source-pin the record page to the helper calls and render
  *      sites, mirroring the sibling `page-record-not-found.test.ts` /
  *      `page-stream-unavailable.test.ts` pattern, so a refactor that drops or
  *      mis-orders a call is caught even though the page can't be imported.
@@ -77,12 +76,8 @@ const DETAIL_MERGES_BACKLINKS = /mergeParentBackLinks\(/;
 const DETAIL_RENDERS_BACKLINKS = /parentBackLinks: allParentBackLinks/;
 const DETAIL_BUILDS_REVERSE_LINKS = /reverseChildListLinksFromManifest\(/;
 const DETAIL_RENDERS_REVERSE_LINKS = /reverseChildListLinks,/;
-const LIST_COMPUTES_LINK_FIELDS = /childHasOneLinkFields\(/;
-const LIST_RESOLVES_CELL_BACKLINK = /childHasOneBackLinkForField\(/;
-const LIST_APPLIES_CELL_LINK = /parentLinkForCell\(/;
-const LIST_GATES_REVERSE_EDGES = /reverseChildListEdgesFromManifest\(/;
-const LIST_BUILDS_REVERSE_LINKS = /reverseChildListLinksFromManifest\(/;
-const LIST_GUARDS_REVERSE_COLUMN = /hasReverseChildEdges/;
+const LIST_OPENS_RECORD_PAGE = /href=\{recordHref\(r\.id\)\}/;
+const LIST_HAS_NO_RELATIONSHIP_LINKS = /parentLinkForCell|ReverseChildLinks/;
 
 async function loadChaseManifest(): Promise<ChaseManifest> {
   return JSON.parse(await readFile(CHASE_MANIFEST, "utf8")) as ChaseManifest;
@@ -136,17 +131,16 @@ test("DIRECTION 1 transaction -> account: detail-page chain yields the parent ac
   );
 });
 
-test("DIRECTION 2 account -> transactions: list-page chain yields the filtered child-list href", async () => {
+test("DIRECTION 2 account -> transactions: record-page chain yields the filtered child-list href", async () => {
   const manifest = await loadChaseManifest();
   const connectorManifest = findManifestForConnectorId([manifest], CONNECTION_CONNECTOR_ID);
   assert.ok(connectorManifest);
   const connectorStreams = connectorManifest.streams ?? [];
   const parentStream = "accounts";
 
-  // Replicate [stream]/page.tsx for the parent (accounts) list: gate on the
-  // reverse child-edge set, then build per-row filtered child-list links.
+  // Replicate [recordKey]/page.tsx for the parent account: build its filtered child-list links.
   const edges = reverseChildListEdgesFromManifest(connectorStreams, parentStream);
-  assert.ok(edges.length > 0, "accounts must have reverse child edges — the list-page gate that renders the column");
+  assert.ok(edges.length > 0, "accounts must have reverse child edges for the record page to render links");
 
   const reverseLinks = reverseChildListLinksFromManifest(connectorStreams, {
     connectionId: CONNECTION_ID,
@@ -203,16 +197,12 @@ test("WIRING detail page composes the reverse parent->child-list links it render
   assert.match(src, DETAIL_RENDERS_REVERSE_LINKS, "detail page must render the reverse child-list links");
 });
 
-test("WIRING list page resolves per-cell child->parent links it renders", async () => {
-  const src = await readFile(LIST_PAGE, "utf8");
-  assert.match(src, LIST_COMPUTES_LINK_FIELDS, "list page must compute child-declared linkable fields");
-  assert.match(src, LIST_RESOLVES_CELL_BACKLINK, "list page must resolve a child-declared back-link per cell");
-  assert.match(src, LIST_APPLIES_CELL_LINK, "list page must apply the per-cell parent link in the row");
-});
-
-test("WIRING list page gates and renders per-row reverse parent->child-list links", async () => {
-  const src = await readFile(LIST_PAGE, "utf8");
-  assert.match(src, LIST_GATES_REVERSE_EDGES, "list page must gate the reverse column on declared edges");
-  assert.match(src, LIST_BUILDS_REVERSE_LINKS, "list page must build per-row reverse child-list links");
-  assert.match(src, LIST_GUARDS_REVERSE_COLUMN, "list page must only render the reverse column when edges exist");
+test("WIRING kind rows open record pages where relationship links remain available", async () => {
+  const list = await readFile(LIST_PAGE, "utf8");
+  const detail = await readFile(DETAIL_PAGE, "utf8");
+  // Round 2 sources brief 5a: row links keep their destination; parent and child links move to that page.
+  assert.match(list, LIST_OPENS_RECORD_PAGE, "each row must open its own record page");
+  assert.doesNotMatch(list, LIST_HAS_NO_RELATIONSHIP_LINKS, "kind rows no longer render relationship links");
+  assert.match(detail, DETAIL_RENDERS_BACKLINKS, "the record page must keep parent links");
+  assert.match(detail, DETAIL_RENDERS_REVERSE_LINKS, "the record page must keep child-list links");
 });

@@ -24,7 +24,7 @@
  * operator voice — this is the owner's own instance state, not a hosted
  * service promise. See `docs/reference/voice-and-framing.md`.
  */
-import { formatConnectorNameForDisplay } from "@pdpp/display";
+import { connectionDisplayName } from "./connection-display-name.ts";
 import type {
   RefRecordVersionDisposition,
   RefRecordVersionRemediation,
@@ -239,10 +239,7 @@ export function pointInTimeGuidance(row: RefRecordVersionStatsRow): string | nul
 
 /** Human-readable connector/stream label for one churn row. */
 export function churnRowLabel(row: RefRecordVersionStatsRow): string {
-  const connector = formatConnectorNameForDisplay({
-    connectorId: row.connector_id ?? row.connector_instance_id,
-    displayName: row.display_name,
-  });
+  const connector = connectionDisplayName(row.display_name, null, row.connector_id);
   return `${connector} / ${row.stream}`;
 }
 

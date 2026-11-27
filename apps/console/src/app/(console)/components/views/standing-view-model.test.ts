@@ -2,2121 +2,1128 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type {
+  DatasetSummary,
   GrantSummary,
   OwnerIssuedClient,
   PendingApproval,
+  RefConnectionHealthSnapshot,
   RefConnectorSummary,
-  RunSummary,
+  RefRenderedVerdict,
+  RefRequiredAction,
   TraceSummary,
 } from "../../lib/ref-client.ts";
+import { sourceStatusWords } from "../../lib/source-status-words.ts";
+import { buildDemoInputs, type DemoScenario } from "./standing-demo-data.ts";
 import {
-  EMPTY_SOURCE_WORK_GROUPS,
-  sourceAttentionHeadline,
-  sourceWorkFromConnectors,
-} from "../../lib/source-actionability.ts";
-import {
-  advisoryOwnerActionsFromConnectors,
-  attentionConnectionsFromConnectors,
-  BEARER_PREVIEW_LIMIT,
-  buildStandingData,
-  computeHero,
-  grantEndorseStatus,
+  buildHomeViewModel,
   grantReads,
+  type HomeHrefs,
+  type HomeInputs,
   joinHuman,
-  relDay,
-  type StandingHrefs,
-  type StandingInputs,
-  scopeHuman,
-  sourceIssueConnectionsFromConnectors,
 } from "./standing-view-model.ts";
 
-const HREFS: StandingHrefs = {
-  connection: (id) => `/sources/${id}`,
+const NOW = new Date("2026-11-24T12:00:00Z");
+const SUCCESS = "2026-11-24T10:00:00.000Z";
+
+const HREFS: HomeHrefs = {
+  addSource: "/sources/add",
+  connect: "/connect",
   deployment: "/deployment",
   deploymentTokens: "/deployment/tokens",
   grant: (id) => `/grants/${id}`,
-  grantPackages: "/grants/packages",
   grants: "/grants",
-  notifications: "/notifications",
-  run: (id) => `/syncs/${id}`,
-  runs: "/syncs",
+  source: (id) => `/sources/${id}`,
   sources: "/sources",
-  trace: (id) => `/audit/${id}`,
-  traces: "/audit",
 };
 
-const NOW = new Date("2026-06-13T12:00:00Z");
-
-const CALM_SUB_RE = /1 client holds 1 active owner token/;
-const BEARER_HOW_RE = /2 active tokens/;
-const BEARER_HOW_HAS_ISSUED_RE = /issued/;
-const BEARER_HOW_HAS_DATE_RE = /\d{4}-\d{2}-\d{2}/;
-const BULK_WRITE_UNKNOWN_CONNECTION_RE = /bulk write on unknown connection/;
-const CODE_FIX_RE = /code fix/;
-const DID_NOT_LOAD_RE = /did not load/;
-const EXPIRED_OR_CREDENTIAL_RE = /grant had expired|you never allowed it|state_expired|github_credential/;
-const LATELY_READ_RE = /read 412 records/;
-const LATEST_SAVED_POSTS_RE = /latest saved posts/;
-const MAINTAINER_ACTION_RE = /maintainer action/;
-const NO_OWNER_TOKEN_RE = /No owner token can act as you yet/;
-const OWNER_TOKEN_COUNT_RE = /1 client holds 2 active owner tokens/;
-const PROJECTION_COPY_RE = /projection|rebuild|bulk write|unknown connection/i;
-const PROJECTION_SQL_COPY_RE = /projection|rebuild|bulk write|unknown connection|SQL/i;
-const RAW_ORPHANED_RUN_RE = /orphaned_started_run/;
-const RAW_REASON_CODE_RE = /new_internal_reason_code/;
-const REFRESH_PAGE_RE = /Refresh this page/;
-const SQL_FAILED_RE = /SQL failed/;
-const STALE_TOTALS_RE = /last completed update/;
-const TOKEN_OVERCOUNT_RE = /2 tokens can act as you/;
-const WILL_NOT_CLAIM_ALL_CLEAR_RE = /will not claim all-clear from partial data/;
-
-function baseInputs(over: Partial<StandingInputs> = {}): StandingInputs {
+function health(overrides: Partial<RefConnectionHealthSnapshot> = {}): RefConnectionHealthSnapshot {
   return {
-    advisoryOwnerActions: [],
-    attentionConnections: [],
-    bearerClients: [],
-    failedRuns: [],
-    failedTraces: [],
-    fleetHealth: null,
-    grants: [],
-    hrefs: HREFS,
-    notificationsSetup: "not_configured",
-    now: NOW,
-    overviewLoadIssues: [],
-    pendingApprovals: [],
-    sourceIssues: [],
-    sourceWork: EMPTY_SOURCE_WORK_GROUPS,
-    summary: {
-      blob_bytes: 0,
-      connector_count: 10,
-      earliest_ingested_at: null,
-      earliest_record_time: null,
-      latest_ingested_at: null,
-      latest_record_time: null,
-      object: "dataset_summary",
-      projection: { state: "fresh" },
-      record_changes_json_bytes: 0,
-      record_count: 48_120,
-      record_json_bytes: 0,
-      stream_count: 24,
-      top_connectors: [],
-      total_retained_bytes: 0,
+    axes: {
+      attention: "none",
+      coverage: "complete",
+      freshness: "fresh",
+      outbox: "idle",
     },
-    traces: [],
-    ...over,
+    badges: { stale: false, syncing: false },
+    last_success_at: SUCCESS,
+    next_action: null,
+    next_attempt_at: null,
+    reason_code: null,
+    state: "healthy",
+    unknown_reasons: [],
+    ...overrides,
   };
 }
 
-// ─── scope → human lexicon (honest fallback) ──────────────────────
-
-test("scopeHuman maps known scopes and strips .read + connector prefix", () => {
-  assert.equal(scopeHuman("pay_statements.read"), "your pay");
-  assert.equal(scopeHuman("transactions"), "your spending");
-  assert.equal(scopeHuman("chase:transactions"), "your spending");
-});
-
-test("scopeHuman falls back to a spaced name when no mapping is honest", () => {
-  assert.equal(scopeHuman("loyalty_points.read"), "loyalty points");
-  assert.equal(scopeHuman("weird_stream"), "weird stream");
-});
-
-test("joinHuman uses an Oxford-comma join", () => {
-  assert.equal(joinHuman(["a"]), "a");
-  assert.equal(joinHuman(["a", "b"]), "a and b");
-  assert.equal(joinHuman(["a", "b", "c"]), "a, b, and c");
-});
-
-// ─── grant vocab → endorse status ─────────────────────────────────
-
-test("grantEndorseStatus collapses the live vocab to active", () => {
-  for (const s of ["succeeded", "issued", "approved", "active"]) {
-    assert.equal(grantEndorseStatus(s), "active");
-  }
-  assert.equal(grantEndorseStatus("revoked"), "revoked");
-  assert.equal(grantEndorseStatus("denied"), "denied");
-});
-
-test("grantReads humanizes kinds, falls back to connector, then generic", () => {
-  const withKinds = { connector_id: "plaid", kinds: ["pay_statements", "transactions"] } as GrantSummary;
-  assert.equal(grantReads(withKinds), "reads only your pay and your spending");
-  const onlyConnector = { connector_id: "employment", kinds: ["read"] } as GrantSummary;
-  assert.equal(grantReads(onlyConnector), "reads only your employment history");
-  const nothing = { connector_id: null, kinds: [] } as unknown as GrantSummary;
-  assert.equal(grantReads(nothing), "reads a scoped slice of your data");
-});
-
-test("grantReads humanizes protocol audit stream names instead of raw event ids", () => {
-  const auditGrant = {
-    connector_id: "pdpp",
-    kinds: ["consent.approved", "token.issued", "query.received", "disclosure.served", "query.rejected"],
-  } as GrantSummary;
-
-  assert.equal(
-    grantReads(auditGrant),
-    "reads only grant decisions, token activity, read requests, data disclosures, and rejected reads"
-  );
-});
-
-// ─── relative time ────────────────────────────────────────────────
-
-test("relDay produces calm relative labels", () => {
-  assert.equal(relDay("2026-06-13T08:00:00Z", NOW), "today");
-  assert.equal(relDay("2026-06-12T08:00:00Z", NOW), "yesterday");
-  assert.equal(relDay("2026-06-10T08:00:00Z", NOW), "3 days ago");
-  assert.equal(relDay("2026-01-01T08:00:00Z", NOW), "2026-01-01");
-  assert.equal(relDay(null, NOW), "—");
-});
-
-// ─── hero tone precedence ─────────────────────────────────────────
-
-test("hero is DECIDE when an approval is pending", () => {
-  const pending: PendingApproval = {
-    approval_id: "a1",
-    batch: false,
-    client_id: "Atlas Mortgage",
-    created_at: NOW.toISOString(),
-    grant_preview: { streams: [{ name: "pay_statements" }, { name: "transactions" }] },
-    kind: "consent",
-    object: "approval",
-  };
-  const hero = computeHero(baseInputs({ pendingApprovals: [pending] }));
-  assert.equal(hero.tone, "decide");
-  assert.equal(hero.line.emphasis, "your pay and your spending");
-  assert.equal(hero.cta?.href, HREFS.grants);
-});
-
-test("local source rows remain detail when no server fleet verdict is available", () => {
-  // Device-local recovery cannot run from the dashboard. The CTA must read as
-  // navigation, route to the recovery panel (exact connection), and leave the
-  // actual host command in the panel.
-  const hero = computeHero(
-    baseInputs({
-      attentionConnections: [
-        {
-          actionLabel: "Recover local collector uploads",
-          connectorKey: "claude-code",
-          deviceLocal: true,
-          label: "laptop Claude Code",
-          routeId: "ci_laptop",
-          what: "The local collector has saved records on its host that did not upload to this server.",
-        },
-      ],
-    })
-  );
-  assert.equal(hero.tone, "calm");
-  assert.equal(hero.kicker, "Where you stand");
-});
-
-test("local dashboard-actionable rows remain detail when no fleet verdict is supplied", () => {
-  // A reconnect/refresh the dashboard CAN initiate keeps its action label.
-  const hero = computeHero(
-    baseInputs({
-      attentionConnections: [
-        {
-          actionLabel: "Reconnect",
-          connectorKey: "chase",
-          deviceLocal: false,
-          label: "Chase - Personal",
-          routeId: "cin_chase",
-          what: "Reconnect Chase.",
-        },
-      ],
-    })
-  );
-  assert.equal(hero.tone, "calm");
-});
-
-test("several local attention rows do not synthesize a fleet headline", () => {
-  const hero = computeHero(
-    baseInputs({
-      attentionConnections: [
-        {
-          actionLabel: "Check the collector",
-          connectorKey: "claude-code",
-          deviceLocal: true,
-          label: "laptop Claude Code",
-          routeId: "ci_laptop",
-          what: "Check the collector.",
-        },
-        {
-          actionLabel: "Reconnect",
-          connectorKey: "chase",
-          deviceLocal: false,
-          label: "Chase - Personal",
-          routeId: "cin_chase",
-          what: "Reconnect Chase.",
-        },
-      ],
-    })
-  );
-  assert.equal(hero.tone, "calm");
-});
-
-test("failed syncs/traces alone do NOT drive the alarm — only the rendered-verdict attention set does", () => {
-  // The old bug: a failed YNAB trace inflated the alarm while YNAB was healthy.
-  const run = { connector_id: "current_activity", failure_reason: "expired", run_id: "r1" } as RunSummary;
-  const trace = { client_id: "ynab", trace_id: "t1" } as TraceSummary;
-  const hero = computeHero(baseInputs({ attentionConnections: [], failedRuns: [run], failedTraces: [trace] }));
-  assert.notEqual(hero.tone, "alarm");
-});
-
-test("decide wins over alarm", () => {
-  const pending = {
-    approval_id: "a1",
-    batch: false,
-    created_at: NOW.toISOString(),
-    kind: "consent",
-    object: "approval",
-  } as PendingApproval;
-  const both = computeHero(
-    baseInputs({
-      attentionConnections: [
-        {
-          actionLabel: "Reconnect",
-          connectorKey: "chase",
-          deviceLocal: false,
-          label: "Chase - Personal",
-          routeId: "cin_chase",
-          what: "x",
-        },
-      ],
-      pendingApprovals: [pending],
-    })
-  );
-  assert.equal(both.tone, "decide");
-});
-
-// ─── attention truth (connection rows and /runs share) ───────────────────
-
-function connector(over: Partial<RefConnectorSummary>): RefConnectorSummary {
+function requiredAction(overrides: Partial<RefRequiredAction> = {}): RefRequiredAction {
   return {
-    connection_health: legacyHealth("healthy"),
-    connection_id: "cin_x",
-    connector_id: "claude-code",
-    display_name: "Claude Code",
+    affects: [],
+    audience: "owner",
+    cta: "Finish this step",
+    kind: "reauth",
+    satisfied_when: { kind: "credential_present_and_unrejected" },
+    surface: { kind: "provider_interaction" },
+    target: { kind: "sync", run_id: "run-waiting" },
+    terminal: false,
+    urgency: "now",
+    ...overrides,
+  };
+}
+
+function verdict(
+  label: RefRenderedVerdict["pill"]["label"] = "Healthy",
+  actions: RefRequiredAction[] = [],
+): RefRenderedVerdict {
+  return {
+    annotations: [],
+    channel: "calm",
+    detail: {},
+    forward_statement: "The source is ready.",
+    pill: {
+      label,
+      tone: label === "Healthy" || label === "Import complete" ? "green" : "amber",
+    },
+    progress: {
+      gaps_drained_last_run: null,
+      headline: "Current status.",
+      last_refreshed_at: null,
+      mode: "scheduled",
+      records_committed_last_run: null,
+      retained_records: null,
+    },
+    required_actions: actions,
+    streams: [],
+    trace: {},
+  };
+}
+
+const HEALTHY_STATE = {
+  evidence_as_of: SUCCESS,
+  owner_of_state: "system" as const,
+  posture: "observed" as const,
+  resolver: "healthy" as const,
+};
+
+function statusSource(row: number, name: string, overrides: Partial<RefConnectorSummary> = {}): RefConnectorSummary {
+  const sourceId = `source-${row}-${name.toLowerCase().replaceAll(" ", "-")}`;
+  const base: RefConnectorSummary = {
+    connection_health: health(),
+    connection_id: sourceId,
+    // Summaries carry the connector's own name; Home names rows by the shared rule.
+    connector_display_name: name,
+    connector_id: name.toLowerCase().replaceAll(" ", "-"),
+    display_name: name,
     freshness: {},
     last_run: null,
     last_successful_run: null,
     manifest_version: null,
     next_action: null,
+    owner_state: HEALTHY_STATE,
+    rendered_verdict: verdict(),
     schedule: null,
-    source_work: "none",
     streams: [],
-    total_records: 0,
-    ...over,
+    total_records: 20,
   };
-}
-
-function legacyHealth(
-  state: RefConnectorSummary["connection_health"]["state"]
-): RefConnectorSummary["connection_health"] {
-  return {
-    axes: {
-      attention: "none",
-      coverage: "unknown",
-      freshness: "unknown",
-      outbox: "unknown",
-    },
-    badges: { stale: false, syncing: false },
-    last_success_at: null,
-    next_action: null,
-    next_attempt_at: null,
-    reason_code: null,
-    state,
-    unknown_reasons: [],
+  const successfulRun = {
+    event_count: 4,
+    failure_reason: null,
+    finished_at: SUCCESS,
+    first_at: SUCCESS,
+    last_at: SUCCESS,
+    needs_input: false,
+    object: "run_summary" as const,
+    provider_id: null,
+    run_id: `run-${sourceId}`,
+    started_at: SUCCESS,
+    status: "succeeded",
   };
-}
 
-function verdict(
-  over: Partial<NonNullable<RefConnectorSummary["rendered_verdict"]>>
-): RefConnectorSummary["rendered_verdict"] {
-  return {
-    annotations: [],
-    channel: "attention",
-    detail: undefined,
-    forward_statement: "Check the collector before this source can make progress.",
-    pill: { label: "Can't collect", tone: "red" },
-    required_actions: [
-      {
-        affects: [],
-        audience: "owner",
-        cta: "Check the collector",
-        kind: "add_info",
-        remediation: {
-          cause: "dead_letter_backlog",
-          commands: [],
-          kind: "local_collector_recovery",
-          label: "Recover local collector uploads",
-          summary: "The local collector has saved records on its host that did not upload to this server.",
-          target: { identity_source: "source_instance_bindings", kind: "local_device" },
+  switch (row) {
+    case 1:
+      return {
+        ...base,
+        source_visibility: "archived",
+        status: "paused",
+        ...overrides,
+      };
+    case 2:
+      return {
+        ...base,
+        revoked_at: SUCCESS,
+        source_visibility: "setup_failed",
+        ...overrides,
+      };
+    case 3:
+      return {
+        ...base,
+        connector_implementation: {
+          connector_id: base.connector_id,
+          state: "not_installed",
         },
-        satisfied_when: { kind: "attention_resolved" },
-        terminal: false,
-        urgency: "now",
-      },
-    ],
-    ...over,
-  } as RefConnectorSummary["rendered_verdict"];
+        status: "revoked",
+        ...overrides,
+      };
+    case 4:
+      return {
+        ...base,
+        connector_implementation: {
+          connector_id: base.connector_id,
+          state: "not_installed",
+        },
+        ...overrides,
+      };
+    case 5:
+      return {
+        ...base,
+        terminal_setup_disposition: "unverified_missing_counts",
+        ...overrides,
+      };
+    case 6:
+      return {
+        ...base,
+        terminal_setup_disposition: "unverified_zero",
+        ...overrides,
+      };
+    case 7:
+      return {
+        ...base,
+        terminal_setup_disposition: "verified_empty",
+        ...overrides,
+      };
+    case 8:
+      return {
+        ...base,
+        owner_state: {
+          ...HEALTHY_STATE,
+          owner_of_state: "owner",
+          resolver: "needs_owner",
+        },
+        rendered_verdict: verdict("Can't collect", [requiredAction()]),
+        ...overrides,
+      };
+    case 9:
+      return {
+        ...base,
+        owner_state: {
+          ...HEALTHY_STATE,
+          owner_of_state: "owner",
+          resolver: "setup_in_progress",
+        },
+        ...overrides,
+      };
+    case 10:
+      return {
+        ...base,
+        owner_state: {
+          ...HEALTHY_STATE,
+          owner_of_state: "owner",
+          resolver: "owner_paused",
+        },
+        status: "paused",
+        ...overrides,
+      };
+    case 11:
+      return {
+        ...base,
+        last_run: { ...successfulRun, finished_at: null, status: "started" },
+        owner_state: { ...HEALTHY_STATE, resolver: "collecting" },
+        ...overrides,
+      };
+    case 18:
+      return {
+        ...base,
+        owner_state: { ...HEALTHY_STATE, resolver: "healthy" },
+        rendered_verdict: verdict("Import complete"),
+        ...overrides,
+      };
+    case 19:
+      return {
+        ...base,
+        connection_health: health({ lateness: { state: "on_time" } }),
+        ...overrides,
+      };
+    case 20:
+      return {
+        ...base,
+        owner_state: { ...HEALTHY_STATE, posture: "frozen-since-last-run" },
+        ...overrides,
+      };
+    case 21:
+      return {
+        ...base,
+        last_successful_run: successfulRun,
+        owner_state: { ...HEALTHY_STATE, resolver: "not_measured" },
+        rendered_verdict: verdict("Collected, not independently checked"),
+        ...overrides,
+      };
+    case 22:
+      return {
+        ...base,
+        connection_health: health({ last_success_at: null }),
+        last_successful_run: null,
+        owner_state: { ...HEALTHY_STATE, resolver: "not_measured" },
+        source_kind: "account",
+        ...overrides,
+      };
+    case 23:
+      return {
+        ...base,
+        owner_state: undefined,
+        rendered_verdict: verdict("Healthy"),
+        ...overrides,
+      };
+    default:
+      return {
+        ...base,
+        connection_health: health({ last_success_at: null }),
+        owner_state: undefined,
+        rendered_verdict: null,
+        status: undefined,
+        source_visibility: undefined,
+        ...overrides,
+      };
+  }
 }
 
-test("attention truth: only attention-channel connections with an owner-satisfiable action count", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_laptop",
-      connector_id: "claude-code",
-      rendered_verdict: verdict({}),
-      source_work: "needs_owner",
-    }), // ✓ attention + owner action
-    connector({ connector_id: "calm-source", rendered_verdict: verdict({ channel: "calm" }), source_work: "none" }), // ✗ calm
-    connector({ connector_id: "ynab", rendered_verdict: null }), // ✗ no verdict (e.g. healthy)
-    connector({
-      connector_id: "maintainer-only",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "now",
-          },
-        ],
-      }),
-    }), // ✗ attention but no owner-satisfiable action (S1 — code_fix is the maintainer's, not the owner's)
-    connector({
-      connector_id: "revoked",
-      rendered_verdict: verdict({}),
-      revoked_at: "2026-06-01T00:00:00Z",
-      source_work: "none",
-    }), // ✗ revoked
-  ];
-  const attention = attentionConnectionsFromConnectors(connectors);
-  assert.deepEqual(
-    attention.map((a) => a.connectorKey),
-    ["claude-code"]
-  );
-  assert.equal(attention[0]?.actionLabel, "Check the collector");
-  assert.equal(attention[0]?.what, "Check the collector before this source can make progress.");
-  // The local_device remediation target → deviceLocal true → source rows and
-  // Runs use a navigation CTA instead of restating the action.
-  assert.equal(attention[0]?.deviceLocal, true);
-});
+const SUMMARY: DatasetSummary = {
+  blob_bytes: 0,
+  connector_count: 4,
+  earliest_ingested_at: null,
+  earliest_record_time: null,
+  latest_ingested_at: null,
+  latest_record_time: null,
+  object: "dataset_summary",
+  projection: { state: "fresh" },
+  record_changes_json_bytes: 0,
+  record_count: 48_120,
+  record_json_bytes: 0,
+  stream_count: 8,
+  top_connectors: [],
+  total_retained_bytes: 0,
+};
 
-test("attention truth does not classify legacy blocked health without a server work projection", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_health: legacyHealth("blocked"),
-      connection_id: "cin_chase",
-      connector_id: "chase",
-      display_name: "Chase",
-      rendered_verdict: null,
-    }),
-  ];
-
-  const attention = attentionConnectionsFromConnectors(connectors);
-  assert.equal(attention.length, 0);
-
-  const hero = computeHero(baseInputs({ attentionConnections: attention }));
-  assert.equal(hero.tone, "calm");
-});
-
-test("source issues show non-owner material verdicts without alarming as owner attention", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_chase",
-      connector_id: "chase",
-      display_name: "Chase",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "This connector needs a code fix before it can collect again.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "now",
-          },
-        ],
-      }),
-    }),
-    connector({
-      connector_id: "healthy",
-      source_work: "none",
-      rendered_verdict: verdict({ channel: "calm", pill: { label: "Healthy", tone: "green" } }),
-    }),
-    connector({
-      connector_id: "revoked",
-      source_work: "none",
-      rendered_verdict: verdict({ pill: { label: "Can't collect", tone: "red" } }),
-      revoked_at: "2026-06-01T00:00:00Z",
-    }),
-  ];
-
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-
-  const sourceIssues = sourceIssueConnectionsFromConnectors(connectors);
-  assert.equal(sourceIssues.length, 1);
-  assert.equal(sourceIssues[0]?.label, "Chase");
-  assert.equal(sourceIssues[0]?.status, "is degraded");
-  assert.equal(sourceIssues[0]?.routeId, "cin_chase");
-
-  const data = buildStandingData(baseInputs({ sourceIssues }));
-  assert.equal(data.attention.length, 0);
-  assert.equal(data.sourceIssues.length, 1);
-  assert.equal(data.sourceIssues[0]?.what, "Chase is degraded");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(data.sourceIssues[0]?.why ?? "", CODE_FIX_RE);
-});
-
-test("advisory owner actions surface non-urgent Amazon retry work without calm all-clear copy", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_amazon",
-      connector_id: "amazon",
-      display_name: "Amazon - Personal",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Some order detail is still outstanding. Retry this source to collect the missing detail.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: ["orders"],
-            audience: "owner",
-            cta: "Retry detail gap",
-            kind: "retry_gap",
-            satisfied_when: { kind: "gap_recovered" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  const advisoryOwnerActions = advisoryOwnerActionsFromConnectors(connectors);
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-  assert.equal(advisoryOwnerActions.length, 1);
-  assert.equal(advisoryOwnerActions[0]?.actionLabel, "Retry detail gap");
-
-  const data = buildStandingData(baseInputs({ advisoryOwnerActions }));
-  assert.equal(data.hero.tone, "calm");
-  assert.equal(data.advisoryOwnerActions.length, 1);
-  assert.equal(data.advisoryOwnerActions[0]?.what, "Amazon - Personal has an action to review");
-});
-
-test("advisory owner actions surface Reddit refresh work in the home summary", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_reddit",
-      connector_id: "reddit",
-      display_name: "Reddit",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Run a refresh when you want the latest saved posts.",
-        pill: { label: "Healthy", tone: "green" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Refresh now",
-            kind: "refresh_now",
-            satisfied_when: { kind: "confirming_run_succeeded" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  const advisoryOwnerActions = advisoryOwnerActionsFromConnectors(connectors);
-  const data = buildStandingData(baseInputs({ advisoryOwnerActions }));
-  assert.equal(data.advisoryOwnerActions.length, 1);
-  assert.equal(data.advisoryOwnerActions[0]?.href, HREFS.connection("cin_reddit"));
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(data.advisoryOwnerActions[0]?.why ?? "", LATEST_SAVED_POSTS_RE);
-  assert.equal(data.hero.tone, "calm");
-});
-
-test("source actionability groups live-shaped rows with scoped counts", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_chatgpt",
-      connector_id: "chatgpt",
-      display_name: "ChatGPT - personal",
-      source_work: "needs_owner",
-      rendered_verdict: verdict({
-        channel: "attention",
-        forward_statement: "Reconnect this account and collection resumes.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Reconnect this account",
-            kind: "reauth",
-            satisfied_when: { kind: "credential_present_and_unrejected" },
-            terminal: false,
-            urgency: "now",
-          },
-        ],
-      }),
-    }),
-    connector({
-      connection_id: "cin_usaa",
-      connector_id: "usaa",
-      display_name: "USAA - Personal",
-      source_work: "needs_owner",
-      rendered_verdict: verdict({
-        channel: "attention",
-        forward_statement: "Reconnect this account and collection resumes.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Reconnect this account",
-            kind: "reauth",
-            satisfied_when: { kind: "credential_present_and_unrejected" },
-            terminal: false,
-            urgency: "now",
-          },
-        ],
-      }),
-    }),
-    connector({
-      connection_id: "cin_claude",
-      connector_id: "claude-code",
-      display_name: "Local Claude Code",
-      source_work: "needs_owner",
-      rendered_verdict: verdict({}),
-    }),
-    connector({
-      connection_id: "cin_amazon",
-      connector_id: "amazon",
-      display_name: "Amazon - Personal",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Run a refresh to bring this up to date.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Refresh now",
-            kind: "refresh_now",
-            satisfied_when: { kind: "confirming_run_succeeded" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-    connector({
-      connection_id: "cin_chase",
-      connector_id: "chase",
-      display_name: "Chase - Personal",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Latest collection completed with known coverage gaps.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Coverage gap needs review",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-    connector({
-      connection_id: "cin_github",
-      connector_id: "github",
-      display_name: "GitHub - Personal",
-      source_work: "not_measured",
-      rendered_verdict: verdict({
-        channel: "calm",
-        forward_statement: "Coverage has not been measured yet.",
-        pill: { label: "Not measured", tone: "grey" },
-        required_actions: [],
-      }),
-    }),
-  ];
-
-  const sourceWork = sourceWorkFromConnectors(connectors);
-  const data = buildStandingData(baseInputs({ sourceWork }));
-
-  assert.equal(sourceWork.needsOwner.length, 3);
-  assert.equal(sourceWork.review.length, 1);
-  assert.equal(sourceWork.systemIssues.length, 1);
-  assert.equal(sourceWork.notMeasured.length, 1);
-  assert.equal(sourceAttentionHeadline(sourceWork).needsYou, sourceWork.needsOwner.length);
-  assert.equal(data.hero.tone, "calm");
-  assert.equal(data.sourceWorkSections[0]?.title, "Needs you");
-  assert.equal(data.sourceWorkSections[0]?.countLabel, "3 sources");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.sourceWorkSections[0]?.rows.length, 3);
-  assert.equal(data.sourceWorkSections[1]?.title, "Available actions");
-  assert.equal(data.sourceWorkSections[1]?.countLabel, "1 source");
-  assert.equal(data.sourceWorkSections[2]?.title, "System or connector issue");
-  assert.equal(data.sourceWorkSections[3]?.title, "Not measured");
-  assert.equal(data.sourceWorkSections[3]?.rows[0]?.what, "GitHub - Personal: Coverage has not been measured yet.");
-  const chatgptRow = data.sourceWorkSections
-    .flatMap((section) => section.rows)
-    .find((row) => row.what.startsWith("ChatGPT - personal"));
-  assert.equal(chatgptRow?.what, "ChatGPT - personal: Reconnect this account");
-});
-
-// ─── Cross-surface acceptance (recovery governor UI tranche, tasks 4.4/4.6) ───
-//
-// The dashboard is one of the four owner surfaces the recovery-state spec binds:
-// group counts SHALL equal rendered rows, and an inactive queued recovery row
-// SHALL NOT read as "Checking". These assertions pin BOTH invariants on the real
-// rendered `sourceWorkSections`, not just the upstream `SourceWorkGroups`.
-
-const DASHBOARD_CHECKING_RE = /checking/i;
-const DASHBOARD_PASSIVE_RECOVERY_RE = /catching up|syncing details|safe to retry/i;
-
-/** A calm/deferred verdict whose only action is a self-handled `wait`. */
-function deferredRecoveryVerdict(): RefConnectorSummary["rendered_verdict"] {
-  return verdict({
-    channel: "calm",
-    forward_statement: "Catching up on the remaining data.",
-    pill: { label: "Missing data", tone: "amber" },
-    required_actions: [
-      {
-        affects: [],
-        audience: "none",
-        cta: "Collecting — no action needed",
-        kind: "wait",
-        satisfied_when: { kind: "none" },
-        terminal: false,
-        urgency: "verifying",
-      },
-    ],
-  });
-}
-
-/** Health carrying a durable, inactive (not syncing) recovery backlog. */
-function inactiveRecoveryHealth(): RefConnectorSummary["connection_health"] {
+function base(overrides: Partial<HomeInputs> = {}): HomeInputs {
   return {
-    ...legacyHealth("degraded"),
-    axes: { attention: "none", coverage: "deferred", freshness: "fresh", outbox: "idle" },
-    badges: { stale: false, syncing: false },
-    detail_gap_backlog: {
-      max_attempt_count: 3,
-      next_attempt_at: null,
-      pending: 2093,
-      pending_is_floor: true,
-      pending_other: 0,
-      pending_other_is_floor: false,
-      recovered: 396,
-      terminal: null,
-    },
+    approvals: [],
+    approvalsFailed: false,
+    approvalsHaveMore: false,
+    grants: [],
+    grantsFailed: false,
+    grantsHaveMore: false,
+    hrefs: HREFS,
+    now: NOW,
+    ownerClients: [],
+    ownerClientsFailed: false,
+    ownerClientsHaveMore: false,
+    reloadHref: "/?demo=calm",
+    sourcePage: { hasMore: false, kind: "ok", sources: [] },
+    summary: SUMMARY,
+    summaryFailed: false,
+    traces: [],
+    tracesFailed: false,
+    tracesHaveMore: false,
+    ...overrides,
+    appRegistrations: overrides.appRegistrations ?? (overrides.grants ?? []).map((grant) => ({
+      client_id: grant.client_id || grant.grant_id, client_name: grant.client?.client_name || grant.client_id || "", return_host: "assistant.example", returns_to_this_computer: false, domain_control_verified: true, reads_last_7_days: 0,
+      sources: [{ source: { kind: grant.source?.kind || "connector", id: grant.source?.id || grant.connector_id || "unknown", connector_id: grant.source?.connector_id || (grant.source ? grant.source.id : grant.connector_id) || null, connection_id: grant.source?.connection_id || null }, kinds: grant.kinds, in_force: grant.status === "active" || grant.status === "issued", first_issued_at: grant.first_at, expires_at: null, stopped_at: null, stopped_reason: null, last_read_at: grant.last_at, grant_ids: [grant.grant_id], active_grant_ids: [grant.grant_id], package_ids: [] }],
+    })),
   };
 }
 
-test("dashboard cross-surface: every source-work section count equals its rendered row count", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_chatgpt",
-      connector_id: "chatgpt",
-      display_name: "ChatGPT - personal",
-      source_work: "needs_owner",
-      rendered_verdict: verdict({
-        channel: "attention",
-        forward_statement: "Reconnect this account and collection resumes.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Reconnect this account",
-            kind: "reauth",
-            satisfied_when: { kind: "credential_present_and_unrejected" },
-            terminal: false,
-            urgency: "now",
-          },
-        ],
+function approval(id: string, clientId: string, createdAt: string): PendingApproval {
+  return {
+    approval_id: id,
+    batch: false,
+    client_id: clientId,
+    created_at: createdAt,
+    grant_preview: {
+      streams: [{ name: "pay_statements" }, { name: "transactions" }],
+    },
+    kind: "consent",
+    object: "approval",
+  };
+}
+
+function grant(id: string, clientId: string, kinds: string[] = ["transactions"]): GrantSummary {
+  return {
+    client: {
+      client_id: clientId,
+      client_name: clientId,
+      registration_mode: "dynamic",
+    },
+    client_id: clientId,
+    connector_id: "plaid",
+    event_count: 1,
+    failure: null,
+    first_at: SUCCESS,
+    grant_id: id,
+    kinds,
+    last_at: SUCCESS,
+    object: "grant_summary",
+    status: "active",
+  };
+}
+
+function trace(
+  clientId: string,
+  status = "succeeded",
+  lastAt = SUCCESS,
+  failure: TraceSummary["failure"] = null,
+): TraceSummary {
+  return {
+    actor_id: clientId,
+    actor_type: "client",
+    client_id: clientId,
+    event_count: 3,
+    failure,
+    first_at: lastAt,
+    grant_id: null,
+    kinds: ["transactions"],
+    last_at: lastAt,
+    object: "trace_summary",
+    request_id: null,
+    run_id: null,
+    status,
+    trace_id: `trace-${clientId}-${status}`,
+  };
+}
+
+test("Home source labels use shared names and preserve all sources", () => {
+  // DIRECTION.md, Home § Apps that can read your data: include every data source name.
+  assert.equal(joinHuman(["Spotify", "GitHub", "Gmail"]), "Spotify, GitHub, and Gmail");
+  // DIRECTION.md, Home § Apps that can read your data: use the named data source, not an event kind.
+  assert.equal(
+    grantReads({ ...grant("one", "app", ["token.issued"]), source: { id: "spotify", kind: "connector" } }),
+    "reads only Spotify",
+  );
+});
+
+test("the title answers first run, one or many needs, sync, current data, and a neutral state", () => {
+  // DIRECTION.md, Home § First run: no configured data sources gets its own title.
+  assert.equal(buildHomeViewModel(base()).title, "Start with one data source");
+
+  // DIRECTION.md, Home § Needs you: the title count is the number of visible rows.
+  const oneNeed = buildHomeViewModel(base({ approvals: [approval("a1", "Atlas Mortgage", SUCCESS)] }));
+  assert.equal(oneNeed.title, "1 thing needs you");
+  // DIRECTION.md, Home § Needs you: multiple visible rows use a plural count.
+  const multipleNeeds = buildHomeViewModel(
+    base({
+      approvals: [approval("a1", "Atlas Mortgage", SUCCESS)],
+      sourcePage: {
+        hasMore: false,
+        kind: "ok",
+        sources: [statusSource(4, "Amazon")],
+      },
+    }),
+  );
+  assert.equal(multipleNeeds.title, "2 things need you");
+
+  // DIRECTION.md, Home: one active sync names its data source.
+  assert.equal(
+    buildHomeViewModel(
+      base({
+        sourcePage: {
+          hasMore: false,
+          kind: "ok",
+          sources: [statusSource(11, "Amazon")],
+        },
       }),
-    }),
-    connector({
-      // Durable, inactive recovery backlog → passive progress ("PDPP is working").
-      connection_health: inactiveRecoveryHealth(),
-      connection_id: "cin_amazon",
-      connector_id: "amazon",
-      display_name: "Amazon - Personal",
-      source_work: "working",
-      rendered_verdict: deferredRecoveryVerdict(),
-    }),
-    connector({
-      connection_id: "cin_reddit",
-      connector_id: "reddit",
-      display_name: "Reddit - Personal",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Run a refresh to bring this up to date.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Refresh now",
-            kind: "refresh_now",
-            satisfied_when: { kind: "confirming_run_succeeded" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
+    ).title,
+    "Syncing Amazon",
+  );
+  // DIRECTION.md, Home: multiple active syncs show their count.
+  assert.equal(
+    buildHomeViewModel(
+      base({
+        sourcePage: {
+          hasMore: false,
+          kind: "ok",
+          sources: [statusSource(11, "Amazon"), statusSource(11, "Spotify")],
+        },
       }),
-    }),
-    connector({
-      connection_id: "cin_chase",
-      connector_id: "chase",
-      display_name: "Chase - Personal",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Some data from this source can't be collected.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "soon",
-          },
-        ],
+    ).title,
+    "Syncing 2 data sources",
+  );
+
+  // DIRECTION.md, Home: rows 18 and 19 are the only all-current evidence.
+  const current = [statusSource(18, "Pocket"), statusSource(19, "Spotify")];
+  assert.equal(
+    buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: current } })).title,
+    "Everything is up to date",
+  );
+  // DIRECTION.md, Home: other non-action states do not claim all data is current.
+  assert.equal(
+    buildHomeViewModel(
+      base({
+        sourcePage: {
+          hasMore: false,
+          kind: "ok",
+          sources: [statusSource(20, "Oura")],
+        },
       }),
+    ).title,
+    "Nothing needs you",
+  );
+});
+
+test("the row-22 never-synced state does not create an alarm on Home", () => {
+  const neverSynced = statusSource(22, "Fitbit");
+  // DIRECTION.md, Home: an ordinary never-synced source does not claim an owner action.
+  assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, false);
+  // DIRECTION.md, Home: use the source status, not the server-wide alarm, for the heading.
+  assert.equal(
+    buildHomeViewModel(
+      base({
+        sourcePage: { hasMore: false, kind: "ok", sources: [neverSynced] },
+      }),
+    ).title,
+    "Nothing needs you",
+  );
+});
+
+test("the prior fleet alarm maps never-synced rows into an audit failure, while Home stays row-based", async () => {
+  const fleetHealth = await readFile(
+    new URL("../../../../../../../reference-implementation/server/fleet-health.ts", import.meta.url),
+    "utf8",
+  );
+  // DIRECTION.md, Home: active source summaries enter the server answer's assessed scope.
+  assert.match(fleetHealth, /assessed\.push\(ref\)/);
+  // DIRECTION.md, Home: the server answer preserves the stream audit result in coverage_audit.
+  assert.match(fleetHealth, /coverage_audit: input\.streamHealth\.status/);
+  // DIRECTION.md, Home: unobserved can produce a failing stream audit and is not owner-caused.
+  assert.match(fleetHealth, /const FAIL_PRODUCING_STREAM_HEALTH_CLASSES = \[[\s\S]*?"unobserved"/);
+  const ownerClasses =
+    fleetHealth.match(/const OWNER_CAUSED_STREAM_HEALTH_CLASSES = \[([\s\S]*?)\] as const/)?.[1] ?? "";
+  // DIRECTION.md, Home: unobserved is excluded from the owner-caused class set.
+  assert.doesNotMatch(ownerClasses, /"unobserved"/);
+  // DIRECTION.md, Home: that system-caused fail reaches the global banner.
+  assert.match(fleetHealth, /streamHealthFailIsSystemCaused\(input\.streamHealth\)/);
+
+  const ids = ["never-synced-a", "never-synced-b"];
+  const home = buildHomeViewModel(
+    base({
+      sourcePage: {
+        hasMore: false,
+        kind: "ok",
+        sources: ids.map((id) => statusSource(22, id)),
+      },
     }),
+  );
+  // DIRECTION.md, Home: source rows provide the title and never-synced rows are not an alarm.
+  assert.equal(home.title, "Nothing needs you");
+});
+
+test("needs-you rows contain their source or request details and follow the required order", () => {
+  const oldWaiting = statusSource(8, "Calendar", {
+    owner_state: {
+      ...HEALTHY_STATE,
+      owner_of_state: "owner",
+      resolver: "needs_owner",
+      evidence_as_of: "2026-11-20T12:00:00Z",
+    },
+    last_run: {
+      event_count: 0,
+      failure_reason: null,
+      finished_at: null,
+      first_at: "2026-11-20T12:00:00Z",
+      last_at: "2026-11-20T12:00:00Z",
+      run_id: "run-calendar",
+      started_at: "2026-11-20T12:00:00Z",
+      status: "started",
+    },
+  });
+  const newerWaiting = statusSource(8, "Browser", {
+    owner_state: {
+      ...HEALTHY_STATE,
+      owner_of_state: "owner",
+      resolver: "needs_owner",
+      evidence_as_of: "2026-11-22T12:00:00Z",
+    },
+  });
+  const oldOther = statusSource(4, "Amazon", {
+    owner_state: { ...HEALTHY_STATE, evidence_as_of: "2026-11-21T12:00:00Z" },
+  });
+  const newerOther = statusSource(6, "Gmail", {
+    owner_state: { ...HEALTHY_STATE, evidence_as_of: "2026-11-23T12:00:00Z" },
+  });
+  const data = buildHomeViewModel(
+    base({
+      approvals: [
+        approval("a2", "Northstar HR", "2026-11-23T11:00:00Z"),
+        approval("a1", "Atlas Mortgage", "2026-11-23T10:00:00Z"),
+      ],
+      ownerClients: [
+        { active_token_count: 0, client_id: "Atlas Mortgage", client_name: "Atlas Mortgage", created_at: SUCCESS },
+        { active_token_count: 0, client_id: "Northstar HR", client_name: "Northstar HR", created_at: SUCCESS },
+      ],
+      sourcePage: {
+        hasMore: false,
+        kind: "ok",
+        sources: [newerOther, newerWaiting, oldOther, oldWaiting],
+      },
+    }),
+  );
+
+  // DIRECTION.md, Home § Needs you: waiting provider steps appear before approvals and other source actions.
+  assert.deepEqual(
+    data.needs.map((need) => need.kind),
+    ["waiting_sync", "waiting_sync", "approval", "approval", "source", "source"],
+  );
+  // DIRECTION.md, Home § Needs you: oldest items appear first inside each kind.
+  assert.deepEqual(
+    data.needs.map((need) => need.name),
+    ["Calendar", "Browser", "Atlas Mortgage", "Northstar HR", "Amazon", "Gmail"],
+  );
+  // DIRECTION.md, Home § Needs you: the title count equals the rendered box row count.
+  assert.equal(data.title, `${data.needs.length} things need you`);
+  // Lead decision (home-pictures 1): the sync-started time follows the status words, in lower case.
+  assert.match(data.needs[0]?.syncNote ?? "", /^sync started /);
+  // Lead decision (home-pictures 1): status words sit on their own line, capital first, as the wording function gives them.
+  assert.equal(data.needs.find((need) => need.name === "Amazon")?.status?.words, "The Amazon connection in DataConnect is no longer installed. It must be installed again before Amazon can sync.");
+  // DIRECTION.md, Home § Needs you: approval rows use the existing review destination.
+  assert.equal(data.needs.find((need) => need.kind === "approval")?.actionHref, HREFS.grants);
+  // DIRECTION.md, Home § Needs you: source action links land on that source's detail page.
+  assert.equal(data.needs.find((need) => need.name === "Amazon")?.actionHref, HREFS.source(oldOther.connection_id));
+});
+
+test("the needs-you box holds exactly the rows whose status says needs you", () => {
+  const sources = [
+    statusSource(2, "Setup shell"),
+    statusSource(4, "Needs install"),
+    statusSource(9, "Setting up"),
+    statusSource(10, "Paused"),
+    statusSource(11, "Syncing"),
+    statusSource(20, "Healthy"),
   ];
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
+  const expected = sources
+    .filter((source) => sourceStatusWords(source, { now: NOW }).needsYou)
+    .map((source) => source.connection_id);
 
-  const sourceWork = sourceWorkFromConnectors(connectors);
-  const data = buildStandingData(baseInputs({ sourceWork }));
+  // Lead decision (home-pictures 5): only rows where needsYou is true enter the box; setup never completed (row 2) does not.
+  assert.deepEqual(
+    data.needs.map((need) => need.id).sort(),
+    [...expected].sort(),
+  );
+  assert.deepEqual(
+    data.needs.map((need) => need.name).sort(),
+    ["Needs install", "Setting up", "Setup shell"],
+  );
 
-  // The invariant the spec binds: on the rendered surface, every group's
-  // countLabel equals the number of rows it actually renders.
-  for (const section of data.sourceWorkSections) {
+  for (const scenario of ["calm", "alarm", "decide"] as const) {
+    const inputs = buildDemoInputs(scenario, HREFS);
+    const demo = buildHomeViewModel(inputs);
+    // Lead decision (home-pictures 5): the seeded samples obey the same rule.
+    assert.deepEqual(
+      demo.needs.filter((need) => need.source).map((need) => need.id).sort(),
+      inputs.sourcePage.sources
+        .filter((source) => sourceStatusWords(source, { now: inputs.now }).needsYou)
+        .map((source) => source.connection_id)
+        .sort(),
+    );
+  }
+});
+
+test("a needs-you row says when it last synced only after a successful sync", () => {
+  const synced = statusSource(4, "Amazon");
+  const neverSynced = statusSource(9, "Notion", { connection_health: health({ last_success_at: null }) });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [synced, neverSynced] } }));
+
+  // Lead decision (home-pictures 2): "last synced" appears only when the data source has a successful sync.
+  assert.match(data.needs.find((need) => need.name === "Amazon")?.syncNote ?? "", /^last synced /);
+  assert.equal(data.needs.find((need) => need.name === "Notion")?.syncNote, null);
+  // Lead decision (home-pictures 1): the status words stay on the second line, capital first.
+  assert.equal(data.needs.find((need) => need.name === "Notion")?.status?.words, "Setup in progress");
+});
+
+test("Home names a waiting request from the app name in its grants read", () => {
+  const clientId = "https://console.example/oauth/client-metadata/client-1";
+  const data = buildHomeViewModel(
+    base({
+      approvals: [approval("approval-1", clientId, SUCCESS)],
+      grants: [
+        {
+          ...grant("grant-1", clientId),
+          client: { client_id: clientId, client_name: "Listening recap", registration_mode: "dynamic" },
+        },
+      ],
+    }),
+  );
+
+  // round5 item 1: Home uses the known app name from the data already read for Apps.
+  assert.equal(data.needs.find((need) => need.kind === "approval")?.name, "Listening recap");
+});
+
+test("each seeded sample's counts agree with its own rows", () => {
+  for (const scenario of ["calm", "alarm", "decide"] as const) {
+    const inputs = buildDemoInputs(scenario, HREFS);
+    const rows = inputs.sourcePage.sources;
+    const records = rows.reduce((sum, source) => sum + (source.total_records ?? 0), 0);
+    // Lead decision (home-pictures 6): "N data sources · N records" is made from the rows the sample shows.
     assert.equal(
-      section.countLabel,
-      section.rows.length === 1 ? "1 source" : `${section.rows.length} sources`,
-      `section ${section.id} count must equal rendered rows`
+      buildHomeViewModel(inputs).subtitle,
+      `${rows.length} data sources · ${records.toLocaleString("en-US")} records`,
     );
   }
 
-  // The recovery backlog lands in "PDPP is working" as passive progress, and its
-  // rendered rows never say "Checking".
-  const working = data.sourceWorkSections.find((section) => section.id === "working");
-  assert.ok(working, "expected a PDPP-is-working section for the inactive recovery backlog");
-  assert.equal(working.rows.length, 1);
-  for (const row of working.rows) {
-    assert.doesNotMatch(row.what, DASHBOARD_CHECKING_RE);
-    assert.doesNotMatch(row.why ?? "", DASHBOARD_CHECKING_RE);
-  }
+  const calm = buildDemoInputs("calm", HREFS).sourcePage.sources;
+  const words = calm.map((source) => sourceStatusWords(source, { now: NOW }));
+  // Lead decision (home-pictures 6): calm lists at least six rows mixing up to date and imported.
+  assert.ok(calm.length >= 6);
+  assert.ok(words.some((status) => status.row === 19));
+  assert.ok(words.some((status) => status.row === 18));
+  // Calm shows the calm title, so no calm row syncs; "Syncing <name>" stays pinned by its own test.
+  assert.ok(words.every((status) => status.row !== 11));
+  assert.equal(buildHomeViewModel(buildDemoInputs("calm", HREFS)).title, "Everything is up to date");
+  // A paused row would stop the calm title, so calm has none.
+  assert.ok(words.every((status) => status.row !== 10));
+  assert.ok(words.every((status) => !status.needsYou));
 });
 
-test("dashboard keeps unavailable source-work rows connector-keyed and navigable", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({ connection_id: "cin_absent", display_name: "Absent source", source_work: undefined }),
-    connector({
-      connection_id: "cin_malformed",
-      display_name: "Malformed source",
-      source_work: "bogus" as never,
-    }),
-    connector({ connection_id: "cin_unavailable", display_name: "Unavailable source", source_work: null as never }),
-    ...(["constructor", "toString", "__proto__"] as const).map((source_work, index) =>
-      connector({
-        connection_id: `cin_collision_${index}`,
-        display_name: `${source_work} source`,
-        source_work: source_work as never,
-      })
-    ),
-    connector({ connection_id: "cin_none", display_name: "Calm source", source_work: "none" }),
-    connector({ connection_id: "cin_working", display_name: "Working source", source_work: "working" }),
-    connector({ connection_id: "cin_review", display_name: "Review source", source_work: "review" }),
+test("archived, disconnected, setup-failed and needs-you rows stay out of the data-source list", () => {
+  const sources = [
+    statusSource(1, "Archived"),
+    statusSource(2, "Setup shell"),
+    statusSource(3, "Disconnected"),
+    statusSource(4, "Needs install"),
+    statusSource(20, "Healthy"),
   ];
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
 
-  const data = buildStandingData(baseInputs({ sourceCount: 9, sourceWork: sourceWorkFromConnectors(connectors) }));
-  const unavailable = data.sourceWorkSections.find((section) => section.id === "unavailable");
-
-  assert.ok(unavailable);
-  assert.equal(unavailable.countLabel, "6 sources");
+  // DIRECTION.md, Home § Data sources: rows 1–3 and needs-you sources remain off this list.
   assert.deepEqual(
-    unavailable.rows.map((row) => ({ href: row.href, id: row.id, what: row.what })),
-    [
-      { href: "/sources/cin_absent", id: "unavailable:cin_absent", what: "Absent source status unavailable" },
-      { href: "/sources/cin_malformed", id: "unavailable:cin_malformed", what: "Malformed source status unavailable" },
-      {
-        href: "/sources/cin_unavailable",
-        id: "unavailable:cin_unavailable",
-        what: "Unavailable source status unavailable",
-      },
-      {
-        href: "/sources/cin_collision_0",
-        id: "unavailable:cin_collision_0",
-        what: "constructor source status unavailable",
-      },
-      {
-        href: "/sources/cin_collision_1",
-        id: "unavailable:cin_collision_1",
-        what: "toString source status unavailable",
-      },
-      {
-        href: "/sources/cin_collision_2",
-        id: "unavailable:cin_collision_2",
-        what: "__proto__ source status unavailable",
-      },
-    ]
+    data.dataSources.map((row) => row.name),
+    ["Healthy"],
   );
-  assert.equal(data.sourceWorkSections.find((section) => section.id === "working")?.rows.length, 1);
-  assert.equal(data.sourceWorkSections.find((section) => section.id === "review")?.rows.length, 1);
+  // DIRECTION.md, Home § Data sources: visible statuses come from the shared source status function.
+  assert.equal(data.dataSources[0]?.status.row, sourceStatusWords(sources[4] as RefConnectorSummary, { now: NOW }).row);
+  // DIRECTION.md, Home § Data sources: source row addresses use the existing route helper.
+  assert.equal(data.dataSources[0]?.href, HREFS.source((sources[4] as RefConnectorSummary).connection_id));
+});
+
+test("the data-source list puts syncing rows first, sorts by name, and shows no more than twelve", () => {
+  const sources = [
+    statusSource(20, "Zebra"),
+    statusSource(11, "Syncing"),
+    ...Array.from({ length: 12 }, (_, index) => statusSource(20, `Source ${String(index + 1).padStart(2, "0")}`)),
+  ];
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
+
+  // DIRECTION.md, Home § Data sources: the list shows at most twelve sorted rows and links to the full list.
+  assert.equal(data.dataSources.length, 12);
+  // DIRECTION.md, Home § Data sources: syncing sources appear before alphabetical names.
+  assert.equal(data.dataSources[0]?.name, "Syncing");
+  // DIRECTION.md, Home § Data sources: extra rows keep a full-list link.
+  assert.equal(data.showMoreSources, true);
+  // DIRECTION.md, Home § Data sources: the displayed count is a direct row count.
+  assert.equal(data.shownSourceCount, 12);
+});
+
+test("bounded or failed source and approval reads cannot prove an all-clear", () => {
+  const currentSources = [statusSource(18, "Pocket"), statusSource(19, "Spotify")];
+  const paged = buildHomeViewModel(
+    base({
+      sourcePage: { hasMore: true, kind: "ok", sources: currentSources },
+    }),
+  );
+  // DIRECTION.md, Home: a continuation makes the title neutral.
+  assert.equal(paged.title, "Data sources");
+  // DIRECTION.md, Home § Data sources: the continuation is discoverable.
+  assert.equal(paged.showMoreSources, true);
+
+  const sourceFailed = buildHomeViewModel(
+    base({
+      sourcePage: {
+        error: "private server detail",
+        hasMore: false,
+        kind: "error",
+        sources: [],
+      },
+    }),
+  );
+  // DIRECTION.md, Home: a failed source read cannot claim what it might have shown.
+  assert.equal(sourceFailed.title, "Data sources");
+  // DIRECTION.md, Home: source failure gets a section-local error state.
+  assert.equal(sourceFailed.dataSourceError, true);
+  // DIRECTION.md, Home § First run: failed reads do not turn into the first-run page.
+  assert.equal(sourceFailed.firstRun, false);
+
+  const approvalFailed = buildHomeViewModel(
+    base({
+      approvalsFailed: true,
+      sourcePage: { hasMore: false, kind: "ok", sources: currentSources },
+    }),
+  );
+  // DIRECTION.md, Home: a failed approval read makes the title neutral.
+  assert.equal(approvalFailed.title, "Data sources");
+  // DIRECTION.md, Home: the needs-you section reports the failed read.
+  assert.equal(approvalFailed.needsError, true);
+});
+
+test("summary totals stay honest when the summary is stale, unknown, or failed", () => {
+  const stale = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale" } } }));
+  // DIRECTION.md, Home: stale record totals are omitted.
+  assert.equal(stale.recordCount, "0");
+  // A stale total with no error is normal after a sync; nothing failed, so no warning.
+  assert.equal(stale.warning, false);
+  assert.equal(buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale", last_error: "rebuild stopped" } } })).warning, true);
+  assert.equal(buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "failed" } } })).warning, true);
+  // The connection count lives in the same projection as the record count, so a
+  // stale summary's count is not trusted: a full source list is counted instead.
+  assert.equal(stale.dataSourceCount, "0");
+  const threeSources = { hasMore: false, kind: "ok" as const, sources: [statusSource(20, "GitHub"), statusSource(20, "Reddit"), statusSource(20, "Spotify")] };
+  const staleZero = buildHomeViewModel(
+    base({ sourcePage: threeSources, summary: { ...SUMMARY, connector_count: 0, projection: { state: "stale" } } }),
+  );
+  assert.equal(staleZero.subtitle, "3 data sources · 60 records");
+  const stalePaged = buildHomeViewModel(
+    base({ sourcePage: { ...threeSources, hasMore: true }, summary: { ...SUMMARY, projection: { state: "stale" } } }),
+  );
+  assert.equal(stalePaged.dataSourceCount, null);
+
+  const unknown = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: undefined } }));
+  // DIRECTION.md, Home: unknown summary state does not prove a current record total.
+  assert.equal(unknown.recordCount, "0");
+
+  // DIRECTION.md, Home: "N data sources · N records" under the title, counted words in the singular for one.
+  assert.equal(buildHomeViewModel(base()).subtitle, "0 data sources · 0 records");
   assert.equal(
-    data.sourceWorkSections.find((section) => section.id === "needsOwner"),
-    undefined
+    buildHomeViewModel(base({ summary: { ...SUMMARY, connector_count: 1, record_count: 1 } })).subtitle,
+    "0 data sources · 0 records",
   );
-  assert.equal(data.healthySourceCount, 1);
+  // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
+  assert.equal(stale.subtitle, "0 data sources · 0 records");
+  assert.equal(unknown.subtitle, "0 data sources · 0 records");
+
+  const failed = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
+  // DIRECTION.md, Home: a failed summary has a local retry state.
+  assert.equal(failed.summaryError, true);
 });
 
-test("dashboard cross-surface: an inactive queued recovery row is passive progress, never a Checking or degraded row", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_health: inactiveRecoveryHealth(),
-      connection_id: "cin_amazon",
-      connector_id: "amazon",
-      display_name: "Amazon - Personal",
-      source_work: "working",
-      rendered_verdict: deferredRecoveryVerdict(),
-    }),
-  ];
-
-  const sourceWork = sourceWorkFromConnectors(connectors);
-  const data = buildStandingData(baseInputs({ sourceWork }));
-
-  // Exactly one working row; no needs-you, no system issue, no not-measured.
-  assert.equal(sourceWork.working.length, 1);
-  assert.equal(sourceWork.systemIssues.length, 0);
-  assert.equal(sourceWork.needsOwner.length, 0);
-  assert.equal(sourceWork.notMeasured.length, 0);
-
-  const allRows = data.sourceWorkSections.flatMap((section) => section.rows);
-  assert.equal(allRows.length, 1);
-  const [row] = allRows;
-  assert.ok(row);
-  assert.doesNotMatch(row.what, DASHBOARD_CHECKING_RE);
-  assert.match(`${row.what} ${row.why ?? ""}`, DASHBOARD_PASSIVE_RECOVERY_RE);
-});
-
-test("reviewable degraded source appears once rather than as review plus source issue", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_amazon",
-      connector_id: "amazon",
-      display_name: "Amazon - Personal",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Retry now to give the recoverable gap another run.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Retry now",
-            kind: "retry_gap",
-            satisfied_when: { kind: "gap_recovered" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  const sourceWork = sourceWorkFromConnectors(connectors);
-  const data = buildStandingData(baseInputs({ sourceWork }));
-  const rows = data.sourceWorkSections.flatMap((section) => section.rows);
-
-  assert.equal(sourceWork.review.length, 1);
-  assert.equal(sourceWork.systemIssues.length, 0);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.what, "Amazon - Personal: Retry now");
-});
-
-test("source actionability follows primary-action parity with push policy", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_mixed",
-      connector_id: "mixed",
-      display_name: "Mixed-action source",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "attention",
-        forward_statement: "Some data from this source can't be collected.",
-        pill: { label: "Can't collect", tone: "red" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "now",
-          },
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Reconnect this account",
-            kind: "reauth",
-            satisfied_when: { kind: "credential_present_and_unrejected" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  const sourceWork = sourceWorkFromConnectors(connectors);
-  assert.equal(sourceWork.needsOwner.length, 0);
-  assert.equal(sourceWork.review.length, 0);
-  assert.equal(sourceWork.systemIssues.length, 1);
-  assert.equal(sourceWork.systemIssues[0]?.label, "Mixed-action source");
-});
-
-test("maintainer-only actions are not advisory owner actions", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_maintainer",
-      connector_id: "maintainer-only",
-      display_name: "Maintainer-only source",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "This source needs a connector code fix before it can make progress.",
-        pill: { label: "Missing data", tone: "amber" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "now",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  assert.equal(advisoryOwnerActionsFromConnectors(connectors).length, 0);
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-  assert.equal(sourceIssueConnectionsFromConnectors(connectors).length, 1);
-});
-
-test("source issues omit healthy advisory refresh hints", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_reddit",
-      connector_id: "reddit",
-      display_name: "Reddit - janedoe",
-      source_work: "review",
-      rendered_verdict: verdict({
-        channel: "advisory",
-        forward_statement: "Run a refresh to bring this up to date.",
-        pill: { label: "Healthy", tone: "green" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "owner",
-            cta: "Refresh now",
-            kind: "refresh_now",
-            satisfied_when: { kind: "confirming_run_succeeded" },
-            terminal: false,
-            urgency: "soon",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-  assert.equal(sourceIssueConnectionsFromConnectors(connectors).length, 0);
-  assert.equal(advisoryOwnerActionsFromConnectors(connectors).length, 1);
-
-  const data = buildStandingData(baseInputs({ sourceIssues: sourceIssueConnectionsFromConnectors(connectors) }));
-  assert.equal(data.sourceIssues.length, 0);
-});
-
-test("source issues surface attention verdicts that have no owner action, even with a green pill", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_maintainer",
-      connector_id: "maintainer-only",
-      display_name: "Maintainer-only source",
-      source_work: "system_issue",
-      rendered_verdict: verdict({
-        channel: "attention",
-        forward_statement: "This source needs a maintainer action before it can make progress.",
-        pill: { label: "Healthy", tone: "green" },
-        required_actions: [
-          {
-            affects: [],
-            audience: "maintainer",
-            cta: "Some data from this source can't be collected",
-            kind: "code_fix",
-            satisfied_when: { kind: "none" },
-            terminal: true,
-            urgency: "now",
-          },
-        ],
-      }),
-    }),
-  ];
-
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-
-  const sourceIssues = sourceIssueConnectionsFromConnectors(connectors);
-  assert.equal(sourceIssues.length, 1);
-  assert.equal(sourceIssues[0]?.label, "Maintainer-only source");
-  assert.equal(sourceIssues[0]?.routeId, "cin_maintainer");
-  assert.equal(sourceIssues[0]?.status, "is degraded");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(sourceIssues[0]?.what ?? "", MAINTAINER_ACTION_RE);
-});
-
-test("source issues do not classify legacy degraded health without a server work projection", () => {
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_health: legacyHealth("degraded"),
-      connection_id: "cin_usaa",
-      connector_id: "usaa",
-      display_name: "USAA - Personal",
-      rendered_verdict: null,
-    }),
-  ];
-
-  assert.equal(attentionConnectionsFromConnectors(connectors).length, 0);
-
-  const sourceIssues = sourceIssueConnectionsFromConnectors(connectors);
-  assert.equal(sourceIssues.length, 0);
-
-  const data = buildStandingData(baseInputs({ sourceIssues }));
-  assert.equal(data.hero.tone, "calm");
-  assert.equal(data.sourceIssues.length, 0);
-  assert.equal(data.attention.length, 0);
-});
-
-test("attention routeId targets the EXACT connection instance, not the connector type", () => {
-  // The multi-account seam bug: three Claude Code devices share connector_id
-  // "claude-code"; only laptop is in attention. Routing by connector_id would
-  // resolve to whichever connection is first (e.g. healthy VM). The routeId
-  // must be the connection identity (connector_instance_id ?? connection_id) so
-  // the CTA lands on the connection that actually needs the owner.
-  const connectors: RefConnectorSummary[] = [
-    connector({
-      connection_id: "cin_vm",
-      connector_id: "claude-code",
-      source_work: "none",
-      rendered_verdict: verdict({ channel: "calm" }),
-    }), // healthy, first
-    connector({
-      connection_id: "cin_laptop",
-      connector_id: "claude-code",
-      connector_instance_id: "ci_laptop",
-      source_work: "needs_owner",
-      rendered_verdict: verdict({}),
-    }), // the attention one
-  ];
-  const attention = attentionConnectionsFromConnectors(connectors);
-  assert.equal(attention.length, 1);
-  // routeId is the instance id (preferred), which the records route resolves
-  // exactly — NOT the shared connector_id "claude-code".
-  assert.equal(attention[0]?.routeId, "ci_laptop");
-  assert.notEqual(attention[0]?.routeId, "claude-code");
-  // The detail row retains that exact-connection routeId; it no longer drives
-  // the aggregate hero.
-  const hero = computeHero(baseInputs({ attentionConnections: attention }));
-  assert.equal(hero.tone, "calm");
-});
-
-test("hero ALARMs on a stale projection even with no failures", () => {
-  const stale = baseInputs();
-  stale.summary = {
-    ...stale.summary,
-    projection: {
-      last_error: "bulk write on unknown connection",
-      state: "stale",
-    },
-  } as StandingInputs["summary"];
-  const hero = computeHero(stale);
-  assert.equal(hero.tone, "alarm");
-  assert.equal(hero.kicker, "Totals updating");
-  assert.equal(hero.line.emphasis, "are still available");
-  assert.match(hero.sub, STALE_TOTALS_RE);
-  assert.equal(hero.cta?.label, "View status");
-  assert.doesNotMatch(hero.sub, BULK_WRITE_UNKNOWN_CONNECTION_RE);
-  assert.doesNotMatch(
-    `${hero.kicker} ${hero.line.text} ${hero.line.emphasis} ${hero.line.tail} ${hero.sub}`,
-    PROJECTION_COPY_RE
-  );
-});
-
-test("hero uses owner-safe copy for failed projection details", () => {
-  const failed = baseInputs();
-  failed.summary = {
-    ...failed.summary,
-    projection: {
-      last_error: "SQL failed: bulk write on unknown connection",
-      state: "failed",
-    },
-  } as StandingInputs["summary"];
-  const hero = computeHero(failed);
-  assert.equal(hero.tone, "alarm");
-  assert.equal(hero.kicker, "Totals update delayed");
-  assert.equal(hero.line.emphasis, "are still available");
-  assert.match(hero.sub, STALE_TOTALS_RE);
-  assert.equal(hero.cta?.label, "View status");
-  assert.doesNotMatch(hero.sub, BULK_WRITE_UNKNOWN_CONNECTION_RE);
-  assert.doesNotMatch(hero.sub, SQL_FAILED_RE);
-  assert.doesNotMatch(
-    `${hero.kicker} ${hero.line.text} ${hero.line.emphasis} ${hero.line.tail} ${hero.sub}`,
-    PROJECTION_SQL_COPY_RE
-  );
-});
-
-test("hero ALARMs when dashboard inputs fail instead of claiming all-clear from partial data", () => {
-  const data = buildStandingData(baseInputs({ overviewLoadIssues: ["source_status"] }));
-
-  assert.equal(data.hero.tone, "alarm");
-  assert.equal(data.hero.kicker, "Overview is incomplete");
-  assert.match(data.hero.line.emphasis ?? "", DID_NOT_LOAD_RE);
-  assert.match(data.hero.sub, WILL_NOT_CLAIM_ALL_CLEAR_RE);
-  assert.equal(data.hero.cta?.href, HREFS.deployment);
-  assert.equal(data.overviewIssues.length, 1);
-  assert.equal(data.overviewIssues[0]?.what, "Overview could not check everything");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(data.overviewIssues[0]?.why ?? "", REFRESH_PAGE_RE);
-});
-
-test("hero consumes the server fleet verdict when no per-connection row supplies the aggregate cause", () => {
-  const fleetHealth = {
-    banner_warranted: true,
-    state: "unhealthy",
-    fully_healthy: false,
-    scope: { configured: 1, assessed: [], intentional_exclusions: [], setup_pending: [], unassessed: [] },
-    dimensions: {
-      runtime: "unhealthy",
-      coverage_audit: "pass",
-      attention: { needs_owner: [] },
-      system: { degraded_or_broken: [] },
-      recovery: { retryable: [], terminal: [] },
-      stalled_work: [],
-      active_work: [],
-      freshness_advisories: [],
-      intentional_policy: { manual: [], paused: [] },
-      unknown_evidence: [],
-    },
-  } as const;
-  const hero = computeHero(baseInputs({ fleetHealth }));
-  assert.equal(hero.tone, "alarm");
-  assert.equal(hero.kicker, "Source fleet needs attention");
-  assert.equal(hero.cta?.href, HREFS.sources);
-});
-
-test("banner_warranted: an indeterminate fleet verdict (in-progress work, unassessed scope) does not claim the alarm hero", () => {
-  const fleetHealth = {
-    banner_warranted: false,
-    state: "indeterminate",
-    fully_healthy: false,
-    scope: { configured: 1, assessed: [], intentional_exclusions: [], setup_pending: [], unassessed: [] },
-    dimensions: {
-      runtime: "unknown",
-      coverage_audit: "inconclusive",
-      attention: { needs_owner: [] },
-      system: { degraded_or_broken: [] },
-      recovery: { retryable: [], terminal: [] },
-      stalled_work: [],
-      active_work: [{ connection_id: "a", connector_id: "a", connector_instance_id: "a", display_name: "A" }],
-      freshness_advisories: [],
-      intentional_policy: { manual: [], paused: [] },
-      unknown_evidence: [],
-    },
-  } as const;
-  const hero = computeHero(baseInputs({ fleetHealth }));
-  assert.notEqual(hero.tone, "alarm");
-  assert.notEqual(hero.kicker, "Source fleet needs attention");
-});
-
-test("banner_warranted: a healthy_with_advisories fleet verdict (ordinary lateness) does not claim the alarm hero", () => {
-  const fleetHealth = {
-    banner_warranted: false,
-    state: "healthy_with_advisories",
-    fully_healthy: false,
-    scope: { configured: 1, assessed: [], intentional_exclusions: [], setup_pending: [], unassessed: [] },
-    dimensions: {
-      runtime: "healthy",
-      coverage_audit: "pass",
-      attention: { needs_owner: [] },
-      system: { degraded_or_broken: [] },
-      recovery: { retryable: [], terminal: [] },
-      stalled_work: [],
-      active_work: [],
-      freshness_advisories: [{ connection_id: "a", connector_id: "a", connector_instance_id: "a", display_name: "A" }],
-      intentional_policy: { manual: [], paused: [] },
-      unknown_evidence: [],
-    },
-  } as const;
-  const hero = computeHero(baseInputs({ fleetHealth }));
-  assert.notEqual(hero.tone, "alarm");
-  assert.notEqual(hero.kicker, "Source fleet needs attention");
-});
-
-test("a locally alarming source row cannot override a healthy server fleet verdict", () => {
-  const fleetHealth = {
-    banner_warranted: false,
-    state: "healthy",
-    fully_healthy: true,
-    scope: { configured: 1, assessed: [], intentional_exclusions: [], setup_pending: [], unassessed: [] },
-    dimensions: {
-      runtime: "healthy",
-      coverage_audit: "pass",
-      attention: { needs_owner: [] },
-      system: { degraded_or_broken: [] },
-      recovery: { retryable: [], terminal: [] },
-      stalled_work: [],
-      active_work: [],
-      freshness_advisories: [],
-      intentional_policy: { manual: [], paused: [] },
-      unknown_evidence: [],
-    },
-  } as const;
-  const hero = computeHero(
-    baseInputs({
-      fleetHealth,
-      sourceWork: {
-        needsOwner: [
-          {
-            actionLabel: "Reconnect",
-            connectorKey: "chase",
-            deviceLocal: false,
-            group: "needsOwner",
-            id: "conn_chase",
-            label: "Chase",
-            routeId: "conn_chase",
-            statusLabel: "Needs you",
-            what: "This local row disagrees with the aggregate verdict.",
-          },
-        ],
-        notMeasured: [],
-        review: [],
-        systemIssues: [],
-        unavailable: [],
-        working: [],
-      },
-    })
-  );
-  assert.equal(hero.tone, "calm");
-  assert.equal(hero.kicker, "Where you stand");
-});
-
-test("overview counts healthy sources without adding them to the attention groups", () => {
-  const data = buildStandingData(
-    baseInputs({
-      sourceCount: 3,
-      sourceWork: {
-        needsOwner: [],
-        notMeasured: [],
-        review: [
-          {
-            actionLabel: "Retry now",
-            connectorKey: "chase",
-            deviceLocal: false,
-            group: "review",
-            id: "conn_chase",
-            label: "Chase",
-            routeId: "conn_chase",
-            statusLabel: "Retry now",
-            what: "Retry this source.",
-          },
-        ],
-        systemIssues: [],
-        unavailable: [],
-        working: [],
-      },
-    })
-  );
-  assert.equal(data.healthySourceCount, 2);
-  assert.equal(data.sourceWorkSections.flatMap((section) => section.rows).length, 1);
-});
-
-test("overview with partial source data does not claim an exact healthy-source count", () => {
-  const data = buildStandingData(
-    baseInputs({ overviewLoadIssues: ["source_status_page_unavailable"], sourceCount: 3 })
-  );
-  assert.equal(data.healthySourceCount, null);
-});
-
-test("hero is CALM with reassurance when all is well", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 1, client_id: "c1", client_name: "Claude Desktop", created_at: NOW.toISOString() },
-  ];
-  const hero = computeHero(baseInputs({ bearerClients: clients }));
-  assert.equal(hero.tone, "calm");
-  assert.equal(hero.line.emphasis, "all yours to read");
-  assert.match(hero.sub, CALM_SUB_RE);
-});
-
-test("bearer section and hero count only active owner tokens", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 0, client_id: "inactive", client_name: "Old smoke client", created_at: NOW.toISOString() },
-    { active_token_count: 2, client_id: "active", client_name: "Claude Desktop", created_at: NOW.toISOString() },
-  ];
-  const data = buildStandingData(baseInputs({ bearerClients: clients }));
-
-  assert.equal(data.bearers.length, 1);
-  assert.equal(data.bearers[0]?.clientId, "active");
-  assert.match(data.hero.sub, OWNER_TOKEN_COUNT_RE);
-  assert.doesNotMatch(data.hero.sub, TOKEN_OVERCOUNT_RE);
-});
-
-test("hero says no owner token can act when all issued clients are inactive", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 0, client_id: "inactive", client_name: "Old smoke client", created_at: NOW.toISOString() },
-  ];
-  const data = buildStandingData(baseInputs({ bearerClients: clients }));
-
-  assert.equal(data.bearers.length, 0);
-  assert.match(data.hero.sub, NO_OWNER_TOKEN_RE);
-});
-
-// ─── bearer timestamp consistency + honest "issued" copy (C2) ─────────────
-
-test("bearer row carries the raw created_at for the shared IcTimestamp, not a prebaked date string", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 1, client_id: "c1", client_name: "Claude Desktop", created_at: "2026-06-01T00:00:00Z" },
-  ];
-  const data = buildStandingData(baseInputs({ bearerClients: clients }));
-
-  assert.equal(data.bearers.length, 1);
-  // The datum is passed through verbatim so the component renders it with the
-  // same <IcTimestamp> primitive the tokens page uses — one timestamp voice.
-  assert.equal(data.bearers[0]?.issuedAt, "2026-06-01T00:00:00Z");
-  // The `how` line no longer bakes in a relDay date string; the timestamp is
-  // rendered separately by the component.
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.doesNotMatch(data.bearers[0]?.how ?? "", BEARER_HOW_HAS_ISSUED_RE);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.doesNotMatch(data.bearers[0]?.how ?? "", BEARER_HOW_HAS_DATE_RE);
-});
-
-test('single-token bearer labels created_at "issued"; multi-token bearer degrades to "first issued"', () => {
-  const single: OwnerIssuedClient[] = [
-    { active_token_count: 1, client_id: "one", client_name: "Solo", created_at: NOW.toISOString() },
-  ];
-  const multi: OwnerIssuedClient[] = [
-    { active_token_count: 3, client_id: "many", client_name: "Legacy", created_at: NOW.toISOString() },
-  ];
-
-  const singleData = buildStandingData(baseInputs({ bearerClients: single }));
-  const multiData = buildStandingData(baseInputs({ bearerClients: multi }));
-
-  // created_at is CLIENT REGISTRATION time; with one token it IS the issuance,
-  // with several it is only the FIRST — so "issued" would be wrong for the rest.
-  assert.equal(singleData.bearers[0]?.issuedLabel, "issued");
-  assert.equal(multiData.bearers[0]?.issuedLabel, "first issued");
-});
-
-// ─── bearer preview cap + "+N more" (C4) ──────────────────────────────────
-
-test("bearer block previews the most-recent few and reports the hidden overflow count", () => {
-  const clients: OwnerIssuedClient[] = Array.from({ length: 7 }, (_, i) => ({
-    active_token_count: 1,
-    client_id: `c${i}`,
-    client_name: `Client ${i}`,
-    created_at: NOW.toISOString(),
+test("Home names the data sources an app can read, not event kinds", () => {
+  const data = buildHomeViewModel(base({
+    grants: [
+      { ...grant("g1", "Listening recap", ["token.issued"]), source: { id: "spotify", kind: "connector" } },
+      { ...grant("g2", "Listening recap", ["read.success"]), source: { id: "github", kind: "connector" } },
+    ],
   }));
-  const data = buildStandingData(baseInputs({ bearerClients: clients }));
-
-  // Overview reassures/summarizes — it caps the preview and links the rest to
-  // the tokens page rather than rendering a wall.
-  assert.equal(data.bearers.length, BEARER_PREVIEW_LIMIT);
-  assert.equal(data.bearersOverflow, 7 - BEARER_PREVIEW_LIMIT);
+  // DIRECTION.md, Home § Apps that can read your data: name the first data source in the access.
+  // DIRECTION.md, Home § Apps that can read your data: include the next data source in the access.
+  assert.equal(data.apps[0]?.reads, "Spotify and GitHub");
 });
 
-test("bearer overflow is zero when active bearers fit within the preview cap", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 1, client_id: "c1", client_name: "Claude Desktop", created_at: NOW.toISOString() },
-  ];
-  const data = buildStandingData(baseInputs({ bearerClients: clients }));
-
-  assert.equal(data.bearers.length, 1);
-  assert.equal(data.bearersOverflow, 0);
+test("Home does not show the page warning for failures in section-local reads", () => {
+  const data = buildHomeViewModel(base({
+    approvalsFailed: true,
+    grantsFailed: true,
+    ownerClientsFailed: true,
+    sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(19, "Spotify")] },
+    tracesFailed: true,
+  }));
+  // DIRECTION.md, Home: optional failed reads use their affected section, not the page warning.
+  assert.equal(data.warning, false);
+  // DIRECTION.md, Home: a failed approval read remains visible in Needs you.
+  assert.equal(data.needsError, true);
+  // DIRECTION.md, Home: failed app reads remain visible in the Apps section.
+  assert.equal(data.appError, true);
 });
 
-// ─── grant-package discovery from loaded grants (C7) ──────────────────────
+test("each read that no longer raises the page warning never reads as an empty fact", () => {
+  const healthy = { hasMore: false, kind: "ok" as const, sources: [statusSource(19, "Spotify")] };
+  const calm = ["Nothing needs you", "Everything is up to date"];
 
-test("grant packages are surfaced from loaded grants without a count endpoint", () => {
-  const grants: GrantSummary[] = [
-    {
-      client_id: "App A",
-      connector_id: "pdpp",
-      event_count: 5,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g1",
-      grant_package_id: "pkg_alpha",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T00:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-    {
-      client_id: "App A",
-      connector_id: "pdpp",
-      event_count: 3,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g2",
-      grant_package_id: "pkg_alpha",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T00:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-    {
-      client_id: "App B",
-      connector_id: "pdpp",
-      event_count: 1,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g3",
-      grant_package_id: "pkg_beta",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T00:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-  ];
+  const approvals = buildHomeViewModel(base({ approvalsFailed: true, sourcePage: healthy }));
+  // Intake round56 item 1: a failed approvals read must not say that nothing needs the owner.
+  assert.ok(!calm.includes(approvals.title));
+  // Intake round56 item 1: Needs you stays on screen and says it could not load.
+  assert.equal(approvals.needsVisible, true);
+  assert.equal(approvals.needsError, true);
 
-  const data = buildStandingData(baseInputs({ grants }));
+  for (const failed of ["grantsFailed", "tracesFailed", "ownerClientsFailed"] as const) {
+    const apps = buildHomeViewModel(base({ [failed]: true, sourcePage: healthy }));
+    // Intake round56 item 1: a failed app read does not claim that no app can read the data.
+    assert.equal(apps.appsEmpty, false, failed);
+    // Intake round56 item 1: the Apps section says it could not load.
+    assert.equal(apps.appError, true, failed);
+    assert.equal(apps.firstRun, false, failed);
+  }
 
-  // Two DISTINCT packages across the loaded grants; link targets the packages
-  // management surface. Derived only from grant_package_id already in hand.
-  assert.equal(data.grantPackages?.count, 2);
-  assert.equal(data.grantPackages?.exact, false);
-  assert.equal(data.grantPackages?.href, HREFS.grantPackages);
+  const sources = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "error", sources: [] } }));
+  // Intake round56 item 1: a failed source read is not a first run and not "No data sources yet."
+  assert.equal(sources.firstRun, false);
+  assert.equal(sources.noSources, false);
+  // Intake round56 item 1: the Data sources section says it could not load.
+  assert.equal(sources.dataSourceError, true);
+  assert.ok(!calm.includes(sources.title));
 });
 
-// ─── grant-package authoritative count (10.C.4) ───────────────────────────
-
-test("the authoritative grant-package count drives the overview badge when present", () => {
-  // A single loaded grant carries a package; the count endpoint reports more.
-  // The overview must trust the endpoint (exact), not the loaded-grants floor,
-  // so packages not represented in the preview still surface.
-  const grant: GrantSummary = {
-    client_id: "App A",
-    connector_id: "pdpp",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    grant_package_id: "pkg_alpha",
-    kinds: ["query.received"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "active",
-  };
-
-  const data = buildStandingData(baseInputs({ grantPackageCount: 4, grants: [grant] }));
-  assert.equal(data.grantPackages?.count, 4);
-  assert.equal(data.grantPackages?.exact, true);
-  assert.equal(data.grantPackages?.href, HREFS.grantPackages);
+test("Home labels the successful read time in sentence case", async () => {
+  const src = await readFile(new URL("./standing-overview.tsx", import.meta.url), "utf8");
+  // DIRECTION.md, Home § Apps that can read your data: use the same sentence-case label as Apps.
+  const row = src.slice(src.indexOf("function AppRow"), src.indexOf("function AppsBlock"));
+  assert.match(row, /Last read \{app\.lastRead\}/);
 });
 
-test("an authoritative zero grant-package count collapses the badge even if a stale grant carries a package id", () => {
-  const grant: GrantSummary = {
-    client_id: "App A",
-    connector_id: "pdpp",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    grant_package_id: "pkg_alpha",
-    kinds: ["query.received"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "active",
-  };
-
-  const data = buildStandingData(baseInputs({ grantPackageCount: 0, grants: [grant] }));
-  assert.equal(data.grantPackages, null);
-});
-
-test("a null grant-package count falls back to the loaded-grants floor", () => {
-  const grant: GrantSummary = {
-    client_id: "App A",
-    connector_id: "pdpp",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    grant_package_id: "pkg_alpha",
-    kinds: ["query.received"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "active",
-  };
-
-  const data = buildStandingData(baseInputs({ grantPackageCount: null, grants: [grant] }));
-  assert.equal(data.grantPackages?.count, 1);
-  assert.equal(data.grantPackages?.exact, false);
-});
-
-test("grant packages are absent when no loaded grant carries a package id", () => {
-  const grant: GrantSummary = {
-    client_id: "App A",
-    connector_id: "pdpp",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    kinds: ["query.received"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "active",
-  };
-
-  const data = buildStandingData(baseInputs({ grants: [grant] }));
-  assert.equal(data.grantPackages, null);
-});
-
-test("a fully-revoked package does not advertise from the overview", () => {
-  const grant: GrantSummary = {
-    client_id: "App A",
-    connector_id: "pdpp",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    grant_package_id: "pkg_dead",
-    kinds: ["query.received"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "revoked",
-  };
-
-  const data = buildStandingData(baseInputs({ grants: [grant] }));
-  assert.equal(data.grantPackages, null);
-});
-
-// ─── full builder ─────────────────────────────────────────────────
-
-test("buildStandingData wires bearers, relationships, lately, attention", () => {
-  const clients: OwnerIssuedClient[] = [
-    { active_token_count: 2, client_id: "c1", client_name: "Claude Desktop", created_at: "2026-06-01T00:00:00Z" },
-  ];
-  const grant: GrantSummary = {
-    client_id: "Atlas Mortgage",
-    connector_id: "plaid",
-    event_count: 5,
-    failure: null,
-    first_at: "2026-06-01T00:00:00Z",
-    grant_id: "g1",
-    kinds: ["pay_statements"],
-    last_at: "2026-06-12T00:00:00Z",
-    object: "grant_summary",
-    status: "active",
-  };
-  const readTrace: TraceSummary = {
-    actor_id: "Claude Desktop",
-    actor_type: "client",
-    client_id: "Claude Desktop",
-    event_count: 412,
-    failure: null,
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["transactions"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: null,
-    status: "succeeded",
-    trace_id: "t1",
-  };
-  const data = buildStandingData(baseInputs({ bearerClients: clients, grants: [grant], traces: [readTrace] }));
-  assert.equal(data.bearers.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(data.bearers[0]?.how ?? "", BEARER_HOW_RE);
-  assert.equal(data.relationships.length, 1);
-  assert.equal(data.relationships[0]?.reads, "reads only your pay");
-  // The action only NAVIGATES, so it is labeled as navigation (trailing arrow,
-  // no destructive verb) and drills into the one identifiable grant.
-  assert.equal(data.relationships[0]?.actionLabel, "Review grant →");
-  assert.equal(data.relationships[0]?.actionHref, HREFS.grant("g1"));
-  assert.equal(data.lately.length, 1);
-  assert.equal(data.lately[0]?.deny, false);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.match(data.lately[0]?.text.rest ?? "", LATELY_READ_RE);
-  assert.equal(data.attention.length, 0);
-});
-
-test("lately uses trace client metadata instead of raw client ids", () => {
-  const trace: TraceSummary = {
-    actor_id: "client",
-    actor_type: "client",
-    client: {
-      client_id: "cli_named",
-      client_name: "Claude",
-      registration_mode: "dynamic",
-    },
-    client_id: "cli_named",
-    event_count: 3,
-    failure: null,
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["query.received"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: null,
-    status: "succeeded",
-    trace_id: "trc_named",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [trace] }));
-
-  assert.equal(data.lately.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.who, "Claude");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.notEqual(data.lately[0]?.text.who, "cli_named");
-});
-
-test("lately humanizes live denial reason codes instead of rendering raw diagnostics", () => {
-  const trace: TraceSummary = {
-    actor_id: "slack",
-    actor_type: "client",
-    client_id: "slack",
-    event_count: 1,
-    failure: {
-      event_type: "run.started",
-      reason: "orphaned_started_run",
-    },
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["query.rejected"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: "run_orphaned",
-    status: "denied",
-    trace_id: "trc_orphaned",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [trace] }));
-
-  assert.equal(data.lately.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.rest, "tried to read — turned away, it was not tied to an active run.");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.doesNotMatch(data.lately[0]?.text.rest ?? "", RAW_ORPHANED_RUN_RE);
-});
-
-test("lately does not fall through to unknown snake-case denial reasons", () => {
-  const trace: TraceSummary = {
-    actor_id: "client",
-    actor_type: "client",
-    client_id: "client",
-    event_count: 1,
-    failure: {
-      event_type: "query.rejected",
-      reason: "new_internal_reason_code",
-    },
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["query.rejected"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: null,
-    status: "denied",
-    trace_id: "trc_unknown_denial",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [trace] }));
-
-  assert.equal(data.lately.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.rest, "tried to read — turned away, the server rejected it.");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.doesNotMatch(data.lately[0]?.text.rest ?? "", RAW_REASON_CODE_RE);
-});
-
-test("lately does not overclaim off-surface expired or credential scope failures", () => {
-  const traces: TraceSummary[] = [
-    {
-      actor_id: "state_client",
-      actor_type: "client",
-      client_id: "state_client",
-      event_count: 1,
-      failure: {
-        event_type: "query.rejected",
-        reason: "state_expired",
-      },
-      first_at: "2026-06-13T00:00:00Z",
-      grant_id: null,
-      kinds: ["query.rejected"],
-      last_at: "2026-06-13T00:00:00Z",
-      object: "trace_summary",
-      request_id: null,
-      run_id: null,
-      status: "denied",
-      trace_id: "trc_state_expired",
-    },
-    {
-      actor_id: "credential_client",
-      actor_type: "client",
-      client_id: "credential_client",
-      event_count: 1,
-      failure: {
-        event_type: "query.rejected",
-        reason: "github_credential_insufficient_scope",
-      },
-      first_at: "2026-06-13T00:00:01Z",
-      grant_id: null,
-      kinds: ["query.rejected"],
-      last_at: "2026-06-13T00:00:01Z",
-      object: "trace_summary",
-      request_id: null,
-      run_id: null,
-      status: "denied",
-      trace_id: "trc_credential_scope",
-    },
-  ];
-
-  const data = buildStandingData(baseInputs({ traces }));
-  const rendered = data.lately.map((item) => item.text.rest);
-
-  assert.ok(rendered.includes("tried to read — turned away, the server rejected it."));
-  assert.ok(rendered.includes("tried to read — turned away, the app was not authorized."));
-  assert.doesNotMatch(rendered.join("\n"), EXPIRED_OR_CREDENTIAL_RE);
-});
-
-test("lately does not bold raw technical client ids when metadata is missing", () => {
-  const trace: TraceSummary = {
-    actor_id: "cli_raw",
-    actor_type: "client",
-    client_id: "cli_raw",
-    event_count: 3,
-    failure: null,
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["query.received"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: null,
-    status: "succeeded",
-    trace_id: "trc_raw",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [trace] }));
-
-  assert.equal(data.lately.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.who, "An app");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.notEqual(data.lately[0]?.text.who, "cli_raw");
-});
-
-test("lately does not render bare opaque client ids as names", () => {
-  const opaqueClientId = "d9f1c1bb7a5c4a6f9e8d7c6b5a4f3210";
-  const trace: TraceSummary = {
-    actor_id: opaqueClientId,
-    actor_type: "unknown",
-    client_id: opaqueClientId,
-    event_count: 3,
-    failure: null,
-    first_at: "2026-06-13T00:00:00Z",
-    grant_id: null,
-    kinds: ["query.received"],
-    last_at: "2026-06-13T00:00:00Z",
-    object: "trace_summary",
-    request_id: null,
-    run_id: null,
-    status: "succeeded",
-    trace_id: "trc_opaque",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [trace] }));
-
-  assert.equal(data.lately.length, 1);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.who, "Someone");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.notEqual(data.lately[0]?.text.who, opaqueClientId);
-});
-
-test("lately summarizes identical recent reads instead of repeating the same row", () => {
-  const repeated = Array.from(
-    { length: 5 },
-    (_, i): TraceSummary => ({
-      actor_id: "client",
-      actor_type: "client",
-      client: {
-        client_id: "cli_longview",
-        client_name: "Longview CLI",
-        registration_mode: "pre_registered_public",
-      },
-      client_id: "cli_longview",
-      event_count: 3,
-      failure: null,
-      first_at: "2026-06-13T00:00:00Z",
-      grant_id: null,
-      kinds: ["query.received"],
-      last_at: "2026-06-13T00:00:00Z",
-      object: "trace_summary",
-      request_id: null,
-      run_id: null,
-      status: "succeeded",
-      trace_id: `trc_longview_${i}`,
-    })
-  );
-  const [baseRepeated] = repeated;
-  assert.ok(baseRepeated);
-  const different: TraceSummary = {
-    ...baseRepeated,
-    actor_id: "controller",
-    actor_type: "runtime",
-    client: undefined,
-    client_id: null,
-    event_count: 1,
-    trace_id: "trc_controller",
-  };
-
-  const data = buildStandingData(baseInputs({ traces: [...repeated, different] }));
-
-  assert.equal(data.lately.length, 2);
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.who, "Longview CLI");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[0]?.text.rest, "read 3 records 5 times.");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[1]?.text.who, "controller");
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: array/Map-lookup access under noUncheckedIndexedAccess is genuinely T | undefined; tsc rejects removing this guard (Biome's type-aware pass doesn't honor that tsconfig flag here).
-  assert.equal(data.lately[1]?.text.rest, "read 1 record.");
-});
-
-test("relationships summarize grants by client instead of repeating one row per grant", () => {
-  const grants: GrantSummary[] = [
-    {
-      client_id: "CLI agent",
-      connector_id: "pdpp",
-      event_count: 5,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g1",
-      kinds: ["token.issued", "query.received"],
-      last_at: "2026-06-10T00:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-    {
-      client_id: "CLI agent",
-      connector_id: "pdpp",
-      event_count: 7,
-      failure: null,
-      first_at: "2026-06-02T00:00:00Z",
-      grant_id: "g2",
-      kinds: ["disclosure.served", "query.rejected"],
-      last_at: "2026-06-12T12:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-  ];
-
-  const data = buildStandingData(baseInputs({ grants }));
-
-  assert.equal(data.relationships.length, 1);
-  assert.equal(data.relationships[0]?.who, "CLI agent");
-  assert.equal(
-    data.relationships[0]?.reads,
-    "reads only token activity, read requests, data disclosures, and rejected reads"
-  );
-  assert.equal(data.relationships[0]?.terms, "last active yesterday · 2 grants");
-  // Two distinct grants under one client: no single grant is the subject, so the
-  // link degrades to the grants list and SAYS how many it covers.
-  assert.equal(data.relationships[0]?.actionLabel, "Review 2 grants →");
-  assert.equal(data.relationships[0]?.actionHref, HREFS.grants);
-});
-
-test("relationships use known client names without replacing the verified client id", () => {
-  const grants: GrantSummary[] = [
-    {
-      client_id: "cli_known",
-      connector_id: "pdpp",
-      event_count: 7,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g1",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T12:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-  ];
-  const clients: OwnerIssuedClient[] = [
-    {
-      active_token_count: 0,
-      client_id: "cli_known",
-      client_name: "Claude Code",
-      created_at: "2026-06-01T00:00:00Z",
-    },
-  ];
-
-  const data = buildStandingData(baseInputs({ bearerClients: clients, grants }));
-
-  assert.equal(data.relationships.length, 1);
-  assert.equal(data.relationships[0]?.who, "Claude Code");
-  assert.equal(data.relationships[0]?.clientId, "cli_known");
-  assert.equal(data.bearers.length, 0, "inactive owner clients still provide identity metadata only");
-});
-
-test("relationships prefer grant client metadata over owner-token labels", () => {
-  const grants: GrantSummary[] = [
-    {
-      client: {
-        client_id: "cli_known",
-        client_name: "Claude Code",
-        registration_mode: "dynamic",
-      },
-      client_id: "cli_known",
-      connector_id: "pdpp",
-      event_count: 7,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g1",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T12:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-  ];
+test("apps group active grants, say what can be read, and include only matching successful recent reads", () => {
   const clients: OwnerIssuedClient[] = [
     {
       active_token_count: 1,
-      client_id: "cli_known",
-      client_name: "Older owner-token label",
-      created_at: "2026-06-01T00:00:00Z",
+      client_id: "Atlas",
+      client_name: "Atlas",
+      created_at: SUCCESS,
     },
   ];
+  const data = buildHomeViewModel(
+    base({
+      grants: [
+        { ...grant("g1", "Atlas", ["pay_statements"]), source: { id: "spotify", kind: "connector" } },
+        { ...grant("g2", "Atlas", ["transactions"]), source: { id: "github", kind: "connector" } },
+        { ...grant("revoked", "Retired"), status: "revoked" },
+      ],
+      ownerClients: clients,
+      traces: [
+        trace("Atlas", "denied", "2026-11-24T11:45:00Z", {
+          event_type: "trace.denied",
+          reason: "not allowed",
+        }),
+        trace("Atlas", "succeeded", "2026-11-24T10:00:00Z"),
+        trace("Other app", "succeeded", "2026-11-24T11:00:00Z"),
+      ],
+    }),
+  );
 
-  const data = buildStandingData(baseInputs({ bearerClients: clients, grants }));
-
-  assert.equal(data.relationships.length, 1);
-  assert.equal(data.relationships[0]?.who, "Claude Code");
-  assert.equal(data.relationships[0]?.clientId, "cli_known");
+  // DIRECTION.md, Home § Apps that can read your data: a client with multiple active permissions gets one row.
+  assert.equal(data.apps.length, 1);
+  // DIRECTION.md, Home § Apps that can read your data: the app summary names its data sources.
+  assert.equal(data.apps[0]?.reads, "Spotify and GitHub");
+  // DIRECTION.md, Home § Apps that can read your data: grouped grants use the full access list address.
+  assert.equal(data.apps[0]?.href, HREFS.grant("g1"));
+  // The permission list supplies the last-read time. by the same app supplies last-read text.
+  assert.match(data.apps[0]?.lastRead ?? "", /ago|today|yesterday/);
+  // DIRECTION.md, Home § Apps that can read your data: token rows count active owner-made tokens directly.
+  assert.equal(data.activeTokenCount, 1);
 });
 
-test("relationships do not render raw URL client ids as owner-facing names", () => {
-  const urlClientId = "https://chatgpt.com/oauth/Dyp26IIu2iQg/client.json?token_endpoint_auth_method=none";
-  const grants: GrantSummary[] = [
-    {
-      client_id: urlClientId,
-      connector_id: "pdpp",
-      event_count: 7,
-      failure: null,
-      first_at: "2026-06-01T00:00:00Z",
-      grant_id: "g1",
-      kinds: ["query.received"],
-      last_at: "2026-06-12T12:00:00Z",
-      object: "grant_summary",
-      status: "active",
-    },
-  ];
+test("single app links, token links, and empty-state conditions are exact", () => {
+  const singleGrant = buildHomeViewModel(base({ grants: [grant("g1", "Atlas")] }));
+  // DIRECTION.md, Home § Apps that can read your data: one permission uses the matching access page.
+  assert.equal(singleGrant.apps[0]?.href, HREFS.grant("g1"));
 
-  const data = buildStandingData(baseInputs({ grants }));
+  const withTokens = buildHomeViewModel(
+    base({
+      ownerClients: [
+        {
+          active_token_count: 2,
+          client_id: "owner",
+          client_name: "Owner tool",
+          created_at: SUCCESS,
+        },
+      ],
+    }),
+  );
+  // DIRECTION.md, Home § Apps that can read your data: access tokens have their own management address.
+  assert.equal(withTokens.tokensHref, HREFS.deploymentTokens);
+  // DIRECTION.md, Home § Apps that can read your data: an active owner token prevents the no-app empty state.
+  assert.equal(withTokens.appsEmpty, false);
 
-  assert.equal(data.relationships.length, 1);
-  assert.equal(data.relationships[0]?.who, "chatgpt.com");
-  assert.equal(data.relationships[0]?.clientId, urlClientId);
-  assert.equal(data.relationships[0]?.showClientId, false);
+  const empty = buildHomeViewModel(base());
+  // DIRECTION.md, Home § Apps that can read your data: the no-app message appears only when both access reads are complete.
+  assert.equal(empty.appsEmpty, true);
+  const grantsIncomplete = buildHomeViewModel(base({ grantsHaveMore: true }));
+  // DIRECTION.md, Home § Apps that can read your data: incomplete permission data cannot claim no app has access.
+  assert.equal(grantsIncomplete.appsEmpty, false);
+  const ownerClientsFailed = buildHomeViewModel(base({ ownerClientsFailed: true }));
+  // DIRECTION.md, Home § Apps that can read your data: a failed token read cannot claim no app has access.
+  assert.equal(ownerClientsFailed.appsEmpty, false);
+  // DIRECTION.md, Home: affected app data carries a retry state.
+  assert.equal(ownerClientsFailed.appError, true);
 });
 
-test("relationships do not render bare UUID or opaque client ids as owner-facing names", () => {
-  for (const clientId of ["0b643449-9516-45e0-b375-7feb9ecb7a58", "d9f1c1bb7a5c4a6f9e8d7c6b5a4f3210"]) {
-    const grants: GrantSummary[] = [
-      {
-        client_id: clientId,
-        connector_id: "pdpp",
-        event_count: 7,
-        failure: null,
-        first_at: "2026-06-01T00:00:00Z",
-        grant_id: "g1",
-        kinds: ["query.received"],
-        last_at: "2026-06-12T12:00:00Z",
-        object: "grant_summary",
-        status: "active",
-      },
-    ];
+test("the apps section links to all apps at twelve permissions and suppresses false empty states", () => {
+  const twelveGrants = Array.from({ length: 12 }, (_, index) => grant(`grant-${index}`, `App ${index}`));
+  const exactLimit = buildHomeViewModel(base({ grants: twelveGrants }));
+  // DIRECTION.md, Home § Apps that can read your data: reaching the permissions limit adds the all-apps link.
+  assert.equal(exactLimit.allAppsLink, true);
+  // DIRECTION.md, Home § Apps that can read your data: the all-apps link points to the full permissions page.
+  assert.equal(exactLimit.allAppsHref, HREFS.grants);
 
-    const data = buildStandingData(baseInputs({ grants }));
+  const tracesFailed = buildHomeViewModel(base({ tracesFailed: true }));
+  // DIRECTION.md, Home § Apps that can read your data: incomplete reads suppress the no-app message.
+  assert.equal(tracesFailed.appsEmpty, false);
+  // DIRECTION.md, Home: failed reads remain visible as a soft error.
+  assert.equal(tracesFailed.appError, true);
+});
 
-    assert.equal(data.relationships.length, 1);
-    assert.equal(data.relationships[0]?.who, "Unnamed app");
-    assert.equal(data.relationships[0]?.clientId, clientId);
-    assert.equal(data.relationships[0]?.showClientId, false);
+test("the seeded demos exercise every active status row through the shared status function", () => {
+  const scenarios: DemoScenario[] = ["calm", "alarm", "decide"];
+  const rows = scenarios.flatMap((scenario) =>
+    buildDemoInputs(scenario, HREFS).sourcePage.sources.map((source) => sourceStatusWords(source, { now: NOW }).row),
+  );
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): every visible status row appears in at least one seeded scenario.
+  assert.deepEqual(
+    Array.from(new Set(rows)).sort((left, right) => left - right),
+    Array.from({ length: 21 }, (_, index) => index + 4),
+  );
+});
+
+test("every status fixture named after a row lands on that row", () => {
+  // DIRECTION.md, "One status, from one place": each fixture is named by the row it must reach.
+  for (const row of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23, 24]) {
+    assert.equal(sourceStatusWords(statusSource(row, `Row ${row}`), { now: NOW }).row, row, `fixture for row ${row}`);
   }
 });
 
-test("revoked grants are excluded from relationships", () => {
-  const revoked: GrantSummary = {
-    client_id: "Old App",
-    connector_id: null,
-    event_count: 0,
-    failure: null,
-    first_at: "2026-05-01T00:00:00Z",
-    grant_id: "g2",
-    kinds: [],
-    last_at: "2026-05-02T00:00:00Z",
-    object: "grant_summary",
-    status: "revoked",
-  };
-  const data = buildStandingData(baseInputs({ grants: [revoked] }));
-  assert.equal(data.relationships.length, 0);
+test("a read with more than it returned is not a failure: show what was read and link to the full list", () => {
+  const moreApprovals = buildHomeViewModel(
+    base({
+      approvals: [approval("a1", "Atlas Mortgage", SUCCESS)],
+      approvalsHaveMore: true,
+      sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(19, "Spotify")] },
+    }),
+  );
+  // Lead decision (deputy-fixes-1 E4): `has_more` on app requests shows the rows read, no failure line.
+  assert.equal(moreApprovals.needs.length, 1);
+  assert.equal(moreApprovals.needsError, false);
+  assert.equal(moreApprovals.needsMore, true);
+  assert.equal(moreApprovals.warning, false);
+  // DIRECTION.md, Home: "When there is more than it read, it never says 'everything' or 'no'".
+  assert.equal(moreApprovals.title, "Data sources");
+
+  const moreClients = buildHomeViewModel(
+    base({
+      grants: [grant("g1", "Atlas")],
+      ownerClients: [{ active_token_count: 2, client_id: "owner", client_name: "Owner tool", created_at: SUCCESS }],
+      ownerClientsHaveMore: true,
+    }),
+  );
+  // Lead decision (deputy-fixes-1 E4): `has_more` on owner-made clients is not "This could not be loaded."
+  assert.equal(moreClients.appError, false);
+  assert.equal(moreClients.warning, false);
+  // DIRECTION.md, Home: "No count is ever made by subtraction"; a short page gives a link, not a count.
+  assert.equal(moreClients.activeTokenCount, 0);
+  assert.equal(moreClients.allTokensLink, true);
+  assert.equal(moreClients.appsEmpty, false);
+  assert.equal(moreClients.apps.length, 1);
+
+  const failedClients = buildHomeViewModel(base({ ownerClientsFailed: true }));
+  // A real failure still reports itself and gives no full-list link.
+  assert.equal(failedClients.appError, true);
+  assert.equal(failedClients.allTokensLink, false);
 });
 
-// NotificationsBlock used to render identical "set up alerts" copy regardless
-// of whether push notifications were already configured on this deployment —
-// the only Overview block with no data-driven state (2026-08-07 IA audit,
-// finding 5). notificationsSetup carries the honest tri-state signal through.
-test("notificationsSetup passes through buildStandingData verbatim, honoring the unknown/configured/not_configured tri-state", () => {
-  for (const setup of ["configured", "not_configured", "unknown"] as const) {
-    const data = buildStandingData(baseInputs({ notificationsSetup: setup }));
-    assert.equal(data.notificationsSetup, setup);
-  }
+test("no data sources but an app: the top says so with the one filled button", () => {
+  const data = buildHomeViewModel(base({ grants: [grant("g1", "Atlas")] }));
+  // Lead decision (deputy-fixes-1 E5): not first run, and not "Nothing needs you".
+  assert.equal(data.firstRun, false);
+  assert.equal(data.noSources, true);
+  assert.equal(data.title, "No data sources yet.");
+
+  const withRequest = buildHomeViewModel(
+    base({ approvals: [approval("a1", "Atlas Mortgage", SUCCESS)], grants: [grant("g1", "Atlas")] }),
+  );
+  // DIRECTION.md, Home: a thing that needs the person keeps the title and its own filled button.
+  assert.equal(withRequest.title, "1 thing needs you");
+  assert.equal(withRequest.noSources, false);
+});
+
+test("more than twelve data sources: a complete read names the total, a paged read keeps the paged wording", () => {
+  const sources = Array.from({ length: 14 }, (_, index) =>
+    statusSource(20, `Source ${String(index + 1).padStart(2, "0")}`),
+  );
+  const complete = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources } }));
+  // DIRECTION.md, Home § Data sources: "More than twelve: show twelve and 'All N data sources'."
+  assert.equal(complete.sourceTotalLink, "All 14 data sources");
+
+  const paged = buildHomeViewModel(base({ sourcePage: { hasMore: true, kind: "ok", sources } }));
+  // DIRECTION.md, Home: a read with more than it read names no total.
+  assert.equal(paged.sourceTotalLink, null);
+  assert.equal(paged.showMoreSources, true);
+});
+
+test("the record total shows while the summary is refreshing, not while rebuilding", () => {
+  // Lead decision (deputy-fixes-1 E7): refreshing still carries the last known total.
+  assert.equal(
+    buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "refreshing" } } })).subtitle,
+    "0 data sources · 0 records",
+  );
+  // DIRECTION.md, Home: "Leave out the record total when the server marks it stale or unknown."
+  assert.equal(
+    buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "rebuilding" } } })).subtitle,
+    // Not current, so the source count is the full list's length (empty in this fixture).
+    "0 data sources · 0 records",
+  );
+});
+
+test("Home names a connection by the shared rule: a saved connector key is not a name", () => {
+  // Round 3 brief item 2: one connection-name rule for the whole console.
+  const keyNamed = statusSource(20, "Reddit", { connector_display_name: "Reddit", connector_id: "reddit", display_name: "reddit" });
+  const syncing = statusSource(11, "GitHub", { connector_display_name: "GitHub", connector_id: "github", display_name: "GITHUB" });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [keyNamed, syncing] } }));
+
+  assert.deepEqual(data.dataSources.map((row) => row.name), ["GitHub", "Reddit"]);
+  assert.equal(data.title, "Syncing GitHub");
+});
+
+
+test("Home counts the same Sources inventory as its All link", () => {
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: Array.from({ length: 13 }, (_, i) => statusSource(20, `Example ${i}`)) }, summary: { ...SUMMARY, connector_count: 66 } }));
+  assert.match(data.subtitle ?? "", /^13 data sources/);
+  assert.equal(data.sourceTotalLink, "All 13 data sources");
+});
+
+test("an owner-paused schedule is not in Needs you", () => {
+  const off = statusSource(10, "Steam", { status: "active", owner_state: { ...HEALTHY_STATE, owner_of_state: "owner", resolver: "owner_paused" }, rendered_verdict: verdict("Healthy", [requiredAction({ cta: "Resume schedule", kind: "reattach_schedule", satisfied_when: { kind: "schedule_attached_and_enabled" }, surface: { kind: "schedule" }, target: undefined })]) });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [off] } }));
+  // Round 7 review B1: an owner-paused schedule offers an optional Resume, so it is not in Needs you.
+  assert.equal(data.needs.find((need) => need.name === "Steam"), undefined);
+});
+
+test("a failed source in Needs you says what happens next, with the same cause sentence and button as the list", () => {
+  const unavailable = { code: "upstream_unavailable", message: "Steam answered 503", origin: null, retryable: true };
+  const failed = statusSource(20, "Steam", {
+    last_run: { event_count: 0, failure_reason: null, finished_at: SUCCESS, first_at: SUCCESS, last_at: SUCCESS, run_id: "run-test", started_at: SUCCESS, status: "failed", terminal_reason: "connector_reported_failed", connector_error: unavailable } as never,
+    owner_state: { ...HEALTHY_STATE, owner_of_state: "maintainer", resolver: "blocked_maintainer" },
+    rendered_verdict: verdict("Can't collect", [requiredAction({ audience: "maintainer", kind: "code_fix", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" } })]),
+  });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [failed] } }));
+  const need = data.needs[0]!;
+  assert.equal(need.status?.words, "Steam was not available.");
+  assert.equal(need.actionLabel, "Try again");
+  assert.equal(need.nextStep, "DataConnect checks Steam only when you ask.");
+  assert.equal(data.needs.length, 1);
+});
+
+test("a source that is only waiting for a sync has no next-step line", () => {
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(4, "Amazon")] } }));
+  assert.equal(data.needs[0]?.nextStep, null);
+});
+
+test("the first-run logo row shows only services this install's catalog offers, at most five", () => {
+  const offered = ["amazon", "chase", "github", "steam", "venmo", "ynab"].map((key) => ({ connectorKey: key, displayName: key }));
+  const data = buildHomeViewModel(base({ offeredSources: offered, sourcePage: { hasMore: false, kind: "ok", sources: [] } }));
+  assert.deepEqual(data.offeredSources.map((entry) => entry.iconId), ["amazon", "chase", "github", "steam", "venmo"]);
+  assert.deepEqual(buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [] } })).offeredSources, []);
+});
+
+test("Home does not claim the totals could not be checked when they came from a complete source read", () => {
+  const complete = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
+  assert.equal(complete.recordCount, "0");
+  assert.equal(complete.warning, false);
+  assert.equal(complete.summaryError, true);
+  const paged = buildHomeViewModel(base({ summary: null, summaryFailed: true, sourcePage: { hasMore: true, kind: "ok", sources: [] } }));
+  assert.equal(paged.recordCount, null);
+  assert.equal(paged.warning, true);
+});
+
+// Round 11 (F1): an empty Data sources list never contradicts the count or the Needs you rows.
+test("the empty Data sources line agrees with what is listed above", async () => {
+  const { sourcesEmptyLine } = await import("./standing-view-model.ts");
+  assert.equal(sourcesEmptyLine({ needingSources: [], total: 0 }), "No active data sources.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "Steam" }], total: 1 }), "Steam is listed above under Needs you.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "A" }, { name: "B" }, { name: "C" }], total: 3 }), "All 3 are listed above under Needs you.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "Steam" }], total: 3 }), "The rest are not active.");
+  assert.equal(sourcesEmptyLine({ needingSources: [], total: 1 }), "No active data sources.");
 });

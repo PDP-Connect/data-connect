@@ -27,7 +27,15 @@ test("buildConnectorContext: a resolved match uses that connection's OWN display
   assert.deepEqual(context, { connectorId: "strava", displayName: "Strava (work account)" });
 });
 
-test("buildConnectorContext: an unresolved match (ambiguous connector_id or unknown route id) degrades to the generic connector label, never a sibling connection's name", () => {
+test("buildConnectorContext uses the manifest name when the saved name is the connector key", () => {
+  const context = buildConnectorContext("strava", {
+    connector_display_name: "Strava",
+    display_name: "STRAVA",
+  });
+  assert.equal(context.displayName, "Strava");
+});
+
+test("buildConnectorContext: an unresolved match uses the generic label, never a sibling connection's name", () => {
   // This is the intentional migration behavior change: previously, an
   // ambiguous connector_id resolved via client-side `.find()` to the FIRST
   // configured connection sharing that type — silently attaching a
@@ -36,7 +44,7 @@ test("buildConnectorContext: an unresolved match (ambiguous connector_id or unkn
   // to the generic connector-type label rather than fabricate or guess.
   const context = buildConnectorContext("strava", undefined);
   assert.equal(context.connectorId, "strava");
-  assert.ok(context.displayName.length > 0, "must be a non-empty generic connector-type label");
+  assert.equal(context.displayName, "this data source");
   // Never a specific connection's own display_name — that would mean the
   // fallback silently attached a possibly-wrong sibling connection's label.
   assert.notEqual(context.displayName, "Strava (work account)");
@@ -45,6 +53,5 @@ test("buildConnectorContext: an unresolved match (ambiguous connector_id or unkn
 test("buildConnectorContext never throws when the match carries no display fields", () => {
   const context = buildConnectorContext("strava", { connector_display_name: "", display_name: "" });
   assert.equal(context.connectorId, "strava");
-  assert.equal(typeof context.displayName, "string");
-  assert.ok(context.displayName.length > 0, "must fall back to a non-empty label, never a blank string");
+  assert.equal(context.displayName, "this data source");
 });

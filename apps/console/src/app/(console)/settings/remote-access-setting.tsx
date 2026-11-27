@@ -11,10 +11,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
-import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
+import { canOpenOwnerPasswordWindowAction, requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
 import { EarlierSetupCard } from "./earlier-setup-card.tsx";
 import { ProviderSetup } from "./provider-setup.tsx";
-import { type ServiceEntry, setupCards } from "./setup-services.ts";
+import { familyName, type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-client.ts";
 import { OnCard } from "./on-card.tsx";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
@@ -48,7 +48,7 @@ import {
   runAction,
   staleReviewCodes,
 } from "./prepare-remote-access.ts";
-import { OtherWays, RecommendedWay } from "./choose-way.tsx";
+import { WaysList } from "./choose-way.tsx";
 import {
   type Blocks,
   funnelPolicyActionId,
@@ -130,12 +130,23 @@ function OffStatusRow({ possiblyLive, framed = false, localOnly = true }: { poss
   );
 }
 
+// The fragment Set password leaves for the desktop to carry across its restart.
+const PASSWORD_SET_FRAGMENT = "#remote-access-password-set";
+
 export function RemoteAccessSetting({
   request = requestReachability,
   appVersion,
+  technical = false,
+  canOpenPasswordWindow = canOpenOwnerPasswordWindowAction,
+  openPasswordWindow = requestOwnerPasswordWindowAction,
+  migrateReservations = migrateLegacySetupReservations,
 }: {
   request?: typeof requestReachability;
   appVersion?: string;
+  technical?: boolean;
+  canOpenPasswordWindow?: typeof canOpenOwnerPasswordWindowAction;
+  openPasswordWindow?: typeof requestOwnerPasswordWindowAction;
+  migrateReservations?: typeof migrateLegacySetupReservations;
 }) {
   const [host, setHost] = useState<{ known: true; value: HostSettings } | { known: false; reason: string }>({
     known: false,
@@ -161,7 +172,6 @@ export function RemoteAccessSetting({
   // Bumped whenever the way on screen changes. A preparation or click binds to
   // the value it started with and sends nothing positive once it has moved on.
   const selection = useRef(0);
-  const [showOtherWays, setShowOtherWays] = useState(false);
   const [declined, setDeclined] = useState<string | null>(null);
   const [prep, setPrep] = useState<Prep>({ status: "idle" });
   const [prepError, setPrepError] = useState<DisplayError | null>(null);
@@ -182,6 +192,7 @@ export function RemoteAccessSetting({
   // The last read that got no answer, for Details under the stale line.
   const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
   const [error, setError] = useState<DisplayError | null>(null);
+  const [checkingEarlier, setCheckingEarlier] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   // After Cancel: the host is turning it off, or could not confirm it is off.
   const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
@@ -193,7 +204,9 @@ export function RemoteAccessSetting({
   // Routes the owner has moved past by choosing Turn on again or Turn off.
   const [acknowledged, setAcknowledged] = useState<ReadonlySet<string>>(new Set());
   // A stop the owner must confirm first: this page is open through the address being turned off.
-  const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean } | null>(null);
+  const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean; farAway: boolean } | null>(null);
+  const [confirmTurnOn, setConfirmTurnOn] = useState<Review | null>(null);
+  const [confirmPortSave, setConfirmPortSave] = useState(false);
   // The stop was confirmed from far away; this page is about to stop working.
   const [closingPage, setClosingPage] = useState(false);
   // A far-away stop whose request died with no answer from the host: the route may still be on.
@@ -385,7 +398,7 @@ export function RemoteAccessSetting({
     };
     // Setups an older console kept in the browser move to the host first, and
     // polling starts only after that finishes.
-    void migrateLegacySetupReservations(request)
+    void migrateReservations(request)
       .catch(() => undefined)
       .then(async () => {
         if (!active) {
@@ -409,7 +422,7 @@ export function RemoteAccessSetting({
         clearInterval(timer);
       }
     };
-  }, [request]);
+  }, [request, migrateReservations]);
 
   useEffect(() => {
     if (!operation || operation.stage !== "applying") {
@@ -457,7 +470,7 @@ export function RemoteAccessSetting({
   const way = pinnedWay && !wayUnusable(pinnedWay, capabilities, blocks) ? pinnedWay : recommended;
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
-  const wayLabel = way ? plain(way.label) : undefined;
+  const wayLabel = way ? plain(familyName(way.providerId, way.label)) : undefined;
   // The selected way's card title, as the Turn on card's caption reads it.
   const wayTitle = way ? plain(wayRow(way, capabilities, blocks).title) : null;
   // Read by a sign-in step already under way: it must not show or open for a way the owner has left.
@@ -468,6 +481,21 @@ export function RemoteAccessSetting({
   // The password is the only gate on an address reachable from the internet,
   // so nothing can be turned on until the owner has chosen one.
   const passwordMissing = state.passwordSet === false;
+  const [canSetPasswordHere, setCanSetPasswordHere] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!passwordMissing) return;
+    let current = true;
+    void canOpenPasswordWindow()
+      .then((available) => {
+        if (current) setCanSetPasswordHere(available);
+      })
+      .catch(() => {
+        if (current) setCanSetPasswordHere(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [passwordMissing, canOpenPasswordWindow]);
   // Read by actions already under way, which can outlive the state they started in.
   const passwordMissingNow = useRef(false);
   passwordMissingNow.current = passwordMissing;
@@ -529,13 +557,17 @@ export function RemoteAccessSetting({
     }
     return null;
   })();
-  const recheckPending = (route: Route) => recheckTarget?.route.handle.id === route.handle.id;
+  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
+  const recheckPending = (route: Route) => recheckId === route.handle.id;
   const recheckUnderWay = (route: Route) => rechecking.has(route.handle.id) || recheckPending(route);
-  // While a re-check is pending or under way the status stays On: neither
-  // "checking" nor "stale" reaches the owner.
+  const hasCurrentProof = (route: Route) => {
+    const until = route.verification.validUntil;
+    return route.verification.status === "verified" && Boolean(route.published) &&
+      until?.known === true && Date.parse(until.value) > Date.now();
+  };
   const shownPhase = (route: Route) => {
     const phase = phaseOf(route);
-    return recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
+    return hasCurrentProof(route) && recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
   };
   const attentionOf = (route: Route): Attention | null =>
     routeAttention(route, {
@@ -551,8 +583,10 @@ export function RemoteAccessSetting({
         !(operation?.kind === "stop" && operation.stage === "applying") &&
         cancel !== "stopping",
     });
-  const headlineOf = (route: Route) =>
-    routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+  const headlineOf = (route: Route) => {
+    const headline = routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+    return headline === "On" && !hasCurrentProof(route) ? "Turning on" : headline;
+  };
   const routesOff = state.routes.every((route) => headlineOf(route) === "Off");
   const outcome = operation ? operationOutcome(operation) : null;
   // Preparation runs only while nothing is on or on its way. A finished
@@ -569,6 +603,7 @@ export function RemoteAccessSetting({
 
   // Preparation for a way pins it. If that replaces a way the owner was on,
   // the old way could no longer be used: say why.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
   useEffect(() => {
     if (!wayId && pinnedWay && wayUnusable(pinnedWay, capabilities, blocks)) {
       selection.current += 1;
@@ -587,9 +622,10 @@ export function RemoteAccessSetting({
       );
     }
     setPinned(wayId);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
   }, [readyToPrepare, wayId, pinned]);
 
+  // `send` only wraps `request`; `prepRun` re-runs preparation when a review expires.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way, its use or the review changes
   useEffect(() => {
     if (!readyToPrepare || !wayId || !wayUsage) {
       refreshing.current = null;
@@ -646,8 +682,6 @@ export function RemoteAccessSetting({
     return () => {
       active = false;
     };
-    // `send` only wraps `request`.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
   }, [readyToPrepare, wayId, wayUsage, prepRun, request]);
 
   // An expired review is replaced without a click.
@@ -666,16 +700,17 @@ export function RemoteAccessSetting({
 
   // After Turn on again: turn on once the review is ready, only when it shows the facts
   // the host recorded as approved for the route. Different facts, or no record, wait for a click.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
   useEffect(() => {
     if (!readyReview || !againPending.current || busy) return;
     const { approvedDigest } = againPending.current;
     againPending.current = null;
     if (approvedDigest !== null && readyReview.candidate.consentFactsDigest === approvedDigest) {
-      void turnOn(readyReview);
+      // The owner already confirmed Turn off and on, on facts they approved: no second question.
+      void applyTurnOn(readyReview);
     } else {
       setChanged([]);
     }
-    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
   }, [readyReview, busy]);
 
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
@@ -702,7 +737,11 @@ export function RemoteAccessSetting({
   // Sends the approval for the review whose facts are on screen, then applies.
   // `shown` is the review the owner saw: its digest is what is approved. If the
   // host holds a newer review of the same facts, only its id is newer.
-  async function turnOn(shown: Review) {
+  function turnOn(shown: Review) {
+    setConfirmTurnOn(shown);
+  }
+
+  async function applyTurnOn(shown: Review) {
     const token = selection.current;
     const isCurrent = () => mounted.current && selection.current === token && wayIdNow.current === shown.candidate.providerId;
     await change(async () => {
@@ -772,6 +811,7 @@ export function RemoteAccessSetting({
     // The radios are disabled while a change is in flight; this is the same rule at the handler.
     if (mutationBlocked) return;
     selection.current += 1;
+    setConfirmTurnOn(null);
     setPinned(providerId);
     setSwitchNote(null);
     setDeclined(null);
@@ -781,7 +821,6 @@ export function RemoteAccessSetting({
   }
   function chooseAnotherWay() {
     if (wayId) setDeclined(wayId);
-    setShowOtherWays(true);
     setPrep({ status: "idle" });
   }
   async function stopOperation(current: Operation) {
@@ -851,7 +890,6 @@ export function RemoteAccessSetting({
     });
   }
   useEffect(() => () => recheckLoop.current?.stop(), []);
-  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
   const recheckGeneration = recheckTarget?.route.handle.generation ?? 0;
   const recheckWindow = recheckTarget?.key ?? "";
   const recheckWait = recheckTarget?.delay ?? 0;
@@ -915,13 +953,9 @@ export function RemoteAccessSetting({
       if (mounted.current) setCheckingStop(false);
     }
   }
-  // Turn off, Turn off and on, Turn on again: ask first only when this page came in through the address.
+  // Stop actions always ask first; the message explains whether this page will close.
   function requestStop(route: Route, again: boolean) {
-    if (isOpenThroughRoute(window.location.origin, route.origin)) {
-      setConfirmStop({ route, again });
-      return;
-    }
-    void (again ? turnOnAgain(route) : turnOffRoute(route));
+    setConfirmStop({ route, again, farAway: isOpenThroughRoute(window.location.origin, route.origin) });
   }
   function turnOffRoute(route: Route, farAway = false) {
     return stopRoute(
@@ -971,22 +1005,43 @@ export function RemoteAccessSetting({
     setPrepRun((n) => n + 1);
   }
 
-  // After the desktop restarts for a new password it reopens this card by its
-  // fragment. Remember that once, then clear the fragment.
-  const [returnedFromPassword] = useState(
-    () => typeof window !== "undefined" && window.location.hash === "#remote-access"
-  );
+  // After the desktop restarts for a new password it reopens this page with
+  // PASSWORD_SET_FRAGMENT. Read it after mount (the server render cannot see it),
+  // bring the card into view, remember it once, then clear the fragment. A plain
+  // #remote-access link only scrolls here; it does not mean a password was saved.
+  const [returnedFromPassword, setReturnedFromPassword] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (returnedFromPassword) window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  }, [returnedFromPassword]);
+    if (window.location.hash !== PASSWORD_SET_FRAGMENT) return;
+    setReturnedFromPassword(true);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    sectionRef.current?.scrollIntoView?.();
+  }, []);
   async function setPassword() {
     // The native shell reads this address before it restarts, so the card is
     // reopened afterwards.
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#remote-access`);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${PASSWORD_SET_FRAGMENT}`);
     await change(async () => {
-      const result = await requestOwnerPasswordWindowAction();
+      const result = await openPasswordWindow();
       if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
     }, "change");
+  }
+  async function savePort() {
+    if (!host.known) return;
+    await edit(async () => {
+      const value = port.trim() === "" ? null : Number(port);
+      if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
+        throw new ReachabilityFailure(publicError("invalid_input", "Enter a port between 1 and 65535.", "change"));
+      }
+      const updated = await send<HostSettings>("/host-settings", {
+        expectedRevision: host.value.revision,
+        mode: host.value.mode,
+        port: value,
+        acknowledgeDisconnect: true,
+      });
+      setHost({ known: true, value: updated });
+      setConfirmPortSave(false);
+    });
   }
   // A route turned off and replaced is history: the newest one is the card.
   // One the owner turned off shows its Off card once, right after the stop, and
@@ -1014,6 +1069,19 @@ export function RemoteAccessSetting({
     void loadRef.current?.();
     setPrepRun((n) => n + 1);
   };
+  const checkEarlierAddresses = async () => {
+    if (checkingEarlier) return;
+    setCheckingEarlier(true);
+    setError(null);
+    try {
+      await send("/recovery/check", {});
+      refresh();
+    } catch (failure) {
+      setError(toDisplayError(failure, "action", undefined, "check"));
+    } finally {
+      setCheckingEarlier(false);
+    }
+  };
   const recover: Recover = {
     request,
     onTryAgain: refresh,
@@ -1036,24 +1104,50 @@ export function RemoteAccessSetting({
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
-    <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
+    <DiagnosticsContext.Provider value={{ appVersion, technical }}>
     {/* The page's Section already names this card; no second heading here. */}
-    <section aria-label="Remote access" className="grid gap-4">
+    <section aria-label="Remote access" className="grid gap-4" ref={sectionRef}>
+      {technical ? null : <>
       {confirmStop ? (
         <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
-          <p className="text-sm font-medium">You're using this address now. Turning it off will close this page.</p>
+          <p className="text-sm font-medium">
+            {isOpenThroughRoute(window.location.origin, confirmStop.route.origin)
+              ? "You're using this address now. Turning it off will close this page."
+              : "Turning off remote access will make this address stop working."}
+          </p>
           <div className="flex flex-wrap gap-3">
             <Button
               onClick={() => {
-                const { route, again } = confirmStop;
+                const { route, again, farAway } = confirmStop;
                 setConfirmStop(null);
-                void (again ? turnOnAgain(route, true) : turnOffRoute(route, true));
+                void (again ? turnOnAgain(route, farAway) : turnOffRoute(route, farAway));
               }}
               type="button"
             >
-              Turn off
+              {confirmStop.again ? "Turn off and on" : "Turn off"}
             </Button>
             <Button onClick={() => setConfirmStop(null)} type="button" variant="outline">
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {confirmTurnOn ? (
+        <div aria-label="Turn on remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
+          <p className="text-sm">Turning on remote access may interrupt this page while DataConnect updates the address.</p>
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={busy}
+              onClick={() => {
+                const review = confirmTurnOn;
+                setConfirmTurnOn(null);
+                void applyTurnOn(review);
+              }}
+              type="button"
+            >
+              Continue turning on
+            </Button>
+            <Button disabled={busy} onClick={() => setConfirmTurnOn(null)} type="button" variant="outline">
               Cancel
             </Button>
           </div>
@@ -1076,19 +1170,22 @@ export function RemoteAccessSetting({
           </div>
         </div>
       ) : null}
-      {passwordMissing ? (
-        <div className="grid gap-2 rounded-xl border p-4">
-          <h3 className="pdpp-label">Step 1: Set a password</h3>
+      {passwordMissing && canSetPasswordHere === true ? (
+        <div className="grid gap-2 border-y border-border/70 py-3">
+          <h3 className="pdpp-label">Choose your own password for remote access</h3>
           <p className="max-w-prose text-sm">
-            Once remote access is on, anyone with your address can reach the sign-in page. Your password is the only
-            thing stopping them, so choose one first.
+            DataConnect made a password for you. To turn on remote access, choose your own password first.
           </p>
           <div className="flex flex-wrap gap-3">
             <Button disabled={busy || stale} onClick={() => void setPassword()} type="button">
-              Set password
+              Choose a password
             </Button>
           </div>
         </div>
+      ) : passwordMissing && canSetPasswordHere === false ? (
+        <p className="text-sm">Set a password from the DataConnect app on the computer that runs it.</p>
+      ) : passwordMissing ? (
+        <p className="text-sm text-muted-foreground" role="status">Checking where you can set a password…</p>
       ) : returnedFromPassword ? (
         <p className="text-sm" role="status">Password saved ✓ Step 2: turn on.</p>
       ) : null}
@@ -1096,10 +1193,10 @@ export function RemoteAccessSetting({
         {way.detection.checkedAt ? `Provider checked ${formatLocalTime(way.detection.checkedAt)}${way.detection.fresh ? "" : " (stale)"}.` : "Provider has not been checked."}
       </p> : null}
       <RecoveryContext.Provider value={recover}>
-        {error ? <ErrorNotice error={error} /> : null}
-        {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}
+        {error ? <ErrorNotice error={noAnswer ? { ...error, serverMessage: [error.serverMessage, diagnosticsText(noAnswer, appVersion)].filter(Boolean).join("\n") } : error} /> : null}
+        {prepError && !error ? <ErrorNotice action="prepare" error={prepError} /> : null}
       </RecoveryContext.Provider>
-      {stale ? (
+      {stale && !error ? (
         <div className="grid gap-1" role="status">
           <p className="text-sm text-muted-foreground">
             {noAnswer
@@ -1114,10 +1211,10 @@ export function RemoteAccessSetting({
         </div>
       ) : null}
       {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
-      {state.lifecycle?.cleanup === "unconfirmed" ? (
+      {state.lifecycle?.cleanup === "unconfirmed" && visibleRoutes.length === 0 ? (
         <p className="text-sm text-muted-foreground" role="status">{CLEANUP_UNCONFIRMED}</p>
       ) : null}
-      {inventory ? null : (
+      {inventory || error ? null : (
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
       {inventory?.providers.map(provider => provider.configuration.known === false ? (
@@ -1125,27 +1222,17 @@ export function RemoteAccessSetting({
       ) : null)}
       {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
-        <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
+        <Button disabled={checkingEarlier || busy} onClick={() => void checkEarlierAddresses()}>Check earlier addresses</Button>
       ) : null}
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
         <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
       ) : null}
-      {idle && !passwordMissing ? (
-        <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
-          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
-          <div className="grid gap-4 p-4">
-            <div className="grid gap-1">
-              <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
-              <h3 className="text-base font-semibold">Turn on</h3>
-            </div>
-            {inventory && recommended ? (
-              <RecommendedWay
-                checked={wayId === recommended.providerId}
-                disabled={mutationBlocked}
-                onPick={pickWay}
-                row={wayRow(recommended, capabilities, blocks)}
-              />
-            ) : null}
+      {idle && !passwordMissing && !(operation && outcome === "did-not-turn-on") ? (
+        <section aria-label="Turn on remote access" className="grid gap-4">
+          {visibleRoutes.length === 0 && !operation && reservations.length === 0 ? <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
+          <div className="grid gap-4">
+            <p className="text-sm text-muted-foreground">Choose whether to use DataConnect from your phone or with ChatGPT.</p>
+            {inventory ? <WaysList inventory={inventory} capabilities={capabilities} blocks={blocks} disabled={mutationBlocked} pickedId={wayId} onPick={pickWay} /> : null}
             {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
             {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
             {done?.kind === "allow" && declined !== wayId ? (
@@ -1159,7 +1246,7 @@ export function RemoteAccessSetting({
             ) : null}
             {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
               // A step the page cannot show as a sign-in: never a blank card.
-              <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+              <section aria-label="Turn on" className="grid gap-3 border-y border-border/70 py-3">
                 <p className="text-sm" role="status">{SERVICE_DETAILS}</p>
                 <div className="flex flex-wrap gap-3">
                   <Button disabled={busy} onClick={refresh} type="button">
@@ -1181,27 +1268,6 @@ export function RemoteAccessSetting({
             ) : null}
             {wayId && wayUsage === null ? (
               <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
-            ) : null}
-            <Button
-              aria-expanded={showOtherWays}
-              className="justify-self-start"
-              disabled={busy}
-              onClick={() => setShowOtherWays((open) => !open)}
-              type="button"
-              variant="outline"
-            >
-              Other ways
-            </Button>
-            {showOtherWays && inventory ? (
-              <OtherWays
-                blocks={blocks}
-                capabilities={capabilities}
-                disabled={mutationBlocked}
-                inventory={inventory}
-                onPick={pickWay}
-                pickedId={wayId}
-                recommendedId={recommended?.providerId ?? null}
-              />
             ) : null}
           </div>
         </section>
@@ -1250,9 +1316,8 @@ export function RemoteAccessSetting({
         />
       ) : null}
       {operation && (cancel === "unconfirmed" || (cancel === null && outcome === "needs-action")) ? (
-        <section aria-label="Needs your action" className="grid gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
+        <section aria-label="Needs your action" className="grid gap-3 border-y border-border/70 py-3">
+          <h3 className="text-[13px] font-medium text-attention">
             Needs your action
           </h3>
           <p className="text-sm" role="status">
@@ -1285,8 +1350,8 @@ export function RemoteAccessSetting({
         </section>
       ) : null}
       {operation && operation.kind !== "stop" && cancel === null && outcome === "did-not-turn-on" ? (
-        <section aria-label="Did not turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
-          <h3 className="pdpp-label">Remote access did not turn on</h3>
+        <section aria-label="Did not turn on" className="grid gap-3 border-y border-border/70 py-3">
+          <h3 className="text-[13px] font-medium">Remote access did not turn on</h3>
           {operation.failureCode ? <p className="text-sm text-destructive" role="status">{publicError(operation.failureCode).message}</p> : null}
           <div className="flex flex-wrap gap-3">
             <Button disabled={busy} onClick={startOver} type="button">
@@ -1370,7 +1435,11 @@ export function RemoteAccessSetting({
             // the catalog happens to select now.
             const routeProvider = route.providerId != null ? inventory?.providers.find((item) => item.providerId === route.providerId) : undefined;
             const onWay = routeProvider
-              ? { title: plain(wayRow(routeProvider, capabilities, blocks).title), provider: plain(routeProvider.label) }
+              ? {
+                  title: plain(wayRow(routeProvider, capabilities, blocks).title),
+                  provider: plain(familyName(routeProvider.providerId, routeProvider.label)),
+                  reach: routeProvider.reach,
+                }
               : null;
             return (
               <OnCard
@@ -1384,23 +1453,17 @@ export function RemoteAccessSetting({
                 way={onWay}
               >
                 {extras}
-                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
+                <Diagnostics technicalOnly={!hostReasonShown} label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
                   {detailsBody}
                 </Diagnostics>
               </OnCard>
             );
           }
-          const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
+          const cardProof = (attention === "cleanup-unconfirmed" || route.cleanup.state === "unconfirmed") ? null : routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
           const needsOwner = headline === "Needs your action";
           return (
-          <div className="grid gap-3 rounded-xl border p-4" key={route.handle.id}>
-            <h3 className="flex items-center gap-2 text-sm font-medium">
-              <span
-                aria-hidden="true"
-                className={`size-2.5 flex-none rounded-full ${
-                  needsOwner ? "bg-amber-500 ring-4 ring-amber-500/15" : "bg-muted-foreground/50"
-                }`}
-              />
+          <div className="grid gap-2 border-y border-border/70 py-3" key={route.handle.id}>
+            <h3 className={`text-sm font-medium ${needsOwner ? "text-attention" : "text-foreground"}`}>
               {headline}
             </h3>
             {sentence ? <p className="text-sm" role="status">{sentence}</p> : null}
@@ -1458,7 +1521,9 @@ export function RemoteAccessSetting({
           );
         })}
       </section>
-      <Diagnostics label="This computer">
+      </>}
+      {technical && error ? <RecoveryContext.Provider value={recover}><ErrorNotice error={error} /></RecoveryContext.Provider> : null}
+      {technical ? <Diagnostics label="Remote access details">
         {Object.entries(capabilities).map(([id, observation]) => (
           <p key={id}>
             {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
@@ -1490,33 +1555,29 @@ export function RemoteAccessSetting({
                 />
               </label>
               <div className="flex flex-wrap gap-3">
-                <Button
-                  disabled={mutationBlocked}
-                  onClick={() =>
-                    void edit(async () => {
-                      const value = port.trim() === "" ? null : Number(port);
-                      if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
-                        throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
-                      }
-                      const updated = await send<HostSettings>("/host-settings", {
-                        expectedRevision: host.value.revision,
-                        mode: host.value.mode,
-                        port: value,
-                        acknowledgeDisconnect: true,
-                      });
-                      setHost({ known: true, value: updated });
-                    })
-                  }
-                  type="button"
-                  variant="outline"
-                >
-                  Save port
-                </Button>
+                {confirmPortSave ? (
+                  <div aria-label="Save port" aria-modal="true" className="grid basis-full gap-3 rounded-lg border border-border p-3" role="alertdialog">
+                    <p className="text-sm">Saving this port will stop existing remote access addresses while DataConnect applies the change.</p>
+                    <div className="flex flex-wrap gap-3">
+                      <Button disabled={busy} onClick={() => void savePort()} type="button">Save port</Button>
+                      <Button disabled={busy} onClick={() => setConfirmPortSave(false)} type="button" variant="outline">Cancel</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button
+                    disabled={mutationBlocked}
+                    onClick={() => setConfirmPortSave(true)}
+                    type="button"
+                    variant="outline"
+                  >
+                    Save port
+                  </Button>
+                )}
               </div>
             </div>
           </>
         ) : (
-          <p>Host settings unavailable: {host.reason}.</p>
+          <p>Not known on this install.</p>
         )}
         {inventory?.providers.map((item) => (
           <div key={`${item.providerId}-${item.reach}`}>
@@ -1538,7 +1599,7 @@ export function RemoteAccessSetting({
             ))}
           </div>
         ))}
-      </Diagnostics>
+      </Diagnostics> : null}
     </section>
     </DiagnosticsContext.Provider>
   );

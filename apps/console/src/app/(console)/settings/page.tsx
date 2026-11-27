@@ -1,114 +1,89 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
+import { Text } from "@pdpp/brand-react"
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
+import { OpenExternalLink } from "../components/open-external-link.tsx"
+import { RemoteAccessRow } from "./remote-access-row.tsx"
+import { isManagedDesktopHost, settingsPracticeFor } from "./settings-host.ts"
+import { NotificationsRow } from "./notifications-row.tsx"
+import { SettingsRow } from "./settings-row.tsx"
+import { loadSettingsSummary } from "./settings-summary-data.ts"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
+import { DesktopSettingsPractice } from "./desktop-settings-practice.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
-import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
-import { RemoteAccessSetting } from "./remote-access-setting.tsx"
-import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
-import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
 import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
-import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
+import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
+import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
 }
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> }) {
+  const demo = (await searchParams)?.demo
+  const practice = settingsPracticeFor(demo)
   const identity = getProductIdentity()
-  // Desktop and vault-recovery settings write command files only the managed
-  // desktop host answers; on a server they would do nothing.
-  const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
+  const managedDesktopHost = isManagedDesktopHost(practice)
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
-    await Promise.all([
+    practice ? [practice.revealProof, practice.inventory, practice.passwordSource, practice.passwordSet] as const : await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
       loadOwnerSessionInventory(),
       loadOwnerPasswordSource(),
       loadOwnerPasswordSet(),
     ])
 
+  const signedIn = ownerSessions.enabled ? `${ownerSessions.sessions.length} signed in` : null
+  const signInWords = [ownerPasswordSource ? (ownerPasswordSet ? "Password set" : "No password yet") : null, signedIn].filter(Boolean).join(" · ") || undefined
+
+  const summary = practice ? { tokens: 2, collectors: 4, webhooks: 0, updates: 0, publicAddress: practice.publicAddress } : await loadSettingsSummary()
+
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
-        <PageHeader
-          description="Control optional features for this browser and the way this Personal Server can be reached."
-          title="Settings"
-        />
-        <Section
-          description="Reveal connector surfaces intended for local development and connector testing."
-          title="Developer mode"
-        >
-          <DeveloperModeSetting />
+      <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6">
+        <PageHeader title="Settings" />
+        <Section title="Access and alerts">
+          {managedDesktopHost ? <RemoteAccessRow practiceName={practice?.name} /> : <SettingsRow href="/settings/remote-access" title="Remote access" />}
+          <SettingsRow href="/settings/sign-in" title="Password and sign-in" state={signInWords} />
+          <SettingsRow href="/deployment/tokens" title="Tokens for scripts and tools" state={summary.tokens === null ? "Could not check" : summary.tokens ? String(summary.tokens) : "None"} />
+          <NotificationsRow practice={!!practice} />
         </Section>
-        <Section
-          id="remote-access"
-          description="Use DataConnect from your phone, or let AI apps like ChatGPT reach it."
-          title="Remote access"
-        >
-          <RemoteAccessSetting appVersion={identity.version} />
+        <Section title="Updates">
+          <Text as="p">DataConnect {identity.version}</Text>
+          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases" className="inline-flex min-h-11 items-center underline">See the latest version</OpenExternalLink>
+          <SettingsRow href="/settings/packages" title="Data source updates" state={summary.updates === null ? "Could not check" : summary.updates ? `${summary.updates} available` : "All up to date"} />
         </Section>
-        {ownerPasswordSource ? (
-          <Section
-            id="owner-password"
-            description={
-              ownerPasswordSource === "env"
-                ? "Change the password used to sign in to this Personal Server."
-                : undefined
-            }
-            title="Owner password"
-          >
-            <OwnerPasswordSetting
-              canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              managedDesktop={managedDesktopHost}
-              passwordSet={ownerPasswordSet}
-              source={ownerPasswordSource}
-            />
+        <Section title="Advanced" description="For scripts, other devices, and people who run DataConnect on a server.">
+          {ownerSessions.enabled ? (
+            <div className="grid gap-3 py-3">
+              {practice ? <DesktopPairingSetting practice /> : <DesktopPairingSetting />}
+            </div>
+          ) : null}
+          <SettingsRow href="/device-exporters" title="Collectors on your devices" state={summary.collectors === null ? "Could not check" : `${summary.collectors} sending`} />
+          <SettingsRow href="/event-subscriptions" title="Webhooks" state={summary.webhooks === null ? "Could not check" : String(summary.webhooks)} />
+          <SettingsRow href="/deployment" title="Server" state="Checks that DataConnect itself is working" />
+          <SettingsRow href="/deployment/provider-apps" title="Sign-in apps for data sources" />
+          <div id="developer-mode"><DeveloperModeSetting /></div>
+        </Section>
+        {managedDesktopHost && hasLocalRevealProof ? (
+          <Section description="Control how DataConnect starts on the computer that runs it." title="This computer">
+            {practice ? <DesktopSettingsPractice /> : <DesktopSettingsSetting />}
+            <div className="grid gap-3 py-5">
+              <Text as="h3">Recovery code</Text>
+              {practice ? <RecoveryKeySetting passwordSource={ownerPasswordSource} practice practiceState={practice.recoveryState} /> : <RecoveryKeySetting passwordSource={ownerPasswordSource} />}
+            </div>
           </Section>
-        ) : null}
-        {ownerSessions.enabled ? (
-          <Section
-            description="Review signed-in devices and command-line tokens. Signing one out blocks its next request."
-            title="Owner sessions"
-          >
-            <OwnerSessionsSetting
-              bearers={ownerSessions.bearers}
-              sessions={ownerSessions.sessions}
-            />
-          </Section>
-        ) : null}
-        {ownerSessions.enabled ? (
-          <Section
-            description="Pair the DataConnect desktop app with this server. The desktop shows this server's console and signs in as you."
-            title="Attach a desktop app"
-          >
-            <DesktopPairingSetting />
-          </Section>
-        ) : null}
-        {managedDesktopHost ? (
-          <>
-        <Section
-          description="Control how DataConnect starts on this computer."
-          title="Desktop"
-        >
-          <DesktopSettingsSetting />
-        </Section>
-        <Section
-          description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
-          title="Vault recovery code"
-        >
-          <RecoveryKeySetting />
-        </Section>
-          </>
         ) : null}
         <AboutSection identity={identity} />
-      </main>
+        <TechnicalDetailsLink href="/settings/technical" />
+      </div>
     </RecordroomShellWithPalette>
   )
 }

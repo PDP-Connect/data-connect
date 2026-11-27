@@ -15,7 +15,13 @@
  * the real projection, not a parallel one.
  */
 
-import type { RefConnectionHealthSnapshot, RefConnectorSummary, RefRecordVersionStatsRow } from "../lib/ref-client.ts";
+import type {
+  RefConnectionHealthSnapshot,
+  RefConnectorSummary,
+  RefRenderedVerdict,
+  RefRequiredAction,
+} from "../lib/ref-client.ts";
+import type { SourceStatusRow } from "../lib/source-status-words.ts";
 
 export type SourcesDemoScenario = "mixed" | "healthy" | "attention";
 
@@ -50,6 +56,158 @@ function health(
 }
 
 const TYPE_LABEL_SEP_RE = /[-_]/;
+const DEMO_SUCCESS = "2026-11-24T10:00:00.000Z";
+const HEALTHY_OWNER_STATE = {
+  evidence_as_of: DEMO_SUCCESS,
+  owner_of_state: "system" as const,
+  posture: "observed" as const,
+  resolver: "healthy" as const,
+};
+
+function requiredAction(cta: string): RefRequiredAction {
+  return {
+    affects: [],
+    audience: "owner",
+    cta,
+    kind: "reauth",
+    satisfied_when: { kind: "credential_present_and_unrejected" },
+    surface: { kind: "browser_session" },
+    terminal: false,
+    urgency: "now",
+  };
+}
+
+function verdict(label: RefRenderedVerdict["pill"]["label"], actions: RefRequiredAction[] = []): RefRenderedVerdict {
+  return {
+    annotations: [],
+    channel: "calm",
+    detail: {},
+    forward_statement: "The data source is ready.",
+    pill: { label, tone: label === "Healthy" || label === "Import complete" ? "green" : "amber" },
+    progress: {
+      gaps_drained_last_run: null,
+      headline: "Current status.",
+      last_refreshed_at: null,
+      mode: "scheduled",
+      records_committed_last_run: null,
+      retained_records: null,
+    },
+    required_actions: actions,
+    streams: [],
+    trace: {},
+  };
+}
+
+const HEALTHY_VERDICT = verdict("Healthy");
+
+/**
+ * One real-looking data source per status row, using the names and bundled
+ * logos Home's samples use (lead decision list-pictures 8). Names never repeat
+ * a named sample in the same scenario, so no duplicate-label notice appears.
+ */
+const STATUS_SAMPLE_SOURCES: Readonly<Record<SourceStatusRow, { connectorId: string; name: string }>> = {
+  1: { connectorId: "linkedin", name: "LinkedIn" },
+  2: { connectorId: "discord-browser", name: "Discord" },
+  3: { connectorId: "steam", name: "Steam" },
+  4: { connectorId: "facebook", name: "Facebook" },
+  5: { connectorId: "notion", name: "Notion" },
+  6: { connectorId: "google-calendar", name: "Google Calendar" },
+  7: { connectorId: "jellyfin", name: "Jellyfin" },
+  8: { connectorId: "reddit", name: "Reddit" },
+  9: { connectorId: "pocket", name: "Pocket" },
+  10: { connectorId: "strava", name: "Strava" },
+  11: { connectorId: "slack", name: "Slack" },
+  12: { connectorId: "tiktok", name: "TikTok" },
+  13: { connectorId: "uber", name: "Uber" },
+  14: { connectorId: "venmo", name: "Venmo" },
+  15: { connectorId: "whatsapp", name: "WhatsApp" },
+  16: { connectorId: "youtube", name: "YouTube" },
+  17: { connectorId: "ynab", name: "YNAB" },
+  18: { connectorId: "apple-photos", name: "Apple Photos" },
+  19: { connectorId: "fitbit", name: "Fitbit" },
+  20: { connectorId: "oura", name: "Oura" },
+  21: { connectorId: "perplexity", name: "Perplexity" },
+  22: { connectorId: "netflix-export", name: "Netflix" },
+  23: { connectorId: "usaa", name: "USAA" },
+  24: { connectorId: "doordash", name: "DoorDash" },
+};
+
+export function statusSampleConnectionId(row: SourceStatusRow): string {
+  return `conn_demo_status_${row}`;
+}
+
+function statusSample(row: SourceStatusRow): RefConnectorSummary {
+  const { connectorId, name } = STATUS_SAMPLE_SOURCES[row];
+  const base = summary({
+    connection_id: statusSampleConnectionId(row),
+    connector_id: connectorId,
+    display_name: name,
+    owner_state: HEALTHY_OWNER_STATE,
+    rendered_verdict: HEALTHY_VERDICT,
+  });
+  const result: Pick<RefConnectorSummary, "connector_id" | "connection_id" | "display_name"> & Partial<RefConnectorSummary> = {
+    connection_id: statusSampleConnectionId(row),
+    connector_instance_id: statusSampleConnectionId(row),
+    connector_id: connectorId,
+    connector_display_name: name,
+    display_name: name,
+  };
+  switch (row) {
+    case 1: Object.assign(result, { source_visibility: "archived", status: "paused" }); break;
+    case 2: Object.assign(result, { source_visibility: "setup_failed", status: "revoked", revoked_at: DEMO_SUCCESS }); break;
+    case 3: Object.assign(result, { status: "revoked", revoked_at: DEMO_SUCCESS }); break;
+    case 4: Object.assign(result, { connector_implementation: { connector_id: connectorId, state: "not_installed" } }); break;
+    case 5: Object.assign(result, { terminal_setup_disposition: "unverified_missing_counts" }); break;
+    case 6: Object.assign(result, { terminal_setup_disposition: "unverified_zero" }); break;
+    case 7: Object.assign(result, { terminal_setup_disposition: "verified_empty" }); break;
+    case 8: Object.assign(result, {
+      owner_state: { ...HEALTHY_OWNER_STATE, owner_of_state: "owner", resolver: "needs_owner" },
+      rendered_verdict: verdict("Can't collect", [requiredAction("Review this data source")]),
+    }); break;
+    case 9: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, owner_of_state: "owner", resolver: "setup_in_progress" } }); break;
+    case 10: Object.assign(result, { status: "paused" }); break;
+    case 11: Object.assign(result, {
+      last_run: { ...base.last_run!, finished_at: null, started_at: DEMO_SUCCESS, status: "started" },
+      owner_state: { ...HEALTHY_OWNER_STATE, resolver: "collecting" },
+    }); break;
+    case 12: Object.assign(result, {
+      schedule: { ...GMAIL.schedule!, scheduler_backoff: { backoff_applied: true, consecutive_failures: 2, next_run_at: null, reason_class: "retry", recommended_health_state: "cooling_off" } },
+      owner_state: { ...HEALTHY_OWNER_STATE, resolver: "system_degraded" },
+      rendered_verdict: verdict("Missing data"),
+    }); break;
+    case 13: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, resolver: "blocked_maintainer" } }); break;
+    case 14: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, resolver: "system_degraded" }, rendered_verdict: verdict("Missing optional data") }); break;
+    case 15: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, resolver: "system_degraded" }, rendered_verdict: verdict("Some records stuck") }); break;
+    case 16: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, resolver: "system_degraded" }, rendered_verdict: verdict("Missing data") }); break;
+    case 17: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, owner_of_state: "owner", resolver: "refresh_due" } }); break;
+    case 18: Object.assign(result, { owner_state: { ...HEALTHY_OWNER_STATE, resolver: "healthy" }, rendered_verdict: verdict("Import complete") }); break;
+    case 19: Object.assign(result, { connection_health: health("healthy", { lateness: { state: "on_time" } }) }); break;
+    case 20: Object.assign(result, {
+      owner_state: { ...HEALTHY_OWNER_STATE, posture: "frozen-since-last-run" },
+      rendered_verdict: verdict("Collected, not independently checked"),
+    }); break;
+    case 21: Object.assign(result, {
+      owner_state: { ...HEALTHY_OWNER_STATE, resolver: "not_measured" },
+      last_successful_run: base.last_successful_run,
+    }); break;
+    case 22: Object.assign(result, {
+      owner_state: { ...HEALTHY_OWNER_STATE, resolver: "not_measured" },
+      source_kind: "manual",
+      last_successful_run: null,
+      connection_health: health("healthy", { last_success_at: null }),
+    }); break;
+    case 23: Object.assign(result, { owner_state: undefined, rendered_verdict: HEALTHY_VERDICT }); break;
+    case 24: Object.assign(result, {
+      owner_state: undefined,
+      rendered_verdict: null,
+      status: undefined,
+      source_visibility: undefined,
+      connection_health: health("idle", { last_success_at: null }),
+      last_successful_run: null,
+    }); break;
+  }
+  return summary(result);
+}
 
 /** Title-case the connector key into a type label, e.g. "gmail" → "Gmail". */
 function typeLabel(connectorId: string): string {
@@ -67,6 +225,7 @@ function summary(
 ): RefConnectorSummary {
   return {
     connection_health: health("healthy"),
+    owner_state: HEALTHY_OWNER_STATE,
     // The TYPE label (distinct from the owner's per-instance display_name), so
     // the demo exercises the real "type · account" list line shape.
     connector_display_name: typeLabel(partial.connector_id),
@@ -94,6 +253,7 @@ function summary(
     },
     manifest_version: "1.0.0",
     next_action: null,
+    rendered_verdict: HEALTHY_VERDICT,
     schedule: null,
     stream_count: 2,
     streams: ["messages", "threads"],
@@ -101,6 +261,14 @@ function summary(
     ...partial,
   };
 }
+
+/** A data source the person renamed: its row still says what it is ("Signal"). */
+const SIGNAL_RENAMED = summary({
+  connection_id: "conn_signal_workstation_01",
+  connector_display_name: "Signal",
+  connector_id: "signal",
+  display_name: "workstation",
+});
 
 const GMAIL = summary({
   connection_health: health("healthy"),
@@ -139,6 +307,8 @@ const GMAIL = summary({
 });
 
 const CHATGPT = summary({
+  owner_state: { ...HEALTHY_OWNER_STATE, owner_of_state: "owner", resolver: "needs_owner" },
+  rendered_verdict: verdict("Can't collect", [requiredAction("Review this data source")]),
   connection_health: health("needs_attention", {
     next_action: {
       action_target: "open_detail",
@@ -161,6 +331,8 @@ const CHATGPT = summary({
 });
 
 const CHASE = summary({
+  owner_state: { ...HEALTHY_OWNER_STATE, owner_of_state: "owner", resolver: "needs_owner" },
+  rendered_verdict: verdict("Can't collect", [requiredAction("Update saved sign-in details")]),
   connection_health: health("blocked", { reason_code: "reauthorize_required" }),
   connection_id: "conn_chase_01",
   connector_id: "chase",
@@ -183,6 +355,8 @@ const SPOTIFY_REVOKED = summary({
 });
 
 const AMAZON = summary({
+  owner_state: { ...HEALTHY_OWNER_STATE, resolver: "system_degraded" },
+  rendered_verdict: verdict("Missing optional data"),
   connection_health: health("degraded", { reason_code: "partial_coverage" }),
   connection_id: "conn_amazon_01",
   connector_id: "amazon",
@@ -194,48 +368,16 @@ const AMAZON = summary({
 
 export function buildSourcesDemoSummaries(scenario: SourcesDemoScenario): RefConnectorSummary[] {
   if (scenario === "healthy") {
-    return [GMAIL, summary({ connection_id: "conn_github_01", connector_id: "github", display_name: "GitHub" })];
+    return [GMAIL, summary({ connection_id: "conn_github_01", connector_id: "github", display_name: "GitHub" }), statusSample(18), statusSample(19)];
   }
   if (scenario === "attention") {
-    return [CHATGPT, CHASE, AMAZON];
+    return [CHATGPT, CHASE, AMAZON, ...([2, 4, 5, 6, 8, 9, 17] as const).map(statusSample)];
   }
-  // mixed — one of everything for a full screenshot.
-  return [GMAIL, CHATGPT, AMAZON, CHASE, SPOTIFY_REVOKED];
-}
-
-/** Build a seeded version-stats row so the demo can render a churn advisory. */
-function churnRow(overrides: Partial<RefRecordVersionStatsRow> = {}): RefRecordVersionStatsRow {
-  return {
-    connector_id: "ynab",
-    connector_instance_id: "cin_ynab_demo",
-    current_record_count: 4,
-    display_name: null,
-    last_current_at: "2026-06-12T08:00:00Z",
-    last_history_at: "2026-06-12T08:01:00Z",
-    projection_authority: "record_changes_ground_truth",
-    projection_dirty: false,
-    projection_missing: false,
-    record_history_count: 1095,
-    record_key_count: 4,
-    risk_level: "high",
-    risk_reasons: ["versions_per_record_high"],
-    stream: "budgets",
-    version_disposition: "lossless_compaction_candidate",
-    version_remediation: "none",
-    versions_per_record: 273.75,
-    ...overrides,
-  };
-}
-
-/**
- * Seeded version-churn rows for the Sources demo. The `healthy` scenario has no
- * churn (proves the advisory is absent when nothing crosses the threshold); the
- * other scenarios surface a single classified compaction candidate so the quiet
- * advisory renders for a screenshot. Fictional — demo only.
- */
-export function buildSourcesDemoChurnRows(scenario: SourcesDemoScenario): RefRecordVersionStatsRow[] {
-  if (scenario === "healthy") {
-    return [];
-  }
-  return [churnRow()];
+  // The three scenarios seed every status the list can display.
+  return [
+    GMAIL,
+    SIGNAL_RENAMED,
+    SPOTIFY_REVOKED,
+    ...([1, 3, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24] as const).map(statusSample),
+  ];
 }

@@ -1,349 +1,437 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * StandingOverview — the Ink Carbon "Standing" (Overview) presentation.
- *
- * Answers the owner's three questions calmly:
- *   1. What can act as you   — bearer (owner) tokens, "reads everything".
- *   2. Who can read parts of you — scoped grants, humanized.
- *   3. What's been read       — recent traces, humanized.
- * Plus "Anything wrong" — attention list, or an all-clear reassurance panel.
- *
- * Pure presentation: it takes a fully-derived `StandingData` (see
- * standing-view-model.ts) and renders kit primitives. No data fetching, no
- * tone logic here — that lives in the view-model so it stays testable.
- *
- * Design source: docs/design-system/ink-carbon/project/recordroom/rr-overview.jsx.
- */
-import { Endorse, Eyebrow, IcTimestamp, Monogram } from "@pdpp/brand-react";
+import { buttonVariants as primaryButtonVariants } from "@pdpp/brand-react";
+import { Text } from "@pdpp/brand-react";
 import "@pdpp/brand-react/components.css";
+import { buttonVariants } from "@pdpp/operator-ui/ui/button";
+import { cn } from "@pdpp/operator-ui/ui/utils";
+import Link from "next/link";
 import { ConnectorMark } from "../connector-mark.tsx";
-import type { StandingData } from "./standing-view-model.ts";
+import { SourceStatusText } from "../source-status-text.tsx";
+import { actionEmphasis } from "../../lib/action-emphasis.ts";
+import type { HomeData, HomeNeedRow, HomeSourceRow } from "./standing-view-model.ts";
 
-function HeroLine({ line }: { line: StandingData["hero"]["line"] }) {
+// One primary button for the same action everywhere: Apps uses the same maker.
+const FILLED_BUTTON = primaryButtonVariants({
+  className: "h-[30px] rounded-[6px] px-2.5 text-[13px]",
+  variant: "default",
+});
+
+// Lead decision (home-pictures 3) was: every button in the needs-you box is outlined.
+// Changed (closing judge, round 6): the needed action is the page's one filled button and
+// "Connect an app" goes quiet while something needs the person (lib/action-emphasis.ts). DIRECTION.md, Values: buttons use the stronger line.
+const OUTLINED_BUTTON = cn(
+  buttonVariants({ size: "default", variant: "outline" }),
+  "h-[30px] rounded-[6px] border-border-strong px-2.5 text-[13px] dark:border-border-strong"
+);
+
+const SECTION_LABEL = "text-[13px] font-medium text-muted-foreground";
+const SECOND_LINE = "text-[13px] leading-5 text-muted-foreground";
+const FAINT_TEXT = "text-[color:var(--foreground-faint)]";
+
+function LogoTile({ iconId, name, size = "small" }: { iconId: string; name: string; size?: "large" | "small" }) {
+  const dimensions = size === "large" ? "size-10" : "size-8";
+
   return (
-    <h1 className="rr-stand-hero__line">
-      {line.text}
-      {line.emphasis ? <em>{line.emphasis}</em> : null}
-      {line.tail ?? null}
-    </h1>
+    <span
+      aria-hidden="true"
+      className={`${dimensions} inline-flex shrink-0 items-center justify-center rounded-[26%] border border-border bg-muted`}
+    >
+      <ConnectorMark connectorId={iconId} name={name} />
+    </span>
   );
 }
 
-function Hero({ hero }: { hero: StandingData["hero"] }) {
+function DemoNotice({ notice }: { notice?: string }) {
+  return notice ? (
+    <Text as="p" className="mb-3 text-[13px] text-muted-foreground">
+      {notice}
+    </Text>
+  ) : null;
+}
+
+function PageWarning({ href }: { href: string }) {
   return (
-    <section className={["rr-stand-hero", `is-${hero.tone}`].join(" ")}>
-      <span className="rr-stand-hero__kicker">{hero.kicker}</span>
-      <HeroLine line={hero.line} />
-      <p className="rr-stand-hero__sub">{hero.sub}</p>
-      {hero.cta ? (
-        <div className="rr-stand-hero__foot">
-          <a className={hero.cta.human ? "pdpp-btn pdpp-btn--human" : "pdpp-btn pdpp-btn--sm"} href={hero.cta.href}>
-            {hero.cta.label}
-          </a>
-        </div>
-      ) : null}
-    </section>
+    <Text as="p" className="mb-5 text-[13px] text-muted-foreground">
+      DataConnect could not check the record totals, so they may be out of date.{" "}
+      <Link
+        className="text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        href={href}
+      >
+        Check server status
+      </Link>
+      .
+    </Text>
   );
 }
 
-function BearerBlock({
-  bearers,
-  bearersOverflow,
-  tokensHref,
-}: {
-  bearers: StandingData["bearers"];
-  bearersOverflow: number;
-  tokensHref: string;
-}) {
-  return (
-    <section className="rr-stand-block">
-      <div className="rr-stand-block__head">
-        <h2 className="rr-stand-block__title">What can act as you</h2>
-        <a className="rr-link" href={tokensHref}>
-          owner tokens →
-        </a>
-      </div>
-      {bearers.length > 0 ? (
-        <div className="rr-bearer">
-          {bearers.map((b) => {
-            // When the client carries a human name, `who` is that name and the
-            // raw machine `clientId` is shown beneath it as a secondary, muted,
-            // truncated mono line. When there is no name, `who === clientId`, so
-            // we show it once (the id IS the identity) and let it truncate.
-            const hasDistinctId = b.clientId !== b.who;
-            return (
-              <div className="rr-bearer__row" key={b.clientId}>
-                <span className="rr-bearer__id">
-                  <span className="rr-bearer__who" title={b.who}>
-                    {b.who}
-                  </span>
-                  {hasDistinctId ? (
-                    <span className="rr-bearer__client" title={b.clientId}>
-                      {b.clientId}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="rr-bearer__tag">reads everything</span>
-                {/* Same field, same primitive as the tokens page: the
-                    registration timestamp renders through IcTimestamp, so the
-                    two owner surfaces speak one timestamp voice. The label word
-                    degrades to "first issued" when the client has >1 token. */}
-                <span className="rr-bearer__how">
-                  {b.how} · {b.issuedLabel} <IcTimestamp value={b.issuedAt} />
-                </span>
-                {/* NAV, not a mutation. This opens the owner-tokens page; the
-                    actual revoke ceremony lives there. It previously read
-                    "revoke" in a `rr-rel__revoke` slot — destructive wording and
-                    destructive chrome on a link that only navigates. The name
-                    now matches what the click does. */}
-                <a className="rr-rel__revoke rr-rel__manage" href={b.revokeHref}>
-                  Manage →
-                </a>
-              </div>
-            );
-          })}
-          {bearersOverflow > 0 ? (
-            <a className="rr-link rr-bearer__more" href={tokensHref}>
-              +{bearersOverflow} more owner {bearersOverflow === 1 ? "credential" : "credentials"} →
-            </a>
-          ) : null}
-          <p className="rr-bearer__note">
-            An owner token reads everything — every source, every field, exactly what you see. Keep the list short;
-            revoke anytime.
-          </p>
-        </div>
-      ) : (
-        <p className="rr-stand-empty">
-          No token can act as you. Nothing has full access — only your signed-in owner session reads everything here.
-        </p>
-      )}
-    </section>
-  );
-}
-
-function RelationshipsBlock({
-  relationships,
-  grantsHref,
-  grantPackages,
-}: {
-  relationships: StandingData["relationships"];
-  grantsHref: string;
-  grantPackages: StandingData["grantPackages"];
-}) {
-  return (
-    <section className="rr-stand-block">
-      <div className="rr-stand-block__head">
-        <h2 className="rr-stand-block__title">Who can read parts of you</h2>
-        <span className="rr-stand-block__links">
-          {grantPackages ? (
-            <a className="rr-link" href={grantPackages.href}>
-              {grantPackages.count === 1 ? "grant package" : `${grantPackages.count} grant packages`} →
-            </a>
-          ) : null}
-          <a className="rr-link" href={grantsHref}>
-            all grants →
-          </a>
-        </span>
-      </div>
-      {relationships.length > 0 ? (
-        <div className="rr-rel-list">
-          {relationships.map((r) => (
-            <div className="rr-rel" key={r.clientId}>
-              <span className="rr-rel__who">
-                <Monogram name={r.who} />
-                <span>
-                  <span title={r.who}>{r.who}</span>
-                  {r.showClientId ? (
-                    <span className="rr-bearer__client" title={r.clientId}>
-                      {r.clientId}
-                    </span>
-                  ) : null}
-                </span>
-              </span>
-              <span className="rr-rel__reads">
-                {r.reads} · <Endorse status={r.status} />
-              </span>
-              <span className="rr-rel__meta">{r.terms}</span>
-              {/* NAV, not a mutation: opens the grant (or the filtered grants
-                  list when the group has no single subject). The label is
-                  supplied by the view-model and already carries the arrow. */}
-              <a className="rr-rel__revoke rr-rel__manage" href={r.actionHref}>
-                {r.actionLabel}
-              </a>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="rr-stand-empty">No grants are active. No connected app can read this instance yet.</p>
-      )}
-    </section>
-  );
-}
-
-function LatelyBlock({ lately, tracesHref }: { lately: StandingData["lately"]; tracesHref: string }) {
-  return (
-    <section className="rr-stand-block">
-      <div className="rr-stand-block__head">
-        <h2 className="rr-stand-block__title">What's been read</h2>
-        {/* Honest CTA: the overview shows a grouped preview of recent reads and
-            the link lands on the Audit log (itself grouped, with a
-            per-event drill one click further). "audit log →" names the
-            destination; the old "every read →" implied this preview was the
-            exhaustive log, which it is not. */}
-        <a className="rr-link" href={tracesHref}>
-          audit log →
-        </a>
-      </div>
-      {lately.length > 0 ? (
-        <div className="rr-lately">
-          {lately.map((e) => (
-            <div className={["rr-lately__row", e.deny ? "is-deny" : null].filter(Boolean).join(" ")} key={e.id}>
-              <span className="rr-lately__text">
-                <b>{e.text.who}</b> {e.text.rest}
-              </span>
-              <span className="rr-lately__when">{e.when}</span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="rr-stand-empty">Nothing has been read yet. When an app reads a record, it shows up here.</p>
-      )}
-    </section>
-  );
-}
-
-/**
- * Source attention is projected once by the shared source-work model. The
- * overview shows each row's owner-safe label and next step, while Syncs stays
- * the deeper recovery surface.
- */
-function AttentionBlock({
-  sections,
-  fleetHealth,
-  healthySourceCount,
-  syncsHref,
-}: {
-  sections: StandingData["sourceWorkSections"];
-  fleetHealth: StandingData["fleetHealth"];
-  healthySourceCount: StandingData["healthySourceCount"];
-  syncsHref: string;
-}) {
-  const rowCount = sections.reduce((sum, section) => sum + section.rows.length, 0);
-  return (
-    <section className="rr-stand-block">
-      <h2 className="rr-stand-block__title">Source attention</h2>
-      {healthySourceCount !== null && healthySourceCount > 0 ? (
-        <p className="rr-stand-empty">
-          {healthySourceCount} {healthySourceCount === 1 ? "source is" : "sources are"} healthy and need no action.
-        </p>
-      ) : null}
-      {rowCount > 0 ? (
-        <div className="rr-attn" data-row-count={rowCount}>
-          {sections.map((section) => (
-            <div className="rr-attn__section" key={section.id}>
-              <div className={["rr-attn__section-summary", `is-${section.tone}`].join(" ")}>
-                <span className="rr-attn__section-title">{section.title}</span>
-                <span className="rr-attn__section-count">{section.countLabel}</span>
-              </div>
-              {section.rows.map((row) => (
-                <div className={["rr-attn__row", `is-${section.tone}`].join(" ")} key={row.id}>
-                  <a className="rr-attn__what" href={row.href}>
-                    {row.connectorId ? (
-                      <ConnectorMark spacing="after" connectorId={row.connectorId} name={row.what} />
-                    ) : null}
-                    {row.what}
-                  </a>
-                  <span className="rr-attn__why">{row.why}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-          <a className="rr-link rr-attn__syncs-link" href={syncsHref}>
-            Review in Syncs →
-          </a>
-        </div>
-      ) : (
-        <div className="rr-allclear">
-          <span className="rr-allclear__text">
-            {fleetHealth?.state === "healthy"
-              ? "All assessed sources are healthy."
-              : "No source rows need review here. Source health is still being checked."}
-          </span>
-        </div>
-      )}
-    </section>
-  );
-}
-
-const NOTIFICATIONS_SETUP_COPY: Readonly<Record<StandingData["notificationsSetup"], string>> = {
-  configured:
-    "At least one device is enrolled for alerts on source reconnects, syncs waiting on you, and other owner-action events.",
-  not_configured:
-    "No device is enrolled yet. Enable browser or installed-app alerts for source reconnects, syncs waiting on you, and other owner-action events.",
-  unknown: "Could not check whether any device is enrolled for alerts right now.",
-};
-
-function NotificationsBlock({ href, setup }: { href: string; setup: StandingData["notificationsSetup"] }) {
-  return (
-    <section className="rr-stand-block">
-      <div className="rr-stand-block__head">
-        <h2 className="rr-stand-block__title">Notifications</h2>
-        <a className="rr-link" href={href}>
-          {setup === "configured" ? "manage →" : "setup →"}
-        </a>
-      </div>
-      <p className="rr-stand-empty">{NOTIFICATIONS_SETUP_COPY[setup]}</p>
-    </section>
-  );
-}
-
-export interface StandingOverviewProps {
-  data: StandingData;
-  grantsHref: string;
-  /** Optional banner above the view (e.g. seeded-demo notice). */
-  notice?: string;
-  notificationsHref: string;
-  /** Where "Review in Syncs →" points — the one place attention items are listed in full. */
-  syncsHref: string;
-  tokensHref: string;
-  tracesHref: string;
-}
-
-export function StandingOverview({
+function PageHeading({
   data,
-  grantsHref,
-  notificationsHref,
-  syncsHref,
-  tokensHref,
-  tracesHref,
   notice,
-}: StandingOverviewProps) {
+  showSubtitle = true,
+}: {
+  data: HomeData;
+  notice?: string;
+  showSubtitle?: boolean;
+}) {
+  // Lead decision (home-pictures 8): the title starts where the /sources title
+  // starts; the demo notice sits under the title there too.
   return (
-    <div className="rr-stand">
+    <header className="mb-8">
+      {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
+      <Text
+        as="h1"
+        className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]"
+      >
+        {data.title}
+      </Text>
+      {showSubtitle && data.subtitle ? (
+        <Text as="p" className="mt-2 text-[13px] text-muted-foreground tabular-nums">
+          {data.subtitle}
+        </Text>
+      ) : null}
       {notice ? (
-        <div style={{ marginBottom: 4 }}>
-          <Eyebrow>{notice}</Eyebrow>
+        <Text as="p" className="mt-3 text-[13px] text-muted-foreground">
+          {notice}
+        </Text>
+      ) : null}
+      {data.noSources ? (
+        <Link className={`${FILLED_BUTTON} mt-4`} href={data.addSourceHref}>
+          Add a data source
+        </Link>
+      ) : null}
+      {data.summaryError ? <ReadFailure href={data.reloadHref} /> : null}
+    </header>
+  );
+}
+
+function ReadFailure({ href }: { href: string }) {
+  return (
+    <Text as="p" className={SECOND_LINE}>
+      This could not be loaded.{" "}
+      <Link
+        className="text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        href={href}
+      >
+        Try again
+      </Link>
+    </Text>
+  );
+}
+
+function NeedLines({ need }: { need: HomeNeedRow }) {
+  if (need.kind === "approval") {
+    return (
+      <>
+        <Text as="p" className="text-[15px] text-foreground leading-5">
+          <strong className="font-medium">{need.name}</strong> is asking to read your data
+        </Text>
+        {need.detail ? (
+          <Text as="p" className={`${SECOND_LINE} mt-0.5 tabular-nums`}>
+            {need.detail}
+          </Text>
+        ) : null}
+      </>
+    );
+  }
+
+  // Lead decision (home-pictures 1): two lines, the name, then the status words
+  // and, only when there is one, the sync time in faint text.
+  return (
+    <>
+      <Text as="p" className="truncate font-medium text-[15px] text-foreground leading-5">
+        {need.name}
+      </Text>
+      {need.status && need.source ? (
+        <Text as="p" className="mt-0.5 text-[13px] leading-5">
+          <span data-source-id={need.source.connection_id} data-status-row={need.status.row}>
+            <SourceStatusText status={need.status} />
+          </span>
+          {need.syncNote ? (
+            <span className={`${FAINT_TEXT} tabular-nums`}>
+              <span className="hidden min-[560px]:inline"> · </span>
+              <span className="block whitespace-nowrap min-[560px]:inline">{need.syncNote}</span>
+            </span>
+          ) : null}
+        </Text>
+      ) : null}
+      {need.nextStep ? (
+        <Text as="p" className={`${SECOND_LINE} mt-0.5`}>
+          {need.nextStep}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
+function NeedRow({ need }: { need: HomeNeedRow }) {
+  // Lead decision (home-pictures 4): under 560px the button sits beneath the
+  // text, aligned with it, instead of squeezing the text into a narrow column.
+  return (
+    <div className="grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-3 py-3 min-[560px]:grid-cols-[2rem_minmax(0,1fr)_auto]">
+      <LogoTile iconId={need.iconId} name={need.name} />
+      <div className="min-w-0">
+        <NeedLines need={need} />
+      </div>
+      {need.actionLabel ? (
+        <Link
+          className={`${FILLED_BUTTON} col-start-2 justify-self-start min-[560px]:col-start-3 min-[560px]:justify-self-end`}
+          href={need.actionHref}
+        >
+          {need.actionLabel}
+        </Link>
+      ) : null}
+    </div>
+  );
+}
+
+function NeedsBlock({ data }: { data: HomeData }) {
+  if (!data.needsVisible) {
+    return null;
+  }
+
+  return (
+    <section aria-labelledby="home-needs-heading" className="mb-8">
+      <Text as="h2" className={`${SECTION_LABEL} mb-2`} id="home-needs-heading">
+        Needs you
+      </Text>
+      <div className="overflow-hidden rounded-md border border-border-strong">
+        {data.needs.length > 0 ? (
+          <div className="divide-y divide-border/70">
+            {data.needs.map((need) => (
+              <NeedRow key={need.id} need={need} />
+            ))}
+          </div>
+        ) : null}
+        {data.needsError ? (
+          <div className={data.needs.length > 0 ? "border-border/70 border-t px-3 py-3" : "px-3 py-3"}>
+            <ReadFailure href={data.reloadHref} />
+          </div>
+        ) : null}
+        {data.needsMore ? (
+          <div className={data.needs.length > 0 ? "border-border/70 border-t px-3 py-3" : "px-3 py-3"}>
+            <Link
+              className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={data.allAppsHref}
+            >
+              All apps
+            </Link>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function DataSourceRow({ source }: { source: HomeSourceRow }) {
+  return (
+    <Link
+      className="flex min-w-0 items-center justify-between gap-3 border-border/70 border-b py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      href={source.href}
+    >
+      <span className="flex min-w-0 items-center gap-3">
+        <LogoTile iconId={source.source.connector_id} name={source.name} />
+        <span className="min-w-0">
+          <Text as="span" className="block truncate font-medium text-[15px] text-foreground">
+            {source.name}
+          </Text>
+          <span
+            className="block text-[13px] leading-5 min-[560px]:hidden"
+            data-source-id={source.source.connection_id}
+            data-status-row={source.status.row}
+          >
+            <SourceStatusText status={source.status} />
+          </span>
+        </span>
+      </span>
+      <span
+        className="hidden min-[560px]:inline"
+        data-source-id={source.source.connection_id}
+        data-status-row={source.status.row}
+      >
+        <SourceStatusText className="whitespace-nowrap" status={source.status} />
+      </span>
+    </Link>
+  );
+}
+
+function DataSourcesBlock({ data }: { data: HomeData }) {
+  return (
+    <section aria-labelledby="home-sources-heading">
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+        <Text as="h2" className={SECTION_LABEL} id="home-sources-heading">
+          Data sources
+        </Text>
+        <Link
+          className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          href={data.addSourceHref}
+        >
+          Add a data source
+        </Link>
+      </div>
+
+      {data.dataSourceError ? <ReadFailure href={data.reloadHref} /> : null}
+      {!data.dataSourceError && data.dataSources.length > 0 ? (
+        <div>
+          {data.dataSources.map((source) => (
+            <DataSourceRow key={source.id} source={source} />
+          ))}
         </div>
       ) : null}
-      <Hero hero={data.hero} />
-      <BearerBlock bearers={data.bearers} bearersOverflow={data.bearersOverflow} tokensHref={tokensHref} />
-      <div className="rr-stand-grid">
-        <RelationshipsBlock
-          grantPackages={data.grantPackages}
-          grantsHref={grantsHref}
-          relationships={data.relationships}
-        />
-        <LatelyBlock lately={data.lately} tracesHref={tracesHref} />
+      {data.sourcesEmptyLine ? (
+        <Text as="p" className={SECOND_LINE}>
+          {data.sourcesEmptyLine}
+        </Text>
+      ) : null}
+      {data.sourceTotalLink ? (
+        <div className="border-border/70 border-t py-3">
+          <Link
+            className="text-[13px] text-primary tabular-nums underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            href={data.sourcesHref}
+          >
+            {data.sourceTotalLink}
+          </Link>
+        </div>
+      ) : data.showMoreSources ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-border/70 border-t py-3">
+          <Text as="p" className={`${SECOND_LINE} tabular-nums`}>
+            Showing {data.shownSourceCount.toLocaleString("en-US")} of your data sources.
+          </Text>
+          <Link
+            className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            href={data.sourcesHref}
+          >
+            All data sources
+          </Link>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AppRow({ app }: { app: HomeData["apps"][number] }) {
+  return (
+    <Link
+      className="block border-border/70 border-b py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      href={app.href}
+    >
+      <Text as="span" className="text-[15px]">
+        {app.name}
+      </Text>
+      <Text as="span" className={SECOND_LINE}>
+        {" "}
+        · {app.lastRead ? <>Last read {app.lastRead}</> : "Has not read anything yet"}
+      </Text>
+    </Link>
+  );
+}
+
+function AppsBlock({ data }: { data: HomeData }) {
+  return (
+    <section aria-labelledby="home-apps-heading">
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+        <Text as="h2" className={SECTION_LABEL} id="home-apps-heading">
+          {data.appError || data.appsEmpty ? "Apps" : `${data.apps.length} ${data.apps.length === 1 ? "app" : "apps"} can read your data`}
+        </Text>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {data.allAppsLink ? (
+            <Link
+              className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={data.allAppsHref}
+            >
+              All apps
+            </Link>
+          ) : null}
+          {data.allTokensLink ? (
+            <Link
+              className="text-[13px] text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              href={data.tokensHref}
+            >
+              All access tokens
+            </Link>
+          ) : null}
+          <Link className={actionEmphasis(data.needsVisible).optional === "quiet" ? OUTLINED_BUTTON : FILLED_BUTTON} href={data.appsHref}>
+            Connect an app
+          </Link>
+        </div>
       </div>
-      <AttentionBlock
-        fleetHealth={data.fleetHealth}
-        healthySourceCount={data.healthySourceCount}
-        sections={data.sourceWorkSections}
-        syncsHref={syncsHref}
-      />
-      <NotificationsBlock href={notificationsHref} setup={data.notificationsSetup} />
+
+      {data.apps.slice(0, 3).map((app) => (
+        <AppRow app={app} key={app.id} />
+      ))}
+      {data.apps.length > 3 ? (
+        <Link className={`${SECOND_LINE} block py-3`} href={data.allAppsHref}>
+          and {data.apps.length - 3} more
+        </Link>
+      ) : null}
+      {data.activeTokenCount > 0 ? (
+        // Lead decision (home-pictures 7): a quiet line under the apps, not set like an app name.
+        <Link
+          className={`${SECOND_LINE} block py-3 tabular-nums underline underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+          href={data.tokensHref}
+        >
+          {data.activeTokenCount.toLocaleString("en-US")}{" "}
+          {data.activeTokenCount === 1 ? "sign-in key can" : "sign-in keys can"} read everything
+        </Link>
+      ) : null}
+      {data.appsEmpty ? (
+        <Text as="p" className={`${SECOND_LINE} py-3`}>
+          No app can read your data yet. ChatGPT, Claude and other assistants read only what you allow.
+        </Text>
+      ) : null}
+      {data.appError ? <ReadFailure href={data.reloadHref} /> : null}
+    </section>
+  );
+}
+
+function FirstRun({ data, notice }: { data: HomeData; notice?: string }) {
+  return (
+    <div className="mx-auto max-w-2xl pb-8">
+      <DemoNotice notice={notice} />
+      {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
+      {data.offeredSources.length > 0 ? (
+        <div aria-hidden="true" className="mb-7 flex items-center gap-3">
+          {data.offeredSources.map((entry) => (
+            <LogoTile iconId={entry.iconId} key={entry.iconId} name={entry.name} size="large" />
+          ))}
+        </div>
+      ) : null}
+      <Text
+        as="h1"
+        className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]"
+      >
+        {data.title}
+      </Text>
+      <Text as="p" className="mt-3 max-w-xl text-[16px] text-foreground leading-6">
+        DataConnect keeps a copy of your own data on a computer you choose and shows how current it is. Later you choose
+        which apps and assistants may read it.
+      </Text>
+      <Link className={`${FILLED_BUTTON} mt-6`} href={data.addSourceHref}>
+        Add a data source
+      </Link>
+      {data.summaryError ? <ReadFailure href={data.reloadHref} /> : null}
+    </div>
+  );
+}
+
+export function StandingOverview({ data, notice }: { data: HomeData; notice?: string }) {
+  if (data.firstRun) {
+    return <FirstRun data={data} notice={notice} />;
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl pb-8">
+      <PageHeading data={data} notice={notice} />
+      <div className="grid gap-10 min-[860px]:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="min-w-0">
+          <NeedsBlock data={data} />
+          <DataSourcesBlock data={data} />
+        </div>
+        <div className="min-w-0">
+          <AppsBlock data={data} />
+        </div>
+      </div>
     </div>
   );
 }

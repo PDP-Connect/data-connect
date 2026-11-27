@@ -1,3 +1,4 @@
+import { formatConnectionDisplayName } from "@pdpp/display";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -390,7 +391,7 @@ async function projectEscalation(
     if (summary) {
       return {
         connectionUrl: `/sources/${encodeURIComponent(summary.connection_id || routeId)}`,
-        connectorDisplayName: summary.display_name || summary.connector_display_name || connectorId,
+        connectorDisplayName: formatConnectionDisplayName(summary.display_name, summary.connector_display_name, connectorId),
         renderedVerdict:
           summary.rendered_verdict && typeof summary.rendered_verdict === "object" ? summary.rendered_verdict : null,
       };
@@ -861,10 +862,13 @@ export function createReferenceSchedulerManager({
       },
       onInteraction: async (interaction: unknown) => {
         const interactionRecord: Interaction = isRecord(interaction) ? interaction : {};
-        const connectorDisplayName = interactionDisplayName(interactionRecord);
+        let connectorDisplayName = interactionDisplayName(interactionRecord);
         const runId = typeof interactionRecord.run_id === "string" ? interactionRecord.run_id : null;
         if (runId) {
           try {
+            const routeId = typeof interactionRecord.connector_instance_id === "string" ? interactionRecord.connector_instance_id : typeof interactionRecord.connector_id === "string" ? interactionRecord.connector_id : null;
+            const source = routeId ? await getConnectorSummaryForRoute(routeId, controller as unknown as Parameters<typeof getConnectorSummaryForRoute>[1]).catch(() => null) : null;
+            connectorDisplayName = formatConnectionDisplayName(source?.display_name, source?.connector_display_name || connectorDisplayName, typeof interactionRecord.connector_id === "string" ? interactionRecord.connector_id : null);
             await fanoutPendingInteractionWebPush({
               config: webPushConfig,
               connectorDisplayName,

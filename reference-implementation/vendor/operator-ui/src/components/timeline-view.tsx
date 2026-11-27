@@ -131,10 +131,10 @@ function EventRow({ event, index }: { event: SpineEvent; index: number }) {
     >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex flex-wrap items-baseline gap-2">
-          <span className="pdpp-caption text-muted-foreground/70 tabular-nums">
+          <span className="pdpp-caption text-muted-foreground tabular-nums">
             {String(index + 1).padStart(2, "0")}
           </span>
-          <code className="pdpp-caption font-medium font-mono" title={event.event_type}>
+          <code className="pdpp-caption font-medium font-sans" title={event.event_type}>
             {humanizeFieldLabel(event.event_type)}
           </code>
           <span
@@ -152,15 +152,15 @@ function EventRow({ event, index }: { event: SpineEvent; index: number }) {
         </span>
       </div>
       <div className="pdpp-caption mt-1 text-muted-foreground">
-        <span className="font-mono">
+        <span className="font-sans tabular-nums">
           {event.actor_type}/{event.actor_id}
         </span>
         {event.stream_id ? ` · stream ${humanizeFieldLabel(event.stream_id)}` : ""}
         {event.request_id ? ` · req ${event.request_id}` : ""}
       </div>
-      <details className="mt-1">
+      <details className="mt-1 min-w-0">
         <summary className="pdpp-caption cursor-pointer text-muted-foreground hover:text-foreground">data</summary>
-        <pre className="pdpp-caption mt-1 overflow-x-auto rounded border border-border/70 bg-background p-2 font-mono">
+        <pre className="pdpp-caption mt-1 max-w-[calc(100vw-3rem)] overflow-x-auto rounded border border-border/70 bg-background p-2 font-mono">
           {/** biome-ignore lint/suspicious/noUnnecessaryConditions: The declared public input remains defensive at this boundary; removing the guard would reduce runtime tolerance. */}
           {JSON.stringify(redactSecrets(event.data || {}), null, 2)}
         </pre>
@@ -229,10 +229,10 @@ function ProgressGroupRow({ events, startIndex }: { events: SpineEvent[]; startI
     <li className="rounded-md border border-border/70 border-l-4 border-l-blue-500/70 bg-muted/15 px-3 py-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex flex-wrap items-baseline gap-2">
-          <span className="pdpp-caption text-muted-foreground/70 tabular-nums">
+          <span className="pdpp-caption text-muted-foreground tabular-nums">
             {String(startIndex + 1).padStart(2, "0")}–{String(endIndex + 1).padStart(2, "0")}
           </span>
-          <code className="pdpp-caption font-medium font-mono" title="run.progress_reported">
+          <code className="pdpp-caption font-medium font-sans" title="run.progress_reported">
             {humanizeFieldLabel("run.progress_reported")}
           </code>
           <span className="pdpp-eyebrow rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground">
@@ -258,7 +258,7 @@ function ProgressGroupRow({ events, startIndex }: { events: SpineEvent[]; startI
         <dl className="pdpp-caption mt-2 grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5">
           {streams.map((s) => (
             <Fragment key={s.stream}>
-              <dt className="font-mono text-muted-foreground" title={s.stream}>
+              <dt className="font-sans text-muted-foreground" title={s.stream}>
                 {humanizeFieldLabel(s.stream)}
               </dt>
               <dd className="truncate text-muted-foreground">{s.latestMessage ?? "—"}</dd>

@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { Diagnostics } from "./diagnostics.tsx"
 import { useState } from "react"
 import { revealOwnerCredentialAction } from "./owner-credential-actions.ts"
 
@@ -23,8 +24,10 @@ import { revealOwnerCredentialAction } from "./owner-credential-actions.ts"
  */
 export function OwnerCredentialSetting({
   reveal: suppliedReveal,
+  practice = false,
 }: {
   reveal?: typeof revealOwnerCredentialAction
+  practice?: boolean
 } = {}) {
   const reveal = suppliedReveal ?? revealOwnerCredentialAction
   const [password, setPassword] = useState<string | null>(null)
@@ -34,6 +37,7 @@ export function OwnerCredentialSetting({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
 
   const runReveal = () => {
+    if (practice) { setError("This is a practice state. No password was shown."); return }
     setBusy(true)
     setError(null)
     setLinuxPolkitUnverified(false)
@@ -69,27 +73,29 @@ export function OwnerCredentialSetting({
       </p>
 
       {error ? (
+        <>
         <p
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           role="alert"
         >
-          {error}
+          Could not show the password. Try again.
         </p>
+        <Diagnostics><pre>{error}</pre></Diagnostics></>
       ) : null}
 
       {password ? (
         <div className="grid gap-2">
           {linuxPolkitUnverified ? (
             <p className="pdpp-caption text-muted-foreground" role="status">
-              This Linux build allows local-only reveal without an OS prompt until polkit is verified.
+              This build shows the password without asking you to unlock this computer.
             </p>
           ) : null}
-          <pre className="select-all overflow-x-auto rounded-md border border-border/70 bg-muted/10 px-3 py-2 font-mono text-sm text-foreground">
+          <pre className="select-all break-all rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-[15px] text-foreground">
             {password}
           </pre>
           <div className="flex flex-wrap items-center gap-2">
             <button
-              className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+              className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={copyPassword}
               type="button"
             >
@@ -105,12 +111,12 @@ export function OwnerCredentialSetting({
       ) : null}
 
       <button
-        className="justify-self-start rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
+        className="min-h-11 justify-self-start rounded-[6px] border border-border px-3 text-[13px] hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         disabled={busy}
         onClick={runReveal}
         type="button"
       >
-        {busy ? "Revealing…" : password ? "Reveal again" : "Reveal password"}
+        {busy ? "Revealing…" : password ? "Reveal again" : "Show password"}
       </button>
     </div>
   )

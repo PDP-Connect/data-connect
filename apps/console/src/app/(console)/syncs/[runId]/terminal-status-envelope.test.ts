@@ -35,7 +35,7 @@ import {
 } from "./run-terminal-status.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}technical-page.tsx`;
 const REF_CLIENT_FILE = `${HERE}../../lib/ref-client.ts`;
 
 // ── Behavioural: the envelope is the source of truth for liveness ─────────────

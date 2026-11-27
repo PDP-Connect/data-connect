@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import { escapeHtml, renderActionRow, renderHostedDocument, renderPageIntro } from "./hosted-ui.ts";
 import { createOwnerLoginRateLimiter, type OwnerLoginRateLimitRequest } from "./owner-login-rate-limit.ts";
-import { isBlockedOwnerPassword, OWNER_PASSWORD_TOO_COMMON_MESSAGE } from "./owner-password-blocklist.ts";
+import { isBlockedOwnerPassword } from "./owner-password-blocklist.ts";
 import { createOwnerPasswordVerifier } from "./owner-password-verifier.ts";
 import type { OwnerPasswordVerifierStore } from "./stores/owner-password-verifier-store.ts";
 
@@ -31,6 +32,68 @@ function matchesToken(submitted: string, expected: string): boolean {
   return timingSafeEqual(submittedDigest, expectedDigest);
 }
 
+function renderSetupPage(
+  {
+    error,
+    errorField,
+    success = false,
+    token = "",
+  }: { error?: string; errorField?: "token" | "password"; success?: boolean; token?: string } = {}
+): string {
+  const fieldError = (field: "token" | "password") =>
+    error && errorField === field ? `<div class="hosted-ui-error" role="alert">${escapeHtml(error)}</div>` : "";
+  const body = success
+    ? [
+        renderPageIntro({
+          lede: "Your password is set. You can sign in now.",
+          title: "Set up DataConnect",
+        }),
+        renderActionRow([{ href: "/owner/login", label: "Sign in", variant: "primary" }]),
+      ].join("\n")
+    : [
+        renderPageIntro({
+          lede: "Use your setup code to choose a password.",
+          title: "Set up DataConnect",
+        }),
+        `<form class="hosted-ui-surface" method="post" aria-label="Set up DataConnect">
+  <div class="hosted-ui-field">
+    <label for="setup-token">Setup code</label>
+    <input id="setup-token" name="token" value="${escapeHtml(token)}" required autocomplete="off" />
+    ${fieldError("token")}
+  </div>
+  <div class="hosted-ui-field">
+    <label for="setup-password">Password (15 characters minimum)</label>
+    <input id="setup-password" type="password" name="password" required minlength="15"
+      autocomplete="new-password" />
+    ${fieldError("password")}
+  </div>
+  ${error && !errorField ? `<div class="hosted-ui-error" role="alert">${escapeHtml(error)}</div>` : ""}
+  <div class="hosted-ui-actions">
+    <button type="submit" class="hosted-ui-button" data-variant="primary">Set up DataConnect</button>
+  </div>
+</form>`,
+      ].join("\n");
+
+  return renderHostedDocument({
+    body,
+    consoleStyle: true,
+    providerName: "DataConnect",
+    title: "Set up DataConnect",
+  });
+}
+
+function renderSetupUnavailablePage(): string {
+  return renderHostedDocument({
+    body: renderPageIntro({
+      lede: "This setup page is no longer available.",
+      title: "Set up DataConnect",
+    }),
+    consoleStyle: true,
+    providerName: "DataConnect",
+    title: "Set up DataConnect",
+  });
+}
+
 /** Mount the first-run claim page. The store's insert-if-missing is the durable claim race gate. */
 export function mountOwnerSetupRoutes(
   app: SetupApp,
@@ -51,38 +114,39 @@ export function mountOwnerSetupRoutes(
 
   app.get("/setup", (_req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res
-      .status(200)
-      .send(
-        '<!doctype html><html><meta charset="utf-8"><title>Set owner password</title><h1>Set owner password</h1><form method="post"><label>Setup token <input name="token" required autocomplete="off"></label><label>New password (15 characters minimum) <input type="password" name="password" required minlength="15" autocomplete="new-password"></label><button type="submit">Claim this install</button></form></html>'
-      );
+    res.status(200).send(renderSetupPage());
   });
 
   app.post("/setup", async (req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    const submittedToken = typeof req.body?.token === "string" ? req.body.token : "";
     const retryAfter = attempts.check(req);
     if (retryAfter !== null) {
       res.setHeader("Retry-After", String(retryAfter));
-      res.status(429).send("Too many setup attempts.");
+      res.status(429).send(
+        renderSetupPage({ error: "Too many attempts. Try again in a little while.", errorField: "password", token: submittedToken })
+      );
       return;
     }
     if (tokenConsumed || (await passwordStore.read())) {
-      res.status(403).send("Setup is no longer available.");
+      res.status(403).send(renderSetupUnavailablePage());
       return;
     }
 
-    const submittedToken = typeof req.body?.token === "string" ? req.body.token : "";
     const password = typeof req.body?.password === "string" ? req.body.password : "";
     if (!matchesToken(submittedToken, token)) {
-      res.status(403).send("Invalid setup token.");
+      res.status(403).send(renderSetupPage({ error: "That setup code did not work.", errorField: "token", token: submittedToken }));
       return;
     }
     if (Array.from(password).length < 15) {
-      res.status(400).send("Password must contain at least 15 characters.");
+      res
+        .status(400)
+        .send(renderSetupPage({ error: "Use a password with at least 15 characters.", errorField: "password", token: submittedToken }));
       return;
     }
 
     if (isBlockedOwnerPassword(password)) {
-      res.status(400).send(OWNER_PASSWORD_TOO_COMMON_MESSAGE);
+      res.status(400).send(renderSetupPage({ error: "Choose a less common password.", errorField: "password", token: submittedToken }));
       return;
     }
 
@@ -90,15 +154,17 @@ export function mountOwnerSetupRoutes(
     try {
       const verifier = await createOwnerPasswordVerifier(password);
       if (!(await passwordStore.writeIfMissing(verifier))) {
-        res.status(403).send("Setup is no longer available.");
+        res.status(403).send(renderSetupUnavailablePage());
         return;
       }
       ownerAuth.setPasswordVerifier(verifier);
       attempts.recordSuccess(req);
-      res.status(201).send("Owner password set. You can now sign in.");
+      res.status(201).send(renderSetupPage({ success: true }));
     } catch {
       tokenConsumed = false;
-      res.status(500).send("Unable to save the owner password.");
+      res
+        .status(500)
+        .send(renderSetupPage({ error: "We could not save your password. Try again.", errorField: "password", token: submittedToken }));
     }
   });
 }

@@ -30,7 +30,8 @@ import {
 const ui: ConsentUiRenderer = {
   escapeHtml,
   renderActionRow: (actions) => actions.map((a) => `<button>${escapeHtml(a.label)}</button>`).join("\n"),
-  renderHostedDocument: ({ body, title }) => `<!doctype html><html><title>${escapeHtml(title)}</title><body>${body}</body></html>`,
+  renderHostedDocument: ({ body, providerName, title }) =>
+    `<!doctype html><html><title>${escapeHtml(title)}</title><body><header>${escapeHtml(providerName)}</header>${body}</body></html>`,
   renderKeyValueList,
   renderPageIntro: ({ title, lede }) => `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(lede ?? "")}</p>`,
   renderResultState: ({ title, body }) => `<div>${escapeHtml(title)}${escapeHtml(body)}</div>`,
@@ -59,10 +60,11 @@ test("each known failure renders owner copy, not the protocol string", () => {
   // Apostrophes arrive HTML-escaped, so match the escaped form the owner's
   // browser actually receives rather than the source string.
   const cases: Array<[string, RegExp]> = [
-    ["stale_review", /This request changed since you loaded the page\. Review and approve again\./],
-    ["expired_link", /This approval link expired or was already used\. Start the request again/],
-    ["unknown_client", /Your server doesn&#39;t recognize this app\./],
-    ["server_error", /Something went wrong on your server\. Nothing was shared\./],
+    // server-consent.md #1: stopped pages state what happened and where to go next.
+    ["stale_review", /This request changed while you were reviewing it\./],
+    ["expired_link", /This link expired or was already used\./],
+    ["unknown_client", /Your server does not recognize this app, so nothing was shared\./],
+    ["server_error", /Your server could not finish this\./],
   ];
   for (const [code, expected] of cases) {
     assert.match(render(code), expected, `${code} must render its owner-facing sentence`);
@@ -74,7 +76,8 @@ test("an unmapped failure still renders a page, never a raw protocol string", ()
   // fall through to a blank page or to the developer's own error text.
   const html = render("invalid_request", "code_challenge_method must be S256");
   assert.match(html, /<h1[^>]*>/, "an unmapped failure still renders a real page");
-  assert.match(html, /Something went wrong on your server\. Nothing was shared\./, "it falls back to the safe sentence");
+  // server-consent.md #1: fallback pages use the same plain, terminal wording.
+  assert.match(html, /Your server could not finish this\./, "it falls back to the safe sentence");
   assert.equal(
     html.includes("code_challenge_method"),
     false,
@@ -107,7 +110,8 @@ test("a stale review offers a way back, not a dead end", () => {
   // The empty picker used to be a hard dead end. An error page must not
   // become the new one.
   const html = render("stale_review");
-  assert.match(html, /Review and approve again/, "the owner is told what to do next");
+  // server-consent.md #1: result pages give the same next step as the console.
+  assert.match(html, /Go back to the app and start again\./, "the owner is told what to do next");
 });
 
 // ── The denial page tells the owner what happened to their data ──────────────
@@ -122,7 +126,8 @@ test("refusal copy states the consequence, and does not say the same thing three
     /didn&apos;t get any of your data|didn't get any of your data/,
     "the body names the consequence for the owner's data"
   );
-  assert.match(HOSTED_DENIAL_COPY.body, /close this tab/, "the owner is told the flow is over");
+  // server-consent.md #1: denial keeps the shared next-step sentence.
+  assert.match(HOSTED_DENIAL_COPY.body, /close this page/, "the owner is told the flow is over");
   assert.equal(
     /pending|cleared|rejected/i.test(HOSTED_DENIAL_COPY.body),
     false,

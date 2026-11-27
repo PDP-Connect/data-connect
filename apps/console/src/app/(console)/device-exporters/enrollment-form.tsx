@@ -3,7 +3,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { SupportCopy } from "../components/support-copy.tsx";
 import { IcButton, IcInput } from "@pdpp/brand-react";
+import { formatRelative } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { Callout, ToolbarField } from "@pdpp/operator-ui/components/primitives";
 import { useActionState, useState } from "react";
@@ -12,6 +14,11 @@ import { createEnrollmentCodeAction } from "./actions.ts";
 
 const MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS = ["imessage", "apple-photos"] as const;
 const EXTERNAL_TOOL_LOCAL_COLLECTOR_CONNECTORS = ["google-messages", "signal"] as const;
+
+function relativeExpiry(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
+}
 
 function isMacosOnlyLocalCollectorConnector(connectorId: string): boolean {
   return (MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS as readonly string[]).includes(connectorId);
@@ -25,6 +32,7 @@ export function EnrollmentForm({
   collectorConnectorIds,
   referenceBaseUrl,
   defaultConnectorId,
+  practice = false,
 }: {
   /**
    * Enrollment keys of the connectors this server can enroll a local collector
@@ -42,6 +50,7 @@ export function EnrollmentForm({
    * leaves the field empty.
    */
   defaultConnectorId?: string;
+  practice?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(createEnrollmentCodeAction, { ok: null });
   const [showOtherConnectors, setShowOtherConnectors] = useState(false);
@@ -63,43 +72,51 @@ export function EnrollmentForm({
 
   return (
     <Callout
-      description="Create a short-lived enrollment code for a local collector. This links the collector to this server and is separate from PDPP Core/Profile protocol controls."
+      description="Create a short-lived code to set up a collector on another device."
       surface="human"
-      title="Create enrollment code"
+      title="Set up a collector"
     >
       <form action={formAction} className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-end">
-        <ToolbarField label="Connector id">
+        <ToolbarField label="Data source">
           <IcInput defaultValue={defaultConnectorId} name="connector_id" placeholder="claude-code" required />
         </ToolbarField>
-        <ToolbarField label="Local binding">
+        <ToolbarField label="Name on device">
           <IcInput name="local_binding_name" placeholder="personal-laptop" required />
         </ToolbarField>
-        <ToolbarField label="Display name">
+        <ToolbarField label="Device name">
           <IcInput name="display_name" placeholder="the owner's laptop" />
         </ToolbarField>
         <input name="expires_in_seconds" type="hidden" value="900" />
-        <IcButton disabled={pending} type="submit">
-          {pending ? "Creating..." : "Create code"}
+        <IcButton disabled={pending || practice} type="submit">
+          {pending ? "Creating…" : "Create setup code"}
         </IcButton>
       </form>
 
-      {state.ok === false ? <p className="pdpp-caption mt-3 text-destructive">{state.message}</p> : null}
+      {state.ok === false ? (
+        <div className="mt-3">
+          <p className="pdpp-caption text-destructive">Could not create a setup code. Try again.</p>
+          <SupportCopy details={state.message} />
+        </div>
+      ) : null}
       {state.ok === true && enrollCommand && runCommand ? (
         <div className="mt-4 space-y-3 rounded-md border border-border/80 bg-background/60 p-3">
           <div>
-            <div className="pdpp-eyebrow text-muted-foreground">Enrollment code</div>
+            <div className="pdpp-eyebrow text-muted-foreground">Setup code</div>
             <div className="mt-1 flex min-w-0 items-center gap-2">
               <code className="pdpp-body min-w-0 break-all font-mono text-foreground">
                 {state.code.enrollment_code}
               </code>
-              <CopyButton ariaLabel="Copy enrollment code" value={state.code.enrollment_code} />
+              <CopyButton ariaLabel="Copy setup code" value={state.code.enrollment_code} />
             </div>
-            <p className="pdpp-caption mt-1 text-muted-foreground">Expires at {state.code.expires_at}</p>
+            <p className="pdpp-caption mt-1 text-muted-foreground">Expires {relativeExpiry(state.code.expires_at)}</p>
           </div>
+
+          <div className="mt-3">
+            <div className="mt-3 space-y-3">
 
           {isMacosOnly ? (
             <div
-              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2"
+              className="rounded-md border border-attention/40 bg-attention/10 px-3 py-2"
               data-testid="collector-macos-requirements"
             >
               {state.code.connector_id === "apple-photos" ? (
@@ -109,7 +126,7 @@ export function EnrollmentForm({
                   <strong>File &rarr; Export &rarr; Export Unmodified Originals</strong>, and save into{" "}
                   <code className="font-mono">~/.pdpp/imports/apple_photos/</code> (or set{" "}
                   <code className="font-mono">APPLE_PHOTOS_EXPORT_DIR</code> to a different folder before running the
-                  command below). This connector reads that exported folder &mdash; it does not read the Photos library
+                  command below). This data source reads that exported folder &mdash; it does not read the Photos library
                   database directly.
                 </p>
               ) : (
@@ -127,17 +144,17 @@ export function EnrollmentForm({
 
           {isExternalTool ? (
             <div
-              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2"
+              className="rounded-md border border-attention/40 bg-attention/10 px-3 py-2"
               data-testid="collector-external-tool-requirements"
             >
               <p className="pdpp-caption text-foreground">
                 <strong>Requires the external `gmcli` tool and a one-time QR pairing, done by you first.</strong>{" "}
                 Install <code className="font-mono">gmcli</code> from{" "}
-                <code className="font-mono">github.com/johnlindquist/gmkit</code> (AGPL-3.0; this connector spawns it as
+                <code className="font-mono">github.com/johnlindquist/gmkit</code> (AGPL-3.0; this data source uses it as
                 a subprocess and never bundles or imports its code) and put it on your PATH, or set{" "}
                 <code className="font-mono">GMCLI_BIN</code> to its absolute path. Then run{" "}
                 <code className="font-mono">gmcli auth</code> yourself, interactively, to QR-pair with your Android
-                phone &mdash; this connector cannot do that step for you. The phone must stay online and reachable for
+                phone &mdash; this data source cannot do that step for you. The phone must stay online and reachable for
                 gmcli to sync, and pairing expires after roughly 14 days of inactivity (re-run{" "}
                 <code className="font-mono">gmcli auth</code> to re-pair). Only after pairing succeeds will the command
                 below produce real records.
@@ -208,7 +225,7 @@ export function EnrollmentForm({
               onClick={() => setShowOtherConnectors((prev) => !prev)}
               type="button"
             >
-              {showOtherConnectors ? "Hide" : "Show"} run commands for other connectors
+              {showOtherConnectors ? "Hide" : "Show"} run commands for other data sources
             </button>
             {showOtherConnectors ? (
               <div className="mt-3 space-y-2">
@@ -244,6 +261,8 @@ export function EnrollmentForm({
                 )}
               </div>
             ) : null}
+            </div>
+            </div>
           </div>
         </div>
       ) : null}

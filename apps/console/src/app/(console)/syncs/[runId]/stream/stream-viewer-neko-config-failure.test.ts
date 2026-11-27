@@ -13,14 +13,15 @@ const LOADS_CONFIG_WITH_RETRY_HELPER =
 const CONFIG_LOAD_OBSERVATION =
   /logDebug\("stream_neko_client_config", \{ browserSessionId: session\.browserSessionId, \.\.\.observation \}\)/;
 const CONFIG_LOAD_CATCH_SETS_INLINE_ERROR =
-  /\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setError\(err instanceof Error \? err\.message : "n\.eko direct stream failed"\);/;
-const INLINE_ERROR_PANEL = /The n\.eko WebRTC stream did not attach\./;
-const INLINE_RETRY_BUTTON = /Retry secure browser/;
+  /\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setErrorKind\("mount"\);\s+setError\(err instanceof Error \? plainBrowserTrouble\(err\.message\) : "The browser could not start\. Try again\."\);/;
+const INLINE_ERROR_PANEL = /COULDNT_REACH_BROWSER/;
+const INLINE_RETRY_BUTTON = /Try again/;
 const RETRY_RELOADS_CONFIG = /setConfigLoadRetryEpoch\(\(epoch\) => epoch \+ 1\)/;
 const MOUNT_REJECTION_RETHROWS_TO_INLINE_CATCH =
-  /await mountNekoViewer\([\s\S]*?catch \((\w+)\) \{[\s\S]*?throw \1;[\s\S]*?\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setError\(/;
+  /await mountNekoViewer\([\s\S]*?catch \((\w+)\) \{[\s\S]*?throw \1;[\s\S]*?\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setErrorKind\("mount"\);\s+setError\(/;
 
 test("NekoSurface config-load source contract retains inline retry handling", async () => {
+  // Brief item 4: update the fallback wording and keep the existing detailed error message.
   const src = await readFile(VIEWER_FILE, "utf8");
   const loadStart = src.indexOf("const connection = loadNekoClientConfig(session.clientConfigPath,");
   const loadEnd = src.indexOf("return () => {", loadStart);

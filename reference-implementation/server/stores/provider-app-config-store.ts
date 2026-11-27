@@ -23,6 +23,7 @@ interface ProviderAppConfigStoreRead {
 }
 
 interface ProviderAppConfigStoreRun {
+  insertIfAbsent: (row: ProviderAppConfigRow) => Promise<void>;
   delete: (args: { identityGroup: string; logicalKey: string }) => Promise<void>;
   upsert: (row: ProviderAppConfigRow) => Promise<void>;
   /** All rows commit together or none do -- see `ProviderAppConfigStore.setMany`. */
@@ -49,6 +50,7 @@ export interface ProviderAppConfigSetManyEntry {
 }
 
 export interface ProviderAppConfigStore {
+  getOrCreate: (args: { identityGroup: string; logicalKey: string; create: () => string }) => Promise<string>;
   delete: (args: { identityGroup: string; logicalKey: string }) => Promise<void>;
   get: (args: { identityGroup: string; logicalKey: string }) => Promise<string | null>;
   listConfiguredKeys: (identityGroup: string) => Promise<readonly string[]>;
@@ -154,6 +156,16 @@ function buildStore({
   }
 
   return {
+    async getOrCreate({ identityGroup, logicalKey, create }) {
+      assertKeyArgs({ identityGroup, logicalKey });
+      const c = cipher();
+      const existing = await read.getRaw({ identityGroup, logicalKey });
+      if (existing) return c.open(existing.sealed_value);
+      await run.insertIfAbsent({ identity_group: identityGroup, logical_key: logicalKey, sealed_value: c.seal(create()), updated_at: new Date().toISOString() });
+      const saved = await read.getRaw({ identityGroup, logicalKey });
+      if (!saved) throw new Error("Configuration could not be kept.");
+      return c.open(saved.sealed_value);
+    },
     async delete({ identityGroup, logicalKey }: { identityGroup: string; logicalKey: string }) {
       assertKeyArgs({ identityGroup, logicalKey });
       await run.delete({ identityGroup, logicalKey });
@@ -254,6 +266,10 @@ export function createSqliteProviderAppConfigStore({
       },
     },
     run: {
+      insertIfAbsent(row) {
+        exec(referenceQueries.providerAppConfigInsertIfAbsent, [row.identity_group, row.logical_key, row.sealed_value, row.updated_at]);
+        return Promise.resolve();
+      },
       delete({ identityGroup, logicalKey }: { identityGroup: string; logicalKey: string }) {
         exec(referenceQueries.providerAppConfigDeleteByIdentityGroupAndLogicalKey, [identityGroup, logicalKey]);
         return Promise.resolve();
@@ -323,6 +339,9 @@ export function createPostgresProviderAppConfigStore({
       },
     },
     run: {
+      async insertIfAbsent(row) {
+        await postgresQuery("INSERT INTO provider_app_config(identity_group, logical_key, sealed_value, updated_at) VALUES($1, $2, $3, $4) ON CONFLICT(identity_group, logical_key) DO NOTHING", [row.identity_group, row.logical_key, row.sealed_value, row.updated_at]);
+      },
       async delete({ identityGroup, logicalKey }: { identityGroup: string; logicalKey: string }): Promise<void> {
         await postgresQuery("DELETE FROM provider_app_config WHERE identity_group = $1 AND logical_key = $2", [
           identityGroup,

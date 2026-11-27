@@ -99,7 +99,7 @@ export function CommandPaletteTrigger() {
       type="button"
     >
       <span>Jump to…</span>
-      <kbd className="rounded border border-border bg-muted/50 px-1 py-px font-mono text-foreground/80">⌘K</kbd>
+      <kbd className="rounded border border-border bg-muted/50 px-1 py-px font-sans text-foreground">⌘K</kbd>
     </button>
   );
 }
@@ -200,20 +200,22 @@ export function CommandPalette({
       <DialogPortal>
         <DialogBackdrop />
         <DialogPopup
-          aria-label="Jump to artifact"
+          aria-label="Search or jump"
           className="top-24 left-1/2 mx-auto w-[calc(100%-2rem)] max-w-lg translate-x-[-50%] translate-y-0 gap-3 p-3"
           // Autofocus the input deterministically via the primitive.
           initialFocus={inputRef}
         >
           <Input
-            aria-label="Search commands"
-            className="h-10 py-2 font-mono"
+            aria-label="Search pages"
+            className="h-10 py-2"
             data-testid="command-palette-input"
             // biome-ignore lint/performance/noJsxPropsBind: Handler captures the current row or component state; extracting it would add indirection without a stable consumer boundary.
             onChange={(e) => setQuery(e.target.value)}
             // biome-ignore lint/performance/noJsxPropsBind: Handler captures the current row or component state; extracting it would add indirection without a stable consumer boundary.
             onKeyDown={onInputKeyDown}
-            placeholder="Search commands, or type to search records…"
+            // A short placeholder so it is not cut off on a 390px screen; it is the
+            // menu box's own wording.
+            placeholder="Search or jump to…"
             ref={inputRef}
             type="text"
             value={query}
@@ -230,7 +232,7 @@ export function CommandPalette({
             searchRow={searchRow}
           />
 
-          <div className="pdpp-caption text-muted-foreground/70">↑↓ move · ⏎ open · ⎋ close · ⌘/ctrl+k toggle</div>
+          <div className="pdpp-caption text-muted-foreground">↑↓ move · ⏎ open · ⎋ close · ⌘/ctrl+k toggle</div>
         </DialogPopup>
       </DialogPortal>
     </Dialog>
@@ -255,7 +257,7 @@ function PaletteList({
   searchRow: PaletteRow | undefined;
 }) {
   if (rows.length === 0) {
-    return <div className="pdpp-caption px-1 text-muted-foreground/70">No matching commands.</div>;
+    return <div className="pdpp-caption px-1 text-muted-foreground">No matching pages.</div>;
   }
   // Index in the flat `rows` array drives the highlight so keyboard and pointer
   // selection agree.
@@ -322,8 +324,8 @@ function PaletteGroup({
           const index = indexOf(row);
           const active = index === highlight;
           const key = row.kind === "search" ? `search:${row.query}` : row.command.id;
-          const label = row.kind === "search" ? `Search records for “${row.query}” →` : row.command.title;
-          const description = row.kind === "search" ? "Open Explore with this query" : row.command.description;
+          const label = row.kind === "search" ? `Explore records for “${row.query}” →` : row.command.title;
+          const description = row.kind === "search" ? "Search records in Explore" : row.command.description;
           return (
             <li key={key}>
               <button
@@ -340,7 +342,7 @@ function PaletteGroup({
                 type="button"
               >
                 <span className="pdpp-body">{label}</span>
-                <span className="pdpp-caption text-muted-foreground/70">{description}</span>
+                <span className="pdpp-caption text-muted-foreground">{description}</span>
               </button>
             </li>
           );

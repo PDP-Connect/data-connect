@@ -113,9 +113,9 @@ test("a connector_not_installed refusal reads as plain copy with an Install acti
     await act(async () => button(container, "Refresh now").click());
     const prompt = container.querySelector('[data-testid="connector-not-installed-inline"]');
     assert.ok(prompt, "the inline install prompt renders after the refusal");
-    assert.match(prompt.textContent ?? "", /Chase isn't installed on this server yet, so it can't sync\./);
+    assert.match(prompt.textContent ?? "", /The Chase connection in DataConnect is no longer installed\. It must be installed again before Chase can sync\./);
     assert.doesNotMatch(container.textContent ?? "", /reference server rejected|reference fixture|verified install/);
-    button(container, "Install Chase");
+    button(container, "Install again");
     assert.equal(installCalls.length, 0, "nothing installs until the owner presses Install");
   });
 });
@@ -127,16 +127,15 @@ test("Install calls the owner install action with the connector key and shows a 
     await act(async () => button(container, "Refresh now").click());
 
     installResult = { message: "no verified update target for chase.", ok: false };
-    await act(async () => button(container, "Install Chase").click());
+    await act(async () => button(container, "Install again").click());
     assert.deepEqual(installCalls, [{ connectorKey: "chase", routeId: "cin_chase" }]);
-    assert.equal(
-      container.querySelector('[role="alert"]')?.textContent,
-      "Couldn't install Chase: no verified update target for chase."
-    );
+    const feedback = container.querySelector('[data-testid="connector-install-feedback"]');
+    assert.equal(feedback?.querySelector("p")?.textContent, "This could not be done. Try again.");
+    assert.equal(feedback?.querySelector("details code")?.textContent, "no verified update target for chase.");
     assert.equal(refreshCalls, 0, "a failed install does not pretend the state changed");
 
     installResult = { ok: true };
-    await act(async () => button(container, "Install Chase").click());
+    await act(async () => button(container, "Install again").click());
     assert.equal(installCalls.length, 2);
     assert.equal(refreshCalls, 1, "a successful install re-reads the page state");
     assert.equal(
@@ -170,8 +169,10 @@ test("a run-start error flows below the button and wraps instead of floating ove
   };
   await mounted({}, async (container) => {
     await act(async () => button(container, "Refresh now").click());
-    const toast = container.querySelector('[role="status"]');
+    const toast = container.querySelector('[role="alert"]');
     assert.ok(toast, "the error renders");
+    assert.equal(toast.querySelector("details code")?.textContent, "x".repeat(400));
+    assert.match(toast.textContent ?? "", /^This could not be done\. Try again\./);
     const classes = toast.className.split(/\s+/);
     // The old caption was `absolute top-full right-0 w-max`: it reserved no
     // space and grew leftward past the viewport edge on narrow screens.

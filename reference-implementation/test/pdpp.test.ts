@@ -82,7 +82,7 @@ const REGEXP_25 = /streams\/0\/fields must NOT have fewer than 1 items/;
 const REGEXP_26 = /Unknown client_id/;
 const REGEXP_27 = /malformed or no longer valid/;
 const REGEXP_28 = /malformed or no longer valid/;
-const REGEXP_29 = /Longview wants access to your data/;
+const REGEXP_29 = /Longview wants to read your data/;
 const REGEXP_30 = /Forged Display Name/;
 const REGEXP_31 = /Updated Longview/;
 const REGEXP_32 = /Persisted Forgery/;
@@ -93,7 +93,7 @@ const REGEXP_36 = /source_binding must include only kind and id/;
 const REGEXP_37 = /source_binding must include only kind and id/;
 const REGEXP_39 = /Unknown client_id/;
 const REGEXP_40 = /Unknown client_id/;
-const REGEXP_41 = /Access Denied/;
+const REGEXP_41 = /Nothing was shared/;
 const REGEXP_42 = /malformed or no longer valid/;
 const REGEXP_43 = /malformed or no longer valid/;
 const REGEXP_44 = /Unknown client_id/;
@@ -101,10 +101,11 @@ const REGEXP_45 = /malformed or no longer valid/;
 const REGEXP_46 = /denied the request/;
 const REGEXP_47 = /malformed or no longer valid/;
 const REGEXP_48 = /malformed or no longer valid/;
-const REGEXP_49 = /Approve owner access/i;
+// The approval form (not the empty code form) is the one that posts to /device/approve.
+const REGEXP_49 = /action="\/device\/approve"/;
 const REGEXP_50 = /Unknown client_id/;
 const REGEXP_51 = /Unknown client_id/;
-const REGEXP_52 = /Approve owner access/i;
+const REGEXP_52 = /action="\/device\/approve"/;
 const REGEXP_53 = /malformed or no longer valid/;
 const REGEXP_54 = /malformed or no longer valid/;
 const REGEXP_55 = /Invalid initial access token/;
@@ -133,7 +134,7 @@ const REGEXP_77 = /Unsupported pending request fields: redirect_uri/;
 const REGEXP_78 = /Unsupported pending request fields: redirect_uri/;
 const REGEXP_79 = /Unsupported pending stream selection fields on 'top_artists': expand/;
 const REGEXP_80 = /Unsupported pending stream selection fields on 'top_artists': expand/;
-const REGEXP_86 = /Access Denied/;
+const REGEXP_86 = /Nothing was shared/;
 const REGEXP_87 = /source\/id must match format "uri"/;
 const REGEXP_89 = /Grant is malformed or no longer valid/;
 const REGEXP_96 = /Grant is malformed or no longer valid/;
@@ -1913,7 +1914,8 @@ test("PDPP reference implementation integration", async (t) => {
       const { body: approved } = await approveGrantSuccess(asUrl, initiate.request_uri, "u1");
 
       assert.equal(approved.grant.client.client_id, clientId);
-      assert.equal(approved.grant.client.client_display, null);
+      // A CIMD grant keeps the name its metadata document gave, so owner pages can name the app later.
+      assert.equal(approved.grant.client.client_display?.name, "Codex");
       assert.equal(approved.grant.client.registration_mode, undefined);
       assert.ok(approved.token);
 

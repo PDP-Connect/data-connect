@@ -1,50 +1,32 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-
-/**
- * Source-regex guard for the grant detail page.
- *
- * The grant detail page is the natural discovery jump for event
- * subscriptions registered against a grant. The console offers a
- * read-only list at `/event-subscriptions?grant_id=<id>`; this
- * test keeps the discovery link from regressing into a generic Records
- * subnav or a hand-rolled URL string.
- *
- * Spec: openspec/changes/add-mcp-event-subscription-client-tools and
- *       openspec/changes/add-client-event-subscription-management
- */
-
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
-
-const SUBSCRIPTIONS_HREF_RE = /\/event-subscriptions\?grant_id=/;
-const ENCODE_URI_RE = /encodeURIComponent\(grantId\)/;
-const COPY_RE = /Event subscriptions for this grant/i;
-
-const PACKAGE_PIVOT_LOOKUP_RE = /lookupGrantPackageIdForGrant\(/;
-const PACKAGE_PIVOT_HREF_RE = /\/grants\/packages\/\$\{encodeURIComponent\(packageId\)\}/;
-const PACKAGE_PIVOT_COPY_RE = /Parent grant package/i;
-
-test("grant detail page links to filtered event-subscriptions list", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, SUBSCRIPTIONS_HREF_RE);
-  assert.match(src, ENCODE_URI_RE);
-  assert.match(src, COPY_RE);
+const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+test("every record keeps its filtered subscription and package links on the technical page", () => {
+  const source = read("./technical/page.tsx");
+  assert.match(source, /app.grantIds.map/);
+  assert.match(source, /event-subscriptions\?grant_id=\$\{encodeURIComponent\(id\)\}/);
+  assert.match(source, /grants\/packages\/\$\{encodeURIComponent\(packageId\)\}/);
+  assert.match(source, /Parent access package/);
 });
-
-test("grant detail page surfaces a parent-package pivot link when the grant is package-bound", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The page MUST resolve the parent package via the typed helper, render
-  // the pivot href through encodeURIComponent, and only show the link
-  // when `packageId` is non-null (a conditional render around the helper
-  // result). The copy below is the operator-visible affordance pinned
-  // against silent drift.
-  assert.match(src, PACKAGE_PIVOT_LOOKUP_RE);
-  assert.match(src, PACKAGE_PIVOT_HREF_RE);
-  assert.match(src, PACKAGE_PIVOT_COPY_RE);
+test("the app page asks before removing all registrations or one source", () => {
+  const source = read("./app-page.tsx");
+  assert.match(source, /role="alertdialog"/); assert.match(source, /It keeps anything it already read/);
+  assert.match(source, /removal.remove\("all"\)/); assert.match(source, /removal.remove\(key, source.source\)/);
+  assert.match(source, /source.name \|\| appSourceName\(source.source\)/);
+});
+test("the per-row Remove control on an app's page is 44px tall on a coarse pointer", () => {
+  const source = read("./app-page.tsx");
+  const at = source.indexOf("Remove {name}");
+  assert.ok(at > 0);
+  const button = source.slice(source.lastIndexOf("<Button", at), at);
+  assert.match(button, /pointer-coarse:min-h-11/);
+});
+// Round 8 B2: a source the owner just removed leaves "What it can read" at once; the rule is deriveAppReadingView (app-access.test.ts).
+test("the app page lists the rows deriveAppReadingView returns, not its own filter", () => {
+  const source = read("./app-page.tsx");
+  assert.match(source, /deriveAppReadingView\(app, removal\.removed\)/);
+  assert.match(source, /visibleRows\.map\(/);
 });

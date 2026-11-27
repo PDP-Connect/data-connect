@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}[connector]/page.tsx`;
+const PAGE_FILE = `${HERE}[connector]/source-page.tsx`;
 const ACTIONS_FILE = `${HERE}[connector]/actions.ts`;
 const DANGER_ZONE_FILE = `${HERE}[connector]/connection-danger-zone.tsx`;
 const REF_CLIENT_FILE = `${HERE}../lib/ref-client.ts`;
@@ -19,9 +19,11 @@ async function read(path: string): Promise<string> {
 test("the detail route keeps setup-failed identity and renders same-connection recovery", async () => {
   const page = await read(PAGE_FILE);
   assert.match(page, /setupFailed:\s*isSetupFailedSource\(summary\)/);
-  assert.match(page, /setupFailed \? <ResumeSetupSection connectionId=\{connectionId\} \/> : null/);
   assert.match(page, /<ConnectionDangerZone[\s\S]*connectionId=\{connectorInstanceId \?\? connectionId\}/);
-  assert.match(page, /function ResumeSetupSection[\s\S]*>\s*Resume setup\s*<\/IcButton>/);
+  // DIRECTION.md status table row 2: the resume-setup action is named "Continue setup". detail-page-2 decision 2:
+  // it appears once, in the header, and posts the route's connection ID to the same server action.
+  assert.match(page, /statusAction\?\.kind === "continue_setup"[\s\S]*?<form action=\{resumeSetupConnectionAction\}><input name="connection_id" type="hidden" value=\{routeConnectionId\} \/>[\s\S]*?>\{statusAction\.label\}<\/IcButton>/);
+  assert.doesNotMatch(page, /function ResumeSetupSection/);
 });
 
 test("the reference client carries source visibility on scoped connection reads", async () => {
@@ -50,6 +52,6 @@ test("setup-failed details reuse the single-connection danger-zone delete", asyn
     read(ACTIONS_FILE),
   ]);
   assert.match(page, /<ConnectionDangerZone[\s\S]*connectionId=\{connectorInstanceId \?\? connectionId\}/);
-  assert.match(dangerZone, /<DeleteForm activeRunId=\{activeRunId\} connectionId=\{connectionId\} \/>/);
+  assert.match(dangerZone, /<DeleteForm\s+neverConnected=\{neverConnected\}\s+activeRunId=\{activeRunId\}\s+connectionId=\{connectionId\}/);
   assert.match(actions, /await deleteConnectionWithRunCancel\(connectionId, cancelRunId, \{ cancelRun, deleteConnection \}\)/);
 });

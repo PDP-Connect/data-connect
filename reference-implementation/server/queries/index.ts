@@ -384,6 +384,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly providerAppConfigDeleteByIdentityGroupAndLogicalKey: MutationQuery;
   readonly providerAppConfigGetByIdentityGroupAndLogicalKey: ReadOneQuery;
   readonly providerAppConfigListConfiguredKeysByIdentityGroup: SmallEnumerationQuery;
+  readonly providerAppConfigInsertIfAbsent: MutationQuery;
   readonly providerAppConfigUpsert: MutationQuery;
   readonly recordRejectionsAdmitQuota: MutationQuery;
   readonly recordRejectionsCountForConnection: ReadOneQuery;

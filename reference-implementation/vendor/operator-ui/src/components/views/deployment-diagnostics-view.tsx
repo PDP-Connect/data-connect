@@ -458,9 +458,9 @@ function ParticipationSection({
               <tbody>
                 {participation.tuples.map((t) => (
                   <tr className="border-border/60 border-t" key={`${t.connector_id}::${t.stream}::${t.field}`}>
-                    <td className="px-2 py-1.5 font-mono text-xs">{formatConnectorKeyForDisplay(t.connector_id)}</td>
+                    <td className="px-2 py-1.5 text-xs">{formatConnectorKeyForDisplay(t.connector_id)}</td>
                     <td className="px-2 py-1.5">{t.stream}</td>
-                    <td className="px-2 py-1.5 font-mono text-xs">{t.field}</td>
+                    <td className="px-2 py-1.5 text-xs">{t.field}</td>
                     <td className="px-2 py-1.5 text-muted-foreground text-xs">{t.provenance}</td>
                   </tr>
                 ))}
@@ -494,7 +494,7 @@ function ManifestsSection({ manifests }: { manifests: DeploymentDiagnostics["man
           <tbody>
             {manifests.map((m) => (
               <tr className="border-border/60 border-t" key={m.connector_id}>
-                <td className="px-2 py-1.5 font-mono text-xs">{formatConnectorKeyForDisplay(m.connector_id)}</td>
+                <td className="px-2 py-1.5 text-xs">{formatConnectorKeyForDisplay(m.connector_id)}</td>
                 <td className="px-2 py-1.5">{m.display_name ?? "—"}</td>
                 <td className="px-2 py-1.5 text-muted-foreground text-xs">{m.provenance}</td>
                 <td className="px-2 py-1.5 tabular-nums">{m.semantic_stream_count}</td>
@@ -633,7 +633,7 @@ function DatabaseRelations({ relations }: { relations: ReturnType<typeof buildSt
         <tbody>
           {relations.map((relation) => (
             <tr className="border-border/60 border-t" key={relation.name}>
-              <td className="px-2 py-1.5 font-mono text-xs">{relation.name}</td>
+              <td className="px-2 py-1.5 text-xs">{relation.name}</td>
               <td className="px-2 py-1.5 text-right tabular-nums">{relation.label}</td>
             </tr>
           ))}
@@ -689,7 +689,7 @@ function SourceStorageSection({
               <td className="px-2 py-1.5">
                 <span className="text-foreground">{row.label}</span>
                 {row.breakdownLabel ? (
-                  <span className="block text-muted-foreground/70 text-xs" data-testid="retained-bytes-breakdown">
+                  <span className="block text-muted-foreground text-xs" data-testid="retained-bytes-breakdown">
                     {row.breakdownLabel}
                   </span>
                 ) : null}
@@ -760,7 +760,7 @@ function StreamSizeSection({
         <tbody>
           {model.rows.map((row) => (
             <tr className="border-border/60 border-t" key={row.key}>
-              <td className="px-2 py-1.5 font-mono text-xs">{row.label}</td>
+              <td className="px-2 py-1.5 text-xs">{row.label}</td>
               <td className={`px-2 py-1.5 text-right tabular-nums ${row.sizeMeasured ? "" : "text-muted-foreground"}`}>
                 {row.sizeLabel}
               </td>
@@ -823,7 +823,7 @@ function TopList({ title, rows }: { title: string; rows: ReturnType<typeof build
         <tbody>
           {rows.map((row) => (
             <tr className="border-border/60 border-t" key={row.key}>
-              <td className="truncate px-2 py-1.5 font-mono text-xs" title={row.label}>
+              <td className="truncate px-2 py-1.5 text-xs" title={row.label}>
                 {row.label}
               </td>
               <td className={`px-2 py-1.5 text-right tabular-nums ${row.sizeMeasured ? "" : "text-muted-foreground"}`}>
@@ -843,24 +843,27 @@ function EnvironmentSection({ environment }: { environment: DeploymentDiagnostic
       description="Relevant environment variables shaping reference behavior. Secrets are redacted by the server and never reach this page."
       title="Environment"
     >
-      <table className="w-full border-border/80 border-y text-left text-sm">
-        <thead>
-          <tr className="text-muted-foreground text-xs uppercase tracking-wide">
-            <th className="px-2 py-2 font-medium">Name</th>
-            <th className="px-2 py-2 font-medium">Value</th>
-            <th className="px-2 py-2 font-medium">Provenance</th>
-          </tr>
-        </thead>
-        <tbody>
-          {environment.map((entry) => (
-            <tr className="border-border/60 border-t" key={entry.name}>
-              <td className="px-2 py-1.5 font-mono text-xs">{entry.name}</td>
-              <td className="px-2 py-1.5 font-mono text-xs">{formatEnvValue(entry)}</td>
-              <td className="px-2 py-1.5 text-muted-foreground text-xs">{entry.provenance}</td>
+      {/* The table scrolls inside its own box on a phone; the page never scrolls sideways. */}
+      <div className="max-w-full overflow-x-auto">
+        <table className="w-full border-border/80 border-y text-left text-sm">
+          <thead>
+            <tr className="text-muted-foreground text-xs">
+              <th className="px-2 py-2 font-medium">Name</th>
+              <th className="px-2 py-2 font-medium">Value</th>
+              <th className="px-2 py-2 font-medium">Provenance</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {environment.map((entry) => (
+              <tr className="border-border/60 border-t" key={entry.name}>
+                <td className="px-2 py-1.5 font-mono text-xs">{entry.name}</td>
+                <td className="px-2 py-1.5 font-mono text-xs">{formatEnvValue(entry)}</td>
+                <td className="px-2 py-1.5 text-muted-foreground text-xs">{entry.provenance}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </Section>
   );
 }

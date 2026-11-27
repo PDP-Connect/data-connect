@@ -12,7 +12,7 @@ const SHELL_CSS = `${HERE}shell.css`;
 const DRAWER_SELECTOR = ".pdpp-dialog.rr-drawer";
 const BACKDROP_SELECTOR = ".pdpp-dialog-backdrop.rr-drawer-overlay";
 const CONTROLLED_DIALOG = /<IcDialog modal onOpenChange=\{setDrawerOpen\} open=\{drawerOpen\}>/;
-const DIALOG_TRIGGER = /<IcDialogTrigger className="rr-chrome-btn rr-menu-btn" type="button">/;
+const DIALOG_TRIGGER = /<IcDialogTrigger aria-label="Open navigation" className="rr-chrome-btn rr-menu-btn" type="button">/;
 const DIALOG_POPUP = /<IcDialogPopup aria-label="Primary navigation" className="rr-drawer">/;
 const DIALOG_CLOSE = /<IcDialogClose aria-label="Close navigation"/;
 const NAV_CLOSE = /<NavList onNavigate=\{closeDrawer\}/;
@@ -21,16 +21,13 @@ const CONDITIONAL_DRAWER = /drawerOpen\s*&&/;
 const PORTAL_BACKDROP = /<IcDialogPortal>[\s\S]*<IcDialogBackdrop className="rr-drawer-overlay"/;
 const FIXED_POSITION = /position:\s*fixed/;
 const VIEWPORT_INSET = /inset|top:\s*0/;
-const BACKDROP_COLOR = /background:\s*oklch\(0 0 0 \/ 0\.5\)/;
+const BACKDROP_COLOR = /background:\s*var\(--scrim\)/;
 const ABOVE_BACKDROP = /z-index:\s*71/;
 const RIGHT_EDGE_RESET = /right:\s*auto/;
 const MAX_WIDTH_RESET = /max-width:\s*none/;
 const TRANSFORM_RESET = /transform:\s*none/;
 const SHELL_MASTHEAD_SCOPE = /\.rr-app,\s*\.pdpp-dialog\.rr-drawer\s*\{[\s\S]*--rr-masthead-height:\s*52px/;
-const SHELL_MARK_SCOPE =
-  /\.rr-app,\s*\.pdpp-dialog\.rr-drawer\s*\{[\s\S]*--pdpp-mark-warm:[\s\S]*--pdpp-mark-cool:[\s\S]*--pdpp-mark-counter:/;
-const DARK_SHELL_MARK_SCOPE =
-  /\[data-theme="dark"\] \.rr-app,[\s\S]*\[data-theme="dark"\] \.pdpp-dialog\.rr-drawer\s*\{[\s\S]*--pdpp-mark-warm:[\s\S]*--pdpp-mark-cool:[\s\S]*--pdpp-mark-counter:/;
+const MARK_USES_THEME_FOREGROUND = /\.rr-side__mark\s*\{[^}]*color:\s*var\(--foreground\)/;
 
 function ruleBody(css: string, selector: string, requiredDeclaration?: string): string {
   let from = 0;
@@ -55,6 +52,7 @@ test("the mobile drawer is a controlled modal dialog with a real trigger", async
   // machine. Keeping the shell controlled makes trigger, navigation, backdrop,
   // and Escape closes converge on the same state setter.
   assert.match(source, CONTROLLED_DIALOG);
+  // DIRECTION.md "The frame and the menu": the phone menu button is icon-only with an accessible name.
   assert.match(source, DIALOG_TRIGGER);
   assert.match(source, DIALOG_POPUP);
   assert.match(source, DIALOG_CLOSE);
@@ -79,13 +77,23 @@ test("the portaled drawer owns its cascade geometry and shell tokens", async () 
 
   assert.match(backdrop, FIXED_POSITION);
   assert.match(backdrop, VIEWPORT_INSET);
+  // DIRECTION.md "Values (light / dark)": the drawer backdrop derives from a theme token.
   assert.match(backdrop, BACKDROP_COLOR);
   assert.match(popup, FIXED_POSITION);
   assert.match(popup, ABOVE_BACKDROP);
   assert.match(popup, RIGHT_EDGE_RESET);
   assert.match(popup, MAX_WIDTH_RESET);
   assert.match(popup, TRANSFORM_RESET);
+  assert.match(popup, /border-radius:\s*0 var\(--radius\) var\(--radius\) 0/);
   assert.match(css, SHELL_MASTHEAD_SCOPE);
-  assert.match(css, SHELL_MARK_SCOPE);
-  assert.match(css, DARK_SHELL_MARK_SCOPE);
+  // DIRECTION.md "The frame and the menu": the mark stays legible on the light phone bar.
+  assert.match(css, MARK_USES_THEME_FOREGROUND);
+});
+
+// Phone walk: the logo and name are the way Home, and the mark is drawn large enough to read.
+test("the logo and name in the header and sidebar link to Home", async () => {
+  const source = await readFile(SHELL_FRAME, "utf8");
+  assert.match(source, /<Link className="rr-head__brand" href="\/">/);
+  assert.match(source, /<Link className="rr-side__brand-link" href="\/">/);
+  assert.match(source, /viewBox="120 190 606 452"/);
 });

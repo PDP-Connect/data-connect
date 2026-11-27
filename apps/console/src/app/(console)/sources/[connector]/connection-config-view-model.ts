@@ -121,6 +121,21 @@ const UNIT_SUFFIXES: ReadonlyArray<readonly [string, string]> = Object.freeze([
  * place: stripping it can collide two distinct keys onto one label.
  */
 export function optionLabel(optionKey: string): string {
+  const labels: Record<string, string> = {
+    HISTORY_DAYS: "Days of messages to copy",
+    CHANNELS: "Channels to copy",
+    SLACK_CHANNELS: "Channels to copy",
+    CHANNEL_ALLOWLIST: "Channels to copy",
+    CHANNEL_TYPES: "Types of channels to copy",
+    MEMBER_ONLY: "Only channels you joined",
+    SKIP_FILES: "Leave out files",
+    LOOKBACK_DAYS: "Days of history to copy",
+    RECLAIM_UPLOADS: "Copy files sent in messages",
+    CLAUDE_CODE_PROJECT_EXCLUDE: "Projects to leave out",
+    CLAUDE_CODE_PROJECT_INCLUDE: "Projects to copy",
+  };
+  const knownLabel = labels[optionKey.toUpperCase()];
+  if (knownLabel) return knownLabel;
   let base = optionKey;
   let unit: string | null = null;
   for (const [suffix, rendered] of UNIT_SUFFIXES) {
@@ -166,12 +181,12 @@ const GROUPS: Readonly<Record<ConfigGroupId, ConfigGroup>> = Object.freeze({
     title: "Advanced",
   }),
   how_it_runs: Object.freeze({
-    description: "These change how collection runs, not what it collects.",
+    description: "These change how syncing works, not what it collects.",
     id: "how_it_runs" as const,
-    title: "How collection runs",
+    title: "How syncing works",
   }),
   what_to_collect: Object.freeze({
-    description: "These change what this source collects.",
+    description: "These change what this data source collects.",
     id: "what_to_collect" as const,
     title: "What to collect",
   }),
@@ -276,7 +291,7 @@ export function buildCurrentSettings(
       option,
       optionKey: option.option_key,
       provenance: ownerSet ? "owner_set" : "connector_default",
-      provenanceLabel: ownerSet ? "Set by you" : "Connector default",
+      provenanceLabel: ownerSet ? "Set by you" : "Data source default",
       value,
       valueLabel: formatValue(option.type, value),
     };
@@ -426,7 +441,7 @@ export function describeCommit(changes: readonly ConfigFieldChange[]): CommitDes
       hasUnclassified: false,
       kind,
       supportingText:
-        "These settings change how collection runs, not what it collects. They take effect immediately and will be recorded as a new revision.",
+        "These settings change how syncing works, not what it collects. They take effect immediately and will be recorded as a new revision.",
     };
   }
   const bundlesTransportWithScope = hasTransport && (hasScope || hasUnclassified);
@@ -458,7 +473,7 @@ export function confirmationReason(option: ConfigOptionWire): string | null {
   if (!option.platform_classified) {
     return "Requires confirmation because the platform has not classified this setting yet.";
   }
-  return option.option_kind === "collection_scope" ? "Changes what this source collects." : null;
+  return option.option_kind === "collection_scope" ? "Changes what this data source collects." : null;
 }
 
 // ─── Local validation ───────────────────────────────────────────────────────
@@ -567,14 +582,14 @@ export function resolveAvailability(config: ConnectionConfigWire): ConfigAvailab
     return {
       kind: "unreadable",
       message:
-        "This connector's settings description is invalid, so it cannot be shown as a form. Update the connector to fix it.",
+        "This data source's settings description is invalid, so it cannot be shown as a form. Update the data source to fix it.",
     };
   }
   if (config.options_schema_status === "not_declared" || config.options_schema === null) {
     return {
       kind: "not_declared",
       message:
-        "Settings are not available for this connector yet. Its existing collection behaviour is unchanged — nobody has described its options.",
+        "Settings are not available for this data source yet. Its existing collection behaviour is unchanged — nobody has described its options.",
     };
   }
   return config.options_schema.options.length === 0
@@ -635,7 +650,7 @@ export function originLabel(origin: ConfigOrigin, actor: string): string {
       return `Proposed by ${describeAgentActor(actor)}`;
     }
     case "default": {
-      return "Connector default";
+      return "Data source default";
     }
     default: {
       return "Carried over during upgrade";
@@ -763,4 +778,9 @@ export function parseStaleConflict(message: string): StaleConflict {
     actualRevision: match ? Number(match[1]) : null,
     message: "Configuration changed while you were editing.",
   };
+}
+
+/** Choice values remain unchanged when their owner-facing labels differ. */
+export function configChoiceLabel(optionKey:string,choice:string):string {
+  return optionKey.toLowerCase() === "channel_types" ? ({public:"Public channels",private:"Private channels",im:"Direct messages",mpim:"Group messages"} as Record<string,string>)[choice] ?? choice : choice;
 }

@@ -383,13 +383,11 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
     "this-device": "Only this device can reach the sign-in page.",
     unknown: "We can't tell who can reach the sign-in page.",
   }, "access");
-  wordEnum(rest, "transport", {
-    http: "This connection uses unencrypted HTTP. Traffic may be readable in transit.",
-    tcp: "This connection uses TCP without transport encryption.",
-    // Encrypted transports are the expected default and need no words.
-    https: "",
-    tls: "",
-  }, "traffic");
+  if (rest.transport === "http") {
+    lines.push({ kind: "traffic", text: "This connection is not encrypted. Others may be able to read what passes through." });
+  } else if (rest.transport === "tcp") {
+    lines.push({ kind: "traffic", text: "This connection is not encrypted. Others may be able to read what passes through." });
+  }
   const service = candidate.display.label;
   let payloadReading = `We can't tell whether ${service} can read what passes through.`;
   section("traffic", (traffic) => {

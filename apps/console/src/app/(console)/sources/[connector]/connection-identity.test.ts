@@ -22,7 +22,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const IMPORTS_COPY_BUTTON = /import \{ CopyButton \} from "@pdpp\/operator-ui\/components\/copy-button"/;
 const IDENTITY_DISCLOSURE_WRAPPER = /data-testid="connection-id-disclosure"/;

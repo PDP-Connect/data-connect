@@ -3,11 +3,10 @@
 
 import { buttonVariants } from "@pdpp/brand-react";
 import type { Viewport } from "next";
-import { notFound } from "next/navigation";
-import { ConnectorMark } from "../../../components/connector-mark.tsx";
-import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
+import { notFound, redirect } from "next/navigation";
 import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
+  getStaticSecretSetup,
   getRunStatus,
   getRunTimeline,
   listConnectorSummaries,
@@ -28,13 +27,19 @@ import {
   type ConnectorContext,
   resolveConnectorSummaryRouteId,
 } from "./connector-context-resolution.ts";
-import { NoAssistanceRunPoller } from "./no-assistance-run-poller.tsx";
+import { normalizeInteractionPrompt } from "./interaction-prompt.ts";
 import {
-  type NoAssistanceEndedStatus,
-  resolveNoAssistanceEndedTerminalStatus,
   selectNoAssistanceStreamState,
 } from "./stream-state.ts";
 import { ResolvedSurface, StreamSurface } from "./stream-viewer.tsx";
+
+import { flowPreviewState } from "../../../connect/flow-preview.ts";
+
+import { ExternalApprovalSurface, PreparingBrowserSurface, SignInDetailsSurface, SignInFrame } from "./sign-in-parts.tsx";
+import { setupStatusHref, signInDestination } from "./sign-in-flow.ts";
+
+import { projectCredentialInteraction } from "../credential-interaction.ts";
+import { SignInPreview } from "./sign-in-preview.tsx";
 
 export const dynamic = "force-dynamic";
 export const viewport: Viewport = {
@@ -43,32 +48,6 @@ export const viewport: Viewport = {
   viewportFit: "cover",
   width: "device-width",
 };
-
-function RunDetailLink({ runId }: { runId: string }) {
-  return (
-    <a
-      className={buttonVariants({ className: "mt-5", size: "sm", variant: "default" })}
-      href={`/syncs/${encodeURIComponent(runId)}`}
-    >
-      View run details (optional)
-    </a>
-  );
-}
-
-function SetupStatusLink({ connectionId, runId }: { connectionId: string | null; runId: string }) {
-  if (!connectionId) {
-    return <RunDetailLink runId={runId} />;
-  }
-  const query = new URLSearchParams({ run_id: runId });
-  return (
-    <a
-      className={buttonVariants({ className: "mt-5", size: "sm", variant: "default" })}
-      href={`/connect/status/${encodeURIComponent(connectionId)}?${query.toString()}`}
-    >
-      View setup status
-    </a>
-  );
-}
 
 function getConnectorIdFromTimeline(events: SpineEvent[]): string | null {
   const fromRuntime = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
@@ -133,7 +112,9 @@ function renderNoAssistanceSurface({
   connectorInstanceId,
   runId,
   runStatus,
+  credentialFields,
 }: {
+  credentialFields: ReturnType<typeof projectCredentialInteraction>["fields"];
   connector: ConnectorContext | null;
   currentAssistance: ReturnType<typeof getCurrentRunAssistance>;
   connectorInstanceId: string | null;
@@ -141,46 +122,16 @@ function renderNoAssistanceSurface({
   runId: string;
   runStatus: RunStatusEnvelope | null;
 }) {
-  if (currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) {
-    return <UnavailableStreamSurface connector={connector} runId={runId} />;
-  }
-  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") {
-    return <ExternalApprovalSurface assistance={currentAssistance} runId={runId} />;
-  }
-  const noAssistanceState = selectNoAssistanceStreamState({
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
-    runHandleStatus: runStatus?.status ?? null,
-    terminalStatus: envelope.terminal_status,
-  });
-  if (noAssistanceState === "resolved") {
-    return <ResolvedSurface connector={connector} runId={runId} />;
-  }
-  if (noAssistanceState === "ended") {
-    return (
-      <RunEndedSurface
-        connector={connector}
-        runId={runId}
-        terminalStatus={resolveNoAssistanceEndedTerminalStatus({
-          // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
-          runHandleStatus: runStatus?.status ?? null,
-          terminalStatus: envelope.terminal_status,
-        })}
-      />
-    );
-  }
-  if (hasActiveBrowserSurface(envelope.events)) {
-    return <PreparingBrowserSurface connectionId={connectorInstanceId} runId={runId} />;
-  }
-  // The owner already completed a browser step (e.g. H-E-B login) for this
-  // run, and no further browser action is currently open. Say so plainly
-  // instead of reusing the generic "No browser action is waiting" copy,
-  // which reads as a dead end right after a login the owner just finished
-  // (fr-setup-status-lifecycle-0806) — the run keeps going in the
-  // background and this page's job here is done.
-  if (hasResolvedBrowserSurfaceAssistance(envelope.events)) {
-    return <AssistanceCompleteSurface connectionId={connectorInstanceId} runId={runId} />;
-  }
-  return <RunContinuingSurface connectionId={connectorInstanceId} runId={runId} />;
+  const statusHref = setupStatusHref(connectorInstanceId, runId);
+  const state = selectNoAssistanceStreamState({ runHandleStatus: runStatus?.status ?? null, terminalStatus: envelope.terminal_status });
+  if (state === "ended") redirect(statusHref);
+  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") return <ExternalApprovalSurface connector={connector} message={currentAssistance.message} runId={runId} />;
+  if (currentAssistance?.kind === "credentials") return <SignInDetailsSurface connector={connector} fields={credentialFields} interactionId={currentAssistance.id} message={currentAssistance.message} runId={runId} />;
+  if (state === "resolved" || hasResolvedBrowserSurfaceAssistance(envelope.events)) return <ResolvedSurface connector={connector} runId={runId} statusHref={statusHref} />;
+  if ((currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) || hasActiveBrowserSurface(envelope.events)) return <PreparingBrowserSurface connector={connector} runId={runId} />;
+  const destination = signInDestination(state, statusHref);
+  if (destination) redirect(destination);
+  return null;
 }
 
 export default async function RunInteractionStreamPage({
@@ -188,37 +139,14 @@ export default async function RunInteractionStreamPage({
   searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: Promise<{ _preview?: string; _state?: string }>;
+  searchParams: Promise<{ _preview?: string; _state?: string; auto_open?: string }>;
 }) {
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
   const sp = await searchParams;
 
-  // Dev preview bypass: render the visual surface without a real run.
-  // `?_preview=1`                  → orientation card with synthetic Strava context.
-  // `?_preview=1&_state=resolved`  → success state.
-  // `?_preview=1&_state=task`      → orientation card with the Stage-2 overlay open on mount,
-  //                                  so the modal layout can be reviewed in isolation.
-  if (sp._preview === "1" && process.env.NODE_ENV !== "production") {
-    const previewConnector: ConnectorContext = {
-      connectorId: "https://example.com/connectors/strava",
-      displayName: "Strava",
-    };
-    if (sp._state === "resolved") {
-      return <ResolvedSurface connector={previewConnector} runId={runId} />;
-    }
-    return (
-      <StreamSurface
-        autoOpen={sp._state === "task"}
-        connector={previewConnector}
-        interactionId="preview-interaction"
-        interactionKind="manual_action"
-        interactionMessage="Strava is asking you to confirm a 2FA code from your Authenticator app. Enter the six-digit code in the browser below to let collection continue."
-        interactionRequiresResponse
-        runId={runId}
-      />
-    );
-  }
+  const preview = flowPreviewState("browser", sp);
+  if (preview) return <SignInPreview state={preview} />;
 
   let envelope: TimelineEnvelope | null;
   let runStatus: RunStatusEnvelope | null;
@@ -227,9 +155,25 @@ export default async function RunInteractionStreamPage({
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
-        <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-          <ServerUnreachable />
-        </main>
+        <SignInFrame connector={null} title="This page lost contact with DataConnect.">
+          <section className="rounded-lg border border-destructive/30 p-6">
+            <h1 className="pdpp-heading text-foreground">Can't reach DataConnect right now.</h1>
+            <p className="mt-3 text-muted-foreground text-sm leading-6">
+              Try again. If it still does not work, check server settings.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-4 text-sm">
+              <a
+                className={buttonVariants({ size: "sm", variant: "default" })}
+                href={`/syncs/${encodeURIComponent(runId)}/stream`}
+              >
+                Try again
+              </a>
+              <a className="text-primary underline-offset-2 hover:underline" href="/deployment">
+                Server settings
+              </a>
+            </div>
+          </section>
+        </SignInFrame>
       );
     }
     throw err;
@@ -256,9 +200,13 @@ export default async function RunInteractionStreamPage({
       }
     : null;
 
+  const credentialFields = currentAssistance?.kind === "credentials"
+    ? projectCredentialInteraction(currentAssistance.fields, connectorId ? await getStaticSecretSetup(connectorId).catch(() => null) : null).fields
+    : [];
   if (!streamableAssistance) {
     return renderNoAssistanceSurface({
       connector: connectorWithIcon,
+      credentialFields,
       connectorInstanceId,
       currentAssistance,
       envelope,
@@ -269,165 +217,18 @@ export default async function RunInteractionStreamPage({
 
   return (
     <StreamSurface
+      autoOpen={sp.auto_open === "1"}
       connector={connectorWithIcon}
       interactionId={streamableAssistance.id}
-      interactionKind="manual_action"
-      interactionMessage={streamableAssistance.message}
+      // Only an OTP step gets the code field; every other browser step keeps the manual Done dock.
+      interactionKind={streamableAssistance.kind === "otp" ? "otp" : "manual_action"}
+      interactionMessage={normalizeInteractionPrompt(
+        streamableAssistance.message,
+        `This is ${connectorWithIcon?.displayName ?? "the data source"}'s own sign-in page, in a browser that DataConnect runs for you. When you are signed in, DataConnect carries on by itself.`
+      )}
       interactionRequiresResponse={streamableAssistance.responseContract === "response_required"}
       runId={runId}
+      statusHref={setupStatusHref(connectorInstanceId, runId)}
     />
-  );
-}
-
-function RunEndedSurface({
-  connector,
-  runId,
-  terminalStatus,
-}: {
-  connector: ConnectorContext | null;
-  runId: string;
-  terminalStatus: NoAssistanceEndedStatus;
-}) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: connector is nullable; tsc rejects removing this.
-  const subject = connector?.displayName ?? "This run";
-  let statusLabel = "failed";
-  let title = `${subject} needs a look.`;
-  let description =
-    "The browser step is no longer waiting, but the run did not complete successfully. View run details for the exact failure and next action.";
-  let sectionClass = "rounded-3xl border border-destructive/30 bg-destructive/5 p-6 shadow-2xl shadow-black/10";
-  if (terminalStatus === "cancelled") {
-    statusLabel = "cancelled";
-  } else if (terminalStatus === "abandoned") {
-    statusLabel = "stopped";
-  } else if (terminalStatus === "deferred") {
-    statusLabel = "browser deferred";
-    title = "Secure browser slot unavailable.";
-    description = `${subject} waited for a secure browser slot, but capacity stayed full. No connector work started. Try again when a secure browser slot is available.`;
-    sectionClass = "rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10";
-  }
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className={sectionClass}>
-        <p className="pdpp-eyebrow text-muted-foreground">run {statusLabel}</p>
-        <h1 className="pdpp-heading mt-3 flex items-center gap-2 text-balance text-foreground">
-          {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
-          <span>{title}</span>
-        </h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">{description}</p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function RunContinuingSurface({
-  connectionId,
-  runId,
-}: {
-  connectionId: string | null;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">run continuing</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">No browser action is waiting.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          The run is still in progress. This page updates automatically when browser input is needed.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function AssistanceCompleteSurface({ connectionId, runId }: { connectionId: string | null; runId: string }) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">browser step complete</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Browser step complete.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          Collection is continuing in the background. You can close this page — it updates automatically if browser
-          input is needed again.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function PreparingBrowserSurface({
-  connectionId,
-  runId,
-}: {
-  connectionId: string | null;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">secure browser starting</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Preparing the secure browser.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          Keep this page open. Browser controls will appear automatically when the run needs your input.
-        </p>
-        <SetupStatusLink connectionId={connectionId} runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function ExternalApprovalSurface({
-  assistance,
-  runId,
-}: {
-  assistance: NonNullable<ReturnType<typeof getCurrentRunAssistance>>;
-  runId: string;
-}) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-border bg-card p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">approval waiting</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Approve the request with the provider.</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">{assistance.message}</p>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          The run will continue automatically after the provider confirms your approval. No browser controls are waiting
-          here.
-        </p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
-  );
-}
-
-function UnavailableStreamSurface({ connector, runId }: { connector: ConnectorContext | null; runId: string }) {
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
-      <section className="rounded-3xl border border-[color:var(--warning)] bg-[color:var(--warning-wash)] p-6 shadow-2xl shadow-black/10">
-        <NoAssistanceRunPoller runId={runId} />
-        <p className="pdpp-eyebrow text-muted-foreground">stream unavailable</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">Waiting for a browser surface</h1>
-        <p className="mt-3 text-muted-foreground text-sm leading-6">
-          {connector ? (
-            <>
-              <span className="mr-1 inline-flex items-center gap-2 align-middle">
-                <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
-                {connector.displayName}
-              </span>{" "}
-              needs browser control. Keep this page open while the secure browser prepares. The page updates
-              automatically when it is ready.
-            </>
-          ) : (
-            "This run needs browser control. Keep this page open while the secure browser prepares. The page updates automatically when it is ready."
-          )}
-        </p>
-        <RunDetailLink runId={runId} />
-      </section>
-    </main>
   );
 }

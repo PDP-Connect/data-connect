@@ -238,6 +238,11 @@ async function assertBatchChildGrantRetainsTrustSignal(backend: "postgres" | "sq
     const grant = approved.body.grant as { child_grants?: { grant_id: string }[] } | undefined
     assert.equal(grant?.child_grants?.length, 2, "the batch issues one child grant per approved source")
 
+    const names = backend === "postgres"
+      ? (await postgresQuery<{ name: string }>("SELECT grant_json#>>'{client,client_display,name}' AS name FROM grants WHERE client_id=$1", [cimdClientId])).rows
+      : getDb().prepare("SELECT json_extract(grant_json, '$.client.client_display.name') AS name FROM grants WHERE client_id=?").all(cimdClientId) as { name: string }[]
+    assert.deepEqual(names.map(row => row.name), ["CIMD Batch Client", "CIMD Batch Client"])
+
     const tokenIds = await childTokenIds(approved.body.package_id as string, backend)
     assert.equal(tokenIds.length, 2, "each child grant carries its own token")
 

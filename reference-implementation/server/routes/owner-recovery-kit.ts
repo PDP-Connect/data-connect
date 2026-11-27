@@ -5,14 +5,18 @@ import { encodeRecoveryKitV2 } from "../recovery-kit-codec.ts"
 import { getStorageBackendKind } from "../postgres-storage.ts"
 import { resolveCredentialEncryptionKey } from "../stores/credential-encryption.ts"
 import { resolveDatabaseEncryptionKey } from "../sqlite-encryption.ts"
+import type { OwnerLoginRateLimitRequest } from "../owner-login-rate-limit.ts"
+import { type OwnerPasswordCheck, passOwnerPasswordGate } from "../owner-password-check.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 interface RouteRequest {
   readonly body?: unknown
+  readonly headers?: OwnerLoginRateLimitRequest["headers"]
 }
 
 interface RouteResponse {
   json: (body: unknown) => unknown
+  setHeader?: (name: string, value: string) => unknown
   status: (code: number) => RouteResponse
 }
 
@@ -21,6 +25,8 @@ type RouteHandler = (req: RouteRequest, res: RouteResponse) => unknown | Promise
 interface AppLike {
   post: (path: string, ...args: RouteArg<RouteHandler>[]) => AppLike
 }
+
+export type { OwnerPasswordCheck } from "../owner-password-check.ts"
 
 export interface ServerRecoveryKitExporter {
   exportCode: () => string
@@ -51,6 +57,8 @@ export function createServerRecoveryKitExporter({
 export interface MountOwnerRecoveryKitContext {
   exporter: ServerRecoveryKitExporter
   handleError: (res: unknown, err: unknown) => void
+  /** Re-asks for the owner password before every export; see POST contract below. */
+  ownerPassword: OwnerPasswordCheck
   requireOwner: MiddlewareHandler
   requireToken: MiddlewareHandler
 }
@@ -61,8 +69,9 @@ export function mountOwnerRecoveryKit(app: AppLike, ctx: MountOwnerRecoveryKitCo
   app.post(
     "/v1/owner/recovery-kit/export",
     ...guarded,
-    async (_req: RouteRequest, res: RouteResponse) => {
+    async (req: RouteRequest, res: RouteResponse) => {
       try {
+        if (!(await passOwnerPasswordGate(ctx.ownerPassword, req, res))) return
         const code = ctx.exporter.exportCode()
         res.json({ data: { code }, object: "recovery_kit_export" })
       } catch (err) {

@@ -1,0 +1,15 @@
+{
+  "id": "collection-schedules",
+  "name": "Schedule overview",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/schedules",
+      "readyText": "Schedules",
+      "desktopReadyHeading": "Schedules",
+      "phoneReadyHeading": "Schedules",
+      "assertText": "Schedules"
+    }
+  ]
+}

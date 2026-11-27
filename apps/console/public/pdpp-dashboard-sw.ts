@@ -126,13 +126,13 @@ function pdppDefaultTag(payload: DashboardPayload): string {
 }
 
 function pdppDefaultTitle(type: string): string {
-  return type === "pdpp.test_notification" ? "PDPP test notification" : "PDPP action needed";
+  return type === "pdpp.test_notification" ? "DataConnect" : "DataConnect needs you";
 }
 
 function pdppDefaultBody(type: string): string {
   return type === "pdpp.test_notification"
-    ? "This PDPP browser can receive Web Push alerts."
-    : "A connector run needs owner attention.";
+    ? "This is a test. Notifications work on this device."
+    : "Open DataConnect to see what it needs.";
 }
 
 function pdppIsAllowedDashboardUrl(url: string): boolean {

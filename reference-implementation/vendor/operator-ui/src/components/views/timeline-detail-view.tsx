@@ -157,7 +157,7 @@ export function TimelineDetailView({
         count={count}
         description={description}
         meta={metaContent}
-        title={<code className="font-mono">{id}</code>}
+        title={<code className="font-sans tabular-nums">{id}</code>}
       />
 
       {(() => {
@@ -176,7 +176,7 @@ export function TimelineDetailView({
                       href={pivotHref(p.kind, pivotId)}
                       key={`${p.kind}:${pivotId}`}
                     >
-                      {p.kind} <code className="ml-1 font-mono">{pivotId}</code> →
+                      {p.kind} <code className="ml-1 font-sans tabular-nums">{pivotId}</code> →
                     </Link>
                   ))
                 )

@@ -174,7 +174,7 @@ function ListFilterForm({ filters, active }: { filters: FilterFormConfig; active
           <label className="flex min-w-0 flex-col gap-1" htmlFor={`${active}-query`}>
             <span className="pdpp-eyebrow">Query</span>
             <Input
-              className="w-64 font-mono"
+              className="w-64"
               defaultValue={filters.query.defaultValue ?? ""}
               id={`${active}-query`}
               name={filters.query.name}
@@ -187,7 +187,7 @@ function ListFilterForm({ filters, active }: { filters: FilterFormConfig; active
           <label className="flex min-w-0 flex-col gap-1" htmlFor={`${active}-connector`}>
             <span className="pdpp-eyebrow">Connector</span>
             <Input
-              className="w-48 font-mono"
+              className="w-48"
               defaultValue={filters.connector.defaultValue ?? ""}
               id={`${active}-connector`}
               name={filters.connector.name}
@@ -209,7 +209,7 @@ function ListFilterForm({ filters, active }: { filters: FilterFormConfig; active
             </Select>
           </label>
         ) : null}
-        <Button className="mt-5" size="sm" type="submit">
+        <Button className="mt-5" size="sm" type="submit" variant="outline">
           Filter
         </Button>
       </Toolbar>

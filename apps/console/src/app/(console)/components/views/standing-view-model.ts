@@ -1,1179 +1,441 @@
+import { sourceRecordCount } from "../../lib/source-record-count.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Standing (Overview) view-model — pure mapping from the REAL dashboard data
- * shapes to the calm, person-first "Standing" presentation.
- *
- * This module holds NO React and NO data fetching — only typed functions that
- * turn `DatasetSummary` / `OwnerIssuedClient` / `GrantSummary` / `TraceSummary`
- * / `PendingApproval` / attention counts into the small, honest view objects
- * the `StandingOverview` component renders. Keeping it pure makes the hero-tone
- * logic and the scope→human lexicon unit-testable without a browser.
- *
- * Design source: docs/design-system/ink-carbon/project/recordroom/rr-overview.jsx.
- * The design used fictional fixtures; here every field binds to a real shape.
- */
-
+import { formatRelative, humanizeFieldLabel } from "@pdpp/display";
+import { appNamesByClientId, appSourceName, groupGrantAccessByApp, pendingApprovalAppName } from "../../grants/app-access.ts";
 import type {
+  AppAccess,
   DatasetSummary,
   GrantSummary,
   OwnerIssuedClient,
   PendingApproval,
   RefConnectorSummary,
-  RefFleetHealthVerdict,
-  RunSummary,
   TraceSummary,
 } from "../../lib/ref-client.ts";
-import {
-  SOURCE_WORK_GROUP_COPY,
-  type SourceWorkGroups,
-  type SourceWorkItem,
-  sourceWorkFromConnectors,
-} from "../../lib/source-actionability.ts";
+import { connectionDisplayName, connectionNameDisambiguators } from "../../lib/connection-display-name.ts";
+import { isScheduled } from "../../lib/schedule-words.ts";
+import { isUpToDateRow, type SourceStatusWords, sourceStatusWords } from "../../lib/source-status-words.ts";
 
-// ─── Plain-language lexicon: scope/stream → what it means to a person ──
-//
-// HONESTY RULE (from the task contract): there is no owner profile identity to
-// read, and grant summaries do not carry a full scope string — they carry
-// `kinds[]` (event kinds) + `connector_id`. So we humanize at the STREAM level:
-// a known stream maps to a warm phrase ("your pay"); an unknown stream falls
-// back to its own prettified name. We never invent a meaning we can't justify.
 
-const SCOPE_HUMAN: Record<string, string> = {
-  browser_history: "your browsing",
-  browsing: "your browsing",
-  "consent.approved": "grant decisions",
-  conversations: "your conversations",
-  current_activity: "your spending",
-  "disclosure.served": "data disclosures",
-  emails: "your email",
-  employment: "your employment history",
-  health: "your health records",
-  income: "your pay",
-  listening_history: "what you listen to",
-  location: "where you've been",
-  messages: "your messages",
-  orders: "your orders",
-  pay_statements: "your pay",
-  paystubs: "your pay",
-  purchases: "your purchases",
-  "query.received": "read requests",
-  "query.rejected": "rejected reads",
-  statements: "your statements",
-  tax_docs: "your tax documents",
-  tax_documents: "your tax documents",
-  "token.issued": "token activity",
-  transactions: "your spending",
-  watch_history: "what you watch",
-};
+export const HOME_GRANT_LIMIT = 12;
 
-const READ_SUFFIX_RE = /\.read$/;
-const STREAM_PREFIX_RE = /^[a-z0-9-]+:/;
-const UNDERSCORE_RE = /_/g;
-
-/**
- * Humanize one scope/stream identifier. Strips a `.read` suffix and any
- * `connector:` prefix, looks up the warm phrase, and — when there is no honest
- * mapping — returns the identifier with underscores spaced out. The caller
- * always gets readable text; we never show a raw `pay_statements.read`.
- */
-export function scopeHuman(name: string): string {
-  const bare = name.replace(READ_SUFFIX_RE, "").replace(STREAM_PREFIX_RE, "");
-  const known = SCOPE_HUMAN[bare];
-  if (known) {
-    return known;
-  }
-  return bare.replace(UNDERSCORE_RE, " ").trim() || name;
-}
-
-/** Oxford-comma join of human phrases: "a", "a and b", "a, b, and c". */
-export function joinHuman(parts: readonly string[]): string {
-  const list = parts.filter(Boolean);
-  if (list.length <= 1) {
-    return list[0] ?? "";
-  }
-  if (list.length === 2) {
-    return `${list[0]} and ${list[1]}`;
-  }
-  return `${list.slice(0, -1).join(", ")}, and ${list.at(-1)}`;
-}
-
-const STREAM_RECORD_NOUN: Record<string, string> = {
-  current_activity: "transactions",
-  emails: "emails",
-  employment: "employment records",
-  listening_history: "listening records",
-  messages: "messages",
-  orders: "orders",
-  pay_statements: "pay records",
-  tax_docs: "tax records",
-  transactions: "transactions",
-};
-
-/** "transactions" / "pay records" — the plural noun for a stream of records. */
-export function recordNoun(stream: string): string {
-  const bare = stream.replace(STREAM_PREFIX_RE, "");
-  return STREAM_RECORD_NOUN[bare] ?? `${bare.replace(UNDERSCORE_RE, " ").trim()} records`;
-}
-
-// ─── View objects ─────────────────────────────────────────────────────
-
-export type HeroTone = "calm" | "decide" | "alarm";
-
-export interface StandingHero {
-  /** Optional CTA: label + href to the place that resolves the state. */
-  cta?: { href: string; label: string; human?: boolean };
-  /** Eyebrow line above the truth. */
-  kicker: string;
-  /** The one truth. May contain a single emphasized run (rendered <em>). */
-  line: { text: string; emphasis?: string; tail?: string };
-  /** The reassuring/explaining sub-line. */
-  sub: string;
-  tone: HeroTone;
-}
-
-export interface BearerView {
-  clientId: string;
-  /**
-   * "owner token · 2 active tokens" — protocol meta line WITHOUT the timestamp.
-   * The timestamp is carried separately as `issuedAt` so the component renders
-   * it through the shared `IcTimestamp` primitive (same as the tokens page),
-   * instead of the local `relDay` string. Keeps one timestamp voice across the
-   * two owner surfaces.
-   */
-  how: string;
-  /**
-   * Raw `created_at` (client registration time) for the shared `IcTimestamp`.
-   * Null only when the client carries no registration time.
-   */
-  issuedAt: string | null;
-  /**
-   * The honest label for `issuedAt`. "issued" when the client has a single
-   * active token (registration and issuance coincide); "first issued" when
-   * `active_token_count > 1`, since `created_at` is the client's registration
-   * time, not the newest token's issuance — calling that "issued" would be
-   * wrong for the later tokens. Per-token issuance lives in the (out-of-scope)
-   * drilldown; here we degrade the word honestly.
-   */
-  issuedLabel: "issued" | "first issued";
-  /** href to the deployment/tokens revoke surface. */
-  revokeHref: string;
-  who: string;
-}
-
-export interface RelationshipView {
-  actionHref: string;
-  actionLabel: string;
-  clientId: string;
-  /** "reads only your pay and your spending" — humanized scope summary. */
-  reads: string;
-  /** Whether the secondary verified client id is useful owner-facing context. */
-  showClientId: boolean;
-  status: GrantEndorseStatus;
-  /** "last active today · 3 grants" — meta line. */
-  terms: string;
-  who: string;
-}
-
-export type GrantEndorseStatus = "active" | "continuous" | "expiring" | "revoked" | "denied";
-
-export interface LatelyView {
-  deny: boolean;
-  id: string;
-  /** "Claude Desktop read 412 transactions" or deny copy. */
-  text: { who: string; rest: string };
-  when: string;
-}
-
-export interface AttentionRowView {
-  connectorId?: string;
-  href: string;
-  id: string;
-  what: string;
-  why: string;
-}
-
-export interface SourceWorkSectionView {
-  countLabel: string;
-  id: SourceWorkItem["group"];
-  /** One-line "who acts / how urgent" note, from the shared group copy. */
-  note: string;
-  rows: AttentionRowView[];
-  title: string;
-  tone: "muted" | "owner" | "review" | "system";
-}
-
-/**
- * Grant-package presence for the "Who can read parts of you" block header.
- *
- * `count` is authoritative when `exact` is true (from
- * `GET /_ref/grant-packages/count`), and a floor otherwise — the number of
- * DISTINCT packages visible in the already-loaded (preview) grants. The
- * overview prefers the exact count so it can surface packages that exist but
- * are not represented in the loaded grant preview, without paging the full
- * grants or grant-package list. When only the floor is known the label stays
- * discovery-phrased ("grant package →"), not a hard rollup.
- */
-export interface GrantPackagesView {
-  count: number;
-  /** True when `count` is the exact total from the count endpoint, not a preview floor. */
-  exact: boolean;
-  href: string;
-}
-
-export interface StandingData {
-  advisoryOwnerActions: AttentionRowView[];
-  attention: AttentionRowView[];
-  bearers: BearerView[];
-  /** Active bearer credentials beyond the preview cap; 0 means none hidden. */
-  bearersOverflow: number;
-  /** Aggregate server verdict; source rows retain their existing detail contract. */
-  fleetHealth: RefFleetHealthVerdict | null;
-  grantPackages: GrantPackagesView | null;
-  /** Exact healthy-source count when the overview loaded the complete source fleet. */
-  healthySourceCount: number | null;
-  hero: StandingHero;
-  lately: LatelyView[];
-  /** Whether ANY web-push subscription is registered on this deployment — the
-   *  only server-derivable signal (per-browser enablement is client-only
-   *  state, see web-push-settings.tsx). `"unknown"` when the read failed;
-   *  must never default to "not configured" on a load failure. */
-  notificationsSetup: "configured" | "not_configured" | "unknown";
-  overviewIssues: AttentionRowView[];
-  relationships: RelationshipView[];
-  sourceIssues: AttentionRowView[];
-  sourceWorkSections: SourceWorkSectionView[];
-}
-
-// ─── Inputs ────────────────────────────────────────────────────────────
-
-export interface StandingInputs {
-  /**
-   * Connections with non-urgent owner-runnable required actions. Prefer
-   * `sourceWork.review` for new code.
-   */
-  advisoryOwnerActions: AdvisoryOwnerActionConnection[];
-  /**
-   * Connections the owner genuinely needs to act on, derived from the rendered
-   * verdict attention channel (the SAME source `/runs` uses). These rows drive
-   * connection detail and the "anything wrong" list; the aggregate hero is
-   * owned by the server fleet verdict so the two layers cannot disagree.
-   */
-  attentionConnections: AttentionConnection[];
-  bearerClients: OwnerIssuedClient[];
-  failedRuns: RunSummary[];
-  failedTraces: TraceSummary[];
-  /** Server-owned aggregate source-health contract. */
-  fleetHealth: RefFleetHealthVerdict | null;
-  /**
-   * Authoritative total grant-package count from `GET /_ref/grant-packages/count`,
-   * so the overview shows package presence/count without paging the full grants
-   * or grant-package list. `null`/absent falls back to the DISTINCT-package
-   * floor derived from the already-loaded grants (a preview lower bound).
-   */
-  grantPackageCount?: number | null;
-  grants: GrantSummary[];
-  /** href builders (bound to dashboardRoutes by the page). */
-  hrefs: StandingHrefs;
-  /** See StandingData.notificationsSetup. */
-  notificationsSetup: "configured" | "not_configured" | "unknown";
-  /** Relative-time formatter (injected so the view-model stays clock-pure). */
-  now: Date;
-  /**
-   * Dashboard sub-reads that failed while building the overview. Empty means
-   * the page checked every input. Non-empty must suppress all-clear copy.
-   */
-  overviewLoadIssues: string[];
-  pendingApprovals: PendingApproval[];
-  /** Exact number of operational, assessed sources in the complete overview page. */
-  sourceCount?: number;
-  /**
-   * Connections with material source issues that do NOT ask the owner to do
-   * anything. These must still suppress "everything is syncing" all-clears.
-   */
-  sourceIssues: SourceIssueConnection[];
-  /** Honest bounded dashboard pagination state, when the live page is used. */
-  sourcePage?: {
-    kind: "error" | "ok";
-    hasMore: boolean;
-    message?: string;
-    nextCursor?: string;
-    isPaged: boolean;
-  };
-  /**
-   * Mutually-exclusive owner-console source work. This is the actionability
-   * model the Overview renders; legacy arrays remain only for compatibility
-   * with older tests/helpers.
-   */
-  sourceWork: SourceWorkGroups;
-  summary: DatasetSummary | null;
-  traces: TraceSummary[];
-}
-
-export interface StandingHrefs {
-  /** Per-connection recovery destination — the connection detail page that
-   *  carries the focused recovery panel. NOT /traces (an audit log). */
-  connection: (connectorKey: string) => string;
+export interface HomeHrefs {
+  addSource: string;
+  connect: string;
   deployment: string;
   deploymentTokens: string;
   grant: (id: string) => string;
-  /** The grant-packages management surface — discovery target from the overview. */
-  grantPackages: string;
   grants: string;
-  /** Device-level browser/PWA notification setup surface. */
-  notifications: string;
-  run: (id: string) => string;
-  /** The syncs/runs list — the triage destination when several connections need the owner. */
-  runs: string;
-  /** Source list — the review destination for non-urgent source advisory actions. */
+  source: (id: string) => string;
   sources: string;
-  trace: (id: string) => string;
-  traces: string;
+}
+
+export interface HomeReads {
+  appRegistrations?: AppAccess[];
+  approvals: PendingApproval[];
+  approvalsFailed: boolean;
+  approvalsHaveMore: boolean;
+  grants: GrantSummary[];
+  grantsFailed: boolean;
+  grantsHaveMore: boolean;
+  /** Services this install's catalog offers, A to Z; the first-run logo row shows the first five. */
+  offeredSources?: { connectorKey: string; displayName: string }[];
+  ownerClients: OwnerIssuedClient[];
+  ownerClientsFailed: boolean;
+  ownerClientsHaveMore: boolean;
+  sourcePage: {
+    error?: string;
+    hasMore: boolean;
+    kind: "error" | "ok";
+    sources: RefConnectorSummary[];
+  };
+  summary: DatasetSummary | null;
+  summaryFailed: boolean;
+  traces: TraceSummary[];
+  tracesFailed: boolean;
+  tracesHaveMore: boolean;
+}
+
+export interface HomeSourceRow {
+  href: string;
+  id: string;
+  name: string;
+  source: RefConnectorSummary;
+  status: SourceStatusWords;
+}
+
+export interface HomeNeedRow {
+  actionHref: string;
+  actionLabel: string | null;
+  detail: string | null;
+  href: string;
+  id: string;
+  iconId: string;
+  kind: "waiting_sync" | "approval" | "source";
+  name: string;
+  source?: RefConnectorSummary;
+  status?: SourceStatusWords;
+  /** What happens next after a failed sync; null when the status already says it. */
+  nextStep?: string | null;
+  /** "last synced <when>" or "sync started <when>"; null when the data source has neither. */
+  syncNote: string | null;
+}
+
+export interface HomeAppRow {
+  href: string;
+  id: string;
+  lastRead: string | null;
+  name: string;
+  reads: string;
 }
 
 /**
- * A connection the owner genuinely needs to act on. Derived from the rendered
- * verdict's attention channel (an owner-satisfiable required action), NOT from
- * failed runs/traces. It powers connection rows and `/runs`; the aggregate
- * dashboard hero instead follows the server fleet verdict. See
- * {@link attentionConnectionsFromConnectors}.
+ * What an empty Data sources list says. Sources that need the person are listed above, not in the list,
+ * so "No active data sources." would contradict the count and the Needs you row.
  */
-export interface AttentionConnection {
-  /** The owner-resolvable action label (the CTA verb). */
-  actionLabel: string;
-  /** Owner-facing connector type, for the human label ("Chase needs you"). */
-  connectorKey: string;
-  /**
-   * True when the action is a DEVICE-LOCAL recovery — the owner runs commands on
-   * the host that holds the data; the dashboard cannot perform it. The CTA then
-   * only NAVIGATES to where the commands are shown, so its label must read as
-   * navigation ("See what to do"), never restate the action as if a click runs
-   * it (which sends the owner in a circle).
-   */
-  deviceLocal: boolean;
-  /** Owner-facing connection/source label, for exact multi-account/device copy. */
-  label: string;
-  /**
-   * The records-route id that resolves to THIS exact connection — the
-   * connection identity (`connector_instance_id ?? connection_id`), NOT the
-   * connector type. Routing by connector type lands on whichever connection
-   * of that type is first, which is wrong when several accounts/devices share
-   * a type (e.g. three Claude Code devices: only one is in attention).
-   */
-  routeId: string;
-  /** Owner-facing "what's wrong" line, from the verdict's forward statement. */
-  what: string;
+export function sourcesEmptyLine(input: { needingSources: readonly { name: string }[]; total: number | null }): string {
+  const needing = input.needingSources.length;
+  if (needing === 0) return "No active data sources.";
+  if (input.total !== null && needing >= input.total) {
+    return needing === 1 ? `${input.needingSources[0]?.name} is listed above under Needs you.` : `All ${needing} are listed above under Needs you.`;
+  }
+  return "The rest are not active.";
 }
 
-export interface SourceIssueConnection {
-  /** Connector type id when known; legacy callers may omit it. */
-  connectorKey?: string;
-  /** Owner-facing source name ("Chase", "Gmail - work"). */
-  label: string;
-  routeId: string;
-  /** Source-state label derived from the server-owned verdict pill. */
-  status: "can't collect" | "is degraded";
-  /** Owner-facing "what's wrong" line, from the verdict's forward statement. */
-  what: string;
+export interface HomeData {
+  addSourceHref: string;
+  activeTokenCount: number;
+  allAppsHref: string;
+  allAppsLink: boolean;
+  allTokensLink: boolean;
+  appError: boolean;
+  apps: HomeAppRow[];
+  appsEmpty: boolean;
+  appsHref: string;
+  dataSourceCount: string | null;
+  dataSourceError: boolean;
+  dataSources: HomeSourceRow[];
+  deploymentHref: string;
+  firstRun: boolean;
+  needs: HomeNeedRow[];
+  needsError: boolean;
+  needsMore: boolean;
+  needsVisible: boolean;
+  noSources: boolean;
+  /** The one sentence for an empty Data sources list; null when the list is shown or the section needs none. */
+  sourcesEmptyLine: string | null;
+  /** Logos for the first-run row: only services this install's catalog offers. */
+  offeredSources: { iconId: string; name: string }[];
+  recordCount: string | null;
+  summaryError: boolean;
+  reloadHref: string;
+  sourcesHref: string;
+  showMoreSources: boolean;
+  shownSourceCount: number;
+  /** "All N data sources" when a complete read has more rows than Home shows; null on a paged read. */
+  sourceTotalLink: string | null;
+  subtitle: string | null;
+  title: string;
+  tokensHref: string;
+  warning: boolean;
 }
 
-export interface AdvisoryOwnerActionConnection {
-  actionLabel: string;
-  connectorKey?: string;
-  label: string;
-  routeId: string;
-  what: string;
+export interface HomeInputs extends HomeReads {
+  hrefs: HomeHrefs;
+  now: Date;
+  reloadHref: string;
+  offset?: number;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
-const DAY_MS = 86_400_000;
-
-/** Compact, calm relative time: "today", "yesterday", "3 days ago", date. */
-export function relDay(iso: string | null, now: Date): string {
-  if (!iso) {
-    return "—";
-  }
-  const t = new Date(iso);
-  if (Number.isNaN(t.getTime())) {
-    return "—";
-  }
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfThen = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
-  const days = Math.round((startOfToday - startOfThen) / DAY_MS);
-  if (days <= 0) {
-    return "today";
-  }
-  if (days === 1) {
-    return "yesterday";
-  }
-  if (days < 7) {
-    return `${days} days ago`;
-  }
-  return t.toISOString().slice(0, 10);
+interface PreparedSource extends HomeSourceRow {
+  actionSurface: string | null;
+  sortAt: string | null;
 }
 
-/** Compact integer formatting: 48120 → "48,120". */
-function fmtInt(n: number): string {
-  return n.toLocaleString("en-US");
+/** Join source names without dropping any of them. */
+export function joinHuman(parts: readonly string[]): string {
+  const list = parts.filter(Boolean);
+  if (list.length <= 1) return list[0] ?? "";
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, and ${list.at(-1)}`;
 }
 
-/**
- * Grant decision vocab → an Endorse status. Per the task contract:
- * succeeded | issued | approved | active → active.
- */
-export function grantEndorseStatus(status: string): GrantEndorseStatus {
-  const s = status.toLowerCase();
-  if (s === "revoked") {
-    return "revoked";
-  }
-  if (s === "denied" || s === "failed" || s === "rejected") {
-    return "denied";
-  }
-  if (s === "expiring") {
-    return "expiring";
-  }
-  if (s === "continuous" || s === "indefinite") {
-    return "continuous";
-  }
-  // succeeded | issued | approved | active | anything else live → active
-  return "active";
-}
-
-const REVOKED_STATES = new Set(["revoked", "denied", "rejected", "expired"]);
-
-function isLiveGrant(g: GrantSummary): boolean {
-  return !REVOKED_STATES.has(g.status.toLowerCase());
-}
-
-/**
- * Humanize the slices a grant can read. Grant summaries don't carry a full
- * scope list; we derive readable phrases from the grant's `kinds[]` and
- * `connector_id`. We strip protocol noise (`grant.*`, `read`, `trace.*`) and
- * humanize what's left; if nothing survives, we fall back to the connector
- * name, and finally to a calm generic phrase. Always honest — never invented.
- */
-const PROTOCOL_KIND_PREFIX_RE = /^(grant|trace|run|event)\./;
-const PROTOCOL_KIND_WORDS = new Set(["read", "issued", "approved", "revoked", "denied"]);
-const HEX_TOKEN_RE = /^[a-f0-9]{16,}$/i;
-const LONG_MACHINE_TOKEN_RE = /^(?=.{32,}$)(?=.*\d)[A-Za-z0-9_-]+$/;
-const TECH_ID_PREFIX_RE = /^(cli|grt|trc|run|req|cin|dsrc|dexp|ldt)_[A-Za-z0-9_-]+$/;
-const TRAILING_PERIOD_RE = /\.$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const WWW_PREFIX_RE = /^www\./;
-
-export function grantReads(g: GrantSummary): string {
-  const phrases = grantReadPhrases(g);
-  if (phrases.length > 0) {
-    return `reads only ${joinHuman(phrases)}`;
-  }
+/** Name the data source attached to an app's access. */
+export function grantReads(grant: GrantSummary): string {
+  const source =
+    appSourceName(grant.source) ??
+    (grant.connector_id ? appSourceName({ id: grant.connector_id, kind: "connector" }) : null);
+  if (source) return `reads only ${source}`;
   return "reads a scoped slice of your data";
 }
 
-function grantReadPhrases(g: GrantSummary): string[] {
-  const meaningfulKinds = g.kinds
-    .map((k) => k.replace(PROTOCOL_KIND_PREFIX_RE, ""))
-    .filter((k) => k && !PROTOCOL_KIND_WORDS.has(k));
-  const phrases = Array.from(new Set(meaningfulKinds.map(scopeHuman))).filter(Boolean);
-  if (phrases.length > 0) {
-    return phrases;
-  }
-  return g.connector_id ? [scopeHuman(g.connector_id)] : [];
-}
-
-/** Humanize the streams a pending approval previews. */
-function approvalReads(a: PendingApproval): string {
-  const streams = (a.grant_preview?.streams ?? [])
-    .map((s) => (typeof s === "string" ? s : (s.name ?? "")))
+function approvalReads(approval: PendingApproval): string {
+  const streams = (approval.grant_preview?.streams ?? [])
+    .map((stream) => (typeof stream === "string" ? stream : (stream.name ?? "")))
     .filter(Boolean);
-  const phrases = Array.from(new Set(streams.map(scopeHuman)));
-  if (phrases.length > 0) {
-    return joinHuman(phrases);
-  }
-  return "parts of your data";
+  const phrases = Array.from(new Set(streams.map(humanizeFieldLabel)));
+  return phrases.length > 0 ? joinHuman(phrases) : "parts of your data";
 }
 
-function hostFromUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    return url.hostname.replace(WWW_PREFIX_RE, "") || null;
-  } catch {
-    return null;
-  }
+function relativeWhen(value: string | null | undefined, now: Date): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : formatRelative(date, now.getTime());
 }
 
-function clientLabel(name: string | null, clientId: string): string {
-  const raw = name?.trim() || clientId;
-  const host = hostFromUrl(raw);
-  if (host) {
-    return host;
-  }
-  if (looksLikeTechnicalId(raw)) {
-    return "Unnamed app";
-  }
-  return raw;
-}
-
-function shouldShowSecondaryClientId(clientId: string, who: string): boolean {
-  if (clientId === who) {
-    return false;
-  }
-  if (hostFromUrl(clientId)) {
-    return false;
-  }
-  if (looksLikeTechnicalId(clientId)) {
-    return false;
-  }
-  return true;
-}
-
-// ─── Bearer view ("what can act as you") ──────────────────────────────────
-
-function activeBearerClients(clients: readonly OwnerIssuedClient[]): OwnerIssuedClient[] {
-  return clients.filter((c) => c.active_token_count > 0);
-}
-
-function activeOwnerTokenCount(clients: readonly OwnerIssuedClient[]): number {
-  return clients.reduce((sum, c) => sum + Math.max(0, c.active_token_count), 0);
-}
-
-/**
- * Preview cap for the bearer block on the overview. The overview REASSURES and
- * SUMMARIZES; the tokens page is where the owner manages at scale. Beyond this
- * many active credentials the block shows the most-recent few and a "+N more"
- * link to the full managed list, matching the preview+link pattern the grants
- * and reads blocks already use — so twenty bearers is a summary, not a wall.
- */
-export const BEARER_PREVIEW_LIMIT = 4;
-
-function toBearers(clients: OwnerIssuedClient[], hrefs: StandingHrefs): BearerView[] {
-  return activeBearerClients(clients).map((c) => {
-    const count = c.active_token_count;
-    const tokenWord = count === 1 ? "token" : "tokens";
-    return {
-      clientId: c.client_id,
-      how: `owner token · ${count} active ${tokenWord}`,
-      issuedAt: c.created_at,
-      // A client with more than one active token registered before the newest
-      // token was issued, so `created_at` is a "first issued", not "issued".
-      issuedLabel: count > 1 ? "first issued" : "issued",
-      revokeHref: hrefs.deploymentTokens,
-      who: clientLabel(c.client_name, c.client_id),
-    };
+function oldestFirst<T>(items: T[], at: (item: T) => string | null): T[] {
+  return [...items].sort((left, right) => {
+    const leftAt = at(left) ? Date.parse(at(left) as string) : Number.POSITIVE_INFINITY;
+    const rightAt = at(right) ? Date.parse(at(right) as string) : Number.POSITIVE_INFINITY;
+    if (leftAt === rightAt) return 0;
+    return leftAt < rightAt ? -1 : 1;
   });
 }
 
-// ─── Relationships view ("who can read parts of you") ────────────────────
-
-function newerIso(a: string | null, b: string | null): string | null {
-  if (!a) {
-    return b;
-  }
-  if (!b) {
-    return a;
-  }
-  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
+function sourceActionSurface(source: RefConnectorSummary): string | null {
+  return source.rendered_verdict?.required_actions.find((action) => action.audience === "owner")?.surface?.kind ?? null;
 }
 
-function clientNamesById(clients: readonly OwnerIssuedClient[]): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const client of clients) {
-    const name = client.client_name?.trim();
-    if (name) {
-      out.set(client.client_id, name);
-    }
-  }
-  return out;
+function sourceSortTime(source: RefConnectorSummary): string | null {
+  return source.owner_state?.evidence_as_of ?? source.last_run?.started_at ?? null;
 }
 
-function toRelationships(
-  grants: GrantSummary[],
-  hrefs: StandingHrefs,
+function lastSuccessfulSync(source: RefConnectorSummary): string | null {
+  return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
+}
+
+function prepareSources(sources: readonly RefConnectorSummary[], now: Date, hrefs: HomeHrefs, offset?:number): PreparedSource[] {
+  const disambiguators = connectionNameDisambiguators(sources);
+  return sources.map((source) => ({
+    actionSurface: sourceActionSurface(source),
+    href: hrefs.source(source.connection_id),
+    id: source.connection_id,
+    name: connectionDisplayName(source.display_name, source.connector_display_name, source.connector_id, disambiguators.get(source.connection_id)),
+    sortAt: sourceSortTime(source),
+    source,
+    status: sourceStatusWords(source, { now,offset }),
+  }));
+}
+
+function approvalRow(
+  approval: PendingApproval,
   now: Date,
-  knownClientNames: ReadonlyMap<string, string> = new Map()
-): RelationshipView[] {
-  const groups = new Map<
-    string,
-    {
-      clientId: string;
-      grantIds: string[];
-      lastAt: string | null;
-      phrases: Set<string>;
-      statuses: GrantEndorseStatus[];
-      who: string;
-    }
-  >();
-  for (const grant of grants.filter(isLiveGrant)) {
-    const clientId = grant.client_id || grant.grant_id;
-    const grantClientName = grant.client?.client_name?.trim() || null;
-    const knownClientName = grant.client_id ? (knownClientNames.get(grant.client_id) ?? null) : null;
-    const existing = groups.get(clientId) ?? {
-      clientId,
-      grantIds: [],
-      lastAt: null,
-      phrases: new Set<string>(),
-      statuses: [],
-      who: clientLabel(grantClientName ?? knownClientName ?? grant.client_id, grant.grant_id),
-    };
-    existing.grantIds.push(grant.grant_id);
-    existing.lastAt = newerIso(existing.lastAt, grant.last_at);
-    for (const phrase of grantReadPhrases(grant)) {
-      existing.phrases.add(phrase);
-    }
-    existing.statuses.push(grantEndorseStatus(grant.status));
-    groups.set(clientId, existing);
-  }
-
-  return Array.from(groups.values()).map((group) => {
-    const grantCount = group.grantIds.length;
-    const grantWord = grantCount === 1 ? "grant" : "grants";
-    // The group's subject is identifiable when it resolves to exactly ONE
-    // distinct grant id — dedupe first, so a client whose grants all carry the
-    // same id still drills into that grant rather than falling back to the list.
-    const distinctGrantIds = Array.from(new Set(group.grantIds.filter((id) => id.length > 0)));
-    const identifiableGrantId = distinctGrantIds.length === 1 ? distinctGrantIds[0] : null;
-    const status = group.statuses.includes("expiring") ? "expiring" : (group.statuses[0] ?? "active");
-    return {
-      // Per-grant drill-in whenever a SPECIFIC grant is identifiable. A group is
-      // keyed by client, so a multi-grant group has no single subject — but the
-      // one-grant case does, and previously only the `=== 1` branch used it.
-      // `identifiableGrantId` keeps that drill-in and degrades to the filtered
-      // list (never the bare index) when the subject is genuinely ambiguous.
-      actionHref: identifiableGrantId ? hrefs.grant(identifiableGrantId) : hrefs.grants,
-      // NAV, not a mutation: this only opens a page. It rendered as the word
-      // "review" in a `rr-rel__revoke` slot, which read as a destructive control.
-      actionLabel: identifiableGrantId ? "Review grant →" : `Review ${grantCount} grants →`,
-      clientId: group.clientId,
-      reads:
-        group.phrases.size > 0
-          ? `reads only ${joinHuman(Array.from(group.phrases))}`
-          : "reads a scoped slice of your data",
-      showClientId: shouldShowSecondaryClientId(group.clientId, group.who),
-      status,
-      terms: `last active ${relDay(group.lastAt, now)} · ${grantCount} ${grantWord}`,
-      who: group.who,
-    };
-  });
+  hrefs: HomeHrefs,
+  knownNames: ReadonlyMap<string, string>,
+): HomeNeedRow {
+  const name = pendingApprovalAppName(knownNames.get(approval.client_id ?? ""));
+  const when = relativeWhen(approval.created_at, now);
+  const asksFor = approvalReads(approval);
+  return {
+    actionHref: hrefs.grants,
+    actionLabel: "Review",
+    detail: `Asks to read ${asksFor}${when ? ` · ${when}` : ""}`,
+    href: hrefs.grants,
+    iconId: approval.client_id || name,
+    id: `approval:${approval.approval_id}`,
+    kind: "approval",
+    name,
+    syncNote: null,
+  };
 }
 
-// ─── Grant packages (discovery from already-loaded grants) ────────────────
-
-/**
- * Grant-package presence for the overview header. Prefers the authoritative
- * total from the count endpoint (`grantPackageCount`); when that is absent,
- * falls back to counting the DISTINCT packages visible in the already-loaded
- * (live) grants — a preview floor. Revoked grants are excluded from the floor
- * so a fully-revoked package does not advertise from the loaded preview.
- */
-function toGrantPackages(
-  grants: GrantSummary[],
-  hrefs: StandingHrefs,
-  grantPackageCount?: number | null
-): GrantPackagesView | null {
-  if (typeof grantPackageCount === "number" && Number.isFinite(grantPackageCount)) {
-    if (grantPackageCount <= 0) {
-      return null;
-    }
-    return { count: grantPackageCount, exact: true, href: hrefs.grantPackages };
-  }
-  const ids = new Set<string>();
-  for (const grant of grants.filter(isLiveGrant)) {
-    const id = grant.grant_package_id?.trim();
-    if (id) {
-      ids.add(id);
-    }
-  }
-  if (ids.size === 0) {
-    return null;
-  }
-  return { count: ids.size, exact: false, href: hrefs.grantPackages };
+/** Row 16 is a failed sync: say whether DataConnect will try again by itself. */
+function failedSyncNextStep(source: PreparedSource): string | null {
+  if (source.status.row !== 16 || !source.status.action) return null;
+  if (source.status.action.kind === "repair_sign_in") return "Nothing new is copied until you do.";
+  if (isScheduled(source.source.schedule ?? null)) return "DataConnect will also try again at the next check.";
+  return `DataConnect checks ${source.name} only when you ask.`;
 }
 
-// ─── Lately view ("what's been read") ────────────────────────────────────
-
-function denyReason(reason: string | null): string {
-  if (!reason) {
-    return "it wasn't allowed";
-  }
-  const r = reason.toLowerCase();
-  if (r === "insufficient_scope" || r === "out_of_scope") {
-    return "you never allowed it";
-  }
-  if (r === "grant_revoked") {
-    return "you'd revoked it";
-  }
-  if (r === "grant_expired") {
-    return "the grant had expired";
-  }
-  if (r === "orphaned_started_run") {
-    return "it was not tied to an active run";
-  }
-  if (r === "permission_error" || r === "permanent_forbidden") {
-    return "the app was not allowed to do that";
-  }
-  if (r === "authentication_error" || r.includes("credential")) {
-    return "the app was not authorized";
-  }
-  return "the server rejected it";
+function sourceNeedRow(source: PreparedSource, now: Date, waitingSync: boolean): HomeNeedRow {
+  const lastSynced = relativeWhen(lastSuccessfulSync(source.source), now);
+  const syncStarted =
+    source.source.last_run?.status === "started" ? relativeWhen(source.source.last_run.started_at, now) : null;
+  // Lead decision (home-pictures 1, 2): the second line carries the status words,
+  // then a sync time only when a sync succeeded or started.
+  const wordsSayLastSynced = source.status.words.includes("last synced");
+  const syncNote =
+    waitingSync && syncStarted ? `sync started ${syncStarted}` : lastSynced && !wordsSayLastSynced ? `last synced ${lastSynced}` : null;
+  return {
+    actionHref: source.href,
+    actionLabel: source.status.action?.label ?? null,
+    detail: null,
+    href: source.href,
+    iconId: source.source.connector_id,
+    id: source.id,
+    kind: waitingSync ? "waiting_sync" : "source",
+    name: source.name,
+    nextStep: failedSyncNextStep(source),
+    source: source.source,
+    status: source.status,
+    syncNote,
+  };
 }
 
-function looksLikeTechnicalId(value: string | null | undefined): boolean {
-  const v = value?.trim() ?? "";
-  if (TECH_ID_PREFIX_RE.test(v)) {
-    return true;
-  }
-  if (UUID_RE.test(v)) {
-    return true;
-  }
-  if (HEX_TOKEN_RE.test(v)) {
-    return true;
-  }
-  // Long space/dot-free tokens are more likely to be machine ids than names.
-  // When uncertain, under-claim identity as "Unnamed app" rather than present
-  // a raw token as a trusted owner-facing client name.
-  return LONG_MACHINE_TOKEN_RE.test(v);
+function number(value: number): string {
+  return value.toLocaleString("en-US");
 }
 
-function traceActorFallback(trace: TraceSummary): string {
-  const actorType = trace.actor_type?.trim().toLowerCase() ?? "";
-  if (actorType === "subject" || actorType === "owner") {
-    return "You";
-  }
-  if (actorType === "client") {
-    return "An app";
-  }
-  const actorId = trace.actor_id?.trim() ?? "";
-  if (actorId && !looksLikeTechnicalId(actorId) && actorId !== "owner_local") {
-    return actorId;
-  }
-  if (actorType === "runtime" || actorType === "system") {
-    return "The server";
-  }
-  return "Someone";
+function counted(value: number, one: string, many: string): string {
+  return `${number(value)} ${value === 1 ? one : many}`;
 }
 
-function traceWho(trace: TraceSummary): string {
-  const traceClientName = trace.client?.client_name?.trim() || null;
-  if (traceClientName) {
-    return traceClientName;
-  }
-  const clientId = trace.client_id?.trim() ?? "";
-  if (clientId && !looksLikeTechnicalId(clientId)) {
-    return clientId;
-  }
-  return traceActorFallback(trace);
-}
-
-function repeatedLatelyRest(rest: string, count: number): string {
-  const base = rest.replace(TRAILING_PERIOD_RE, "");
-  return `${base} ${count === 2 ? "twice" : `${count} times`}.`;
-}
-
-function toLately(traces: TraceSummary[], now: Date): LatelyView[] {
-  const groups: Array<LatelyView & { count: number; key: string; originalRest: string }> = [];
-  for (const tr of traces.slice(0, 6)) {
-    const who = traceWho(tr);
-    const isDeny = tr.status.toLowerCase() === "denied" || tr.failure !== null;
-    let row: LatelyView;
-    if (isDeny) {
-      row = {
-        deny: true,
-        id: tr.trace_id,
-        text: { rest: `tried to read — turned away, ${denyReason(tr.failure?.reason ?? null)}.`, who },
-        when: relDay(tr.last_at, now),
-      };
-    } else {
-      const noun = tr.event_count === 1 ? "record" : "records";
-      row = {
-        deny: false,
-        id: tr.trace_id,
-        text: { rest: `read ${fmtInt(tr.event_count)} ${noun}.`, who },
-        when: relDay(tr.last_at, now),
-      };
-    }
-    const key = `${row.deny ? "deny" : "read"}|${row.when}|${row.text.who}|${row.text.rest}`;
-    const existing = groups.find((group) => group.key === key);
-    if (existing) {
-      existing.count += 1;
-      existing.id = `${existing.id}+${tr.trace_id}`;
-      continue;
-    }
-    groups.push({ ...row, count: 1, key, originalRest: row.text.rest });
-  }
-
-  return groups.slice(0, 6).map(({ count, key: _key, originalRest, ...row }) => ({
-    ...row,
-    text: {
-      ...row.text,
-      rest: count > 1 ? repeatedLatelyRest(originalRest, count) : row.text.rest,
-    },
-  }));
-}
-
-// ─── Attention truth (connection rows and /runs) ──────────────────────────
-
-/**
- * The SINGLE source of attention truth: connections whose rendered verdict is
- * on the `attention` channel with an owner-satisfiable required action. This is
- * the same predicate `/runs` uses, so connection rows and sync triage agree —
- * no more counting failed runs/traces (which surfaced healthy connections as
- * "broken" and missed the genuinely-attention ones). The aggregate dashboard
- * hero intentionally follows the server fleet verdict. Revoked connections are
- * excluded.
- */
-export function attentionConnectionsFromConnectors(connectors: readonly RefConnectorSummary[]): AttentionConnection[] {
-  return sourceWorkFromConnectors(connectors).needsOwner.map((item) => ({
-    actionLabel: item.actionLabel ?? "Review source",
-    connectorKey: item.connectorKey,
-    deviceLocal: item.deviceLocal,
-    label: item.label,
-    routeId: item.routeId,
-    what: item.what,
-  }));
-}
-
-/**
- * Non-owner source issues for the dashboard "Anything wrong" panel. These are
- * deliberately NOT owner-action attention rows: a maintainer/code-fix source
- * should not alarm as "needs you", but it must also not disappear behind an
- * all-clear that claims everything is syncing.
- */
-export function sourceIssueConnectionsFromConnectors(
-  connectors: readonly RefConnectorSummary[]
-): SourceIssueConnection[] {
-  return sourceWorkFromConnectors(connectors).systemIssues.map((item) => ({
-    connectorKey: item.connectorKey,
-    label: item.label,
-    routeId: item.routeId,
-    status: item.statusLabel === "can't collect" ? "can't collect" : "is degraded",
-    what: item.what,
-  }));
-}
-
-export function advisoryOwnerActionsFromConnectors(
-  connectors: readonly RefConnectorSummary[]
-): AdvisoryOwnerActionConnection[] {
-  return sourceWorkFromConnectors(connectors).review.map((item) => ({
-    actionLabel: item.actionLabel ?? "Review source",
-    connectorKey: item.connectorKey,
-    label: item.label,
-    routeId: item.routeId,
-    what: item.what,
-  }));
-}
-
-// ─── Attention view ("anything wrong") ───────────────────────────────────
-
-function toAttention(attention: AttentionConnection[], hrefs: StandingHrefs): AttentionRowView[] {
-  return attention.map((a) => ({
-    href: hrefs.connection(a.routeId),
-    id: `connection:${a.routeId}`,
-    what: `${a.label} needs you`,
-    why: a.what,
-  }));
-}
-
-function toSourceIssues(sourceIssues: SourceIssueConnection[], hrefs: StandingHrefs): AttentionRowView[] {
-  return sourceIssues.map((issue) => ({
-    href: hrefs.connection(issue.routeId),
-    id: `source-issue:${issue.routeId}`,
-    what: `${issue.label} ${issue.status}`,
-    why: issue.what,
-  }));
-}
-
-function toAdvisoryOwnerActions(
-  advisoryOwnerActions: AdvisoryOwnerActionConnection[],
-  hrefs: StandingHrefs
-): AttentionRowView[] {
-  return advisoryOwnerActions.map((action) => ({
-    href: hrefs.connection(action.routeId),
-    id: `advisory-owner-action:${action.routeId}`,
-    what: `${action.label} has an action to review`,
-    why: action.what,
-  }));
-}
-
-function toOverviewIssues(loadIssues: readonly string[], hrefs: StandingHrefs): AttentionRowView[] {
-  if (loadIssues.length === 0) {
-    return [];
-  }
-  const count = loadIssues.length;
-  return [
-    {
-      href: hrefs.deployment,
-      id: "overview:partial-data",
-      what: "Overview could not check everything",
-      why:
-        count === 1
-          ? "One dashboard check did not load. Refresh this page; if it keeps happening, check deployment."
-          : `${count} dashboard checks did not load. Refresh this page; if it keeps happening, check deployment.`,
-    },
+export function buildHomeViewModel(input: HomeInputs): HomeData {
+  const sourceReadFailed = input.sourcePage.kind === "error";
+  const preparedSources = sourceReadFailed ? [] : prepareSources(input.sourcePage.sources, input.now, input.hrefs,input.offset);
+  const knownNames = appNamesByClientId([], input.ownerClientsFailed ? [] : input.ownerClients);
+  for (const app of groupGrantAccessByApp(input.appRegistrations ?? [], input.now.getTime())) for (const id of app.clientIds) knownNames.set(id, app.name);
+  // Rows 1–3 are archived, disconnected or never set up. The direction keeps
+  // those states on the data-sources page rather than treating them as active.
+  const activeSources = preparedSources.filter(
+    (source) => source.status.row !== 1 && source.status.row !== 2 && source.status.row !== 3,
+  );
+  const waitingSources = oldestFirst(
+    preparedSources.filter(
+      (source) => source.status.needsYou && source.status.row === 8 && source.actionSurface === "provider_interaction",
+    ),
+    (source) => source.sortAt,
+  );
+  const otherNeedsSources = oldestFirst(
+    preparedSources.filter(
+      (source) =>
+        source.status.needsYou && !(source.status.row === 8 && source.actionSurface === "provider_interaction"),
+    ),
+    (source) => source.sortAt,
+  );
+  const approvals = oldestFirst(input.approvals, (approval) => approval.created_at).map((approval) =>
+    approvalRow(approval, input.now, input.hrefs, knownNames),
+  );
+  const needs = [
+    ...waitingSources.map((source) => sourceNeedRow(source, input.now, true)),
+    ...approvals,
+    ...otherNeedsSources.map((source) => sourceNeedRow(source, input.now, false)),
   ];
-}
 
-function activeSourceWork(input: StandingInputs): SourceWorkGroups {
-  return input.sourceWork;
-}
-
-function sourceWorkRow(item: SourceWorkItem, hrefs: StandingHrefs): AttentionRowView {
-  let what: string;
-  if (item.group === "needsOwner") {
-    // Owner attention is already classified by the shared provider-neutral
-    // actionability model. Keep its exact sanctioned CTA on the overview so
-    // the owner does not have to open Syncs to learn what to do.
-    what = item.actionLabel ? `${item.label}: ${item.actionLabel}` : `${item.label} needs you`;
-  } else if (item.group === "review" && item.actionLabel) {
-    // The non-urgent group reads as the CONCRETE available action ("Amazon:
-    // Refresh now"), not a taxonomy noun ("Amazon is ready for review").
-    what = `${item.label}: ${item.actionLabel}`;
-  } else if (item.group === "review") {
-    what = `${item.label}: action available`;
-  } else if (item.group === "working" || item.group === "notMeasured") {
-    what = `${item.label}: ${item.what}`;
-  } else if (item.group === "unavailable") {
-    what = `${item.label} status unavailable`;
-  } else {
-    what = `${item.label} ${item.statusLabel}`;
-  }
-  return {
-    connectorId: item.connectorKey,
-    href: hrefs.connection(item.routeId),
-    id: item.id,
-    what,
-    why: item.group === "working" || item.group === "notMeasured" ? item.statusLabel : item.what,
-  };
-}
-
-function pluralSource(count: number): string {
-  return count === 1 ? "1 source" : `${count} sources`;
-}
-
-function toSourceWorkSections(
-  groups: SourceWorkGroups,
-  overviewIssues: AttentionRowView[],
-  hrefs: StandingHrefs
-): SourceWorkSectionView[] {
-  const sections: SourceWorkSectionView[] = [];
-  if (groups.needsOwner.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.needsOwner.length),
-      id: "needsOwner",
-      note: SOURCE_WORK_GROUP_COPY.needsOwner.note,
-      rows: groups.needsOwner.map((item) => sourceWorkRow(item, hrefs)),
-      title: SOURCE_WORK_GROUP_COPY.needsOwner.label,
-      tone: "owner",
+  const sortedDataSources = activeSources
+    .filter((source) => !source.status.needsYou)
+    .sort((left, right) => {
+      const leftSyncing = left.status.row === 11;
+      const rightSyncing = right.status.row === 11;
+      if (leftSyncing !== rightSyncing) return leftSyncing ? -1 : 1;
+      return left.name.localeCompare(right.name);
     });
-  }
-  if (groups.review.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.review.length),
-      id: "review",
-      note: SOURCE_WORK_GROUP_COPY.review.note,
-      rows: groups.review.map((item) => sourceWorkRow(item, hrefs)),
-      title: SOURCE_WORK_GROUP_COPY.review.label,
-      tone: "review",
-    });
-  }
-  if (groups.systemIssues.length > 0 || overviewIssues.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.systemIssues.length + overviewIssues.length),
-      id: "systemIssue",
-      note: SOURCE_WORK_GROUP_COPY.systemIssue.note,
-      rows: [...groups.systemIssues.map((item) => sourceWorkRow(item, hrefs)), ...overviewIssues],
-      title: SOURCE_WORK_GROUP_COPY.systemIssue.label,
-      tone: "system",
-    });
-  }
-  if (groups.working.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.working.length),
-      id: "working",
-      note: SOURCE_WORK_GROUP_COPY.working.note,
-      rows: groups.working.map((item) => sourceWorkRow(item, hrefs)),
-      title: SOURCE_WORK_GROUP_COPY.working.label,
-      tone: "muted",
-    });
-  }
-  if (groups.notMeasured.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.notMeasured.length),
-      id: "notMeasured",
-      note: SOURCE_WORK_GROUP_COPY.notMeasured.note,
-      rows: groups.notMeasured.map((item) => sourceWorkRow(item, hrefs)),
-      title: SOURCE_WORK_GROUP_COPY.notMeasured.label,
-      tone: "muted",
-    });
-  }
-  if (groups.unavailable.length > 0) {
-    sections.push({
-      countLabel: pluralSource(groups.unavailable.length),
-      id: "unavailable",
-      note: SOURCE_WORK_GROUP_COPY.unavailable.note,
-      rows: groups.unavailable.map((item) => sourceWorkRow(item, hrefs)),
-      title: SOURCE_WORK_GROUP_COPY.unavailable.label,
-      tone: "muted",
-    });
-  }
-  return sections;
-}
+  const dataSources = sortedDataSources.slice(0, 12);
+  const syncingSources = activeSources.filter((source) => source.status.row === 11);
+  const apps = input.grantsFailed ? [] : groupGrantAccessByApp(input.appRegistrations ?? [], input.now.getTime())
+    .filter((app) => app.state === "reading").map((app) => ({ clientId: app.clientIds[0] || "", href: input.hrefs.grant(app.hrefId), id: app.hrefId, name: app.name, reads: joinHuman(app.sources), lastRead: app.lastRead ? formatRelative(new Date(app.lastRead), input.now.getTime()) : null }));
+  const activeTokenCount = input.ownerClients.reduce((sum, client) => sum + Math.max(0, client.active_token_count), 0);
+  // More owner-made clients than one page is not a failure: show what was read
+  // and link to the full list instead of a count that may be short.
+  const tokenReadIncomplete = input.ownerClientsFailed || input.ownerClientsHaveMore;
+  const appError = input.grantsFailed || input.tracesFailed || input.ownerClientsFailed;
+  const appsEmpty =
+    apps.length === 0 &&
+    activeTokenCount === 0 &&
+    !input.grantsFailed &&
+    !input.grantsHaveMore &&
+    !input.tracesFailed &&
+    !input.tracesHaveMore &&
+    !tokenReadIncomplete;
+  const sourceReadComplete = !sourceReadFailed && !input.sourcePage.hasMore;
+  const needsReadFailed = input.approvalsFailed;
+  const needsReadIncomplete = needsReadFailed || input.approvalsHaveMore;
+  const firstRun =
+    sourceReadComplete &&
+    preparedSources.length === 0 &&
+    needs.length === 0 &&
+    !needsReadIncomplete &&
+    apps.length === 0 &&
+    activeTokenCount === 0 &&
+    !appError &&
+    !input.grantsHaveMore &&
+    !input.tracesHaveMore;
+  // No data sources, but something else exists (an app, a token): the title
+  // says so and carries the one filled button, unless something needs the person.
+  const noSources =
+    !firstRun && sourceReadComplete && preparedSources.length === 0 && needs.length === 0 && !needsReadIncomplete;
+  const title = firstRun
+    ? "Start with one data source"
+    : !sourceReadComplete || needsReadIncomplete
+      ? "Data sources"
+      : needs.length === 1
+        ? "1 thing needs you"
+        : needs.length > 1
+          ? `${needs.length} things need you`
+          : syncingSources.length === 1
+            ? `Syncing ${syncingSources[0]?.name ?? "a data source"}`
+            : syncingSources.length > 1
+              ? `Syncing ${syncingSources.length} data sources`
+              : noSources
+                ? "No data sources yet."
+                : activeSources.length > 0 && activeSources.every((source) => isUpToDateRow(source.status.row))
+                  ? "Everything is up to date"
+                  : "Nothing needs you";
 
-// ─── Hero tone (the one truth, computed from real state) ─────────────────
+  // A refreshing summary still carries the last known total; rebuilding,
+  // stale, failed or unknown states do not.
+  // The server counts connections in the same projection as records, so a
+  // stale summary can say 0 while the full source list shows three. Without a
+  // current summary, count the source list when it was read in full.
+  const dataSourceTotal = sourceReadComplete ? preparedSources.length : null;
+  const dataSourceCount = dataSourceTotal === null ? null : number(dataSourceTotal);
+  const sourceCounts = preparedSources.map(({ source }) => sourceRecordCount(source).count);
+  const recordTotal = sourceReadComplete && sourceCounts.every((count) => count !== null) ? sourceCounts.reduce<number>((sum, count) => sum + (count ?? 0), 0) : null;
+  const subtitle =
+    [
+      dataSourceTotal === null ? null : counted(dataSourceTotal, "data source", "data sources"),
+      recordTotal === null ? null : counted(recordTotal, "record", "records"),
+    ]
+      .filter(Boolean)
+      .join(" · ") || null;
+  // A stale total with no error is the ordinary state after a sync: nothing
+  // failed, and Home counts the source list itself. Only a failed rebuild, or a
+  // stale total that carries an error, means the totals could not be checked.
+  const projection = input.summary?.projection;
+  const warning =
+    (input.summaryFailed && recordTotal === null) ||
+    projection?.state === "failed" || (projection?.state === "stale" && Boolean(projection.last_error));
 
-/** DECIDE — a request is waiting on the owner. */
-function buildDecideHero(pending: PendingApproval[], hrefs: StandingHrefs): StandingHero {
-  const [first] = pending;
-  const more = pending.length - 1;
-  const who = first ? clientLabel(first.client_id ?? null, first.approval_id) : "An app";
-  const reads = first ? approvalReads(first) : "parts of your data";
-  const moreSub = `No data is shared until you approve a request. Review each request one at a time. ${more} more after this one.`;
-  return {
-    cta: { href: hrefs.grants, human: true, label: "Review the request" },
-    kicker: pending.length === 1 ? "A request is waiting on you" : `${pending.length} requests are waiting`,
-    line: { emphasis: reads, tail: ".", text: `${who} wants to read ` },
-    sub: more > 0 ? moreSub : "No data is shared until you approve this request.",
-    tone: "decide",
-  };
-}
-
-/** ALARM — the summary projection is stale. */
-function buildStaleHero(summary: DatasetSummary | null, hrefs: StandingHrefs): StandingHero {
-  const projectionState = summary?.projection?.state;
-  const isFailed = projectionState === "failed";
-  return {
-    cta: { href: hrefs.deployment, label: "View status" },
-    kicker: isFailed ? "Totals update delayed" : "Totals updating",
-    line: {
-      emphasis: "are still available",
-      tail: ".",
-      text: "Records ",
-    },
-    sub: isFailed
-      ? "Dashboard totals are using the last completed update."
-      : "Dashboard totals may use the last completed update for a few minutes.",
-    tone: "alarm",
-  };
-}
-
-function buildPartialDataHero(loadIssues: readonly string[], hrefs: StandingHrefs): StandingHero {
-  const count = loadIssues.length;
-  return {
-    cta: { href: hrefs.deployment, label: "Check deployment" },
-    kicker: "Overview is incomplete",
-    line: {
-      emphasis: "did not load",
-      tail: ".",
-      text: count === 1 ? "One dashboard check " : `${count} dashboard checks `,
-    },
-    sub: "Refresh this page; if it keeps happening, check deployment. This page will not claim all-clear from partial data.",
-    tone: "alarm",
-  };
-}
-
-/**
- * The single alarm-toned hero slot is scarce and reserved for genuinely
- * owner-actionable trouble. Gate on `banner_warranted`
- * (server-computed, narrower than `state !== "healthy"`) rather than `state`
- * directly: `indeterminate` (in-progress work, reconciliation gaps, unknown
- * evidence) and `healthy_with_advisories` (ordinary cadence-relative
- * lateness) are real, useful diagnostic states — the per-source rows and
- * "Anything wrong" surface still disclose them — but neither is proof that
- * anything needs the owner right now, so neither may claim the hero. See
- * `FleetHealthVerdict.banner_warranted` (`reference-implementation/server/
- * fleet-health.ts`) for the exact rule.
- */
-function buildFleetHealthHero(fleetHealth: RefFleetHealthVerdict, hrefs: StandingHrefs): StandingHero | null {
-  if (!fleetHealth.banner_warranted) {
-    return null;
-  }
-  return {
-    tone: "alarm",
-    kicker: "Source fleet needs attention",
-    line: { text: "One or more sources are ", emphasis: "not healthy", tail: "." },
-    sub: "Review source status to see the typed cause and the next available action.",
-    cta: { label: "Review sources", href: hrefs.sources },
-  };
-}
-
-/** CALM — the reassurance moment. */
-function buildCalmHero(input: StandingInputs): StandingHero {
-  const { summary, bearerClients } = input;
-  const activeClients = activeBearerClients(bearerClients);
-  const activeTokenCount = activeOwnerTokenCount(activeClients);
-  const liveGrants = input.grants.filter(isLiveGrant);
-  const records = summary ? fmtInt(summary.record_count) : "0";
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const sources = summary?.connector_count ?? 0;
-  const sourceWord = sources === 1 ? "source" : "sources";
-  const grantWord = liveGrants.length === 1 ? "app reads" : "apps read";
-  const tokenWord = activeTokenCount === 1 ? "token" : "tokens";
-  const clientWord = activeClients.length === 1 ? "client holds" : "clients hold";
-  const withBearers = `${activeClients.length} ${clientWord} ${fmtInt(activeTokenCount)} active owner ${tokenWord} with full access. ${liveGrants.length} ${grantWord} only the slices you granted. Revoke any of them instantly.`;
-  const noBearers = `No owner token can act as you yet. ${liveGrants.length} ${grantWord} only the slices you granted. Revoke any of them instantly.`;
-  return {
-    kicker: "Where you stand",
-    line: { emphasis: "all yours to read", tail: ".", text: `${records} records from ${sources} ${sourceWord} — ` },
-    sub: activeTokenCount > 0 ? withBearers : noBearers,
-    tone: "calm",
-  };
-}
-
-/**
- * Compute the hero. Precedence: a pending approval is a DECIDE (it needs a
- * yes/no), stale/failed or incomplete dashboard reads are ALARMs, then the
- * server fleet verdict owns aggregate source health. Only a healthy server
- * verdict falls through to the calm reassurance line.
- */
-export function computeHero(input: StandingInputs): StandingHero {
-  if (input.pendingApprovals.length > 0) {
-    return buildDecideHero(input.pendingApprovals, input.hrefs);
-  }
-  // A source that needs the owner outranks a totals refresh. Totals catching up
-  // is a few-minute self-resolving delay with nothing to do about it; a source
-  // that stopped collecting is work only the owner can clear. Ordering these the
-  // other way spent the one hero slot on the transient state and buried the
-  // actionable one.
-  const fleetHealthHero = input.fleetHealth ? buildFleetHealthHero(input.fleetHealth, input.hrefs) : null;
-  if (fleetHealthHero) {
-    return fleetHealthHero;
-  }
-  const projectionState = input.summary?.projection?.state;
-  if (projectionState === "stale" || projectionState === "failed") {
-    return buildStaleHero(input.summary, input.hrefs);
-  }
-  if (input.overviewLoadIssues.length > 0) {
-    return buildPartialDataHero(input.overviewLoadIssues, input.hrefs);
-  }
-  return buildCalmHero(input);
-}
-
-// ─── Top-level builder ───────────────────────────────────────────────────
-
-export function buildStandingData(input: StandingInputs): StandingData {
-  const overviewIssues = toOverviewIssues(input.overviewLoadIssues, input.hrefs);
-  const sourceWork = activeSourceWork(input);
-  const allBearers = toBearers(input.bearerClients, input.hrefs);
-  const bearers = allBearers.slice(0, BEARER_PREVIEW_LIMIT);
-  const sourceWorkCount = Object.values(sourceWork).reduce((sum, rows) => sum + rows.length, 0);
-  const healthySourceCount =
-    input.overviewLoadIssues.length === 0 && input.sourceCount !== undefined
-      ? Math.max(0, input.sourceCount - sourceWorkCount)
+  const showMoreSources = !sourceReadFailed && (input.sourcePage.hasMore || sortedDataSources.length > 12);
+  const sourceTotalLink =
+    sourceReadComplete && sortedDataSources.length > 12
+      ? `All ${counted(preparedSources.length, "data source", "data sources")}`
       : null;
   return {
-    advisoryOwnerActions: toAdvisoryOwnerActions(input.advisoryOwnerActions, input.hrefs),
-    attention: toAttention(input.attentionConnections, input.hrefs),
-    bearers,
-    bearersOverflow: allBearers.length - bearers.length,
-    grantPackages: toGrantPackages(input.grants, input.hrefs, input.grantPackageCount),
-    healthySourceCount,
-    hero: computeHero(input),
-    lately: toLately(input.traces, input.now),
-    notificationsSetup: input.notificationsSetup,
-    overviewIssues,
-    relationships: toRelationships(input.grants, input.hrefs, input.now, clientNamesById(input.bearerClients)),
-    sourceIssues: toSourceIssues(input.sourceIssues, input.hrefs),
-    fleetHealth: input.fleetHealth,
-    sourceWorkSections: toSourceWorkSections(sourceWork, overviewIssues, input.hrefs),
+    activeTokenCount: tokenReadIncomplete ? 0 : activeTokenCount,
+    allAppsHref: input.hrefs.grants,
+    allAppsLink: !input.grantsFailed && apps.length > 5,
+    allTokensLink: !input.ownerClientsFailed && input.ownerClientsHaveMore,
+    appError,
+    apps,
+    appsEmpty,
+    appsHref: input.hrefs.connect,
+    dataSourceCount,
+    dataSourceError: sourceReadFailed,
+    dataSources,
+    deploymentHref: input.hrefs.deployment,
+    firstRun,
+    needs,
+    needsError: needsReadFailed,
+    needsMore: !needsReadFailed && input.approvalsHaveMore,
+    needsVisible: needs.length > 0 || needsReadIncomplete,
+    noSources,
+    sourcesEmptyLine: dataSources.length === 0 && !sourceReadFailed && !firstRun && !noSources
+      ? sourcesEmptyLine({ needingSources: needs.filter((need) => need.source), total: dataSourceTotal })
+      : null,
+    offeredSources: (input.offeredSources ?? []).slice(0, 5).map((entry) => ({ iconId: entry.connectorKey, name: entry.displayName })),
+    recordCount: recordTotal === null ? null : number(recordTotal),
+    reloadHref: input.reloadHref,
+    addSourceHref: input.hrefs.addSource,
+    sourcesHref: input.hrefs.sources,
+    showMoreSources,
+    shownSourceCount: dataSources.length + needs.filter((need) => need.source).length,
+    sourceTotalLink,
+    subtitle,
+    summaryError: input.summaryFailed,
+    title,
+    tokensHref: input.hrefs.deploymentTokens,
+    warning,
   };
 }

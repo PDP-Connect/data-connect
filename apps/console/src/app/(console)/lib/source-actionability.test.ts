@@ -463,6 +463,18 @@ test("source actionability projects a draft connection as needs-you setup_in_pro
   assert.equal(actionability.work?.statusLabel, "needs you");
 });
 
+test("source-work labels replace a saved connector key with its manifest name or the generic label", () => {
+  const named = projectSourceActionability(
+    connector({ connector_id: "reddit", connector_display_name: "Reddit", display_name: "REDDIT" })
+  );
+  const unnamed = projectSourceActionability(
+    connector({ connector_id: "new_source", connector_display_name: "", display_name: "NEW_SOURCE" })
+  );
+
+  assert.equal(named.work?.label, "Reddit");
+  assert.equal(unnamed.work?.label, "this data source");
+});
+
 test("terminal setup dispositions replace generic draft copy while staying inactive setup work", () => {
   for (const disposition of ["verified_empty", "unverified_zero", "unverified_missing_counts"] as const) {
     const copy = TERMINAL_SETUP_DISPOSITION_COPY[disposition];

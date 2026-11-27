@@ -185,8 +185,8 @@ test(
       connectorDisplayName: push?.connectorDisplayName ?? "",
       reason: "needs_attention",
     });
-    assert.equal(payload.title, "PDPP Claude Code: action needed");
-    assert.equal(payload.body, "Your attention is required to continue syncing.", "body is fixed copy");
+    assert.equal(payload.title, "Claude Code needs you");
+    assert.equal(payload.body, "Open DataConnect to continue this sync.", "body is fixed copy");
 
     // Assert over the human-visible fields, not the whole serialized object: the
     // payload's ISO timestamp contains arbitrary digits, so a bare search for

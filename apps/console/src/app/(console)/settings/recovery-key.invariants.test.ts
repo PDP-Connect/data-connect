@@ -13,8 +13,8 @@ const PAGE_FILE = `${HERE}page.tsx`
 
 test("the settings page mounts the Vault recovery code section with the recovery key component", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
-  assert.match(page, /<RecoveryKeySetting \/>/)
-  assert.match(page, /title="Vault recovery code"/)
+  assert.match(page, /<RecoveryKeySetting passwordSource=\{ownerPasswordSource\} \/>/)
+  assert.match(page, />Recovery code<\/Text>/)
 })
 
 test("the warning copy is about custody and says the kit is keys-only", async () => {
@@ -30,9 +30,9 @@ test("the warning copy is about custody and says the kit is keys-only", async ()
   const warningMatch = setting.match(/<p className="pdpp-caption text-muted-foreground">\s*([\s\S]*?)\s*<\/p>/)
   assert.ok(warningMatch, "expected a rendered warning paragraph")
   const warningText = warningMatch?.[1] ?? ""
-  assert.match(warningText, /restores encryption keys only/)
-  assert.match(warningText, /database backup separately/)
-  assert.match(warningText, /read everything in your Personal Server vault/)
+  assert.match(warningText, /locks your saved sign-ins/)
+  assert.match(warningText, /backup of your DataConnect files/)
+  assert.match(warningText, /read everything/)
   assert.doesNotMatch(
     warningText,
     /phishing/i,
@@ -57,5 +57,5 @@ test("the action calls the recovery-kit client and requires dashboard access, ma
   const actions = await readFile(ACTIONS_FILE, "utf8")
   assert.match(actions, /"use server"/)
   assert.match(actions, /await requireDashboardAccess\("\/settings"\)/)
-  assert.match(actions, /exportRecoveryKitCode\(\)/)
+  assert.match(actions, /exportRecoveryKitCode\(password\)/)
 })

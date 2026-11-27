@@ -37,6 +37,7 @@ export interface HeartbeatRow {
   readonly connectorId: string;
   readonly connectorInstanceId: string | null;
   readonly deviceId: string;
+  readonly deviceName?: string | null;
   readonly deviceRevokedAt: string | null;
   readonly deviceStatus: string;
   readonly lastError?: unknown;
@@ -262,7 +263,10 @@ export function projectLocalDeviceProgress(heartbeats: readonly HeartbeatRow[]):
       sawPending = true;
     }
   }
+  const names = new Set(trusted.map(row=>row.deviceName).filter((name):name is string=>Boolean(name)));
   return {
+    device_name: names.size === 1 ? [...names][0] ?? null : null,
+    source_instance_id: trusted.length === 1 ? trusted[0]?.sourceInstanceId ?? null : null,
     last_heartbeat_at: lastHeartbeatAt,
     last_heartbeat_status: lastHeartbeatStatus,
     last_ingest_at: lastIngestAt,

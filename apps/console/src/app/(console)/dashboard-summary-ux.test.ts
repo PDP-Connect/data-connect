@@ -10,110 +10,99 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
 const OVERVIEW_FILE = `${HERE}components/views/standing-overview.tsx`;
 const MODEL_FILE = `${HERE}components/views/standing-view-model.ts`;
-const TEST_FILE = `${HERE}components/views/standing-view-model.test.ts`;
+const LOADING_FILE = `${HERE}loading.tsx`;
 
 const STANDING_OVERVIEW_RENDER = /<StandingOverview\b/;
-const SHARED_SOURCE_WORK_INPUT = /sourceWork: sourceWorkFromConnectors\(connectors\)/;
-const SHARED_SOURCE_WORK_AUTHORITY = /function activeSourceWork[\s\S]*return input\.sourceWork/;
-// The fleet verdict owns the hero, and now outranks the stale/partial-read
-// states as well: totals catching up is a self-resolving delay with no owner
-// action, while a source that stopped collecting is work only the owner can
-// clear. Ordering those the other way spent the single hero slot on the
-// transient state. This pins fleet health AHEAD of both projection staleness
-// and overviewLoadIssues.
-const SERVER_FLEET_VERDICT_HERO_PRECEDENCE =
-  /function computeHero\(input: StandingInputs\)[\s\S]*const fleetHealthHero = input\.fleetHealth \? buildFleetHealthHero\(input\.fleetHealth, input\.hrefs\) : null;[\s\S]*if \(fleetHealthHero\)[\s\S]*return fleetHealthHero[\s\S]*projectionState === "stale"[\s\S]*overviewLoadIssues\.length > 0/;
-// Overview renders the section summary and the shared row copy. The row is
-// the owner-facing trust correction: it carries the exact source label and
-// sanctioned next action already classified by the shared model.
-const SOURCE_WORK_SECTIONS_RENDERED =
-  /data-row-count=\{rowCount\}[\s\S]*sections\.map\(\(section\)[\s\S]*rr-attn__section-count/;
-const SOURCE_WORK_ROWS_RENDERED = /section\.rows\.map\(\(row\)[\s\S]*rr-attn__row[\s\S]*row\.what[\s\S]*row\.why/;
-const SOURCE_WORK_SYNCS_LINK_RE = /href=\{syncsHref\}/;
-const NOTIFICATIONS_BLOCK_RENDERED =
-  /function NotificationsBlock\([\s\S]*<h2 className="rr-stand-block__title">Notifications<\/h2>[\s\S]*href=\{href\}/;
-const OVERVIEW_PASSES_NOTIFICATIONS_HREF = /notificationsHref=\{HREFS\.notifications\}/;
-const PROJECTION_COPY_TESTS = /hero uses owner-safe copy for failed projection details/;
-const FORBIDDEN_COPY_INVARIANTS = /projection\|rebuild\|bulk write\|unknown connection\|SQL/i;
-// The "What's been read" block is a GROUPED preview linking to the grouped
-// Traces audit log (raw per-event detail is one drill further). The CTA must
-// not claim "every read" — that overstates the preview as an exhaustive log.
-// Match the rendered anchor text (leading `>` before the label) so an
-// explanatory comment mentioning the retired copy doesn't trip the guard.
-const READS_HONEST_CTA = />\s*audit log →/;
-const READS_OVERCLAIMED_CTA = />\s*every read →/;
+const HOME_READS =
+  /listAppAccess\(\)[\s\S]*listTraces\(\{ limit: 6 \}\)[\s\S]*listPendingApprovals\(\)[\s\S]*listOwnerIssuedClients\(\)/;
+const BOUNDED_SOURCE_READ =
+  /loadConnectorSummaryPage\(pageState,[\s\S]*listConnectorSummaries\(\{ \.\.\.opts, includeFleetHealth: false \}\)/;
+const SOFT_READS = /function safeRead[\s\S]*rethrowControlFlow\(err\)[\s\S]*return \{ issue, value: fallback \}/;
+const NO_RETIRED_READS = /getFleetHealthVerdict|getGrantPackageCount|listWebPushSubscriptions/;
+const STATUS_ATTRS = /data-source-id=\{[^}]+\} data-status-row=\{[^}]+\}/;
+const SOURCE_STATUS_PRIMITIVE = /<SourceStatusText/;
+const ERROR_WORDS = /This could not be loaded\.[\s\S]*Try again/;
+// JSX text may wrap across lines; any run of whitespace renders as one space.
+const FIRST_RUN_COPY = new RegExp(
+  "DataConnect keeps a copy of your own data on a computer you choose and shows how current it is. Later you choose which apps and assistants may read it."
+    .replaceAll(".", "\\.")
+    .replaceAll(" ", "\\s+"),
+);
+const FIRST_RUN_LOGOS = /data\.offeredSources\.map/;
+const SYNC_CONTROL = /SyncNowButton|runConnectorNowAction/;
+const NEED_ACTION_LINK = /className=\{`\$\{FILLED_BUTTON\}[^`]*`\}\s*href=\{need\.actionHref\}\s*>\s*\{need\.actionLabel\}/;
+const NEEDS_BOX_STRONG_LINE = /home-needs-heading[\s\S]*rounded-md border border-border-strong/;
 
-test("dashboard home renders the active Standing Overview path", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-
-  assert.match(src, STANDING_OVERVIEW_RENDER);
-  assert.match(src, SHARED_SOURCE_WORK_INPUT);
-});
-
-test("Standing Overview uses source work for detail while the server fleet verdict owns the aggregate hero", async () => {
-  const src = await readFile(MODEL_FILE, "utf8");
-
-  assert.match(src, SHARED_SOURCE_WORK_AUTHORITY);
-  assert.match(src, SERVER_FLEET_VERDICT_HERO_PRECEDENCE);
-});
-
-test("Standing Overview renders sectioned shared source-work rows and links to Syncs for deeper recovery", async () => {
-  const src = await readFile(OVERVIEW_FILE, "utf8");
-
-  assert.match(src, SOURCE_WORK_SECTIONS_RENDERED);
-  assert.match(src, SOURCE_WORK_ROWS_RENDERED, "Overview must render the shared source label and next-step row");
-  assert.match(src, SOURCE_WORK_SYNCS_LINK_RE, "Overview must link into Syncs for the full attention list");
-});
-
-test("Standing Overview links to notification setup as a first-class utility", async () => {
+test("Home uses the existing reads, limits, and soft-failure boundary", async () => {
   const page = await readFile(PAGE_FILE, "utf8");
+
+  // DIRECTION.md, Home: the requested route still composes the new pure view model.
+  assert.match(page, STANDING_OVERVIEW_RENDER);
+  // DIRECTION.md, Home: permissions and recent reads keep their existing bounds.
+  assert.match(page, HOME_READS);
+  // DIRECTION.md, Home: source summaries remain one bounded page and do not fetch an aggregate verdict.
+  assert.match(page, BOUNDED_SOURCE_READ);
+  // DIRECTION.md, Home: reads retain a soft fallback and rethrow control flow.
+  assert.match(page, SOFT_READS);
+  // DIRECTION.md, Home: the Home title no longer depends on fleet or deployment summary reads.
+  assert.doesNotMatch(page, NO_RETIRED_READS);
+});
+
+test("Home renders Needs you, Data sources, then Apps that can read your data", async () => {
+  const overview = await readFile(OVERVIEW_FILE, "utf8");
+  const needs = overview.indexOf("Needs you");
+  const sources = overview.indexOf("Data sources");
+  const apps = overview.indexOf("can read your data");
+
+  // DIRECTION.md, Home: the page leads with the items that need the person.
+  assert.ok(needs >= 0 && needs < sources);
+  // DIRECTION.md, Home: data sources follow Needs you.
+  assert.ok(sources < apps);
+  // DIRECTION.md, Home § Data sources: status words use the shared component and carry row/source attributes.
+  assert.match(overview, SOURCE_STATUS_PRIMITIVE);
+  // DIRECTION.md, Home § Data sources: every rendered status can be compared to the server row.
+  assert.match(overview, STATUS_ATTRS);
+  // DIRECTION.md, Home: the affected section offers the exact retry copy.
+  assert.match(overview, ERROR_WORDS);
+  // Lead decision (deputy-fixes-1 E3): no sync starts from Home; every row action opens the data source's page.
+  assert.doesNotMatch(overview, SYNC_CONTROL);
+  // Round 6 (F3): the needed action is the one filled button on the page.
+  assert.match(overview, NEED_ACTION_LINK);
+  // Lead decision (deputy-fixes-1 E2): the packages list is linked from /grants, not Home.
+  assert.doesNotMatch(overview, /Packages/);
+  // DIRECTION.md, Values: the needs-you box uses the "Stronger line (buttons, the needs-you box)".
+  assert.match(overview, NEEDS_BOX_STRONG_LINE);
+});
+
+test("first run uses bundled marks and copy that does not guess the installation host", async () => {
   const overview = await readFile(OVERVIEW_FILE, "utf8");
 
-  assert.match(page, OVERVIEW_PASSES_NOTIFICATIONS_HREF);
-  assert.match(overview, NOTIFICATIONS_BLOCK_RENDERED);
+  // DIRECTION.md, Home § First run: the setup sentence uses the safe computer-you-choose wording.
+  assert.match(overview, FIRST_RUN_COPY);
+  // DIRECTION.md, Home § First run: the visible logo row uses only services this install's catalog offers.
+  assert.match(overview, FIRST_RUN_LOGOS);
+  // DIRECTION.md, Home § First run: the only setup button opens source setup.
+  assert.match(overview, /Add a data source[\s\S]*href=\{data\.addSourceHref\}/);
 });
 
-test("Standing Overview tests pin owner-safe projection copy invariants", async () => {
-  const src = await readFile(TEST_FILE, "utf8");
+test("the page keeps the seeded demos and route-level loading skeleton", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  const model = await readFile(MODEL_FILE, "utf8");
+  const loading = await readFile(LOADING_FILE, "utf8");
 
-  assert.match(src, PROJECTION_COPY_TESTS);
-  assert.match(src, FORBIDDEN_COPY_INVARIANTS);
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): demos remain gated to non-production requests.
+  assert.match(page, /process\.env\.NODE_ENV !== "production"/);
+  // DIRECTION.md, PAGE-RULES 8 (seeded demos): calm, alarm and decide fixtures share the live Home input shape.
+  assert.match(model, /export interface HomeInputs/);
+  // DIRECTION.md, Home: Home uses the shared shell and route skeleton.
+  // Every other route now has its own loading file, so the root one is Home's: a title bar and rows with a logo each.
+  assert.match(loading, /RecordroomShellWithPalette[\s\S]*<h1[\s\S]*<Bar/);
+  assert.match(loading, /<LoadingRegion[^>]*label="this page"/);
+  assert.doesNotMatch(loading, /ListLoadingSkeleton/);
 });
 
-test('"What\'s been read" CTA names the audit log and does not overclaim "every read"', async () => {
-  const src = await readFile(OVERVIEW_FILE, "utf8");
-
-  // The overview shows a grouped preview; the link lands on the grouped Traces
-  // audit log (raw per-event detail is a further drill). The CTA must match
-  // that reality, not imply the preview is the exhaustive log.
-  assert.match(src, READS_HONEST_CTA);
-  assert.doesNotMatch(src, READS_OVERCLAIMED_CTA);
-});
-
-// ---- terminal gate REVISE (2026-08-11), finding 1: Overview pagination ----
-
-const LOAD_OVERVIEW_CONNECTORS_USES_BOUNDED_PAGE =
-  /async function loadOverviewConnectors\(\s*state:[\s\S]*loadConnectorSummaryPage\(state,/;
-const OVERVIEW_RENDERS_PAGER = /<ConnectorSummaryPager[\s\S]*basePath="\/"[\s\S]*hasMore=\{page\.hasMore\}/;
-const NO_LIST_ALL_CONNECTOR_SUMMARIES_IN_PAGE = /\blistAllConnectorSummaries\b/;
-const OVERVIEW_SOURCE_PAGE_ERROR = /function DashboardSourcePageControls[\s\S]*page\.kind === "error"/;
-const OVERVIEW_RENDERS_SOURCE_PAGE_ERROR = /<ConnectorSummaryPageError/;
-
-test("Overview's connector load is ONE bounded page with an honest continuation pager", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-
-  assert.match(src, LOAD_OVERVIEW_CONNECTORS_USES_BOUNDED_PAGE);
-  assert.match(src, OVERVIEW_RENDERS_PAGER);
-  assert.doesNotMatch(
-    src,
-    NO_LIST_ALL_CONNECTOR_SUMMARIES_IN_PAGE,
-    "the exhaustive fold must never return to the Overview render path"
-  );
-});
-
-test("Overview exposes an error state when its bounded source page cannot be loaded", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-
-  assert.match(src, OVERVIEW_SOURCE_PAGE_ERROR);
-  assert.match(src, OVERVIEW_RENDERS_SOURCE_PAGE_ERROR);
+test("the first-run Home title sits where the loading screen's title bar sits", async () => {
+  const overview = await readFile(OVERVIEW_FILE, "utf8");
+  const firstRun = overview.slice(overview.indexOf("function FirstRun"));
+  assert.match(firstRun.slice(0, 200), /className="mx-auto max-w-2xl pb-8"/, "no extra top padding: the loading screen has none");
 });

@@ -4,7 +4,8 @@
 // Plain-words errors with the raw code one click away, and the collapsed
 // Details block that holds host internals. Everything inside `Diagnostics`
 // may show codes and flags; nothing outside it may.
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
+import { createContext, isValidElement, useContext, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
 import { formatLocalTime } from "./plain-text.ts";
@@ -21,7 +22,7 @@ import {
 
 export { ReachabilityFailure };
 
-export const DiagnosticsContext = createContext<{ appVersion?: string }>({});
+export const DiagnosticsContext = createContext<{ appVersion?: string; technical?: boolean }>({});
 
 // What an error's button may do on this card. A button with no handler is not shown.
 export type Recover = {
@@ -71,25 +72,16 @@ export function diagnosticsText(error: DisplayError, appVersion?: string): strin
   ].join("\n");
 }
 
-export function Diagnostics({ children, label = "Details", note }: { children: ReactNode; label?: string; note?: string }) {
-  return (
-    <details className="grid gap-2" data-diagnostics="">
-      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">
-        {note ? (
-          <span className="flex flex-wrap items-center justify-between gap-3">
-            <span className="pdpp-caption">{note}</span>
-            <span className="flex-none text-sm">
-              {label}{" "}
-              <span aria-hidden="true">›</span>
-            </span>
-          </span>
-        ) : (
-          label
-        )}
-      </summary>
-      <div className="grid gap-2">{children}</div>
-    </details>
-  );
+function supportText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(supportText).join("\n");
+  if (isValidElement<{ children?: ReactNode }>(node)) return node.props.children === undefined ? JSON.stringify(node.props) : supportText(node.props.children);
+  return "";
+}
+
+export function Diagnostics({ children, label = "Details", note, technicalOnly = false }: { children: ReactNode; label?: string; note?: string; technicalOnly?: boolean }) {
+  const { technical } = useContext(DiagnosticsContext);
+  return !technical && technicalOnly ? null : technical ? <div className="grid gap-2" data-diagnostics=""><h4>{label}</h4>{note ? <p>{note}</p> : null}{children}</div> : <div data-diagnostics=""><CopyButton label="Copy details for support" text={supportText(children)} /></div>;
 }
 
 function CopyButton({ label, text }: { label: string; text: string }) {
@@ -114,6 +106,7 @@ type PathReport = { paths: { path: string; fixable: boolean }[]; command: string
 // A folder the service refuses because others can write to it. The host repairs
 // the ones inside DataConnect's own directory; for any other it shows the command.
 function StatePathsFix({ recover }: { recover: Recover }) {
+  const { technical } = useContext(DiagnosticsContext);
   const [report, setReport] = useState<PathReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
@@ -153,7 +146,7 @@ function StatePathsFix({ recover }: { recover: Recover }) {
         </Button>
       ) : null}
       {hasUnfixable && report?.command ? (
-        <>
+        technical ? <>
           <p className="pdpp-caption">Run this command, then try again:</p>
           <code className="rounded-lg border bg-muted/40 px-3 py-2 font-mono text-sm break-all">{report.command}</code>
           <div className="flex flex-wrap gap-3">
@@ -164,7 +157,11 @@ function StatePathsFix({ recover }: { recover: Recover }) {
               </Button>
             )}
           </div>
-        </>
+        </> : <div className="grid gap-2">
+          <p className="pdpp-caption">Change the folder permissions where DataConnect is installed, then try again.</p>
+          <TechnicalDetailsLink href="/settings/technical" />
+          {!fixable ? <Button onClick={recover.onRefresh} type="button" variant="outline">Try again</Button> : null}
+        </div>
       ) : null}
       {failed ? <p className="pdpp-caption">{failed}</p> : null}
     </div>
@@ -179,33 +176,25 @@ export function ErrorNotice({ error, action = "turn-on" }: { error: DisplayError
   const recover = useContext(RecoveryContext);
   const text = diagnosticsText(error, appVersion);
   const recovery = recoveryFor(error.code, action);
-  const copyOutside = recovery.buttons.some((button) => button.kind === "copy-diagnostics");
   const actions = recovery.buttons.filter((button) => button.kind !== "copy-diagnostics");
+  const nextAction = actions.find((button) => recover && handlerFor(button.kind, recover));
+  const hasStatePathRecovery = !!recover && recovery.buttons.some((button) => button.kind === "fix-permissions");
+  // The last sentence is the next step; everything before it is what failed
+  // (for example "Remote access couldn't turn off. It may still be on.").
+  const sentenceEnd = error.message.lastIndexOf(". ");
+  const failure = sentenceEnd < 0 ? error.message : error.message.slice(0, sentenceEnd + 1);
+  const nextStep = sentenceEnd < 0 ? null : error.message.slice(sentenceEnd + 2);
   return (
-    <div className="grid gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4" data-status={recovery.status} role="alert">
-      {recovery.status === "needs-action" ? (
-        <p className="flex items-center gap-2 text-sm font-medium">
-          <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
-          Needs your action
-        </p>
-      ) : null}
-      <p className="text-sm text-destructive">{error.message}</p>
+    <div className="grid gap-2" data-status={recovery.status} role="alert">
+      <p className="text-sm">{failure}</p>
+      {!nextAction && !hasStatePathRecovery && nextStep ? <p className="text-sm text-muted-foreground">{nextStep}</p> : null}
       {recover && recovery.buttons.some((button) => button.kind === "fix-permissions") ? <StatePathsFix recover={recover} /> : null}
-      <div className="flex flex-wrap gap-3">
-        {copyOutside ? <CopyButton label="Copy diagnostics" text={text} /> : null}
-        {actions.map((button, index) => {
-          const run = recover ? handlerFor(button.kind, recover) : null;
-          return run ? (
-            <Button key={button.kind} onClick={run} type="button" variant={index === 0 ? "default" : "outline"}>
-              {button.label}
-            </Button>
-          ) : null;
-        })}
-      </div>
-      <Diagnostics label={copyOutside ? "Details for support" : "Details"}>
-        <pre className="whitespace-pre-wrap break-words">{text}</pre>
-        {copyOutside ? null : <CopyButton label="Copy diagnostics" text={text} />}
-      </Diagnostics>
+      {nextAction && recover ? (
+        <Button onClick={handlerFor(nextAction.kind, recover)!} type="button">
+          {nextAction.label}
+        </Button>
+      ) : null}
+      <CopyButton label="Copy details for support" text={text} />
     </div>
   );
 }

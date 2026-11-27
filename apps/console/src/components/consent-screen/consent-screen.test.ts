@@ -34,6 +34,9 @@ const CSS_SOURCE = readFileSync(join(COMPONENT_DIR, "consent-screen.module.css")
 const MODEL_SOURCE = readFileSync(join(COMPONENT_DIR, "consent-screen-model.ts"), "utf8");
 const PAGE_SOURCE = readFileSync(join(APP_DIR, "consent", "page.tsx"), "utf8");
 const ACTIONS_SOURCE = readFileSync(join(APP_DIR, "consent", "actions.ts"), "utf8");
+const NOT_FOUND_SOURCE = readFileSync(join(APP_DIR, "consent", "not-found.tsx"), "utf8");
+const ERROR_SOURCE = readFileSync(join(APP_DIR, "consent", "error.tsx"), "utf8");
+const DEMO_SOURCE = readFileSync(join(COMPONENT_DIR, "consent-screen-demo.ts"), "utf8");
 const AS_HELPERS_SOURCE = readFileSync(
   join(REPO_ROOT, "reference-implementation", "server", "routes", "as-consent-ui-helpers.ts"),
   "utf8"
@@ -46,10 +49,9 @@ test("a repeated source name is stripped from the account label", () => {
   assert.equal(sourceAccountLabel("H-E-B", "HEB - x"), "x");
 });
 
-test("trust hints link desktop and touch triggers to their explanation ids", () => {
-  assert.match(CLIENT_SOURCE, /aria-describedby=\{TRUST_HINT_ID\}/);
-  assert.match(CLIENT_SOURCE, /<IcTooltipContent id=\{TRUST_HINT_ID\}/);
-  assert.match(CLIENT_SOURCE, /<IcPopoverPopup id=\{TRUST_HINT_ID\}[^>]*>/);
+test("trust explanation is visible with no extra press", () => {
+  assert.match(CLIENT_SOURCE, /DataConnect could not confirm who runs this app/);
+  assert.doesNotMatch(CLIENT_SOURCE, /What does this mean/);
 });
 
 test("client metadata line has both, one, and no published links", () => {
@@ -64,7 +66,7 @@ test("client metadata line has both, one, and no published links", () => {
     { href: "https://client.example/privacy", label: "Privacy policy" },
   ]);
   assert.deepEqual(clientPublishedLinks([]), []);
-  assert.match(CLIENT_SOURCE, /No privacy policy or terms published\./);
+  assert.doesNotMatch(CLIENT_SOURCE, /No privacy policy or terms published\./);
 });
 
 // ─── Owner gating ───────────────────────────────────────────────────────────
@@ -103,6 +105,17 @@ test("the consent page and its actions are server-only, never cached", () => {
   }
 });
 
+test("demo screens are development-only and route failures have plain states", () => {
+  // Consent brief: screenshots use fixtures in development; production ignores demo query values.
+  assert.match(PAGE_SOURCE, /resolveConsentDemoState\(params\.demo, process\.env\.NODE_ENV\)/);
+  assert.match(DEMO_SOURCE, /environment === "production"/);
+  assert.match(DEMO_SOURCE, /"many"/);
+  assert.match(PAGE_SOURCE, /demo === "expired"/);
+  assert.match(PAGE_SOURCE, /demo === "error"/);
+  assert.match(NOT_FOUND_SOURCE, /<ConsentUnavailable kind="expired" \/>/);
+  assert.match(ERROR_SOURCE, /<ConsentUnavailable kind="error" onRetry=\{reset\} \/>/);
+});
+
 // ─── The approval artifact (AS-conformance #15) ────────────────────────────
 
 test("the decision digest is computed by the console, from the reference implementation's own function", () => {
@@ -137,21 +150,27 @@ test("the digest covers the client identity the screen displayed", () => {
 
 test("the consent screen uses the real @pdpp/brand-react component modules", () => {
   assert.match(CLIENT_SOURCE, /from ["']@pdpp\/brand-react["']/);
-  for (const component of ["Endorse", "IcButton", "IcInput"]) {
+  for (const component of ["IcButton", "IcInput"]) {
     assert.ok(new RegExp(`\\b${component}\\b`).test(CLIENT_SOURCE), `must use the real ${component}`);
   }
-  assert.match(CLIENT_SOURCE, /className="pdpp-sheet"/, "Terms box must use the real neutral sheet surface");
+  // Consent brief: the decision page stays calm and keeps the purpose under a disclosure.
+  assert.match(CLIENT_SOURCE, /<details className=\{styles\.requestDetails\}>/);
 });
 
-test("the consent screen carries the console's own theme control", () => {
-  // Same component and same persisted next-themes choice the console sidebar
-  // uses, so a theme chosen anywhere in the console is honored here on load.
-  assert.match(
-    CLIENT_SOURCE,
-    /import \{ ThemeToggle \} from "@\/components\/theme\/theme-toggle\.tsx"/,
-    "must import the console's ThemeToggle, the same one the sidebar renders"
-  );
-  assert.match(CLIENT_SOURCE, /<ThemeToggle \/>/, "must render the toggle");
+test("the consent screen draws no theme toggle of its own", () => {
+  // Lead review of the consent pictures: the unlabelled theme icon goes. The
+  // root ThemeProvider (app/layout.tsx) applies the theme chosen in the
+  // console's own top-bar toggle, or the system's, so this page still matches.
+  assert.doesNotMatch(CLIENT_SOURCE, /ThemeToggle/);
+  const layout = readFileSync(join(APP_DIR, "layout.tsx"), "utf8");
+  assert.match(layout, /<ThemeProvider[\s>]/, "the root layout must still apply the console theme");
+});
+
+test("the page reads demo state only through the production-gated resolver", () => {
+  // Consent brief: dev-only demo state; production ignores it. Every demo
+  // branch keys on this one call, which returns null in production.
+  assert.match(PAGE_SOURCE, /const demo = resolveConsentDemoState\(params\.demo, process\.env\.NODE_ENV\);/);
+  assert.equal((PAGE_SOURCE.match(/params\.demo/g) ?? []).length, 1, "no other read of the demo query");
 });
 
 test("connector marks use shared display resolution and explicit connector provenance", () => {
@@ -191,36 +210,21 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
   assert.deepEqual(offenders, [], "every color must reference a design token");
 });
 
-test("client trust explanations live only in an accessible chip hint", () => {
-  assert.doesNotMatch(CLIENT_SOURCE, /What was checked/);
-  assert.doesNotMatch(CLIENT_SOURCE, /<details className=\{styles\.trustDetails\}/);
-  assert.match(CLIENT_SOURCE, /<IcTooltip>/, "desktop hover and focus use the shared tooltip primitive");
-  assert.match(CLIENT_SOURCE, /<IcPopover>/, "touch uses a dismissible, anchored shared popover");
-  assert.doesNotMatch(CLIENT_SOURCE, /<IcPopoverPopup[^>]+role=/, "the shared popover retains its dialog role");
-  assert.match(CLIENT_SOURCE, /Dismiss trust explanation/, "the touch popover has an explicit dismiss control");
-});
-
-test("client trust chip copy names only the completed check", () => {
-  assert.doesNotMatch(CLIENT_SOURCE, /Its identity document was fetched from/);
-  assert.doesNotMatch(CLIENT_SOURCE, /Its name and logo come from its own registration/);
-  assert.doesNotMatch(CLIENT_SOURCE, /The operator of this server has confirmed the app/);
-  assert.match(CLIENT_SOURCE, /Name and logo are self-reported\. Nothing was verified\./);
-  assert.match(
-    CLIENT_SOURCE,
-    /Verified automatically against the identity document published at \$\{client\.domain\}\. No manual review\./
-  );
-  assert.match(CLIENT_SOURCE, /Confirmed by the operator of this server\./);
+test("address proof adds the self-declared-name explanation without a badge", () => {
+  assert.match(CLIENT_SOURCE, /client.trust === "domain"/);
+  assert.ok(!CLIENT_SOURCE.includes(">Verified<"));
+  assert.match(CLIENT_SOURCE, /The name is what the app calls itself/);
 });
 
 test("client metadata links render only when the challenge model supplies them", () => {
   assert.match(
     CLIENT_SOURCE,
-    /publishedLinks\.length > 0/,
+    /policyLinks\.length > 0/,
     "an absent policy_uri/tos_uri pair must omit the secondary row"
   );
   assert.match(
     CLIENT_SOURCE,
-    /publishedLinks\.map\(\(link, index\) =>[\s\S]*?href=\{link\.href\}[\s\S]*?target="_blank"/,
+    /policyLinks\.map\(\(link\) =>[\s\S]*?href=\{link\.href\}[\s\S]*?target="_blank"/,
     "each present resolved metadata link must remain a direct, new-tab link"
   );
   assert.match(
@@ -237,9 +241,10 @@ test("field panels expose bulk selection while preserving required fields", () =
   assert.match(CLIENT_SOURCE, /disabled=\{field\.required\}/);
 });
 
-test("declared field titles label controls and raw names remain available", () => {
-  assert.match(CLIENT_SOURCE, /field\.label \|\| field\.name/);
-  assert.match(CLIENT_SOURCE, /className=\{styles\.fieldRaw\}>\{field\.name\}<\/span>/);
+test("declared field titles label controls without showing raw field names", () => {
+  // Consent brief: use plain words and keep raw identifiers off the screen.
+  assert.match(CLIENT_SOURCE, /field\.label \|\| humanFieldName\(field\.name\)/);
+  assert.doesNotMatch(CLIENT_SOURCE, /className=\{styles\.fieldRaw\}>\{field\.name\}<\/span>/);
 });
 
 // ─── The client/server model contract ──────────────────────────────────────
@@ -251,7 +256,7 @@ function declaredFields(source: string, interfaceName: string): string[] {
   let depth = 0;
   let end = start;
   for (let i = source.indexOf("{", start); i < source.length; i += 1) {
-    if (source[i] === "{") depth += 1;
+    if (source[i] === "{") { depth += 1; }
     if (source[i] === "}") {
       depth -= 1;
       if (depth === 0) {
@@ -318,14 +323,16 @@ test("a source with no chosen streams is not submitted as a grant", () => {
 });
 
 test("the owner's refusal is a first-class action beside Allow", () => {
-  assert.match(CLIENT_SOURCE, /rejectAction\(\)/, "Cancel must call the reject action");
-  assert.match(CLIENT_SOURCE, /variant="ghost"/, "Cancel renders as a real secondary action, not a link");
+  // Consent brief: the two equal actions are Allow and Don't allow.
+  assert.match(CLIENT_SOURCE, /rejectAction\(\)/, "Don't allow must call the reject action");
+  assert.match(CLIENT_SOURCE, /Don&apos;t allow/);
+  assert.match(CLIENT_SOURCE, /variant="ghost"/, "Don't allow renders as a real secondary action, not a link");
 });
 
 test("a completed decision navigates to the client and leaves no back-button replay", () => {
   assert.match(
     CLIENT_SOURCE,
-    /window\.location\.replace\(redirectUrl\)/,
+    /window\.location\.replace\(result\.redirectUrl\)/,
     "must replace, so Back cannot re-present a consumed challenge"
   );
 });
@@ -334,6 +341,10 @@ test("a failed submission tells the owner nothing was shared", () => {
   assert.match(CLIENT_SOURCE, /setSubmitError/, "failures must surface to the owner");
   assert.match(CLIENT_SOURCE, /role="alert"/, "the failure must be announced, not just drawn");
   assert.match(ACTIONS_SOURCE, /Nothing was shared/, "the fallback message must state the outcome");
+  assert.match(ACTIONS_SOURCE, /error_description/);
+  assert.match(ACTIONS_SOURCE, /detail\?\.error/);
+  assert.match(ACTIONS_SOURCE, /ok: false/);
+  assert.doesNotMatch(ACTIONS_SOURCE, /throw new Error\(\s*detail\?\.error_description/);
 });
 
 // ─── The retired preview is gone ───────────────────────────────────────────
@@ -362,7 +373,8 @@ test("the owner's per-stream date range is submitted, not just collected", () =>
 });
 
 test("streams without a declared time field explain the missing date range", () => {
-  assert.match(CLIENT_SOURCE, /No date range for this data type\./);
+  // Consent brief: use “kinds of records” in place of technical record-group terms.
+  assert.match(CLIENT_SOURCE, /No date range for this kind of record\./);
   assert.match(CLIENT_SOURCE, /stream\.timePhrase \?/);
 });
 
@@ -406,7 +418,7 @@ test("the data range is folded into the approval artifact digest", () => {
 
 test("the owner's selected fields are submitted through the declaration-checked narrowing path", () => {
   assert.match(CLIENT_SOURCE, /initialFieldSelection/, "every manifest field starts selected");
-  assert.match(CLIENT_SOURCE, /Choose fields to share/, "Change must reveal a real field list");
+  assert.match(CLIENT_SOURCE, /Each record’s id is always included/, "narrowing keeps the required-id explanation");
   assert.match(CLIENT_SOURCE, /streamFields\[stream\.id\]/, "the decision must keep fields keyed by stable stream id");
   assert.match(ACTIONS_SOURCE, /stream_fields: decision\.streamFields/, "the accept request must carry field selections");
   assert.match(

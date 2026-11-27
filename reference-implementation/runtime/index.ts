@@ -82,7 +82,7 @@ import {
   buildKnownGap,
   buildRecoveryGapClosureFacts,
   capCoveredCount,
-  GAP_STRING_MAX,
+  ASSISTANCE_TEXT_MAX,
   isValidRecoveryHintShape,
   normalizeGapScope,
   VIOLATION_LIST_MAX,
@@ -2254,8 +2254,15 @@ function safeAttachmentString(value: unknown, maxLength = 160): string | null {
   return trimmed;
 }
 
-function sanitizeAssistanceTimelineString(value: unknown, maxLength = GAP_STRING_MAX): string | null {
-  const redacted = boundGapString(value);
+// Plain e-mail addresses are masked on the whole value, before the final cut, so no
+// half-cut address can survive at the length bound.
+const ASSISTANCE_EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi;
+
+function sanitizeAssistanceTimelineString(value: unknown, maxLength = ASSISTANCE_TEXT_MAX): string | null {
+  const redacted = boundGapString(
+    typeof value === "string" ? value.replace(ASSISTANCE_EMAIL_PATTERN, "[REDACTED_EMAIL]") : value,
+    ASSISTANCE_TEXT_MAX
+  );
   if (!redacted) {
     return null;
   }
@@ -2273,6 +2280,15 @@ function sanitizeAssistanceTimelineString(value: unknown, maxLength = GAP_STRING
     return sanitized;
   }
   return `${sanitized.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * The one display value for an interaction message: bounded to 2,000 characters and
+ * redacted. Used for both event shapes and the interactive stderr line. The full
+ * input stays only in the in-memory interaction contract given to the handler.
+ */
+export function interactionDisplayMessage(value: unknown): string {
+  return sanitizeAssistanceTimelineString(value) || "Owner assistance requested.";
 }
 
 function sanitizeAssistanceInputSchema(value: unknown, depth = 0): unknown {
@@ -2423,7 +2439,7 @@ export function buildAssistanceRequestedDataFromInteraction(
   return {
     assistance_request_id: msg.request_id,
     kind: msg.kind,
-    message: sanitizeAssistanceTimelineString(msg.message) || "Owner assistance requested.",
+    message: interactionDisplayMessage(msg.message),
     owner_action: hasBrowserSurface ? "operate_attachment" : "provide_value",
     progress_posture: "blocked",
     response_contract: "response_required",
@@ -2452,7 +2468,7 @@ function buildAssistanceRequestedDataFromMessage(
 ): Record<string, unknown> {
   return {
     assistance_request_id: msg.assistance_request_id,
-    message: sanitizeAssistanceTimelineString(msg.message) || "Owner assistance requested.",
+    message: interactionDisplayMessage(msg.message),
     owner_action: msg.owner_action,
     progress_posture: msg.progress_posture,
     response_contract: msg.response_contract,
@@ -6652,7 +6668,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           kind: msg.kind,
-          message: msg.message,
+          message: interactionDisplayMessage(msg.message),
           source: runSource,
           stream: interactionStream,
           ...(isNullish(msg.schema) ? {} : { schema: msg.schema }),
@@ -7567,7 +7583,7 @@ export async function defaultInteractionHandler(interaction: ConnectorMessage): 
   const { createInterface } = await import("node:readline");
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
 
-  process.stderr.write(`\n[INTERACTION] ${interaction.message}\n`);
+  process.stderr.write(`\n[INTERACTION] ${interactionDisplayMessage(interaction.message)}\n`);
   process.stderr.write(`Kind: ${interaction.kind}\n`);
 
   const schema =

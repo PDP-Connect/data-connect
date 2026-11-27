@@ -7,11 +7,11 @@ import { IcButton } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
-import { syncStartFailureLead } from "../../lib/connection-evidence.ts";
 import { connectorNotInstalledCopy } from "../../lib/connector-implementation.ts";
 import { type RunNowResult, runConnectorNowAction } from "../actions.ts";
 import { markSyncStartToast, readSyncStartToast, syncStartToastDismissDelayMs } from "../last-known-sync-start.ts";
 import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 const RUNNING_POLL_MS = 3000;
 const TOAST_TTL_MS = 15_000;
@@ -21,7 +21,7 @@ function syncToastToneClass(tone: "info" | "error" | "warning"): string {
     return "text-destructive";
   }
   if (tone === "warning") {
-    return "text-[color:var(--warning)]";
+    return "text-attention";
   }
   return "text-muted-foreground";
 }
@@ -47,6 +47,7 @@ interface Props {
 interface SyncToast {
   expiresAt?: number;
   message: string;
+  rawDetails?: string;
   runId?: string;
   tone: "info" | "error" | "warning";
 }
@@ -174,8 +175,9 @@ export function SyncNowButton({
       }
       // Stay on this connection and say whether the request reached the server.
       setToast({
-        message: `${syncStartFailureLead(res.phase)} ${res.message}`.trim(),
-        tone: res.phase === "before_server" ? "warning" : "error",
+        message: ACTION_ERROR_COPY,
+        rawDetails: res.message,
+        tone: "error",
       });
     });
   }, [connectionId, connectorId, displayName, force, installPromptShown, router, syncToastScopeId]);
@@ -203,6 +205,7 @@ export function SyncNowButton({
             displayName={displayName}
             onInstalled={() => setNotInstalledKey(null)}
             routeId={syncToastScopeId}
+            showSentence
             variant="inline"
           />
         </div>
@@ -212,13 +215,19 @@ export function SyncNowButton({
           aria-live="polite"
           className={`pdpp-caption block min-w-0 max-w-[18rem] break-words ${syncToastToneClass(toast.tone)}`}
           data-toast-tone={toast.tone}
-          role="status"
+          role={toast.rawDetails ? "alert" : "status"}
         >
           {toast.message}{" "}
           {toastRunHref ? (
             <Link className="underline underline-offset-2" href={toastRunHref}>
               View sync →
             </Link>
+          ) : null}
+          {toast.rawDetails ? (
+            <details className="mt-1 text-muted-foreground">
+              <summary className="cursor-pointer">What went wrong</summary>
+              <code className="mt-1 block break-words font-mono text-xs">{toast.rawDetails}</code>
+            </details>
           ) : null}
         </span>
       ) : null}

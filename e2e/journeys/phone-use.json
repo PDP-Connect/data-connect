@@ -1,0 +1,15 @@
+{
+  "id": "phone-use",
+  "name": "Sources on a phone viewport",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/sources",
+      "readyText": "Data sources",
+      "desktopReadyHeading": "Data sources",
+      "phoneReadyHeading": "Data sources",
+      "assertText": "Data sources"
+    }
+  ]
+}

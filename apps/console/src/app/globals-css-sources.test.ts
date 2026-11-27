@@ -66,3 +66,24 @@ test("compiled CSS contains utilities used only by the vendored operator-ui and 
 		"compiled CSS is missing w-[calc(100%-2rem)]",
 	);
 });
+
+test("on a touch screen every link, button and summary gets a 44 px hit area, written once", async () => {
+	const result = await postcss([tailwindPostcss()]).process(source, { from: cssPath });
+	const css = result.css;
+	// Other utilities (pointer-coarse:) emit their own coarse blocks; take the one with the hit-area rule.
+	const segment = css.split("@media (pointer: coarse)").find((part) => part.includes("a[href]"));
+	const block = segment?.match(/[\s\S]*?::after[\s\S]*?\}/);
+	assert.ok(block, "a coarse-pointer block with an ::after hit area");
+	assert.match(block[0], /width:\s*max\(100%,\s*44px\)/);
+	assert.match(block[0], /height:\s*max\(100%,\s*44px\)/);
+	assert.match(block[0], /a\[href\]/);
+});
+
+test("on a touch screen a text field is at least 44 px high (a field takes no ::after)", async () => {
+	const result = await postcss([tailwindPostcss()]).process(source, { from: cssPath });
+	const coarse = result.css.match(/@media \(pointer: coarse\)[\s\S]*$/)?.[0];
+	assert.ok(coarse, "a coarse-pointer block");
+	const field = coarse.match(/input:not\([^)]*\)[^{]*\{([^}]*)\}/)?.[1];
+	assert.ok(field, "a rule for text fields");
+	assert.match(field, /min-height:\s*44px/);
+});

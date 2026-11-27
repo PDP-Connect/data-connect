@@ -3,7 +3,20 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveSourceDisplayNameFallback, isFallbackConnectionLabel } from "./connector-display.ts";
+import {
+  deriveSourceDisplayNameFallback,
+  formatConnectionDisplayName,
+  formatConnectorKeyForDisplay,
+  formatSourceForDisplay,
+  isFallbackConnectionLabel,
+} from "./connector-display.ts";
+
+test("GitHub uses its product name in source and connector labels", () => {
+  // PAGE-RULES 6: connector names use the shared display rule.
+  assert.equal(formatConnectorKeyForDisplay("github"), "GitHub");
+  // PAGE-RULES 6: source labels use the same shared connector-name rule.
+  assert.equal(formatSourceForDisplay({ id: "github", kind: "connector" }), "GitHub");
+});
 
 test("absent display name is a fallback", () => {
   assert.equal(isFallbackConnectionLabel({ connectorId: "gmail", displayName: null }), true);
@@ -121,4 +134,27 @@ test("deriveSourceDisplayNameFallback converts underscores/hyphens to spaces for
     }),
     "my new connector source"
   );
+});
+
+test("a connection name the server saved, not a person, falls back to the connector name", () => {
+  for (const saved of [
+    "github",
+    "GitHub",
+    "legacy",
+    "local-device:github:abc123",
+    "https://registry.pdpp.dev/connectors/github",
+  ]) {
+    assert.equal(formatConnectionDisplayName(saved, "GitHub", "github"), "GitHub", saved);
+    assert.equal(formatConnectionDisplayName(saved, null, "github"), "this data source", saved);
+  }
+});
+
+test("a connection name a person gave is shown as written", () => {
+  assert.equal(formatConnectionDisplayName("  Work email ", "Gmail", "gmail"), "Work email");
+});
+
+test("a registry address gets the same display name as its bare connector key", () => {
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/github"), "GitHub");
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/chatgpt"), "ChatGPT");
+  assert.equal(formatConnectorKeyForDisplay("https://registry.pdpp.dev/connectors/spotify"), "spotify");
 });

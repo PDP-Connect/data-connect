@@ -28,6 +28,7 @@ function read(relPath: string): Promise<string> {
 
 const FORM_PATH = "apps/console/src/app/(console)/device-exporters/enrollment-form.tsx";
 const ACTIONS_PATH = "apps/console/src/app/(console)/device-exporters/actions.ts";
+const REENROLL_PATH = "apps/console/src/app/(console)/device-exporters/reenroll-button.tsx";
 
 const COLLECTOR_SETUP_HELPER = /pdppLocalCollectorSetupCommand/;
 const COLLECTOR_ENROLL_HELPER = /pdppLocalCollectorEnrollCommand/;
@@ -93,6 +94,26 @@ test("enrollment action only mints packaged local collector enrollment codes", a
   assert.match(src, /resolveLocalCollectorEnrollmentKey\(templates, connectorId\)/);
   assert.match(src, /only creates packaged local collector enrollments/);
   assert.doesNotMatch(src, /isSupportedBrowserCollectorConnector/);
+});
+
+test("device setup uses plain labels and keeps technical steps in Details", async () => {
+  const src = await read(FORM_PATH);
+  // DIRECTION.md §What the look is for: use plain words and keep technical instructions folded under Details.
+  assert.match(src, /ToolbarField label="Data source"/);
+  // DIRECTION.md §What the look is for: the setup form names its next action in familiar words.
+  assert.match(src, /Create setup code/);
+  // DIRECTION.md §What the look is for: machine commands stay in a folded Details section.
+  assert.doesNotMatch(src, /<details/);
+  assert.match(src, /collector-enroll-command/);
+  // DIRECTION.md §What the look is for: dates are words, never raw ISO values.
+  assert.match(src, /Expires \{relativeExpiry\(state\.code\.expires_at\)\}/);
+});
+
+test("re-enrollment errors use plain copy and fold server text into Details", async () => {
+  const src = await read(REENROLL_PATH);
+  // RAISE-RULES.md #4: raw server error text stays inside a folded Details section.
+  assert.match(src, /Could not make a new setup code\. Try again\./);
+  assert.match(src, /<SupportCopy details=\{state.message\}/);
 });
 
 const RUNBOOK_CROSS_REF = /docs\/operator\/local-collector-runbook\.md/;

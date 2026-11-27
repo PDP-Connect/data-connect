@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createAutostartStore, type AutostartState, type AutostartStore } from "../server/autostart-store.ts";
+import { AutostartStateNotReportedError, createAutostartStore, type AutostartState, type AutostartStore } from "../server/autostart-store.ts";
 import { mountOwnerAutostart } from "../server/routes/owner-autostart.ts";
 
 interface CapturedResponse {
@@ -134,6 +134,22 @@ test("GET autostart surfaces a load failure (desktop app not seeded yet) via han
   const { captured, res } = makeRes();
   await handler?.({}, res);
   assert.equal(captured.status, 500);
+});
+
+test("GET autostart gives an unreported desktop state a stable error code", async () => {
+  const routes = mountWithStore({
+    load: async () => { throw new AutostartStateNotReportedError(); },
+    requestChange: async () => { throw new Error("unused"); },
+  });
+  const { captured, res } = makeRes();
+  await routes.get("GET /v1/owner/autostart")?.({}, res);
+  assert.equal(captured.status, 500);
+  assert.deepEqual(captured.body, {
+    error: {
+      code: "autostart_state_not_reported",
+      message: "Autostart state is not available yet. The DataConnect desktop app has not reported its autostart state.",
+    },
+  });
 });
 
 test("POST autostart requests a change and returns the applied result", async () => {

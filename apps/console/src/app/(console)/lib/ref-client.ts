@@ -15,6 +15,10 @@ import { redirectToOwnerLogin } from "./login-redirect.ts";
 import { getAsInternalUrl, ReferenceServerUnreachableError, withOwnerSessionCookie } from "./owner-token.ts";
 import { isCredentialRefusal, refErrorCode } from "./static-secret-refusal.ts";
 import { verifyDashboardSession } from "./verify-session.ts";
+import type { AppAccess, RemoveAppAccessInput, RemoveAppAccessResult } from "pdpp-reference-implementation/app-access";
+export type {
+  AppAccess, AppAccessSource, AppAccessSourceIdentity, RemoveAppAccessInput, RemoveAppAccessResult,
+} from "pdpp-reference-implementation/app-access";
 
 export interface SourceObject {
   connection_id?: string | null;
@@ -358,6 +362,9 @@ export interface RunSummary {
 }
 
 export interface RefConnectorRunSummary {
+  collection_facts?: {streams: readonly {stream:string;collected:number}[]} | null;
+  connector_error?: unknown;
+  terminal_reason?: string | null;
   event_count: number;
   failure_reason: string | null;
   finished_at: string | null;
@@ -440,6 +447,8 @@ export interface RefSchedule {
  * `reference-implementation/server/ref-control.ts`.
  */
 export interface RefLocalDeviceProgress {
+  device_name?: string | null;
+  source_instance_id?: string | null;
   last_heartbeat_at: string | null;
   last_heartbeat_status: string | null;
   last_ingest_at: string | null;
@@ -1395,6 +1404,12 @@ export interface RefConnectionHealthSnapshot {
    */
   forward_disposition?: RefForwardDisposition;
   last_success_at: string | null;
+  /**
+   * Whether the expected sync happened, sized against this source's own
+   * interval. The server sets it on every snapshot (`runtime/connection-health.ts`,
+   * `ConnectionHealthSnapshot.lateness`); absent on older servers.
+   */
+  lateness?: { state: "late" | "on_time" | "overdue" | "unknown" } | null;
   /** Non-secret owner CTA, or null when no attention is required. */
   next_action: RefNextAction | null;
   next_attempt_at: string | null;
@@ -1707,6 +1722,18 @@ export async function listGrants(opts: ListQuery = {}): Promise<ListResponse<Gra
   )) as ListResponse<GrantSummary>;
 }
 
+export async function listAppAccess(): Promise<ListResponse<AppAccess>> {
+  return (await refFetch("/_ref/app-access")) as ListResponse<AppAccess>;
+}
+
+export async function removeAppAccess(input: RemoveAppAccessInput): Promise<RemoveAppAccessResult> {
+  return (await refFetch("/_ref/app-access/remove", undefined, {
+    body: JSON.stringify(input),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })) as RemoveAppAccessResult;
+}
+
 export async function listRuns(opts: ListQuery = {}): Promise<ListResponse<RunSummary>> {
   return (await refFetch(
     "/_ref/runs",
@@ -2010,10 +2037,12 @@ export async function getConnectorSchedule(
   options: { connectorInstanceId?: string | null } = {}
 ): Promise<RefSchedule | null> {
   try {
-    const path = options.connectorInstanceId
-      ? `/_ref/connections/${encodeURIComponent(options.connectorInstanceId)}/schedule`
-      : `/_ref/connectors/${encodeURIComponent(connectorId)}/schedule`;
-    return (await refFetch(path)) as RefSchedule;
+    // The server answers a schedule read on the connector route only; the connection route has no GET.
+    const path = `/_ref/connectors/${encodeURIComponent(connectorId)}/schedule`;
+    return (await refFetch(
+      path,
+      options.connectorInstanceId ? { connector_instance_id: options.connectorInstanceId } : undefined
+    )) as RefSchedule;
   } catch (err) {
     if (err instanceof RefNotFoundError) {
       return null;
@@ -2360,6 +2389,7 @@ export type DeviceSourceInstanceHeartbeatHealth =
   | "unknown";
 
 export interface DeviceSourceInstance {
+  device_display_name?: string | null;
   accepted_record_count?: number;
   connector_id: string;
   connector_instance_id?: string | null;
@@ -3688,4 +3718,20 @@ export async function abandonBrowserEnrollmentShell(
     headers: { "content-type": "application/json" },
     method: "POST",
   })) as { object: "enrollment_abandoned"; connection_id: string; connector_id: string; status: string };
+}
+
+export type { SyncHistory, SyncHistoryInput, SyncDay, SyncEntry, SyncOutcome } from "pdpp-reference-implementation/sync-history";
+export type { AppHistory, AppHistoryInput, AppReadDay, AppReadEntry, AccessChange } from "pdpp-reference-implementation/app-history";
+export async function listSyncHistory(input: import("pdpp-reference-implementation/sync-history").SyncHistoryInput): Promise<import("pdpp-reference-implementation/sync-history").SyncHistory> {
+  return await refFetch(`/_ref/sync-history?${historyQuery(input)}`) as import("pdpp-reference-implementation/sync-history").SyncHistory;
+}
+export async function listAppHistory(input: import("pdpp-reference-implementation/app-history").AppHistoryInput): Promise<import("pdpp-reference-implementation/app-history").AppHistory> {
+  return await refFetch(`/_ref/app-history?${historyQuery(input)}`) as import("pdpp-reference-implementation/app-history").AppHistory;
+}
+function historyQuery(input: object): string {
+  const params = new URLSearchParams();
+  for (const [key,value] of Object.entries(input)) {
+    if (value !== undefined) params.set(key, Array.isArray(value) ? value.join(",") : String(value));
+  }
+  return params.toString();
 }

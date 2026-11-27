@@ -10,17 +10,17 @@ import { ApprovalReview as ApprovalReviewView } from "./approval-review.tsx";
 
 (globalThis as { React?: typeof React }).React = React;
 
-const APPROVAL_BUTTON_RE = /Approve and issue grant/;
+const APPROVAL_BUTTON_RE = /Allow<\/button>/;
 const APPROVAL_CONFIRMATION_RE = /name="approval_confirmation"[^>]*value="approve"/;
 const APPROVAL_REVISION_RE =
   /name="approval_review_revision"[^>]*value="reference\.approval-review\.v1:sha256:reviewDigest"/;
 const REQUEST_URI_RE = /name="request_uri"[^>]*value="urn:pdpp:pending-consent:dc_reviewed"/;
-const NO_APPROVAL_BUTTON_RE = /<button[^>]*>Approve and issue grant<\/button>/;
+const NO_APPROVAL_BUTTON_RE = /<button[^>]*>Allow<\/button>/;
 const NO_DEVICE_SECRET_RE = /device_code|user_code|params_json/;
 const OWNER_DEVICE_CONTROL_RE = /Owner device control/;
-const OWNER_DEVICE_WARNING_RE = /not a scoped third-party data grant/;
-const REVIEW_CONTINUE_RE = /Continue to approval/;
-const BATCH_NON_ACTIONABLE_RE = /Batch approval is not available from this console review/;
+const OWNER_DEVICE_WARNING_RE = /There is no data access to review/;
+const REVIEW_CONTINUE_RE = /\?confirm=1">Allow/;
+const BATCH_NON_ACTIONABLE_RE = /Open this request in the hosted approval page/;
 const BATCH_ARTIFACT_VERSION_RE = /reference\.batch-approval-review\.v1/;
 const NO_APPROVAL_ID_RE = /name="approval_id"[^>]*value="dc_/;
 const NO_MUTABLE_CONSENT_RE = /name="subject_id"|name="ai_training_consented"/;
@@ -87,11 +87,16 @@ function consent(overrides: Partial<ConsentApprovalReview> = {}): ConsentApprova
 }
 
 function render(detail: ApprovalReview, confirm = false): string {
-  return renderToStaticMarkup(ApprovalReviewView({ approveAction: noAction, confirm, denyAction: noAction, detail }));
+  return renderToStaticMarkup(React.createElement(ApprovalReviewView, { approveAction: noAction, confirm, denyAction: noAction, detail }));
+}
+
+function visibleMarkup(html: string): string {
+  return html.replace(/<details\b[\s\S]*?<\/details>/g, "");
 }
 
 test("single consent review renders PR114 artifact authority and no approval submit before confirmation", () => {
   const html = render(consent());
+  // RAISE-RULES 4: system facts remain available in Details while the visible request uses plain words.
   for (const label of [
     "reference.approval-review.v1",
     "owner_local",
@@ -124,6 +129,8 @@ test("single consent review renders PR114 artifact authority and no approval sub
 test("final consent confirmation carries the exact reviewed request uri and revision", () => {
   const html = render(consent(), true);
   assert.match(html, APPROVAL_BUTTON_RE);
+  // RAISE-RULES 5: approval adds a confirmation step that says what the app will be able to read.
+  assert.match(html, /will be able to read Spotify/);
   assert.match(html, APPROVAL_CONFIRMATION_RE);
   assert.match(html, APPROVAL_REVISION_RE);
   assert.match(html, REQUEST_URI_RE);
@@ -163,11 +170,12 @@ test("batch review is explicit and non-actionable in the console", () => {
     true
   );
   assert.match(html, BATCH_ARTIFACT_VERSION_RE);
+  // RAISE-RULES 4: batch review says where to decide it in plain words.
   assert.match(html, BATCH_NON_ACTIONABLE_RE);
   assert.doesNotMatch(html, NO_APPROVAL_BUTTON_RE);
 });
 
-test("owner-device review warns about owner control without inventing grant scope or purpose", () => {
+test("owner-device review explains the device request without exposing system terms", () => {
   const html = render({
     approval_id: "apr_owner",
     client_id: "owner_cli",
@@ -179,4 +187,23 @@ test("owner-device review warns about owner control without inventing grant scop
   assert.match(html, OWNER_DEVICE_CONTROL_RE);
   assert.match(html, OWNER_DEVICE_WARNING_RE);
   assert.doesNotMatch(html, NO_OWNER_DEVICE_SCOPE_RE);
+});
+
+test("visible approval copy avoids system words in review and confirmation states", () => {
+  const banned = /\b(grant|bearer|scope|manifest|stream|connector|OAuth|PKCE|DCR|JWKS)\b/i;
+  // RAISE-RULES 4: technical evidence is folded into Details; visible copy stays plain.
+  assert.doesNotMatch(visibleMarkup(render(consent())), banned);
+  assert.doesNotMatch(visibleMarkup(render(consent(), true)), banned);
+});
+
+test("reviewed requests humanize record kinds and connector names", () => {
+  const html = render(consent());
+  const visible = visibleMarkup(html);
+  const details = html.slice(html.indexOf("<details"), html.indexOf("</details>"));
+  // DIRECTION.md, PAGE-RULES 6: the reviewed request uses the connector's display name.
+  assert.match(visible, /Spotify/);
+  // DIRECTION.md, PAGE-RULES 6: kind names use the shared humanizer inside Details.
+  assert.match(details, /Top artists/);
+  // DIRECTION.md, PAGE-RULES 6: raw connector and kind names do not appear outside Details.
+  assert.doesNotMatch(visible, /top_artists|spotify/);
 });

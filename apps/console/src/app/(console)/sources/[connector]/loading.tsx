@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { DetailLoadingSkeleton } from "../../components/route-loading.tsx";
+import { TitledDetailLoadingSkeleton } from "../../components/titled-detail-loading.tsx";
 
 /**
  * Route-level loading state for a single connection's detail page.
@@ -14,7 +14,7 @@ import { DetailLoadingSkeleton } from "../../components/route-loading.tsx";
 export default function ConnectorDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="this connection" />
+      <TitledDetailLoadingSkeleton breadcrumbs={[{ href: "/sources", label: "Data sources" }]} label="the data source" mark />
     </RecordroomShellWithPalette>
   );
 }

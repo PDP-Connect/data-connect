@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Record-list money-wiring pin — proves the stream LIST page renders a declared
+ * Record-list value-formatting pin — proves the stream LIST page renders a declared
  * currency field with minor-unit formatting (chase `amount` 3000 -> `$30.00`) on
  * BOTH list surfaces: the desktop `<table>` cell (`cellText`) and the mobile
  * `RecordCard`.
  *
- * Why this exists on top of `record-field-format.test.ts` (10 cases): those tests
- * prove `formatDeclaredAmount` in isolation. They do NOT prove the list `page.tsx`
+ * Why this exists on top of `record-format.test.ts`: formatter tests prove
+ * `formatRecordFieldValue` in isolation. They do NOT prove the list `page.tsx`
  * actually *applies* it. The page's money formatting was wired but pinned by no
- * test — a refactor dropping `formatDeclaredAmount` from `cellText` or the
+ * test — a refactor dropping the shared formatter from `cellText` or the
  * `RecordCard` map would silently regress a Chase `amount` table cell back to the
  * raw `3000` with zero test failures. The relationship wiring on the same page is
  * already source-pinned by `relationship-navigation-smoke.test.ts`; the money
@@ -21,12 +21,12 @@
  *      pulls in `next/navigation`), and `stringifyCell` lives in `rs-client.ts`
  *      which transitively imports `next/headers`. So the call sites are guarded by
  *      source-pin: both `cellText` (desktop) and the `RecordCard` map (mobile)
- *      must call `formatDeclaredAmount(value, declaredFieldTypes[column])` and
+ *      must call `formatRecordFieldValue(value, column, declaredFieldTypes[column])` and
  *      fall back to `stringifyCell` for the non-monetary case.
  *   2. Behavior: replicate each surface's exact one-line cell expression —
- *      `const amount = formatDeclaredAmount(value, declaredType); return amount ?
- *      amount.text : stringifyCell(value)` — against the REAL
- *      `formatDeclaredAmount` and a local mirror of `stringifyCell`'s empty/plain
+ *      `const formatted = formatRecordFieldValue(value, column, declaredType); return formatted ?
+ *      formatted.text : stringifyCell(value)` — against the REAL
+ *      shared formatter and a local mirror of `stringifyCell`'s empty/plain
  *      contract (the function itself can't be imported without dragging in next),
  *      and assert the displayed cell text for the money, undeclared, and null
  *      cases the page must get right.
@@ -39,7 +39,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type DeclaredFieldTypes, formatDeclaredAmount, formatStructuredCell } from "@pdpp/display";
+import {
+  buildRecordPreview,
+  classifyRecordKind,
+  type DeclaredFieldRoles,
+  type DeclaredFieldTypes,
+  formatRecordFieldValue,
+  formatStructuredCell,
+} from "@pdpp/display";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const LIST_PAGE = `${HERE}page.tsx`;
@@ -47,21 +54,25 @@ const LIST_PAGE = `${HERE}page.tsx`;
 // Source-pin regexes for the wiring tests, hoisted to module scope per the
 // project's `useTopLevelRegex` lint rule and the sibling
 // `relationship-navigation-smoke.test.ts` convention.
-const LIST_IMPORTS_FORMAT = /formatDeclaredAmount[\s\S]*from "@pdpp\/display"/;
+const LIST_IMPORTS_FORMAT = /formatRecordFieldValue[\s\S]*from "@pdpp\/display"/;
 // Both cell surfaces must derive the amount from the value + the declared type
 // for that column, then fall back to plain stringification (via the readable
 // structured-value tier for arrays/objects, `formatStructuredCell` from
 // `@pdpp/display`).
-const LIST_FORMATS_CELL_AMOUNT = /formatDeclaredAmount\(value, declaredFieldTypes\[column\]\)/;
+const LIST_FORMATS_CELL_AMOUNT =
+  /formatRecordFieldValue\(value, column, declaredFieldTypes\[column\], fieldSchemaTypes\[column\]\)/;
 const LIST_CELL_FALLS_BACK = /structured\.text : stringifyCell\(value\)/;
-const LIST_CARD_FORMATS_AMOUNT = /formatDeclaredAmount\(raw, declaredFieldTypes\[c\]\)/;
+const LIST_CARD_FORMATS_AMOUNT = /formatRecordFieldValue\(raw, c, declaredFieldTypes\[c\], fieldSchemaTypes\[c\]\)/;
+// Grouping reads the JSON-Schema type; the declared presentation type never carries `integer`.
+const LIST_DERIVES_SCHEMA_TYPES = /fieldSchemaTypes = deriveFieldSchemaTypes\(streamMetadata\)/;
 const LIST_CARD_FALLS_BACK = /v = stringifyCell\(raw\)/;
+const ROW_AMOUNT_AT_END = /<span className="ml-auto flex shrink-0 items-center gap-4">[\s\S]*?preview\?\.amount[\s\S]*?tabular-nums/;
 const JSON_SYNTAX_RE = /[{}[\]"]/;
 
 // Local mirror of `rs-client.ts`'s `stringifyCell` empty/plain contract. The real
 // function can't be imported here without dragging in `next/headers` via the
 // rs-client module chain; this replica is exercised only for the NON-monetary
-// fallback, exactly the branch the page takes when `formatDeclaredAmount` returns
+// fallback, exactly the branch the page takes when `formatRecordFieldValue` returns
 // null. Kept byte-faithful to the source for null/undefined -> "" and number ->
 // String(n), which are the cases this test asserts.
 function stringifyCellReplica(v: unknown): string {
@@ -78,12 +89,17 @@ function stringifyCellReplica(v: unknown): string {
 }
 
 // The exact composition both `cellText` and the `RecordCard` map perform:
-// declared-currency first, then the readable structured-value rendering for
-// arrays/objects, then plain stringification.
-function displayCell(value: unknown, declaredType: string | undefined): string {
-  const amount = formatDeclaredAmount(value, declaredType);
-  if (amount) {
-    return amount.text;
+// shared declared-field formatting, then readable structured values, then
+// plain stringification.
+function displayCell(
+  value: unknown,
+  fieldName: string,
+  declaredType: string | undefined,
+  schemaType?: string
+): string {
+  const formatted = formatRecordFieldValue(value, fieldName, declaredType, schemaType);
+  if (formatted) {
+    return formatted.text;
   }
   const structured = formatStructuredCell(value);
   return structured ? structured.text : stringifyCellReplica(value);
@@ -93,25 +109,25 @@ const CHASE_AMOUNT_CAPS: DeclaredFieldTypes = { amount: "currency" };
 
 test("BEHAVIOR declared-currency minor-units cell renders as scaled dollars, not the raw integer", () => {
   assert.equal(
-    displayCell(3000, CHASE_AMOUNT_CAPS.amount),
+    displayCell(3000, "amount", CHASE_AMOUNT_CAPS.amount),
     "$30.00",
     "a chase `amount` of 3000 with a declared `currency` type must render as $30.00, not 3000"
   );
-  assert.equal(displayCell(-1245, CHASE_AMOUNT_CAPS.amount), "-$12.45", "negative minor-units keeps its sign");
+  assert.equal(displayCell(-1245, "amount", CHASE_AMOUNT_CAPS.amount), "-$12.45", "negative minor-units keeps its sign");
 });
 
 test("BEHAVIOR an UNDECLARED numeric cell is left as the plain integer (no magnitude guess)", () => {
   // No field cap for this column -> declaredFieldTypes[column] is undefined.
   assert.equal(
-    displayCell(3000, undefined),
+    displayCell(3000, "followers", undefined),
     "3000",
     "an undeclared 3000 must NOT be reinterpreted as cents — it stays 3000"
   );
 });
 
 test("BEHAVIOR null/absent cell values render empty, matching stringifyCell", () => {
-  assert.equal(displayCell(null, CHASE_AMOUNT_CAPS.amount), "", "null renders empty even under a currency cap");
-  assert.equal(displayCell(undefined, undefined), "", "absent renders empty");
+  assert.equal(displayCell(null, "amount", CHASE_AMOUNT_CAPS.amount), "", "null renders empty even under a currency cap");
+  assert.equal(displayCell(undefined, "followers", undefined), "", "absent renders empty");
 });
 
 test("BEHAVIOR an array-of-objects cell (e.g. a Gmail `cc` field) renders readable names, never raw JSON", () => {
@@ -119,14 +135,23 @@ test("BEHAVIOR an array-of-objects cell (e.g. a Gmail `cc` field) renders readab
     { email: "rowan.diaz@example.edu", name: "Rowan Diaz" },
     { email: "sasha.lindqvist@example.org", name: "Sasha Lindqvist" },
   ];
-  const text = displayCell(cc, undefined);
+  const text = displayCell(cc, "cc", undefined);
   assert.equal(text, "Rowan Diaz, Sasha Lindqvist");
   assert.doesNotMatch(text, JSON_SYNTAX_RE, "must never contain JSON syntax characters");
 });
 
-test("WIRING list page imports the declared-currency formatter", async () => {
+test("BEHAVIOR field cells share list and large-number formatting", () => {
+  // Spotify `followers` and `genres` carry only a JSON-Schema type, no declared presentation type.
+  assert.equal(displayCell(["pop", "country pop"], "genres", undefined, "array"), "pop, country pop");
+  assert.equal(displayCell(98_000_000, "followers", undefined, "integer"), "98,000,000");
+  assert.equal(displayCell(19_870, "release_year", undefined, "integer"), "19870");
+  assert.equal(displayCell(98_000_000, "id", undefined, "integer"), "98000000");
+});
+
+test("WIRING list page imports the shared field formatter", async () => {
   const src = await readFile(LIST_PAGE, "utf8");
-  assert.match(src, LIST_IMPORTS_FORMAT, "list page must import formatDeclaredAmount from operator-ui");
+  assert.match(src, LIST_DERIVES_SCHEMA_TYPES, "list page must read each field's JSON-Schema type");
+  assert.match(src, LIST_IMPORTS_FORMAT, "list page must import formatRecordFieldValue from @pdpp/display");
 });
 
 test("WIRING desktop cell (cellText) applies declared-currency formatting with a stringify fallback", async () => {
@@ -139,4 +164,17 @@ test("WIRING mobile RecordCard applies declared-currency formatting with a strin
   const src = await readFile(LIST_PAGE, "utf8");
   assert.match(src, LIST_CARD_FORMATS_AMOUNT, "RecordCard must format each column value against its declared type");
   assert.match(src, LIST_CARD_FALLS_BACK, "RecordCard must use the formatted amount, falling back to stringifyCell");
+});
+
+test("BEHAVIOR a money record shows its declared amount at the end of the visible row", async () => {
+  // Round 2 sources brief 5c: a declared money preview stays visible at row end.
+  const data = { amount: 3000, merchant: "Acme" };
+  const fieldTypes: DeclaredFieldTypes = { amount: "currency" };
+  const roles: DeclaredFieldRoles = { amount: "amount", merchant: "primary-title" };
+  const { kind } = classifyRecordKind("transactions", data, fieldTypes, undefined, roles);
+  const preview = buildRecordPreview(kind, data, fieldTypes, roles);
+  assert.equal(preview?.amount, "$30.00");
+
+  const src = await readFile(LIST_PAGE, "utf8");
+  assert.match(src, ROW_AMOUNT_AT_END, "the preview amount is visible and aligned at the row end");
 });

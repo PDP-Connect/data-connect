@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 
 /**
  * Route-level loading state for the schedules list.
@@ -14,7 +14,7 @@ import { ListLoadingSkeleton } from "../components/route-loading.tsx";
 export default function SchedulesLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="schedules" rows={6} />
+      <NamedPageLoadingSkeleton label="schedules" rows={6} shape="list" title="Schedules" />
     </RecordroomShellWithPalette>
   );
 }

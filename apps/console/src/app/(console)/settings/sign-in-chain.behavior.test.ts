@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict"
 import test, { mock } from "node:test"
 import { JSDOM } from "jsdom"
@@ -147,11 +148,13 @@ async function setup() {
     [...container.querySelectorAll("label")].find(node => node.textContent?.startsWith(label))?.querySelector("input,select") as
       | HTMLInputElement
       | undefined
+  // RAISE rule 4: type into the plain field labels and use each field's own document.
   const type = async (input: HTMLInputElement, value: string) => {
-    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!
+    const inputWindow = input.ownerDocument.defaultView!
+    const setter = Object.getOwnPropertyDescriptor(inputWindow.HTMLInputElement.prototype, "value")!.set!
     await act(async () => {
       setter.call(input, value)
-      input.dispatchEvent(new dom.window.Event("input", { bubbles: true }))
+      input.dispatchEvent(new inputWindow.Event("input", { bubbles: true }))
     })
   }
   return { dom, container, root, button, field, type }
@@ -196,17 +199,20 @@ test("signed out: one card throughout, one click runs the chain and opens the br
     await render(root, request, { pollTick: 0 })
     const text = () => container.textContent ?? ""
     assert.match(text(), /Needs your action/)
-    assert.match(text(), /Sign in to Tailscale to finish\./)
-    assert.ok(field("Tailscale email"))
-    assert.ok(field("Your tailnet name (ends in .ts.net)"))
-    const find = [...container.querySelectorAll("a")].find(node => node.textContent === "Find it in Tailscale")
-    assert.ok(find, "the tailnet field says where to find the name")
+    assert.match(text(), /Waiting for you to sign in at Tailscale\./)
+    // RAISE rule 4: keep account setup fields clear of protocol terms.
+    assert.ok(field("Email address"))
+    assert.ok(field("Your Tailscale address"))
+    // RAISE rule 4: the link names the address the person needs to find.
+    const find = [...container.querySelectorAll("a")].find(node => node.textContent === "Find your address")
+    assert.ok(find, "the address field says where to find it")
     assert.equal(find.getAttribute("href"), "https://login.tailscale.com/admin/dns")
-    assert.match(text(), /Tailscale shows it under DNS in its admin console\./)
+    // RAISE rule 4: say where to find the address without using the feature name; the link opens the DNS page.
+    assert.match(text(), /Find this address on the DNS page of your Tailscale admin console\./)
     assert.ok(container.querySelector('[aria-label="What this does"]'), "what the approval does is in the default view")
     assert.deepEqual(bannedIn(text()), [])
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     calls.length = 0
     await act(async () => button("Sign in to Tailscale")!.click())
     assert.deepEqual(
@@ -256,15 +262,15 @@ test("the node step shows one button when the facts are new, and the button appr
       if (body.actionId === SEQUENCE[fake.state.at]) fake.state.at++
     })
     await render(root, request, { pollTick: 0 })
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     await act(async () => button("Sign in to Tailscale")!.click())
     fake.state.signedIn = true
     calls.length = 0
     await render(root, request, { pollTick: 1 })
     assert.deepEqual(posts(calls), [])
     assert.ok(button("Use this computer (host-1)"))
-    assert.equal(field("Tailscale email"), undefined)
+    assert.equal(field("Email address"), undefined)
     await act(async () => button("Use this computer (host-1)")!.click())
     assert.equal(posts(calls).length, 1)
     assert.equal(posts(calls)[0]!.body!.approval.consentFactsDigest, "facts-node")
@@ -285,14 +291,14 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
       if (body.actionId === SEQUENCE[fake.state.at]) fake.state.at++
     })
     await render(root, request)
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     calls.length = 0
     await act(async () => button("Sign in to Tailscale")!.click())
     // The entry check and the email ran; the tailnet step has facts nobody has seen.
     assert.deepEqual(posts(calls).map(call => call.body!.actionId), ["tailscale-setup", "tailscale-account"])
     assert.ok(button("Sign in to Tailscale"))
-    assert.match(container.textContent ?? "", /Sign in to Tailscale to finish\./)
+    assert.match(container.textContent ?? "", /Waiting for you to sign in at Tailscale\./)
     assert.equal(opened.length, 0)
     assert.match(container.querySelector('[aria-label="What this does"]')!.textContent ?? "", /Facts for tailscale-tailnet\./)
     // The owner clicks again with those facts on the card; the login step's facts are new again.
@@ -314,9 +320,9 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
   }
 })
 
-for (const [id, line] of [
-  ["tailscale-magicdns", "Turn on MagicDNS for your tailnet."],
-  ["tailscale-https", "Turn on HTTPS certificates for your tailnet."],
+for (const [id, line, detail] of [
+  ["tailscale-magicdns", "Set up your Tailscale network address.", "Turn on MagicDNS for your tailnet."],
+  ["tailscale-https", "Turn on HTTPS certificates for your Tailscale network address.", "Turn on HTTPS certificates for your tailnet."],
 ] as const) {
   test(`administrator step ${id} says what to do in plain words`, async () => {
     opened.length = 0
@@ -334,6 +340,17 @@ for (const [id, line] of [
       const text = container.textContent ?? ""
       assert.match(text, /Needs your action/)
       assert.ok(text.includes(line))
+      const section = container.querySelector('[aria-label="Finish setting up Tailscale"]')
+      assert.ok(section)
+      const details = section.querySelector("[data-diagnostics]")
+      assert.ok(details)
+      const outsideDetails = section.cloneNode(true) as HTMLElement
+      const folded = outsideDetails.querySelector("[data-diagnostics]")
+      assert.ok(folded)
+      folded.remove()
+      // Remote access repair 3: plain wording stays outside; provider terms stay folded.
+      assert.doesNotMatch(outsideDetails.textContent ?? "", /MagicDNS|tailnet/)
+      assert.ok((await copySupport(details)).includes(detail))
       assert.deepEqual(bannedIn(text), [])
       assert.doesNotMatch(text, /daemon|refresh setup|administrator can/i)
       await act(async () => button("Open Tailscale admin")!.click())
@@ -376,9 +393,10 @@ test("a pasted account token is in the submit body only: not in the page, the fi
     const text = () => container.textContent ?? ""
     assert.match(text(), /Needs your action/)
     assert.match(text(), /Add your ngrok token to finish\./)
-    const input = field("ngrok agent authtoken")!
+    const input = field("ngrok token (from your ngrok dashboard)")!
     assert.equal(input.type, "password")
     assert.equal(container.querySelector("a")?.textContent, "Get a token")
+    assert.match(container.querySelector("a")?.className ?? "", /\bunderline\b/)
     assert.equal(container.querySelector("a")?.getAttribute("href"), "https://dashboard.example.test/get-started/your-authtoken")
     assert.equal((button("Save token") as HTMLButtonElement).disabled, true)
     await type(input, SECRET)
@@ -449,8 +467,8 @@ test("leaving the way mid-chain sends no further request for it", async () => {
     )
     const props = { isCurrentWay: () => onWay }
     await render(root, request, props)
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     calls.length = 0
     let click: Promise<void> = Promise.resolve()
     await act(async () => {
@@ -492,8 +510,8 @@ test("a node step that comes back with changed facts after the click is not appr
       }
     )
     await render(root, request, { pollTick: 0 })
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     await act(async () => button("Sign in to Tailscale")!.click())
     fake.state.signedIn = true
     changed = true
@@ -521,15 +539,15 @@ test("a response that does not move the setup on stops the chain after one reque
   try {
     const request = transport(() => view("authorization-required", all["tailscale-setup"], 3), calls)
     await render(root, request)
-    await type(field("Tailscale email")!, EMAIL)
-    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await type(field("Email address")!, EMAIL)
+    await type(field("Your Tailscale address")!, TAILNET)
     calls.length = 0
     await act(async () => button("Sign in to Tailscale")!.click())
     assert.equal(posts(calls).length, 1)
     assert.match(container.textContent ?? "", /Try again/)
     assert.deepEqual(bannedIn(container.textContent ?? ""), [])
     assert.ok(button("Sign in to Tailscale"), "the owner can try again")
-    assert.equal(container.querySelector("details summary")?.textContent !== undefined, true)
+    assert.ok(button("Copy details for support"))
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
@@ -550,7 +568,7 @@ for (const mode of ["server message", "thrown error"] as const) {
     }
     try {
       await render(root, request, { reservation: ngrokReservation })
-      const input = field("ngrok agent authtoken")!
+      const input = field("ngrok token (from your ngrok dashboard)")!
       await type(input, SECRET)
       await act(async () => button("Save token")!.click())
       assert.equal(posts(calls).length, 1)

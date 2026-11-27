@@ -240,6 +240,15 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // runtime data the operator supplied when adding a local source), not
   // RI-committed provider/connector policy.
   'reference-implementation/server/connector-install/local-source.ts::read::readFileSync(statePath, "utf8")',
+  // readCatalogSnapshotFile() in connector-install/index.ts: same shape as
+  // the activation-state read above. snapshotFile is join(dataDir,
+  // CATALOG_SNAPSHOT_FILE), a fixed RI-owned filename under the resolved data
+  // directory: options.dataDir, PDPP_CONNECTOR_PRELOAD_DIR, PDPP_DATA_DIR or
+  // the default data folder. The file is this server's own copy of
+  // the last verified registry catalog, kept so Add a data source works
+  // offline; its connector ids are runtime registry data, not RI-committed
+  // provider policy.
+  'reference-implementation/server/connector-install/index.ts::readCatalogSnapshotFile::readFileSync(snapshotFile, "utf8")',
   // readCredentialRecoveryStateMarker() reads a fixed filename under
   // PDPP_DATA_DIR ("credential-recovery-state.json"). This is operator/runtime
   // recovery state written by the recovery kit, not RI-committed connector

@@ -1,13 +1,15 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { WebPushSettings } from "@/app/(console)/components/web-push-settings.tsx";
-import { ServerUnreachable } from "../components/server-unreachable.tsx";
+import { SupportCopy } from "../components/support-copy.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { getWebPushConfig, listWebPushSubscriptions } from "../lib/ref-client.ts";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { settingsTrail } from "../settings/settings-trail.ts"
 
 export const dynamic = "force-dynamic";
 
@@ -20,15 +22,20 @@ async function loadNotificationState() {
   return { config, subscriptions: subscriptions.data };
 }
 
-export default async function NotificationsPage() {
+export default async function NotificationsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> }) {
+  const params = await searchParams;
+  const practice = process.env.NODE_ENV !== "production" && ["off", "on", "blocked", "unsupported", "insecure", "devices"].includes(params?.demo ?? "") ? params!.demo : undefined;
+  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-4"><PageHeading /><WebPushSettings plain practice={practice} config={{ object: "web_push_config", enabled: true, public_key: "practice", unavailable_reason: null }} subscriptions={[]} /></main></RecordroomShellWithPalette>;
   let state: Awaited<ReturnType<typeof loadNotificationState>> | null = null;
   let unreachable = false;
+  let loadError = "Notifications could not be loaded";
 
   try {
     state = await loadNotificationState();
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       unreachable = true;
+      loadError = err.message;
     } else {
       throw err;
     }
@@ -37,38 +44,33 @@ export default async function NotificationsPage() {
   if (unreachable || !state) {
     return (
       <RecordroomShellWithPalette>
-        <ServerUnreachable />
+        <main className="mx-auto w-full max-w-5xl">
+          <PageHeading />
+          <p className="text-[15px] text-muted-foreground">
+            This could not be loaded. <Link className="text-primary underline" href="/notifications">Try again</Link>.
+          </p>
+          <SupportCopy details={loadError} />
+        </main>
       </RecordroomShellWithPalette>
     );
   }
 
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <PageHeader
-          description="Enable owner-action alerts for the browser profile or installed app you are using right now. Each device is configured separately."
-          title="Notifications"
-        />
-
-        <WebPushSettings config={state.config} subscriptions={state.subscriptions} />
-
-        <Section title="What DataConnect sends">
-          <div className="grid gap-3 text-muted-foreground text-sm md:grid-cols-3">
-            <p>
-              <strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for source
-              reconnects, syncs waiting on you, and other events where this instance needs your attention.
-            </p>
-            <p>
-              <strong className="text-foreground">Headline only.</strong> Payloads stay non-secret and route you back to
-              the owner-authenticated console for the details.
-            </p>
-            <p>
-              <strong className="text-foreground">Per device.</strong> Installing the PWA adds an app icon; this browser
-              starts receiving alerts once you enable it here.
-            </p>
-          </div>
-        </Section>
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+        <PageHeading />
+        <WebPushSettings plain config={state.config} subscriptions={state.subscriptions} />
       </main>
     </RecordroomShellWithPalette>
+  );
+}
+
+function PageHeading() {
+  return (
+    <PageHeader
+      breadcrumbs={settingsTrail("Notifications")}
+      description="A message on this device when a sync needs you."
+      title="Notifications"
+    />
   );
 }

@@ -46,6 +46,9 @@ export interface OwnerBootstrapFlow {
 
 type OwnerBootstrapStore = Map<string, OwnerBootstrapFlow>;
 
+/** A flow older than this is dropped the next time the store is touched. */
+export const OWNER_BOOTSTRAP_FLOW_TTL_MS = 15 * 60 * 1000;
+
 function getFlowStore(): OwnerBootstrapStore {
   const state = globalThis as typeof globalThis & {
     __pdppOwnerBootstrapFlows?: OwnerBootstrapStore;
@@ -53,7 +56,15 @@ function getFlowStore(): OwnerBootstrapStore {
   if (!state.__pdppOwnerBootstrapFlows) {
     state.__pdppOwnerBootstrapFlows = new Map();
   }
-  return state.__pdppOwnerBootstrapFlows;
+  const store = state.__pdppOwnerBootstrapFlows;
+  const oldestKept = Date.now() - OWNER_BOOTSTRAP_FLOW_TTL_MS;
+  for (const [flowId, flow] of store) {
+    // An unparseable start time is treated as expired, never as kept forever.
+    if (!(Date.parse(flow.startedAt) >= oldestKept)) {
+      store.delete(flowId);
+    }
+  }
+  return store;
 }
 
 function readBody(res: Response): Promise<unknown> {
@@ -97,6 +108,20 @@ async function fetchAs(path: string, init: RequestInit): Promise<Response> {
 
 export function getOwnerBootstrapFlow(flowId: string): OwnerBootstrapFlow | null {
   return getFlowStore().get(flowId) ?? null;
+}
+
+/**
+ * Read a flow for display and drop its issued secret from the store, so the
+ * token is shown once (the GitHub/Stripe pattern for new secrets). The
+ * returned copy still holds the token; later reads of the same flow do not.
+ * A flow with no token yet is returned unchanged.
+ */
+export function takeOwnerBootstrapFlow(flowId: string): OwnerBootstrapFlow | null {
+  const flow = getOwnerBootstrapFlow(flowId);
+  if (flow?.token) {
+    saveFlow({ ...flow, token: null, tokenResponse: null });
+  }
+  return flow;
 }
 
 export function setOwnerBootstrapFlowError(flowId: string, message: string): OwnerBootstrapFlow | null {

@@ -13,7 +13,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -38,7 +38,7 @@ const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt
 const way = (providerId: string, over: Record<string, unknown> = {}) => ({
   providerId,
   label: `Label ${providerId}`,
-  reach: providerId === "lan" ? "lan" : "public",
+  reach: providerId === "lan" ? "lan" : "internet",
   transport: "https",
   availability: { session: available, durable: available },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -111,7 +111,9 @@ test("Tailscale with Funnel blocked is not recommended and its row shows the mis
   const lasting = otherWays(inv(funnelBlocked), caps, "localhost-run").find((group) => group.id === "lasting")!;
   const row = lasting.rows.find((item) => item.providerId === "tailscale-funnel")!;
   assert.equal(row.usable, false);
-  assert.match(row.missing!.text, /Funnel isn't allowed/);
+  // RAISE rule 4: the account-specific step is described without the protocol name.
+  assert.match(row.missing!.text, /Your account needs another step/);
+  assert.doesNotMatch(row.missing!.text, /Funnel/);
   assert.equal(lasting.rows.at(-1)!.providerId, "tailscale-funnel", "a way that cannot run comes last");
 });
 
@@ -125,7 +127,8 @@ test("a missing Tailscale app shows Get Tailscale", () => {
 
 test("Other ways has three groups, no development row, and no code in any text", () => {
   const groups = otherWays(inv(tailscaleReady), caps, "tailscale-funnel");
-  assert.deepEqual(groups.map((group) => group.title), ["Lasting address for AI apps", "Only my own devices", "Advanced"]);
+  // RAISE rule 2: alternative ways are grouped by what the person wants to do.
+  assert.deepEqual(groups.map((group) => group.title), ["Addresses ChatGPT can open", "Your phone and computers", "Details"]);
   const rows = groups.flatMap((group) => group.rows);
   assert.ok(!rows.some((row) => row.providerId === "ngrok-tcp-passthrough"), "detect-only row hidden");
   assert.ok(!rows.some((row) => row.providerId === "tailscale-funnel"), "the recommended way is not repeated");
@@ -134,6 +137,25 @@ test("Other ways has three groups, no development row, and no code in any text",
     assert.deepEqual(bannedIn(text), [], text);
     assert.doesNotMatch(text, /detect-only|deferred|admitted|action-required|unsupported|[a-z]+-[a-z]+-[a-z]+/);
   }
+});
+
+test("the two ngrok passthrough ways have distinct plain names and facts", () => {
+  // RAISE rule 4: the two alternatives use distinct plain words.
+  const rows = otherWays(
+    inv({ ...noTailscale, providers: [way("ngrok-tls-passthrough"), way("ngrok-tcp-passthrough")] }),
+    caps,
+    null
+  ).flatMap((group) => group.rows);
+  const tls = rows.find((row) => row.providerId === "ngrok-tls-passthrough");
+  const tcp = rows.find((row) => row.providerId === "ngrok-tcp-passthrough");
+  assert.ok(tls);
+  assert.ok(tcp);
+
+  assert.notEqual(tls.title, tcp.title);
+  assert.equal(tls.title, "ngrok encrypted web address");
+  assert.equal(tls.line, "Needs an ngrok account. Check your plan for cost. The connection stays encrypted until it reaches this computer.");
+  assert.equal(tcp.title, "ngrok network address");
+  assert.equal(tcp.line, "Needs an ngrok account. Check your plan for cost. Uses an address without a domain name. The connection stays encrypted until it reaches this computer.");
 });
 
 test("a missing prerequisite the owner can supply during setup does not block the way", () => {
@@ -260,30 +282,25 @@ const changesHostFor = (calls: Call[], providerId: string) =>
       (call.body?.providerId === providerId || call.url.includes(`d-${providerId}/`))
   );
 
-test("the card recommends the temporary address and Other ways opens in three groups", async () => {
-  await withScreen(noTailscale, async ({ container, press, text }) => {
-    const card = container.querySelector("[aria-label='Recommended way']")!;
-    assert.match(card.textContent!, /Temporary address/);
-    assert.match(card.textContent!, /Recommended/);
-    assert.match(card.textContent!, /Free, no account, ready in seconds\. Good for a quick test\./);
-    assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
-    await press(/^Other ways$/);
-    const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
-    assert.deepEqual(headings.slice(0, 2), ["Lasting address for AI apps", "Only my own devices"]);
-    // The advanced row lists its ways inline, next to the group title.
-    assert.match(headings[2] ?? "", /^Advanced · Your own address, ngrok \(advanced, TLS\), tunnl\.gg›$/, headings[2] ?? "no advanced row");
-    assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
-    assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Advanced starts closed");
-    const shown = container.querySelector("fieldset")!.textContent!;
-    assert.doesNotMatch(shown, /Label |ngrok-tcp|detect-only|deferred|admitted/);
-    assert.deepEqual(bannedIn(shown), []);
+test("one list retains every former alternative and marks the selected way", async () => {
+  await withScreen(noTailscale, async ({ container, text }) => {
+    const list = container.querySelector("[aria-label='Choose a way']")!;
+    assert.ok(list);
+    const radios = [...list.querySelectorAll<HTMLInputElement>("input[type=radio]")];
+    const expected = otherWays(noTailscale as never, {}, null, {}).flatMap(group => group.rows).map(row => row.providerId).sort();
+    assert.deepEqual(radios.map(radio => radio.value).sort(), expected);
+    assert.equal(radios.filter(radio => radio.checked).length, 1);
+    assert.match(list.textContent!, /Temporary address/);
+    assert.match(text(), /Needs the Tailscale app, signed in/);
+    assert.equal(container.querySelector("details"), null);
+    assert.deepEqual(bannedIn(list.textContent!), []);
   });
 });
 
 test("choosing another way prepares that way and never approves without the click", async () => {
-  await withScreen(tailscaleReady, async ({ calls, container, press, text, settle }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
-    await press(/^Other ways$/);
+  await withScreen(tailscaleReady, async ({ calls, container,  text, settle }) => {
+    assert.match(container.querySelector("[aria-label='Choose a way'] input:checked")!.closest("label")!.textContent!, /Tailscale · public address/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
     const before = calls.filter((call) => call.url === "/drafts").length;
     await act(async () => radio.click());
@@ -338,8 +355,8 @@ test("choosing a way that needs a token shows an empty token field and sends no 
       : draft(`d-${providerId}`);
   await withScreen(
     catalog,
-    async ({ calls, container, press, settle }) => {
-      await press(/^Other ways$/);
+    async ({ calls, container,  settle }) => {
+      assert.ok(container.querySelector("[aria-label='Choose a way']"));
       const label = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!;
       const radio = label.querySelector("input")!;
       assert.equal(radio.disabled, false, "the way can be chosen");
@@ -419,8 +436,8 @@ test("choosing managed Cloudflare reserves its sign-in step and shows an empty t
   };
   await withScreen(
     catalog,
-    async ({ calls, container, press, settle }) => {
-      await press(/^Other ways$/);
+    async ({ calls, container,  settle }) => {
+      assert.ok(container.querySelector("[aria-label='Choose a way']"));
       const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
       assert.equal(radio.disabled, false, "the way can be chosen");
       await act(async () => radio.click());
@@ -454,3 +471,29 @@ test("choosing managed Cloudflare reserves its sign-in step and shows an empty t
     route
   );
 });
+
+for (const row of otherWays(inv(tailscaleReady), caps, null).flatMap(
+  group => group.rows
+)) {
+  test(`single list preserves selection of ${row.providerId}`, async () => {
+    await withScreen(tailscaleReady, async ({ container, calls, settle }) => {
+      const radio = container.querySelector<HTMLInputElement>(
+        `input[type=radio][value="${row.providerId}"]`
+      )
+      assert.ok(radio)
+      assert.equal(radio.disabled, !row.usable)
+      if (row.usable) {
+        await act(async () => radio.click())
+        await settle()
+        assert.equal(radio.checked, true)
+        assert.ok(
+          calls.some(
+            call =>
+              call.url === "/drafts" && call.body?.providerId === row.providerId
+          )
+        )
+        assert.deepEqual(mutating(calls), [])
+      }
+    })
+  })
+}

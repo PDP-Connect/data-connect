@@ -1,0 +1,26 @@
+{
+  "id": "owner-login-lifecycle",
+  "name": "Inspecting the server owner sign-in page",
+  "steps": [
+    {
+      "id": "signed-in-owner",
+      "open": "/owner/login",
+      "readyText": "You are signed in.",
+      "desktopReadyHeading": "DataConnect",
+      "phoneReadyHeading": "DataConnect",
+      "assertText": "Sign out"
+    },
+    {
+      "id": "owner-sign-out",
+      "desktopAction": {
+        "type": "click",
+        "role": "button",
+        "name": "Sign out"
+      },
+      "readyText": "Use your password to continue.",
+      "desktopReadyHeading": "Sign in to DataConnect",
+      "phoneReadyHeading": "Sign in to DataConnect",
+      "assertText": "Use your password to continue."
+    }
+  ]
+}

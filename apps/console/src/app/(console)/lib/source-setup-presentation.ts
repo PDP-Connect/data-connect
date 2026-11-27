@@ -601,9 +601,15 @@ export function sourceSetupCardModel(
   // only because nothing has been installed to prove it. Hiding the install
   // action for it would leave no way to ever register it. Install stays
   // offered, and the claim is judged from the manifest once it is registered.
+  //
+  // Because the listing carries no proof claim, install-before-proof is
+  // allowed only for supported/preview packages: a development package whose
+  // manifest proves nothing would be installed and then refused. Replace this
+  // tier check with a proof field from the signed catalog when one exists.
   const proofJudgedAfterInstall =
     entry.disposition === "local_collector_unproven" &&
     entry.registrationStatus !== "registered" &&
+    (entry.publicTier === "supported" || entry.publicTier === "preview") &&
     Boolean(lifecycle?.catalog || lifecycle?.installed);
   const noSetupPath = sourceSetupRowIsUnavailable(entry) && !proofJudgedAfterInstall;
   const installModel = lifecycle && !noSetupPath ? connectorInstallRowModel(entry, lifecycle) : null;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { SyncHistoryLoadingSkeleton } from "./sync-history-loading-skeleton.tsx";
 
 /**
  * Route-level loading state for the runs list.
@@ -15,7 +15,7 @@ import { ListLoadingSkeleton } from "../components/route-loading.tsx";
 export default function RunsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="Syncs" rows={8} />
+      <SyncHistoryLoadingSkeleton />
     </RecordroomShellWithPalette>
   );
 }

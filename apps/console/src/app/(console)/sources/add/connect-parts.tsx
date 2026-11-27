@@ -1,0 +1,177 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import { connectErrorWords } from "../../lib/connect-error-words.ts";
+import { buttonVariants, IcInput, type ConnectorIconLike } from "@pdpp/brand-react";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
+import Link from "next/link";
+import { LoaderCircle } from "lucide-react";
+import type { ReactNode } from "react";
+import { ConnectorMark } from "../../components/connector-mark.tsx";
+import { accountCopy, cannotAddCopy, cannotAddWhy, connectHeading, sentenceName, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
+
+export interface ExistingAccount {
+  readonly connectionId: string;
+  readonly displayName: string;
+}
+
+/** "Connect <Name>": one logo, the name once, a way back to the list. */
+export function ConnectHeader({
+  connectorKey,
+  description,
+  icon,
+  name,
+  title,
+  step,
+  lastCrumb,
+}: {
+  /** The trail's last step. Default: "Add a data source"; a source's own page names the source. */
+  lastCrumb?: { href: string; label: string };
+  connectorKey: string;
+  description?: ReactNode;
+  icon: ConnectorIconLike | null | undefined;
+  name: string;
+  title?: string;
+  step?: string;
+}) {
+  return (
+    <PageHeader
+      breadcrumbs={[
+        { href: dashboardRoutes.section.overview, label: "Home" },
+        { href: dashboardRoutes.section.records, label: "Data sources" },
+        ...(lastCrumb ? [lastCrumb] : [{ href: "/sources/add", label: "Add a data source" }, { label: title ?? connectHeading(name) }]),
+      ]}
+      description={step ? <><span className="pdpp-caption">{step}</span>{description}</> : description}
+      title={
+        <span className="inline-flex items-center gap-2">
+          <ConnectorMark connectorId={connectorKey} icon={icon} name={name} />
+          {title ?? connectHeading(name)}
+        </span>
+      }
+    />
+  );
+}
+
+/** The one fold these pages allow: authored words for the cause, one step away. The server's own message is never shown (it can echo a typed key). */
+export function WentWrong({ message }: { message: string }) {
+  return (
+    <details className="pdpp-caption text-muted-foreground">
+      <summary className="inline-flex min-h-11 cursor-pointer items-center underline decoration-dotted underline-offset-4">
+        {gettingReadyCopy.whatWentWrong}
+      </summary>
+      <p className="mt-1 break-words">{connectErrorWords(message)}</p>
+    </details>
+  );
+}
+
+/** The id the fields point at (aria-describedby) when the form was rejected. */
+export const CONNECT_ERROR_ID = "connect-error";
+
+/** A failed start: one plain sentence, the cause in authored words under "What went wrong". */
+export function StartFailed({ message, sentence }: { message: string; sentence: string }) {
+  return (
+    <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" id={CONNECT_ERROR_ID} role="alert">
+      <p className="pdpp-caption">{sentence}</p>
+      <p className="pdpp-caption break-words">{connectErrorWords(message)}</p>
+    </div>
+  );
+}
+
+/** Tier development or preview: moved here from the badge on the list. */
+export function NewServiceNote({ name, tier }: { name: string; tier: string | null | undefined }) {
+  if (!isNewService(tier)) return null;
+  return (
+    <p className="pdpp-caption text-muted-foreground" data-testid="new-service-note">
+      {newServiceNote(name)}
+    </p>
+  );
+}
+
+/** "You already have <name>. This adds another account." with the name field. */
+export function ExistingAccountsNote({ accounts, connectorKey }: { accounts: readonly ExistingAccount[]; connectorKey: string }) {
+  if (accounts.length === 0) return null;
+  return (
+    <p className="pdpp-caption text-muted-foreground" data-testid="existing-accounts-note">
+      {accountCopy.already}{" "}
+      {accounts.map((account, index) => (
+        <span key={account.connectionId}>
+          {index > 0 ? (index === accounts.length - 1 ? " and " : ", ") : ""}
+          <Link className="text-foreground underline underline-offset-2" href={`/sources/${encodeURIComponent(connectorKey)}?connection_id=${encodeURIComponent(account.connectionId)}`}>
+            {account.displayName}
+          </Link>
+        </span>
+      ))}
+      . {accountCopy.addsAnother}
+    </p>
+  );
+}
+
+/** Shown only when the person already has an account of this service. */
+export function AccountNameField({
+  accounts,
+  fieldName,
+  name,
+}: {
+  accounts: readonly ExistingAccount[];
+  fieldName: string;
+  name: string;
+}) {
+  if (accounts.length === 0) return null;
+  return (
+    <label className="grid gap-1" htmlFor={`account-name-${fieldName}`}>
+      <span className="pdpp-eyebrow">{accountCopy.nameLabel}</span>
+      <IcInput
+        className="min-h-11"
+        id={`account-name-${fieldName}`}
+        maxLength={200}
+        name={fieldName}
+        placeholder={accountCopy.namePlaceholder(name)}
+      />
+    </label>
+  );
+}
+
+/** "<Name> can't be added here yet." with a title, the reason in plain words, and what to do instead. */
+export function CannotBeAddedHere({
+  connectorKey,
+  icon,
+  instead,
+  name,
+  reason,
+}: {
+  connectorKey?: string;
+  icon?: ConnectorIconLike | null | undefined;
+  instead?: string | null;
+  name: string;
+  reason?: string | null;
+}) {
+  const why = reason ? { instead: instead ?? cannotAddWhy(name, null).instead, reason } : cannotAddWhy(name, null);
+  // "Could not tell" is its own verdict: it does not also say "can't be added", and it offers a retry.
+  const undecided = reason ? reason === cannotAddWhy(name, "inspection_unavailable").reason : cannotAddWhy(name, null).undecided;
+  return (
+    <>
+      <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={sentenceName(name)} title={sentenceName(name)} />
+      <div className="grid max-w-xl gap-3 py-4" data-testid="cannot-be-added-here">
+        {undecided ? null : <p className="text-foreground">{cannotAddCopy.heading(sentenceName(name))}</p>}
+        {why.reason ? <p className={undecided ? "text-foreground" : "pdpp-caption text-muted-foreground"}>{why.reason}</p> : null}
+        <p className="pdpp-caption text-muted-foreground">{why.instead}</p>
+        <div className="flex flex-wrap gap-2">
+          {undecided && connectorKey ? (
+            <Link className={buttonVariants({ size: "sm", variant: "default" })} href={`/sources/add/${encodeURIComponent(connectorKey)}`}>
+              {gettingReadyCopy.retry}
+            </Link>
+          ) : null}
+          <Link className={buttonVariants({ size: "sm", variant: undecided && connectorKey ? "ghost" : "default" })} href="/sources/add">
+            {cannotAddCopy.back}
+          </Link>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** Quiet activity mark shared by opening and copying; still in reduced motion. */
+export function ConnectWorkingMark({ label }: { label: string }) {
+  return <div aria-label={label} role="status"><LoaderCircle aria-hidden="true" className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" /></div>;
+}

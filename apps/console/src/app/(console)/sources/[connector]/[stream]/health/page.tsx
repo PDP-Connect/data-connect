@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcTimestamp } from "@pdpp/brand-react";
+import { humanizeFieldLabel } from "@pdpp/display";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -20,8 +21,8 @@ import {
 import {
   connectorInstanceIdForConnection,
   resolveConnectionForRecordsRoute,
-  sourceLabelForConnection,
 } from "../../../connection-route.ts";
+import { connectionDisplayName } from "../../../../lib/connection-display-name.ts";
 import { findManifestForConnectorId } from "../../../lib/relationships.ts";
 
 export const dynamic = "force-dynamic";
@@ -60,7 +61,11 @@ export default async function StreamHealthPage({
     }
     connectorId = connection.connector_id;
     connectionId = connection.connection_id;
-    sourceLabel = sourceLabelForConnection(connection);
+    sourceLabel = connectionDisplayName(
+      connection.display_name,
+      connection.connector_display_name,
+      connection.connector_id
+    );
     const [manifests, streamHealthResult] = await Promise.all([
       listConnectorManifests().catch(() => []),
       streamHealth(connectorId, streamName, {
@@ -74,7 +79,7 @@ export default async function StreamHealthPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Stream health" />
+          <PageHeader title="What arrived" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -136,30 +141,47 @@ function StreamHealthReport({
     <RecordroomShellWithPalette>
       <PageHeader
         breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: `/sources/${encodeURIComponent(connectionId)}`, label: connectionId },
-          { href: streamPath, label: streamName },
-          { label: "health" },
+          { href: "/sources", label: "Data sources" },
+          { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
+          { href: streamPath, label: humanizeFieldLabel(streamName) },
+          { label: "What arrived" },
         ]}
-        count={
-          <>
-            sample {health.sampled.toLocaleString()} / {health.totalRecords.toLocaleString()}
-            {health.limited ? " · sample-based" : ""}
-          </>
-        }
+        count={`${health.sampled.toLocaleString()} record${health.sampled === 1 ? "" : "s"} checked`}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
-            <span>Source {sourceLabel}</span>
+            <span>{sourceLabel}</span>
           </span>
         }
-        title={
-          <>
-            <code className="font-mono">{streamName}</code>{" "}
-            <span className="font-normal text-muted-foreground">· health</span>
-          </>
-        }
+        title={`${humanizeFieldLabel(streamName)}: what arrived`}
       />
+
+      <Section title="What the records show">
+        {health.sampled === 0 ? <p className="pdpp-caption text-muted-foreground">No records to check yet.</p> : null}
+        {health.sampled > 0 && fields.length === 0 ? (
+          <p className="pdpp-caption text-muted-foreground">No field information is available.</p>
+        ) : null}
+        {health.sampled > 0 && fields.length > 0 ? (
+          <ul className="divide-y divide-border/70 border-border/70 border-y">
+            {fields.map((field) => (
+              <li className="pdpp-body py-3" key={field.name}>
+                {field.nullCount > 0
+                  ? `${field.nullCount.toLocaleString()} checked record${field.nullCount === 1 ? " is" : "s are"} missing ${humanizeFieldLabel(field.name)}.`
+                  : `Every checked record has ${humanizeFieldLabel(field.name)}.`}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Section>
+
+      <details className="border-border/70 border-y py-3">
+        <summary className="pdpp-caption cursor-pointer font-medium text-foreground">Details</summary>
+        <p className="pdpp-caption pt-3 text-muted-foreground">Here is how we checked these records.</p>
+        <p className="pdpp-caption pt-3 text-muted-foreground">
+          These checks use {health.sampled.toLocaleString()} of {health.totalRecords.toLocaleString()} records
+          {health.limited ? `; the sample limit is ${health.sampleLimit.toLocaleString()}` : ""}.
+          {" "}You can change the sample size with ?sample=N, up to {MAX_SAMPLE.toLocaleString()}.
+        </p>
 
       <Section title="Summary">
         <p className="pdpp-body break-words">
@@ -277,6 +299,7 @@ function StreamHealthReport({
           </>
         )}
       </Section>
+      </details>
     </RecordroomShellWithPalette>
   );
 }
@@ -302,36 +325,37 @@ function StreamHealthUnavailable({
     <RecordroomShellWithPalette>
       <PageHeader
         breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: `/sources/${encodeURIComponent(connectionId)}`, label: connectionId },
-          { label: streamName },
-          { label: "health" },
+          { href: "/sources", label: "Data sources" },
+          { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
+          { label: humanizeFieldLabel(streamName) },
+          { label: "What arrived" },
         ]}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
-            <span>Source {sourceLabel}</span>
+            <span>{sourceLabel}</span>
           </span>
         }
-        title={
-          <>
-            <code className="font-mono">{streamName}</code>{" "}
-            <span className="font-normal text-muted-foreground">· health</span>
-          </>
-        }
+        title={`${humanizeFieldLabel(streamName)}: what arrived`}
       />
-      <div className="rounded-md border border-border/70 bg-muted/30 p-4">
+      <div className="border-border/70 border-y py-4">
         <p className="pdpp-caption text-foreground">
-          Stream health is not available for <code className="font-mono">{streamName}</code>.
+          What arrived is not available for {sourceLabel}.
         </p>
         <p className="pdpp-caption mt-2 text-muted-foreground">
-          The connector's current manifest no longer lists <code className="font-mono">{streamName}</code> — it was
-          likely renamed or retired, or this link is a stale entry. Open{" "}
+          Open{" "}
           <Link className="underline underline-offset-2" href={`/sources/${encodeURIComponent(connectionId)}`}>
-            the connection page
+            this data source
           </Link>{" "}
-          for the streams available now.
+          to see what it has now.
         </p>
+        <details className="mt-3 border-border/70 border-t pt-3">
+          <summary className="pdpp-caption cursor-pointer font-medium text-foreground">Details</summary>
+          <p className="pdpp-caption pt-3 text-muted-foreground">
+            The data source's current manifest no longer lists {streamName}. It may have been renamed or retired, or
+            this address may be out of date.
+          </p>
+        </details>
       </div>
     </RecordroomShellWithPalette>
   );

@@ -1,0 +1,15 @@
+{
+  "id": "stream-records",
+  "name": "Seeded Spotify stream",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/sources/[seed-source:spotify]/top_artists",
+      "readyText": "Top artists",
+      "desktopReadyHeading": "Top artists",
+      "phoneReadyHeading": "Top artists",
+      "assertText": "Top artists"
+    }
+  ]
+}

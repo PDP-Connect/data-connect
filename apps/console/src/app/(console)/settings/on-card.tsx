@@ -4,6 +4,7 @@
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
+import type { Inventory } from "./prepare-remote-access.ts";
 import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
 import { plain } from "./plain-text.ts";
 import { expiryLine, expiryTime, proofLine, type RouteDisplayInput } from "./route-display.ts";
@@ -78,15 +79,73 @@ function shortCost(facts: OnRouteFact[]): string | null {
 }
 
 /** The way a live route runs through, from the route's own provider. */
-export type OnWay = { title: string; provider: string };
+export type OnWay = { title: string; provider: string; reach: Inventory["providers"][number]["reach"] };
+
+type AccessStatus = { status: string; sentence: string; tone: "available" | "attention" | "quiet" };
+
+function accessStatuses(
+  route: RouteDisplayInput,
+  reach: OnWay["reach"] | undefined
+): { chatgpt: AccessStatus; phone: AccessStatus } {
+  if (reach === "internet") {
+    if (route.verification.status === "verified" && route.verification.vantage === "public") {
+      return {
+        chatgpt: { status: "Available", sentence: "This address works from the internet; connect ChatGPT below.", tone: "available" },
+        phone: { status: "Available", sentence: "Open this address on your phone.", tone: "available" },
+      };
+    }
+    const notChecked = "We haven't confirmed this address from the internet yet.";
+    return {
+      chatgpt: { status: "Not confirmed", sentence: notChecked, tone: "quiet" },
+      phone: { status: "Not confirmed", sentence: notChecked, tone: "quiet" },
+    };
+  }
+
+  if (reach === "tailnet") {
+    return {
+      chatgpt: { status: "Not available", sentence: "ChatGPT needs an address that works from the internet.", tone: "quiet" },
+      phone: { status: "Needs Tailscale", sentence: "Use Tailscale on your phone with the same account.", tone: "attention" },
+    };
+  }
+
+  if (reach === "lan") {
+    return {
+      chatgpt: { status: "Not available", sentence: "ChatGPT needs an address that works from the internet.", tone: "quiet" },
+      phone: { status: "Same Wi-Fi", sentence: "Your phone and this computer need the same Wi-Fi.", tone: "attention" },
+    };
+  }
+
+  return {
+    chatgpt: { status: "Unknown", sentence: "We don't know whether ChatGPT can open this address.", tone: "quiet" },
+    phone: { status: "Unknown", sentence: "We don't know whether your phone can open this address.", tone: "quiet" },
+  };
+}
+
+function ReachStatus({ label, access }: { label: string; access: AccessStatus }) {
+  const tone = {
+    available: "text-primary",
+    attention: "text-attention",
+    quiet: "text-muted-foreground",
+  }[access.tone];
+
+  return (
+    <div className="grid gap-0.5 border-b border-border/70 py-2 last:border-b-0">
+      <p className="text-[13px]">
+        <span className={tone}>{access.status}</span>
+        <span className="text-muted-foreground"> · {label}</span>
+      </p>
+      <p className="text-[13px] text-muted-foreground">{access.sentence}</p>
+    </div>
+  );
+}
 
 /**
- * The card for a route that is on: a status band, the address with Copy, the
- * three facts the owner still needs (when it ends, the way and cost it runs
- * through, who can read the traffic), the next step, and Details as a footer
- * row. The end time is the one the server reports for this route; the proof
- * line says how long ago the address was last checked. Nothing here says an app
- * is connected.
+ * The card for a route that is on: status, the address with Copy, the phone and
+ * ChatGPT outcomes, the three facts the owner still needs (when it ends, the
+ * way and cost it runs through, who can read the traffic), the next step, and
+ * Details as a footer row. The end time is the one the server reports for this
+ * route; the proof line says how long ago the address was last checked. Nothing
+ * here says an app is connected.
  */
 export function OnCard({
   route,
@@ -105,7 +164,7 @@ export function OnCard({
   addressChanged: boolean;
   busy: boolean;
   onTurnOff: () => void;
-  /** The way the route runs through: its name, provider and short cost, when the route's provider is known. */
+  /** The way the route runs through: its name, provider, reach and short cost, when known. */
   way?: OnWay | null;
   /** Details, under the card's footer divider. */
   children?: ReactNode;
@@ -115,24 +174,24 @@ export function OnCard({
   const ends = expiryLine(route);
   const cost = shortCost(facts);
   const readers = trafficReaders(facts);
-  const through = way ? `Through ${way.title} (${way.provider})${cost ? ` · ${cost}` : ""}` : null;
+  const through = way ? `Through ${way.title}${cost ? ` · ${cost}` : ""}` : null;
+  const access = accessStatuses(route, way?.reach);
   return (
-    <section aria-label="On" className="overflow-hidden rounded-xl border">
-      <p className="border-b bg-emerald-500/5 px-4 py-3 text-sm font-medium" role="status">
-        <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-emerald-500 align-middle ring-4 ring-emerald-500/15" />
-        {"On "}
-        <span className="font-normal text-muted-foreground">· {proofLine(route, now, { synthetic })}</span>
+    <section aria-label="On" className="grid">
+      <p className="border-b border-border/70 py-3 text-sm" role="status">
+        <span className="text-primary">On</span>
+        <span className="text-muted-foreground"> · {way?.reach === "tailnet" ? "Works on your devices" : proofLine(route, now, { synthetic })}</span>
       </p>
-      <div className="grid gap-3 p-4">
+      <div className="grid gap-3 py-3">
         {addressChanged ? (
-          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm" role="status">
+          <p className="text-sm text-attention" role="status">
             Your address changed. Update it wherever you pasted the old one, like ChatGPT.
           </p>
         ) : null}
         {route.origin ? (
           <div className="grid gap-2">
-            <span className="pdpp-label uppercase tracking-wide">Your address</span>
-            <p className="rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-sm break-all">{route.origin}</p>
+            <span className="text-[13px] text-muted-foreground">Your address</span>
+            <p className="break-all text-sm">{route.origin}</p>
             <div className="flex flex-wrap items-center gap-3">
               <CopyButton label="Copy address" text={route.origin} variant="default" />
             </div>
@@ -145,7 +204,11 @@ export function OnCard({
           {through ? <FactLine icon="↔">{through}</FactLine> : null}
           {readers ? <FactLine icon="👁">{readers}</FactLine> : null}
         </ul>
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3.5">
+        <section aria-label="Who can open this address" className="grid border-y border-border/70">
+          <ReachStatus access={access.chatgpt} label="ChatGPT" />
+          <ReachStatus access={access.phone} label="Your phone" />
+        </section>
+        {route.verification.status === "verified" && route.verification.vantage === "public" ? <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border/70 py-3">
           <div className="grid gap-0.5">
             <span className="text-sm font-medium">Next: connect ChatGPT or Claude</span>
             <span className="pdpp-caption">Connect apps uses this address and asks you to approve each app.</span>
@@ -153,13 +216,13 @@ export function OnCard({
           <a className="text-sm font-medium underline-offset-4 hover:underline" href={dashboardRoutes.section.connect}>
             Connect apps ›
           </a>
-        </div>
+        </div> : null}
         <div className="flex flex-wrap gap-3">
           <Button disabled={busy} onClick={onTurnOff} type="button" variant="outline">
             Turn off
           </Button>
         </div>
-        <div className="grid gap-3 border-t pt-3">{children}</div>
+        {children ? <div className="grid gap-3 border-t border-border/70 pt-3">{children}</div> : null}
       </div>
     </section>
   );

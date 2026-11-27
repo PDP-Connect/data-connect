@@ -88,15 +88,14 @@ export function TurnOnCard({
   const compact = reduced !== null && !readable.unreadable && !unread;
   const shownLines = compact && reduced ? reduced.shown : routeLines;
   const movedLines = compact && reduced ? reduced.rest : [];
-  const detailsOpen = !compact;
   // Everything the service reports that the short lines do not carry, one click away.
   const details = complete ? (
-    <details className="grid gap-2" open={detailsOpen}>
-      <summary className="cursor-pointer text-sm text-muted-foreground">
+    <div className="grid gap-2" data-disclosure="">
+      <h4 className="cursor-pointer text-sm text-muted-foreground">
         Details · everything {plain(candidate.display.label)} tells us about this connection
-      </summary>
+      </h4>
       <div className="grid gap-3">
-        <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
+        {consent.scope?.query.target ? <p className="pdpp-caption break-words">Connects to: {consent.scope.query.target}</p> : null}
         {consent.scope?.query.expectedOrigin ? (
           <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
         ) : null}
@@ -121,12 +120,12 @@ export function TurnOnCard({
           </div>
         ))}
       </div>
-    </details>
+    </div>
   ) : null;
   return (
     <section aria-label="Turn on" className="grid gap-4">
       {changed ? (
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm" role="status">
+        <p className="border-y border-border/70 py-3 text-sm text-attention" role="status">
           Details of this connection changed: {changed.length > 0 ? changed.map((label) => plain(label)).join(", ") : "see Details"}.
         </p>
       ) : null}
@@ -260,21 +259,21 @@ export function TurningOnChecklist({
   onCancel: () => void;
 }) {
   return (
-    <section aria-label="Turning on" className="grid gap-3 rounded-xl border p-4">
-      <p className="flex items-center gap-2 text-sm font-medium" role="status">
-        <span aria-hidden="true" className="size-2.5 flex-none animate-pulse rounded-full bg-blue-500" />
-        Turning on · This usually takes a few seconds.
+    <section aria-label="Turning on" className="grid gap-3 border-y border-border/70 py-3">
+      <p className="text-sm" role="status">
+        <span className="text-primary">Turning on</span>
+        <span className="text-muted-foreground"> · This usually takes a few seconds.</span>
       </p>
-      <ol className="grid gap-2.5">
+      <ol className="grid">
         {steps.map((label, index) => {
           const text = index === 1 ? `${label} ${plain(service)}…` : label;
           const mark = index < step ? "✓" : index === step ? "◌" : "○";
           return (
-            <li aria-current={index === step ? "step" : undefined} className="flex items-center gap-2.5 text-sm" key={label}>
+            <li aria-current={index === step ? "step" : undefined} className="flex items-center gap-2.5 border-b border-border/70 py-2 text-sm last:border-b-0" key={label}>
               <span
                 aria-hidden="true"
-                className={`flex size-5 flex-none items-center justify-center rounded-full text-xs ${
-                  index < step ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : index === step ? "text-blue-500" : "text-muted-foreground"
+                className={`w-5 flex-none text-center text-[13px] ${
+                  index < step ? "text-primary" : index === step ? "text-attention" : "text-muted-foreground"
                 }`}
               >
                 {mark}

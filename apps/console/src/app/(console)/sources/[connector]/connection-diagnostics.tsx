@@ -5,6 +5,7 @@ import { IcTimestamp } from "@pdpp/brand-react";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { DataList, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import { CONNECTION_HEALTH_VOCABULARY, type StatusVocabulary } from "@pdpp/operator-ui/components/status-vocabularies";
+import { formatRelative } from "@pdpp/display";
 import Link from "next/link";
 import {
   pdppLocalCollectorDoctorCommand,
@@ -102,6 +103,8 @@ export interface ConnectionDiagnosticsProps {
   sourceInstances: readonly DeviceSourceInstance[];
   /** Optional per-source-instance load failure, surfaced honestly. */
   sourceInstancesError: string | null;
+  /** Recovery summaries can live beside the status sentence while diagnostics stay folded. */
+  showRecoverySummary?: boolean;
 }
 
 export function ConnectionDiagnostics({
@@ -118,38 +121,24 @@ export function ConnectionDiagnostics({
   scheduleError,
   sourceInstances,
   sourceInstancesError,
+  showRecoverySummary = true,
 }: ConnectionDiagnosticsProps) {
   const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(renderedVerdict);
-  const backgroundDrain = summarizeBackgroundLocalDeviceDrain({
-    hasDeviceLocalRemediation,
-    localDeviceProgress,
-    sourceInstances,
-  });
-  // Progressive disclosure for detail-gap recovery: when durable recoverable
-  // work exists, show the typed recovery step, progress floor counts, next
-  // eligible attempt, and the blocker behind the source row (design D11). Pure
-  // view-model; no credentials, payloads, provider URLs, or selectors.
-  //
-  // The server-supplied `now` arms the stall watchdog (design D8): eligible
-  // recovery work whose latest attempt floor is older than the cadence window,
-  // with no active run, reads as a system condition instead of endless "catching
-  // up". A future floor is a live cooldown, never a stall, so a healthy queue is
-  // unaffected.
-  const recoveryPanel =
-    connectionHealth && hasRecoverableWork(connectionHealth.detail_gap_backlog)
-      ? buildRecoveryPanelViewModel(renderedVerdict, connectionHealth, {
-          cadenceWindowMs: RECOVERY_STALL_CADENCE_MS,
-          now,
-        })
-      : null;
   return (
     <Section
       description="Technical detail for troubleshooting. Anything nothing has measured yet reads &quot;not measured&quot;, never a guess."
       title="Diagnostics"
     >
       {renderedVerdict ? <RenderedVerdictSummary verdict={renderedVerdict} /> : null}
-      {recoveryPanel ? <RecoveryPanel model={recoveryPanel} /> : null}
-      {backgroundDrain ? <BackgroundLocalDeviceDrainPanel summary={backgroundDrain} /> : null}
+      {showRecoverySummary ? (
+        <ConnectionRecoverySummary
+          connectionHealth={connectionHealth}
+          localDeviceProgress={localDeviceProgress}
+          now={now}
+          renderedVerdict={renderedVerdict}
+          sourceInstances={sourceInstances}
+        />
+      ) : null}
       <details
         className="group border-border/70 border-y"
         data-testid="diagnostics-details"
@@ -193,6 +182,74 @@ export function ConnectionDiagnostics({
       </details>
     </Section>
   );
+}
+
+type ConnectionRecoverySummaryProps = Pick<
+  ConnectionDiagnosticsProps,
+  "connectionHealth" | "localDeviceProgress" | "now" | "renderedVerdict" | "sourceInstances"
+>;
+
+export function ConnectionRecoverySummary(props: ConnectionRecoverySummaryProps) {
+  const { connectionHealth, localDeviceProgress, now, renderedVerdict, sourceInstances } = props;
+  const hasDeviceLocalRemediation = hasPrimaryOwnerLocalDeviceRemediation(renderedVerdict);
+  const backgroundDrain = summarizeBackgroundLocalDeviceDrain({
+    hasDeviceLocalRemediation,
+    localDeviceProgress,
+    sourceInstances,
+  });
+  // Progressive disclosure for detail-gap recovery: when durable recoverable
+  // work exists, show the typed recovery step, progress floor counts, next
+  // eligible attempt, and the blocker behind the source row (design D11). Pure
+  // view-model; no credentials, payloads, provider URLs, or selectors.
+  //
+  // The server-supplied `now` arms the stall watchdog (design D8): eligible
+  // recovery work whose latest attempt floor is older than the cadence window,
+  // with no active run, reads as a system condition instead of endless "catching
+  // up". A future floor is a live cooldown, never a stall, so a healthy queue is
+  // unaffected.
+  const recoveryPanel =
+    connectionHealth && hasRecoverableWork(connectionHealth.detail_gap_backlog)
+      ? buildRecoveryPanelViewModel(renderedVerdict, connectionHealth, {
+          cadenceWindowMs: RECOVERY_STALL_CADENCE_MS,
+          now,
+        })
+      : null;
+  return (
+    <>
+      {recoveryPanel ? <RecoveryPanel model={recoveryPanel} /> : null}
+      {backgroundDrain ? <BackgroundLocalDeviceDrainPanel summary={backgroundDrain} /> : null}
+    </>
+  );
+}
+
+export function ConnectionDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">) {
+  const verdictRemediation = primaryOwnerActionRemediation(renderedVerdict);
+  const remediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress) ?? (verdictRemediation?.commands.length ? { label: verdictRemediation.label, reason: null, scale: null } : null);
+  if (!remediation) return null;
+  return <OutboxStallRemediationPanel
+    connectionId={connectionId}
+    connectorId={connectorId}
+    hostLabels={boundHostLabels(sourceInstancesForRecovery(sourceInstances, connectionId))}
+    plain
+    providerOrigin={providerOrigin}
+    remediation={remediation}
+    sourceInstanceId={recoverySourceInstanceId(sourceInstances, connectionId)}
+    verdictRemediation={primaryOwnerActionRemediation(renderedVerdict)}
+  />;
+}
+
+export function hasDeviceRecoverySteps({ connectionHealth, localDeviceProgress, renderedVerdict, sourceInstances, connectionId, connectorId, providerOrigin }: Pick<ConnectionDiagnosticsProps, "connectionHealth" | "localDeviceProgress" | "renderedVerdict" | "sourceInstances" | "connectionId" | "connectorId" | "providerOrigin">): boolean {
+  const remediation = primaryOwnerActionRemediation(renderedVerdict);
+  if (!remediation) return Boolean(summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress));
+  return remediation.commands.some((command) => substituteCommandTemplate(command.command_template, {
+    connectionId, connectorId, providerUrl: providerOrigin, sourceInstanceId: recoverySourceInstanceId(sourceInstances, connectionId),
+  }) !== null);
+}
+
+function recoveryTimeLabel(value: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : formatRelative(date, Date.now());
 }
 
 interface BackgroundLocalDeviceDrain {
@@ -240,10 +297,7 @@ function BackgroundLocalDeviceDrainPanel({ summary }: { summary: BackgroundLocal
       ? "the local host"
       : `the local host${summary.hostLabels.length === 1 ? "" : "s"} (${summary.hostLabels.join(", ")})`;
   return (
-    <div
-      className="mb-3 flex flex-col gap-1.5 border border-border/70 bg-muted/30 px-3 py-2"
-      data-testid="diagnostics-background-drain"
-    >
+    <div className="mb-3 flex flex-col gap-1.5 border-y border-border py-2" data-testid="diagnostics-background-drain">
       <p className="pdpp-caption font-medium text-foreground">Uploading from the local host</p>
       <p className="pdpp-caption text-muted-foreground">
         The collector on {hostPhrase} is sending saved work in the background. No dashboard action is needed while this
@@ -257,19 +311,8 @@ function BackgroundLocalDeviceDrainPanel({ summary }: { summary: BackgroundLocal
         className="pdpp-caption text-muted-foreground tabular-nums"
         data-testid="diagnostics-background-drain-progress"
       >
-        {summary.ingestAt ? (
-          <>
-            Last upload <IcTimestamp value={summary.ingestAt} />
-          </>
-        ) : (
-          "No upload timestamp yet"
-        )}
-        {summary.heartbeatAt ? (
-          <>
-            {" · collector checked in "}
-            <IcTimestamp value={summary.heartbeatAt} />
-          </>
-        ) : null}
+        {summary.ingestAt ? `Last upload ${recoveryTimeLabel(summary.ingestAt) ?? "time unavailable"}` : "No upload timestamp yet"}
+        {summary.heartbeatAt ? ` · collector checked in ${recoveryTimeLabel(summary.heartbeatAt) ?? "time unavailable"}` : null}
       </p>
     </div>
   );
@@ -282,12 +325,8 @@ function BackgroundLocalDeviceDrainPanel({ summary }: { summary: BackgroundLocal
  * `system_issue` step reads as a system condition — never as a retry prompt.
  */
 function RecoveryPanel({ model }: { model: RecoveryPanelViewModel }) {
-  const isSystemCondition = model.step === "stalled" || model.step === "system_issue";
-  const containerClass = isSystemCondition
-    ? "mb-3 flex flex-col gap-1.5 border border-destructive/40 bg-destructive/5 px-3 py-2"
-    : "mb-3 flex flex-col gap-1.5 border border-border/70 bg-muted/30 px-3 py-2";
   return (
-    <div className={containerClass} data-recovery-step={model.step} data-testid="diagnostics-recovery-panel">
+    <div className="mb-3 flex flex-col gap-1.5 border-y border-border py-2" data-recovery-step={model.step} data-testid="diagnostics-recovery-panel">
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-recovery-sentence">
         {model.primarySentence}
       </p>
@@ -303,7 +342,7 @@ function RecoveryPanel({ model }: { model: RecoveryPanelViewModel }) {
       ) : null}
       {model.nextEligibleAt ? (
         <p className="pdpp-caption text-muted-foreground tabular-nums" data-testid="diagnostics-recovery-next-attempt">
-          Next eligible attempt <IcTimestamp value={model.nextEligibleAt} />
+          Next eligible attempt {recoveryTimeLabel(model.nextEligibleAt) ?? "time unavailable"}
         </p>
       ) : null}
     </div>
@@ -426,7 +465,7 @@ function RenderedVerdictSummary({ verdict }: { verdict: RefRenderedVerdict }) {
 function boundHostLabels(sourceInstances: readonly DeviceSourceInstance[]): string[] {
   const labels: string[] = [];
   for (const source of sourceInstances) {
-    const label = source.display_name ?? source.local_binding_name;
+    const label = source.device_display_name ?? source.local_binding_name;
     if (typeof label === "string" && label.length > 0 && !labels.includes(label)) {
       labels.push(label);
     }
@@ -582,10 +621,10 @@ function ProjectedStateDiagnostics({
         </p>
       ) : null}
       {axisChips.length > 0 ? (
-        <ul className="flex flex-wrap items-center gap-1.5" data-testid="diagnostics-axes">
+        <ul className="flex flex-wrap gap-x-4 gap-y-1" data-testid="diagnostics-axes">
           {axisChips.map((c) => (
             <li
-              className={`pdpp-caption inline-flex items-center gap-1 px-2 py-0.5 ${diagnosticsAxisChipClass(c.tone)}`}
+              className={`pdpp-caption ${diagnosticsAxisTextClass(c.tone)}`}
               data-axis-tone={c.tone}
               key={c.label}
               title={c.title}
@@ -671,7 +710,7 @@ function CollectionRateDiagnostics({ connectionHealth }: { connectionHealth: Ref
       <p className="pdpp-caption text-muted-foreground tabular-nums">{readout.ceilingLabel}</p>
       {readout.backoffLabel ? (
         <p
-          className="pdpp-caption text-[color:var(--warning)] tabular-nums"
+          className="pdpp-caption text-attention tabular-nums"
           data-testid="diagnostics-collection-rate-backoff"
         >
           {readout.backoffLabel}
@@ -689,10 +728,10 @@ function CollectionRateDiagnostics({ connectionHealth }: { connectionHealth: Ref
  */
 function forwardDispositionTextClass(tone: "neutral" | "success" | "warning" | "danger"): string {
   if (tone === "success") {
-    return "text-emerald-700 dark:text-emerald-300";
+    return "text-muted-foreground";
   }
   if (tone === "warning") {
-    return "text-[color:var(--warning)]";
+    return "text-attention";
   }
   if (tone === "danger") {
     return "text-destructive";
@@ -700,17 +739,17 @@ function forwardDispositionTextClass(tone: "neutral" | "success" | "warning" | "
   return "text-foreground";
 }
 
-function diagnosticsAxisChipClass(tone: "neutral" | "success" | "warning" | "danger"): string {
+function diagnosticsAxisTextClass(tone: "neutral" | "success" | "warning" | "danger"): string {
   if (tone === "success") {
-    return "border border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300";
+    return "text-muted-foreground";
   }
   if (tone === "warning") {
-    return "border border-[color:var(--warning)]/40 bg-[color:var(--warning)]/5 text-[color:var(--warning)]";
+    return "text-attention";
   }
   if (tone === "danger") {
-    return "border border-destructive/40 bg-destructive/5 text-destructive";
+    return "text-destructive";
   }
-  return "border border-muted-foreground/30 bg-muted/40 text-muted-foreground";
+  return "text-muted-foreground";
 }
 
 function ScheduleDiagnostics({
@@ -738,12 +777,12 @@ function ScheduleDiagnostics({
       </li>
       {scheduleSummary.nextAttemptLabel ? <li>{scheduleSummary.nextAttemptLabel}</li> : null}
       {scheduleSummary.backoffLabel ? (
-        <li className="text-[color:var(--warning)]" data-testid="diagnostics-backoff">
+        <li className="text-attention" data-testid="diagnostics-backoff">
           {scheduleSummary.backoffLabel}
         </li>
       ) : null}
       {scheduleSummary.ineligibilityReason ? (
-        <li className="text-[color:var(--warning)]" data-testid="diagnostics-ineligibility">
+        <li className="text-attention" data-testid="diagnostics-ineligibility">
           Ineligible: {scheduleSummary.ineligibilityReason.replace(/[_-]+/g, " ")}
         </li>
       ) : null}
@@ -796,7 +835,7 @@ function SourceInstanceDiagnostics({ source }: { source: DeviceSourceInstance })
     <li className="px-3 py-2">
       <div className="flex flex-col gap-0.5">
         <span className="pdpp-caption font-mono text-foreground">
-          {source.display_name ?? source.local_binding_name}
+          {source.device_display_name ?? source.local_binding_name}
         </span>
         <span className="pdpp-caption text-muted-foreground tabular-nums">
           Source {source.source_instance_id}
@@ -809,7 +848,7 @@ function SourceInstanceDiagnostics({ source }: { source: DeviceSourceInstance })
               {" · "}
               <span
                 className={
-                  source.rejected_record_count && source.rejected_record_count > 0 ? "text-[color:var(--warning)]" : ""
+                  source.rejected_record_count && source.rejected_record_count > 0 ? "text-attention" : ""
                 }
               >
                 {rejected}
@@ -939,7 +978,7 @@ function formatLocalCollectorGaps(gaps: NonNullable<DeviceSourceInstance["local_
 
 function localCollectorGapToneClass(gaps: NonNullable<DeviceSourceInstance["local_collector_gaps"]>): string {
   if (gaps.unreliable || gaps.pending_count > 0) {
-    return "text-[color:var(--warning)]";
+    return "text-attention";
   }
   return "text-muted-foreground";
 }
@@ -995,7 +1034,7 @@ function sourceOutboxToneClass(tone: ReturnType<typeof formatSourceOutboxState>[
     case "danger":
       return "text-destructive";
     case "warning":
-      return "text-[color:var(--warning)]";
+      return "text-attention";
     default:
       return "text-muted-foreground";
   }
@@ -1025,6 +1064,18 @@ function outboxCauseExplanation(cause: RefActionRemediation["cause"], hostPhrase
       return `The local collector is not making progress on ${hostPhrase}. Run ${commandPhrase} on ${hostPhrase} to check it.`;
     default:
       return `The local collector needs attention on ${hostPhrase}. Run ${commandPhrase} on ${hostPhrase}.`;
+  }
+}
+
+function plainCommandCaption(kind: RefActionRemediation["commands"][number]["kind"]): string {
+  switch (kind) {
+    case "local_collector_recover_preview": return "Shows what recovering saved data would do and changes nothing.";
+    case "local_collector_recover_apply": return "Recovers saved data and sends waiting records to DataConnect.";
+    case "local_collector_retry_dead_letters_preview": return "Shows which saved records would be sent again and changes nothing.";
+    case "local_collector_retry_dead_letters_apply": return "Backs up the saved data and marks failed uploads to be sent again; it does not send them yet.";
+    case "local_collector_run": return "Copies data on this computer and sends waiting records to DataConnect.";
+    case "local_collector_doctor": return "Checks what is blocking this computer and changes nothing.";
+    default: return "Follow this step on the computer that holds the data.";
   }
 }
 
@@ -1081,6 +1132,7 @@ function OutboxStallRemediationPanel({
   connectionId,
   connectorId,
   hostLabels,
+  plain = false,
   providerOrigin,
   remediation,
   sourceInstanceId,
@@ -1097,6 +1149,7 @@ function OutboxStallRemediationPanel({
    * the data" wording.
    */
   hostLabels: readonly string[];
+  plain?: boolean;
   remediation: NonNullable<ReturnType<typeof summarizeOutboxStallRemediation>>;
   /**
    * Server-owned CAUSE-SPECIFIC remediation from the rendered verdict. When
@@ -1124,7 +1177,7 @@ function OutboxStallRemediationPanel({
   // fully resolved by the safe CLI builders).
   const steps: { caption: string; command: string | null; label: string }[] = verdictRemediation
     ? verdictRemediation.commands.map((command) => ({
-        caption: remediationCommandCaption(command),
+        caption: plain ? plainCommandCaption(command.kind) : remediationCommandCaption(command),
         command: substituteCommandTemplate(command.command_template, {
           connectionId,
           connectorId,
@@ -1135,18 +1188,18 @@ function OutboxStallRemediationPanel({
       }))
     : [
         {
-          caption: "See saved upload rows and local upload health.",
+          caption: plain ? "Checks saved uploads on this computer and changes nothing." : "See saved upload rows and local upload health.",
           command: pdppLocalCollectorDoctorCommand(scope),
           label: "1. Diagnose",
         },
         {
-          caption: "Dry run — shows what would be requeued, changes nothing.",
+          caption: plain ? "Shows which saved records would be sent again and changes nothing." : "Dry run — shows what would be requeued, changes nothing.",
           command: pdppLocalCollectorRetryDeadLettersCommand(scope),
           label: "2. Preview the requeue",
         },
         {
           caption:
-            "Marks failed uploads for another attempt after backing up the local database first. The next collector run drains them — it does not ingest on its own.",
+            plain ? "Backs up the saved data and marks failed uploads to be sent again; it does not send them yet." : "Marks failed uploads for another attempt after backing up the local database first. The next collector run drains them — it does not ingest on its own.",
           command: pdppLocalCollectorRetryDeadLettersCommand({ ...scope, apply: true }),
           label: "3. Requeue",
         },
@@ -1161,23 +1214,23 @@ function OutboxStallRemediationPanel({
     : `Retryable outbound work on the local collector is not draining. The dashboard cannot clear it remotely — run these on ${hostPhrase}, in order:`;
   return (
     <div
-      className="flex flex-col gap-1.5 border border-destructive/40 bg-destructive/5 px-3 py-2"
+      className={["flex w-full min-w-0 max-w-full flex-col gap-1.5 border-y border-border py-2", plain ? "[&_.pdpp-caption]:text-[length:var(--text-body)]" : null].filter(Boolean).join(" ")}
       data-testid="diagnostics-outbox-remediation"
     >
       <p className="pdpp-caption font-medium text-foreground" data-testid="diagnostics-outbox-remediation-label">
         {/* biome-ignore lint/suspicious/noUnnecessaryConditions: verdictRemediation is RefActionRemediation | null; tsc rejects removing this guard. */}
-        {verdictRemediation?.label ?? remediation.label}
+        {plain ? "What to do on that computer" : verdictRemediation?.label ?? remediation.label}
       </p>
       {hostLabels.length > 0 ? (
         <p className="pdpp-caption text-muted-foreground" data-testid="diagnostics-outbox-remediation-host">
-          Bound device{hostLabels.length === 1 ? "" : "s"}:{" "}
+          {plain ? "Computer" : `Bound device${hostLabels.length === 1 ? "" : "s"}`}:{" "}
           <span className="font-medium text-foreground">{hostLabels.join(", ")}</span>
         </p>
       ) : null}
-      <p className="pdpp-caption text-muted-foreground" title={remediation.reason ?? undefined}>
-        {explanation}
+      <p className="pdpp-caption text-muted-foreground" title={plain ? undefined : remediation.reason ?? undefined}>
+        {plain ? "Open a terminal on that computer and follow these steps." : explanation}
       </p>
-      {remediation.scale ? (
+      {!plain && remediation.scale ? (
         <p
           className="pdpp-caption text-muted-foreground tabular-nums"
           data-testid="diagnostics-outbox-remediation-scale"
@@ -1185,10 +1238,10 @@ function OutboxStallRemediationPanel({
           Stuck on the device: {remediation.scale}.
         </p>
       ) : null}
-      <ol className="flex flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
-        {steps.map((step) => (
-          <li className="flex flex-col gap-0.5" key={step.label}>
-            <span className="pdpp-caption font-medium text-foreground">{step.label}</span>
+      <ol className="flex min-w-0 max-w-full flex-col gap-2" data-testid="diagnostics-outbox-remediation-steps">
+        {steps.filter((step) => !plain || step.command !== null).map((step, index) => (
+          <li className="flex min-w-0 max-w-full flex-col gap-0.5" key={step.label}>
+            <span className="pdpp-caption font-medium text-foreground">{plain ? `Step ${index + 1}` : step.label}</span>
             {step.caption ? <span className="pdpp-caption text-muted-foreground">{step.caption}</span> : null}
             {step.command === null ? (
               // Fail-closed: a placeholder could not be resolved. Never render a
@@ -1200,20 +1253,20 @@ function OutboxStallRemediationPanel({
                 Command unavailable — open this source on the host that holds the data to recover it.
               </p>
             ) : (
-              <div className="flex min-w-0 items-center gap-2 border border-border/70 bg-muted/30 px-3 py-2">
+              <div className="flex w-full min-w-0 max-w-full items-center gap-2 py-1">
                 <code
-                  className="pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"
+                  className={plain ? "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-foreground !break-normal" : "pdpp-caption min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-foreground"}
                   data-testid="diagnostics-outbox-remediation-command"
                 >
                   {step.command}
                 </code>
-                <CopyButton ariaLabel={`Copy command: ${step.label}`} value={step.command} />
+                <CopyButton ariaLabel={plain ? `Copy step ${index + 1}` : `Copy command: ${step.label}`} value={step.command} />
               </div>
             )}
           </li>
         ))}
       </ol>
-      {verdictRemediation ? null : (
+      {plain || verdictRemediation ? null : (
         // Legacy fallback only: when the reference does not send cause-specific
         // remediation, we can't tell failed-upload from state-read, so this note
         // covers both. With a verdict remediation present the steps are already

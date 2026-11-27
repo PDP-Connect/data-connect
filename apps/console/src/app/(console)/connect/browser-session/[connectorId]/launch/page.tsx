@@ -1,17 +1,15 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
 import { formatConnectorKeyForDisplay } from "@pdpp/display";
-import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { loadBrowserConnectSupport } from "../../../../lib/load-browser-connect-support.ts";
 import { findManifestForConnectorId } from "../../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../../lib/rs-client.ts";
 import { BrowserSessionLaunchPanel } from "./launch-panel.tsx";
+
+import { flowPreview, flowPreviewState } from "../../../flow-preview.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +31,10 @@ export default async function BrowserSessionLaunchPage({
   const { connectorId: rawConnectorId } = await params;
   const connectorId = decodeURIComponent(rawConnectorId);
 
+  const previewQuery = await searchParams;
+  const preview = flowPreviewState("launch", { _preview: firstValue(previewQuery._preview), _state: firstValue(previewQuery._state) });
+  if (preview) return <RecordroomShellWithPalette><BrowserSessionLaunchPanel connectionId={flowPreview.connectionId} connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} draft={false} previewState={preview} /></RecordroomShellWithPalette>;
+
   const browserConnect = await loadBrowserConnectSupport(connectorId);
   if (!browserConnect.browserBound) {
     notFound();
@@ -51,32 +53,13 @@ export default async function BrowserSessionLaunchPage({
 
   return (
     <RecordroomShellWithPalette>
-      <PageHeader
-        actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
-          </Link>
-        }
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          {
-            href: `/connect/browser-session/${encodeURIComponent(connectorId)}`,
-            label: `Connect ${displayName}`,
-          },
-          { label: "Starting browser" },
-        ]}
-        description={
-          <span className="inline-flex items-center gap-2">
-            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            <span>DataConnect is starting a secure browser session for {displayName}.</span>
-          </span>
-        }
-        title="Starting secure browser"
-      />
-
-      <div className="mx-auto max-w-lg px-4 py-8">
-        <BrowserSessionLaunchPanel connectionId={connectionId} connectorId={connectorId} draft={draft} />
-      </div>
+        <BrowserSessionLaunchPanel
+          connectionId={connectionId}
+          connectorId={connectorId}
+          displayName={displayName}
+          draft={draft}
+          icon={connectorIcon}
+        />
     </RecordroomShellWithPalette>
   );
 }

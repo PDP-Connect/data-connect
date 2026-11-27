@@ -5,7 +5,7 @@
  * Source-regex guards for the connection-detail health surfaces:
  *
  *   1. one server-owned rendered verdict path for health explanation
- *   2. 14-day streak strip
+ *   2. No duplicate recent-sync strip
  *   3. Auto-paused banner in the run timeline
  *
  * These are structural invariants, not behavioural tests. Behavioural
@@ -19,7 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 // ─── Top-level regex constants (biome useTopLevelRegex) ───────────────────────
 
@@ -28,21 +28,16 @@ const RE_FAILURE_EXPANDER_COMPONENT = /<FailureExpander/;
 const RE_FAILURE_EXPANDER_TESTID = /data-testid="failure-expander"/;
 const RE_CONNECTION_DIAGNOSTICS_COMPONENT = /<ConnectionDiagnostics/;
 const RE_CONNECTION_DIAGNOSTICS_VERDICT_PROP = /renderedVerdict=\{connectionRenderedVerdict\}/;
-const RE_DERIVE_STREAK_DOTS = /deriveStreakDots/;
-const RE_STREAK_DOTS_CONDITIONAL = /streakDots\.length\s*>\s*0/;
-const RE_STREAK_STRIP_COMPONENT = /<StreakStrip/;
-const RE_STREAK_STRIP_TESTID = /data-testid="streak-strip"/;
 const RE_DERIVE_AUTO_PAUSED_BANNER = /deriveAutoPausedBanner/;
 const RE_AUTO_PAUSED_BANNER_CONDITIONAL = /autoPausedBanner\s*\?/;
 const RE_AUTO_PAUSED_BANNER_ROW_COMPONENT = /<AutoPausedBannerRow/;
 const RE_AUTO_PAUSED_BANNER_ROW_TESTID = /data-testid="auto-paused-banner-row"/;
-const RE_AUTO_PAUSED_BANNER_TESTID = /data-testid="auto-paused-banner"/;
-const RE_RECENT_RUNS_SECTION = /Recent syncs/;
+const RE_RECENT_RUNS_SECTION = /title="Recent syncs"/;
 const RE_ACQUISITION_COVERAGE_MAPPING = /acquisitionCoverage: summary\.acquisition_coverage \?\? null/;
 const RE_ACQUISITION_COVERAGE_SECTION = /function AcquisitionCoverageSection/;
-const RE_ACQUISITION_COVERAGE_TITLE = /title="Acquisition coverage"/;
+const RE_ACQUISITION_COVERAGE_TITLE = /title="What was collected"/;
 const RE_ACQUISITION_COVERAGE_RECEIPT_LINK = /\/connect\/status\//;
-const RE_ACQUISITION_COVERAGE_OWNER_COPY = /coverage receipts, not generic sync status/;
+const RE_ACQUISITION_COVERAGE_OWNER_COPY = /Recent imports and device transfers/;
 const RE_ACQUISITION_COVERAGE_SOURCE_NEUTRAL = /\bWhatsApp\b|\bTimeline\b|\bGoogle\b/i;
 const RE_STORED_CREDENTIAL_ACTION_USES_EXPLICIT_COPY = /case "stored_credential"[\s\S]*label: "Update credential"/;
 const RE_BROWSER_SESSION_ACTION_USES_SERVER_CTA = /case "browser_session"[\s\S]*label: action\.cta/;
@@ -83,22 +78,14 @@ test("page routes health explanation through ConnectionDiagnostics rendered_verd
   assert.match(src, RE_CONNECTION_DIAGNOSTICS_VERDICT_PROP);
 });
 
-// ─── Surface 2: streak strip ──────────────────────────────────────────────────
+// ─── Surface 2: recent-sync strip ────────────────────────────────────────────
 
-test("page imports deriveStreakDots from connection-evidence", async () => {
+test("Latest syncs has no duplicate streak strip or second history action", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_DERIVE_STREAK_DOTS);
-});
-
-test("page renders StreakStrip when streakDots is non-empty", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_STREAK_DOTS_CONDITIONAL);
-  assert.match(src, RE_STREAK_STRIP_COMPONENT);
-});
-
-test("streak strip has a data-testid for integration targeting", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, RE_STREAK_STRIP_TESTID);
+  // Brief decision 7: each sync appears once and All sync history is the only history link.
+  assert.doesNotMatch(src, /deriveStreakDots|StreakStrip|streak-strip|Open sync history/);
+  assert.equal((src.match(/>All sync history<\/Link>/g) ?? []).length, 1);
+  assert.match(src, RE_RECENT_RUNS_SECTION);
 });
 
 // ─── Surface 3: auto-paused banner ───────────────────────────────────────────
@@ -119,30 +106,24 @@ test("auto-paused banner row has a data-testid for integration targeting", async
   assert.match(src, RE_AUTO_PAUSED_BANNER_ROW_TESTID);
 });
 
-test("auto-paused banner is placed inside the runs DataList, not outside", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The banner li must appear after the "Recent runs" section heading.
-  // Check positional ordering via indexOf so we don't need another regex.
-  const bannerStr = 'data-testid="auto-paused-banner"';
-  const runsSectionStr = "Recent syncs";
-  const bannerIdx = src.indexOf(bannerStr);
-  const runsSectionIdx = src.indexOf(runsSectionStr);
-  assert.match(src, RE_AUTO_PAUSED_BANNER_TESTID);
-  assert.match(src, RE_RECENT_RUNS_SECTION);
-  assert.ok(bannerIdx > runsSectionIdx, "auto-paused banner should be inside the Recent syncs section");
+test("automatic retry measurements stay on the technical page", async () => {
+ const src = await readFile(PAGE_FILE, "utf8");
+ assert.ok(src.indexOf("export function SourceTechnicalDetails") < src.indexOf('data-testid="auto-paused-banner"'));
 });
 
-test("connector detail page threads owner-only acquisition coverage into a source-neutral receipt section", async () => {
+test("detail page keeps acquisition evidence inside folded Details", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const sectionStart = src.indexOf("function AcquisitionCoverageSection");
-  const sectionEnd = src.indexOf("/**\n * Recent syncs", sectionStart);
+  const sectionEnd = src.indexOf("/**\n * Latest syncs", sectionStart);
   const sectionSrc = src.slice(sectionStart, sectionEnd);
+  // Brief decisions 6 and 11: collection facts move to the folded Details section.
   assert.match(src, RE_ACQUISITION_COVERAGE_MAPPING);
   assert.match(src, RE_ACQUISITION_COVERAGE_SECTION);
   assert.match(src, RE_ACQUISITION_COVERAGE_TITLE);
   assert.match(src, RE_ACQUISITION_COVERAGE_RECEIPT_LINK);
   assert.match(src, RE_ACQUISITION_COVERAGE_OWNER_COPY);
   assert.doesNotMatch(sectionSrc, RE_ACQUISITION_COVERAGE_SOURCE_NEUTRAL);
+  assert.ok(src.indexOf('data-testid="source-details"') < src.indexOf("<AcquisitionCoverageSection"));
 });
 
 test("connector detail page labels each reauthentication surface precisely", async () => {
@@ -151,12 +132,13 @@ test("connector detail page labels each reauthentication surface precisely", asy
   assert.match(src, RE_BROWSER_SESSION_ACTION_USES_SERVER_CTA);
 });
 
-test("owner confirmation is reachable from the connection detail page through structured backend evidence", async () => {
+test("owner confirmation remains reachable inside folded Details through structured evidence", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, RE_CONFIRMATION_IMPORT);
   assert.match(src, RE_CONFIRMATION_RENDER);
   assert.match(src, RE_CONFIRMATION_STRUCTURED_ACK);
   assert.match(src, RE_CONFIRMATION_GAP_WIRING);
+  assert.ok(src.indexOf('data-testid="source-details"') < src.indexOf("<ConnectionConfirmation"));
   assert.doesNotMatch(
     src,
     RE_NO_RENDERED_FORWARD_STATEMENT,

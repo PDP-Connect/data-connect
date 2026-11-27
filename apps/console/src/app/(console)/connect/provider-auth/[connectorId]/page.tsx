@@ -1,14 +1,16 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
-import { formatConnectorKeyForDisplay } from "@pdpp/display";
-import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
+import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { buildOwnerConnectorCatalog } from "../../../lib/connection-catalog.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
-import { listConnectorManifests } from "../../../lib/rs-client.ts";
+import { listConnectorManifests, listOwnerConnectorTemplates } from "../../../lib/rs-client.ts";
+import { loadServiceContext } from "../../../sources/add/service-context.ts";
+import { supportsProviderAuth } from "./provider-auth-support.ts";
+
+import { flowPreview, flowPreviewState } from "../../flow-preview.ts";
+import { ProviderAuthBody } from "./provider-auth-body.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +20,8 @@ interface PageParams {
 
 interface PageSearchParams {
   error?: string;
+  _preview?: string;
+  _state?: string;
 }
 
 export default async function ProviderAuthPage({
@@ -27,54 +31,24 @@ export default async function ProviderAuthPage({
   params: Promise<PageParams>;
   searchParams: Promise<PageSearchParams>;
 }) {
-  const [{ connectorId }, query] = await Promise.all([params, searchParams]);
-  const displayName = formatConnectorKeyForDisplay(connectorId);
-  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), connectorId)?.icon;
+  const previewQuery = await searchParams;
+  const preview = flowPreviewState("provider", previewQuery);
+  if (preview) return <RecordroomShellWithPalette><ProviderAuthBody connectorId={flowPreview.connector.connectorId} displayName={flowPreview.connector.displayName} error={preview === "could-not-start" ? flowPreview.startError : undefined} accounts={preview === "already-have-one" ? flowPreview.accounts : []} /></RecordroomShellWithPalette>;
+  const [{ connectorId }, query, manifests, templates] = await Promise.all([
+    params,
+    searchParams,
+    listConnectorManifests().catch(() => []),
+    listOwnerConnectorTemplates(),
+  ]);
+  if (!supportsProviderAuth(buildOwnerConnectorCatalog(manifests, templates), connectorId)) {
+    notFound();
+  }
+  const context = await loadServiceContext(connectorId);
+  const displayName = context.displayName;
+  const connectorIcon = findManifestForConnectorId(manifests, connectorId)?.icon;
   return (
     <RecordroomShellWithPalette>
-      <PageHeader
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: "/sources/add", label: "Add source" },
-          { label: `Authorize ${displayName}` },
-        ]}
-        description={
-          <span className="inline-flex items-center gap-2">
-            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            <span>Authorize this account in the provider's browser. The connection activates after authorization and account inventory succeed.</span>
-          </span>
-        }
-        title={
-          <span className="inline-flex items-center gap-2">
-            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
-            Authorize {displayName}
-          </span>
-        }
-      />
-      <section className="grid max-w-2xl gap-4 rounded-xl border border-border/70 bg-card p-5 shadow-sm">
-        {query.error ? (
-          <p className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive">
-            {query.error}
-          </p>
-        ) : null}
-        <p className="pdpp-body text-muted-foreground">
-          Continue to the provider to grant access for this account. Credentials stay with the provider. DataConnect activates
-          the source after the provider confirms access.
-        </p>
-        <form action={`/connect/provider-auth/${encodeURIComponent(connectorId)}/start`} method="post">
-          <button className={buttonVariants({ size: "sm", variant: "default" })} type="submit">
-            Authorize account
-          </button>
-        </form>
-        <div className="flex flex-wrap gap-2">
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">
-            Back to add source
-          </Link>
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Open sources
-          </Link>
-        </div>
-      </section>
+      <ProviderAuthBody connectorId={connectorId} connectorIcon={connectorIcon} displayName={displayName} error={query.error} accounts={context.accounts} tier={context.tier} kinds={findManifestForConnectorId(manifests, connectorId)?.streams?.map((stream) => stream.name) ?? []} />
     </RecordroomShellWithPalette>
   );
 }

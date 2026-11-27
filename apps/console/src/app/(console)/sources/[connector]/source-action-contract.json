@@ -1,0 +1,55 @@
+{
+  "uses": {
+    "proposeConfigAction": [
+      "proposeConfigAction({baseEpoch:config.base_epoch,baseRevision:config.base_revision,config:buildProposalConfig(changes),connectionId,connectorId,sourceOfChange:reason,})"
+    ],
+    "confirmConfigAction": [
+      "confirmConfigAction({connectionId,connectorId,revision})"
+    ],
+    "action": [
+      "name=\"acknowledged_by\";name=\"connection_id\" value={connectionId};name=\"stream\" value={stream}",
+      "name=\"connection_id\" value={connectionId};name=\"earliest_available\";name=\"stream\" value={stream}"
+    ],
+    "resetAndSyncConnectionAction": [
+      "resetAndSyncConnectionAction(connectionId)"
+    ],
+    "revokeConnectionAction": [
+      "name=\"confirm_revoke\" value=\"yes\";name=\"connection_id\" value={connectionId}"
+    ],
+    "deleteConnectionAction": [
+      "name=\"cancel_run_id\" value={activeRunId};name=\"confirm_delete\" value={confirmed?connectionId:\"\"};name=\"connection_id\" value={connectionId}"
+    ],
+    "installConnectorForSourceAction": [
+      "installConnectorForSourceAction(connectorKey,routeId)"
+    ],
+    "resumeConnectionAction": [
+      "name=\"connection_id\" value={connectionId??\"\"}"
+    ],
+    "resumeSetupConnectionAction": [
+      "name=\"connection_id\" value={routeConnectionId}"
+    ],
+    "resumeConnectorScheduleAction": [
+      "name=\"connection_id\" value={connectionId};name=\"connector_id\" value={connectorId}"
+    ],
+    "pauseConnectionAction": [
+      "name=\"connection_id\" value={connectionId}"
+    ],
+    "renameConnectionAction": [
+      "renameConnectionAction(connectionId,value)"
+    ],
+    "updateConnectorAction": [
+      "updateConnectorAction(model.connectorKey)"
+    ],
+    "runConnectorNowAction": [
+      "runConnectorNowAction(connectorId,connectionId,{force})"
+    ]
+  },
+  "actions": {
+    "actions.ts": "6810f397afe17464faed7b55204983a2aacce46e015b1efbc9d4a5549345111e",
+    "confirmation-actions.ts": "840eeec53abe8f88f4c0097159f8b4fa11e5862c714c16d237aedff1119a10c6",
+    "config-actions.ts": "de9b5f92f072f8509b92aa3538b0a41412a6b4064953e143391c564375c5c1ef",
+    "install-connector-action.ts": "4cbb6c81a6cd20719fe303e9abc760bb5ce27960c2ecd699d097adc8e7626316",
+    "../actions.ts": "4a3b094a65c5d93b327c9603c3d44df7463e5437aa6a9368739d5674352e6806",
+    "../add/connector-install-actions.ts": "2b1f98181e658ec255a97116c8c018ef926f35e9fcd2afec0ec83e3b8bed95a0"
+  }
+}

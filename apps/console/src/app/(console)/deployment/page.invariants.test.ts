@@ -32,9 +32,27 @@ test("deployment page does not repeat the connect-an-AI-app card", async () => {
 });
 
 test("deployment page links to the tokens issuance surface", async () => {
-  // The Tokens link in the page header is how an operator navigates from
-  // deployment diagnostics to the owner-token issuance flow (the path for
-  // trusted local agents).
+  // Brief settings-pages, decision 3: the server page keeps a route to Access tokens.
+  // Settings repair brief, decision 2: the route says what these script and tool tokens are for.
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, TOKENS_LINK_RE);
+  assert.match(src, /Tokens for scripts and tools/);
+});
+
+test("server page leads with reachability and folds diagnostics under Details", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // Brief settings-pages, decision 2: plain server status comes before the checks and technical details.
+  // Settings repair brief, decision 1: reachability comes from the browser-side address check.
+  assert.match(src, /title="Server"/);
+  assert.doesNotMatch(src, /The server is reachable/);
+  assert.match(src, /<ServerChecks[^>]+inputs=\{extractReadinessInputs\(report\)\} \/>/);
+  assert.doesNotMatch(src, /<details/);
+  assert.match(src, /href="\/deployment\/technical"/);
+});
+
+test("the Details fold opens when the rebuild action returns, so its result is seen", async () => {
+  // RAISE-RULES.md 6: a failed action shows its sentence; the rebuild notice and
+  // error render inside Details, so the fold must open on ?notice= / ?error=.
+  const src = await readFile(`${HERE}technical/page.tsx`, "utf8");
+  assert.match(src, /open=\{\s*Boolean\(params\.error\) \|\| params\.notice === "dataset_summary_rebuilt"\s*\}/);
 });

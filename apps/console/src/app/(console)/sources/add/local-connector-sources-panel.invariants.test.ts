@@ -21,3 +21,13 @@ test("developer local source settings keep provenance and source switching visib
   assert.match(source, /Reload/)
   assert.match(source, /Remove/)
 })
+
+// PAGE-RULES 1 and 5: technical controls stay in Details and destructive actions require confirmation.
+test("the developer panel is folded and removal asks before calling its action", async () => {
+  const source = await readFile(PANEL_FILE, "utf8")
+  assert.match(source, /<details[^>]*data-testid="local-connector-sources"[\s\S]*?<summary[^>]*>Details<\/summary>/)
+  assert.match(source, /This removes the local data source from DataConnect\./)
+  assert.match(source, /data-testid="local-source-remove-confirmation"/)
+  assert.match(source, /onClick=\{\(\) => setConfirmRemove\(true\)\}/)
+  assert.match(source, /runAction\(\(\) => removeConnectorLocalSourceAction\(source\.source_id\)\)/)
+})

@@ -3,10 +3,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { IcButton } from "@pdpp/brand-react";
+import { SupportCopy } from "../components/support-copy.tsx";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
+import { formatRelative } from "@pdpp/display";
 import { useActionState } from "react";
 import { pdppLocalCollectorEnrollCommand, pdppLocalCollectorRunCommand } from "@/lib/pdpp-cli-command.ts";
 import { createEnrollmentCodeAction } from "./actions.ts";
+
+function relativeExpiry(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Time not available" : formatRelative(date, Date.now());
+}
 
 /**
  * Inline re-enrollment panel for a stale or revoked local device.
@@ -38,6 +46,7 @@ export function ReenrollButton({
       code: state.code.enrollment_code,
       deviceLabel: state.deviceLabel,
     });
+
     const runCommand = pdppLocalCollectorRunCommand({ baseUrl: referenceBaseUrl, connectorId });
     const fullRunCommand = [
       "PDPP_LOCAL_DEVICE_ID=<device_id> \\",
@@ -48,10 +57,10 @@ export function ReenrollButton({
 
     return (
       <div className="mt-3 space-y-3 rounded-md border border-border/80 bg-background/60 p-3">
-        <div className="pdpp-eyebrow text-[color:var(--success)]">Re-enrollment code ready</div>
+        <div className="pdpp-eyebrow text-muted-foreground">New setup code ready</div>
 
         <div>
-          <div className="pdpp-eyebrow text-muted-foreground">1. Re-enroll this device</div>
+          <div className="pdpp-eyebrow text-muted-foreground">1. Set up this device again</div>
           <p className="pdpp-caption mt-1 text-muted-foreground">
             Run on the target device. The response returns <code className="font-mono">device_id</code>,{" "}
             <code className="font-mono">device_token</code>, and <code className="font-mono">source_instance_id</code> —
@@ -66,7 +75,7 @@ export function ReenrollButton({
             </code>
             <CopyButton ariaLabel="Copy re-enroll command" value={enrollCommand} />
           </div>
-          <p className="pdpp-caption mt-1 text-muted-foreground">Code expires at {state.code.expires_at}</p>
+          <p className="pdpp-caption mt-1 text-muted-foreground">Expires {relativeExpiry(state.code.expires_at)}</p>
         </div>
 
         <div>
@@ -92,19 +101,25 @@ export function ReenrollButton({
 
   return (
     <div className="mt-3">
-      {state.ok === false ? <p className="pdpp-caption mb-2 text-destructive">{state.message}</p> : null}
+      {state.ok === false ? (
+        <div className="mb-2">
+          <p className="pdpp-caption text-destructive">Could not make a new setup code. Try again.</p>
+          <SupportCopy details={state.message} />
+        </div>
+      ) : null}
       <form action={formAction}>
         <input name="connector_id" type="hidden" value={connectorId} />
         <input name="display_name" type="hidden" value="" />
         <input name="expires_in_seconds" type="hidden" value="900" />
         <input name="local_binding_name" type="hidden" value={localBindingName} />
-        <button
-          className="pdpp-caption rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-foreground/80 transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
+        <IcButton
+          variant="ghost"
+          size="sm"
           disabled={pending}
           type="submit"
         >
-          {pending ? "Generating…" : "Re-enroll"}
-        </button>
+          {pending ? "Generating…" : "Set up again"}
+        </IcButton>
       </form>
     </div>
   );

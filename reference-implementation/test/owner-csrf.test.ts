@@ -306,8 +306,10 @@ test("CSRF: form POST /owner/login without _csrf is rejected with 403 and issues
       "no owner session cookie SHALL be issued on CSRF failure"
     );
     const text = await resp.text();
-    assert.ok(text.includes("form replay") || text.includes("CSRF"), "page surfaces a CSRF error");
+    // RAISE-RULES 4: the CSRF failure reads as an expired form in plain words.
+    assert.ok(text.includes("This sign-in form has expired."), "page surfaces a CSRF error");
     assert.ok(!text.includes("Incorrect password"), "CSRF failure SHALL NOT leak password validity");
+    assert.ok(!text.includes("That password did not work"), "CSRF failure SHALL NOT leak password validity");
   });
 });
 
@@ -359,7 +361,8 @@ test("CSRF: form POST /owner/login with valid CSRF and wrong password returns 40
     const setCookies = getRawSetCookieList(resp);
     assert.ok(!findSetCookiePair(setCookies, "pdpp_owner_session"));
     const text = await resp.text();
-    assert.ok(text.includes("Incorrect password"));
+    // RAISE-RULES 4: the wrong-password error is one plain sentence.
+    assert.ok(text.includes("That password did not work."));
   });
 });
 
@@ -751,6 +754,7 @@ test("CSRF: form-encoded POST /owner/login without _csrf still fails CSRF before
     assert.ok(!findSetCookiePair(setCookies, "pdpp_owner_session"));
     const text = await resp.text();
     assert.ok(!text.includes("Incorrect password"), "CSRF failure SHALL NOT leak password validity");
+    assert.ok(!text.includes("That password did not work"), "CSRF failure SHALL NOT leak password validity");
   });
 });
 

@@ -68,12 +68,22 @@ const COUNT_STATE_LABELS: Record<
  * present, falling back to the legacy `record_count === null` binary check
  * for a reference predating `count_state` — never inventing a state.
  */
+/** A current count, or null when the evidence cannot support a number. */
+export function knownStreamRecordCount(record: {
+  count_state?: RefConnectorStreamRecord["count_state"];
+  record_count: number | null;
+}): number | null {
+  if (record.count_state === "known_zero") return 0;
+  if (record.count_state && record.count_state !== "known") return null;
+  return record.record_count;
+}
+
 export function streamCountLabel(record: {
   count_state?: RefConnectorStreamRecord["count_state"];
   record_count: number | null;
 }): StreamCountLabel {
   if (record.count_state) {
-    return COUNT_STATE_LABELS[record.count_state](record.record_count);
+    return COUNT_STATE_LABELS[record.count_state](knownStreamRecordCount(record));
   }
   return {
     text: record.record_count === null ? "count unavailable" : formatRecordCount(record.record_count),

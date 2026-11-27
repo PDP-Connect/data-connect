@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // One-click Turn on: the preparation chain, setup actions with effects, the
 // review that the click approves, and the Cancel paths.
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { JSDOM } from "jsdom";
@@ -14,7 +15,7 @@ import { publicError } from "./reachability-errors.ts";
 import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -59,7 +60,7 @@ const review = (id: string, digest: string, facts?: ReturnType<typeof fact>[], e
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -388,6 +389,7 @@ async function withScreen<T>(
   run: (screen: {
     container: Element;
     calls: Call[];
+    click: (label: RegExp) => Promise<void>;
     press: (label: RegExp) => Promise<void>;
     settle: () => Promise<void>;
     text: () => string;
@@ -424,17 +426,22 @@ async function withScreen<T>(
   try {
     await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
     await settle();
+    const click = async (label: RegExp) => {
+      const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
+      assert.ok(button, `no button matching ${label}`);
+      await act(async () => button.click());
+      await settle();
+    };
     return await run({
       container,
       calls,
       settle,
       unmount,
       text: () => container.textContent ?? "",
+      click,
       press: async (label) => {
-        const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
-        assert.ok(button, `no button matching ${label}`);
-        await act(async () => button.click());
-        await settle();
+        await click(label);
+        if (label.source === "^Turn on remote access$") await click(/^Continue turning on$/);
       },
     });
   } finally {
@@ -471,9 +478,19 @@ test("opening step 2 prepares a review without applying anything", async () => {
   });
 });
 
+test("Turn on remote access asks before sending the disconnect acknowledgement", async () => {
+  await withScreen(host({ "/operations": ok({ operationId: "op-1" }) }), async ({ calls, click, text }) => {
+    await click(/^Turn on remote access$/);
+    assert.match(text(), /Turning on remote access may interrupt this page/);
+    assert.deepEqual(approvals(calls), []);
+    await click(/^Cancel$/);
+    assert.deepEqual(approvals(calls), []);
+  });
+});
+
 test("the recommended way's radio has a name and every way's radio carries its provider id", async () => {
   await withScreen(host(), async ({ container }) => {
-    const recommended = container.querySelector('[aria-label="Recommended way"] input[type="radio"]');
+    const recommended = container.querySelector('[aria-label="Choose a way"] input[type="radio"]');
     assert.ok(recommended);
     assert.equal(recommended.getAttribute("aria-label"), "Tunnel service");
     assert.equal((recommended as HTMLInputElement).value, "p-tunnel");
@@ -601,7 +618,7 @@ test("Choose another way drops the step without running it", async () => {
     await press(/^Choose another way$/);
     assert.ok(!calls.some((call) => call.url.includes("/actions/")));
     assert.doesNotMatch(text(), /Check the SSH client/);
-    assert.match(text(), /Other ways/);
+    assert.match(text(), /Choose a way/);
   });
 });
 
@@ -609,11 +626,12 @@ test("a failed preparation says so and Try again runs it again", async () => {
   let drafts = 0;
   const handler = host({ "/drafts": () => (++drafts === 1 ? fail("brand_new_server_code") : ok(draftWith())) });
   await withScreen(handler, async ({ calls, press, text, container }) => {
-    // Nothing turned on yet, so the sentence must not say turning on failed.
-    assert.match(text(), /We couldn.t get this way ready\. Try again/);
+    // Nothing turned on yet; RAISE rule 6 keeps the failure sentence separate from its retry action.
+    assert.equal(container.querySelector('[role="alert"] > p')?.textContent, "We couldn't get this way ready.");
+    assert.ok([...container.querySelectorAll('[role="alert"] button')].some((button) => button.textContent === "Try again"));
     assert.doesNotMatch(text(), /couldn.t turn on/);
     assert.deepEqual(approvals(calls), []);
-    assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));
+    assert.ok((await copySupport(container)).includes("brand_new_server_code"));
     await press(/^Try again$/);
     assert.match(text(), /Turn on remote access/);
   });
@@ -686,6 +704,7 @@ test("a failure before any effect says remote access did not turn on and offers 
   const failed = { operationId: "op-1", stage: "settled", kind: "start", failureCode: "provider_unavailable", handle: null, recovery: null };
   await withScreen(host({ "/state": ok({ ...idleState, operations: [failed] }) }), async ({ text, press }) => {
     assert.match(text(), /Remote access did not turn on/);
+    assert.doesNotMatch(text(), /Turn on remote access/, "the failure is the only thing to act on");
     await press(/^Try again$/);
   });
 });
@@ -741,7 +760,7 @@ test("with no password, a saved draft and its setup action cannot be approved or
     "/drafts/d-1": ok(draftWith([effectful])),
   });
   await withScreen(handler, async ({ calls, text, container }) => {
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     assert.ok(!calls.some(positive), `ran ${calls.filter(positive).map((call) => call.url).join(",")}`);
     const labels = [...container.querySelectorAll("button")].map((node) => node.textContent);
     assert.ok(!labels.some((label) => /Allow|Turn on remote access|Approve|Save and review/.test(label ?? "")), labels.join(","));
@@ -761,7 +780,7 @@ test("an open review cannot be approved once the password is reported missing", 
     passwordSet = false;
     await act(async () => t.mock.timers.tick(3000));
     await settle();
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     const labels = [...container.querySelectorAll("button")].map((node) => node.textContent);
     assert.ok(!labels.includes("Turn on remote access"));
     assert.deepEqual(approvals(calls), []);
@@ -983,9 +1002,9 @@ test("a hung old draft does not block preparation of a newly selected way", asyn
     "/drafts/d-next/commit": ok(nextDraft.configuration),
     "/drafts/d-next/review": ok(nextReview),
   });
-  await withScreen(handler, async ({ container, calls, press, settle, text }) => {
+  await withScreen(handler, async ({ container, calls,  settle, text }) => {
     assert.equal(calls.filter((call) => call.url === "/drafts").length, 1);
-    await press(/^Other ways$/);
+    assert.ok(container.querySelector("[aria-label='Choose a way']"));
     const radio = [...container.querySelectorAll("label")].find((node) => /Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
     await act(async () => radio.click());
     await settle();
@@ -1009,7 +1028,7 @@ test("a private missing-password observation restarts preparation after a true p
     assert.equal(states, 2, "initial poll followed by the chain's private read");
     await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
     await settle();
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     assert.equal(calls.filter((call) => call.url === "/drafts").length, 0);
     await act(async () => t.mock.timers.tick(3_000));
     await settle();
@@ -1039,10 +1058,10 @@ test("a poll already in flight cannot overwrite a fresh missing-password observa
 
     await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
     await settle();
-    assert.match(text(), /Step 1: Set a password/);
+    assert.match(text(), /Choose your own password for remote access/);
     await act(async () => oldPoll.resolve(ok({ ...idleState, passwordSet: true })));
     await settle();
-    assert.match(text(), /Step 1: Set a password/, "the old poll cannot overwrite the newer local fact");
+    assert.match(text(), /Choose your own password for remote access/, "the old poll cannot overwrite the newer local fact");
   });
 });
 
@@ -1055,7 +1074,7 @@ test("an older missing-password observation cannot overwrite a newer true poll",
       ? privateState.promise as unknown as Result
       : ok({ ...idleState, passwordSet: true }),
   });
-  await withScreen(handler, async ({ calls, settle, text }) => {
+  await withScreen(handler, async ({ calls, container, settle, text }) => {
     assert.equal(states, 2, "the preparation has started its private state read");
     await act(async () => t.mock.timers.tick(3_000));
     await settle();
@@ -1064,8 +1083,8 @@ test("an older missing-password observation cannot overwrite a newer true poll",
 
     await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
     await settle();
-    assert.doesNotMatch(text(), /Step 1: Set a password/, "the older observation cannot overwrite the newer true state");
-    assert.match(text(), /Step 2 of 2/, "the page keeps the turn-on step available");
+    assert.doesNotMatch(text(), /Choose your own password for remote access/, "the older observation cannot overwrite the newer true state");
+    assert.ok(container.querySelector('section[aria-label="Turn on remote access"]'), "the page keeps the turn-on step available");
   });
 });
 
@@ -1082,10 +1101,9 @@ test("a route preparation read stops applying after the selected way changes", a
     "/drafts": (call) => ok(draftWith(call.body?.providerId === provider.providerId ? [signIn] : [])),
     "/setups": ok({ operationId: "op-1" }),
   });
-  await withScreen(handler, async ({ calls, container, settle, text, press }) => {
+  await withScreen(handler, async ({ calls, container, settle, text }) => {
     await settle();
     assert.equal(calls.filter((call) => call.url === "/state").length, 3, "the sign-in setup's follow-up state read is pending");
-    await press(/^Other ways$/);
     const radio = [...container.querySelectorAll("label")]
       .find((node) => /Cloudflare/.test(node.textContent ?? ""))
       ?.querySelector("input");
@@ -1094,7 +1112,7 @@ test("a route preparation read stops applying after the selected way changes", a
     await settle();
     await act(async () => oldState.resolve(ok({ ...idleState, passwordSet: false })));
     await settle();
-    assert.doesNotMatch(text(), /Step 1: Set a password/, "the old way's read cannot overwrite the current selection");
+    assert.doesNotMatch(text(), /Choose your own password for remote access/, "the old way's read cannot overwrite the current selection");
     assert.match(text(), /Turn on remote access/);
   });
 });
@@ -1138,14 +1156,14 @@ test("real trial-consent action: Turn on shows the trial's own facts, and one cl
     assert.match(factLines[2] ?? "", /⏱/);
     assert.match(factLines[2] ?? "", /Free\. The address changes each time and turns off by itself\./);
     // The trial's own review heading and paragraph moved into the closed Details below the button.
-    const details = card.querySelector("details");
+    const details = card.querySelector("[data-disclosure]");
     assert.ok(details, "the card has one Details");
-    assert.equal(details.hasAttribute("open"), false, "nothing is unreadable, so Details starts closed");
+    assert.equal(card.querySelector("details"), null);
     assert.ok(button.compareDocumentPosition(details) & 4, "Details sits below the button");
     assert.match(details.textContent ?? "", /Review the public HTTPS trial/);
     assert.match(details.textContent ?? "", /Start a public HTTPS trial through the relay/);
     const outsideDetails = card.cloneNode(true) as Element;
-    for (const node of outsideDetails.querySelectorAll("details")) node.remove();
+    for (const node of outsideDetails.querySelectorAll("[data-disclosure]")) node.remove();
     assert.doesNotMatch(outsideDetails.textContent ?? "", /Review the public HTTPS trial|Start a public HTTPS trial/);
     assert.equal(button.disabled, false);
     assert.ok(!calls.some((call) => call.url === "/setups"), "no setup is started for a consent-only step");
@@ -1241,5 +1259,114 @@ test("a catalog read that fails at once is tried again on the poll, 3 s on, neve
     const reads = calls.filter((call) => call.url === "/catalog").length;
     assert.ok(reads >= 5 && reads <= 12, `/catalog was read ${reads} times in 30 s`);
     assert.match(text(), /couldn.t check remote access|background service isn.t running/i);
+  });
+});
+
+async function withProviderSetup(
+  nextAction: unknown,
+  request: typeof requestReachability,
+  run: (container: Element) => Promise<void>
+) {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
+  const { ProviderSetup } = await import("./provider-setup.tsx");
+  const container = dom.window.document.querySelector("#root")!;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(ProviderSetup, {
+      reservation: { operationId: "op-provider", providerId: "p-tunnel", providerLabel: "Tunnel service", draftId: "d-1", actionId: "act-1", expectedConfigurationRevision: "r2", usage: "session" },
+      request: (async (url, body) => body ? request(url, body) : ok({ operationId: "op-provider", revision: 1, state: "authorization-required", resources: [], evidence: { known: false }, scope: { draftId: "d-1", configurationRevision: "r2" }, nextAction })) as typeof requestReachability,
+      disabled: false,
+      acknowledgeDisconnect: true,
+      onChange: async () => {},
+      onReadiness: () => {},
+    })));
+    await run(container);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+}
+
+const providerBrowserStep = () => action({ kind: "open-url", step: { browser: { expiresAt: "2999-01-01T00:00:00.000Z", pollAfterMs: 2000 } } });
+
+test("two same-tick provider Cancel clicks send one cancel", async () => {
+  for (const nextAction of [null, providerBrowserStep()]) {
+    const held = deferred<Result>();
+    const calls: Call[] = [];
+    await withProviderSetup(nextAction, async (url, body) => {
+      calls.push({ url, body });
+      return held.promise;
+    }, async container => {
+      const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Cancel setup");
+      assert.ok(cancel);
+      try {
+        await act(async () => { cancel.click(); cancel.click(); });
+        assert.equal(calls.filter(call => call.url === "/setup-operations/op-provider/cancel").length, 1);
+        assert.equal(cancel.disabled, true, "the one request remains busy until it settles");
+      } finally {
+        await act(async () => held.resolve(fail("service_unreachable")));
+      }
+    });
+  }
+});
+
+test("same-tick provider Sign in and Cancel share one pending action", async () => {
+  for (const first of ["sign-in", "cancel"] as const) {
+    const handoff = deferred<Result>();
+    const cancellation = deferred<Result>();
+    const calls: Call[] = [];
+    await withProviderSetup(providerBrowserStep(), async (url, body) => {
+      calls.push({ url, body });
+      return url.endsWith("/handoff") ? handoff.promise : cancellation.promise;
+    }, async container => {
+      const buttons = [...container.querySelectorAll("button")];
+      const signIn = buttons.find(button => button.textContent === "Sign in to Tunnel service");
+      const cancel = buttons.find(button => button.textContent === "Cancel setup");
+      assert.ok(signIn);
+      assert.ok(cancel);
+      try {
+        await act(async () => {
+          if (first === "sign-in") { signIn.click(); cancel.click(); }
+          else { cancel.click(); signIn.click(); }
+        });
+        assert.equal(calls.length, 1, "only the first action starts in the same turn");
+        await act(async () => {
+          (first === "sign-in" ? cancellation : handoff).resolve(fail("service_unreachable"));
+        });
+        assert.equal(signIn.disabled, true, "settling the other action cannot release the owner");
+        assert.equal(cancel.disabled, true, "Cancel stays disabled until the owner settles");
+      } finally {
+        await act(async () => {
+          handoff.resolve(fail("service_unreachable"));
+          cancellation.resolve(fail("service_unreachable"));
+        });
+      }
+    });
+  }
+});
+
+test("provider support copy reports failure", async () => {
+  // A pending browser sign-in whose handoff fails offers its fixed support details.
+  await withProviderSetup(providerBrowserStep(), async () => fail("setup_action_unavailable"), async container => {
+    const signIn = [...container.querySelectorAll("button")].find(button => button.textContent === "Sign in to Tunnel service");
+    assert.ok(signIn);
+    await act(async () => signIn.click());
+    const copy = [...container.querySelectorAll("button")].find(button => button.textContent === "Copy details for support");
+    assert.ok(copy, "the failed handoff offers support details");
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    try {
+      for (const [navigator, failure] of [
+        [{ clipboard: { writeText: () => Promise.reject(new Error("clipboard denied")) } }, /Couldn't copy to the clipboard/],
+        [{}, /Clipboard unavailable/],
+      ] as const) {
+        Object.defineProperty(globalThis, "navigator", { configurable: true, value: navigator });
+        await act(async () => copy.click());
+        assert.ok([...container.querySelectorAll('[role="status"]')].some(status => failure.test(status.textContent ?? "")));
+      }
+    } finally {
+      if (navigatorDescriptor) Object.defineProperty(globalThis, "navigator", navigatorDescriptor);
+      else Reflect.deleteProperty(globalThis, "navigator");
+    }
   });
 });

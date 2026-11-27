@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react"
 import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
+import { Button } from "@/components/ui/button.tsx"
 import { Input } from "@/components/ui/input.tsx"
 import { openResource } from "../../../../../../src/lib/open-resource"
 import type { requestReachability } from "./reachability-client.ts"
@@ -13,10 +14,12 @@ import {
 import {
   type DisplayError,
   ErrorNotice,
+  Diagnostics,
   ReachabilityFailure,
   toDisplayError,
 } from "./diagnostics.tsx"
 import { plain } from "./plain-text.ts"
+import { CopyButton } from "./on-card.tsx"
 import { type ActionKind, publicError } from "./reachability-errors.ts"
 import {
   adminStepCopy,
@@ -73,7 +76,7 @@ export function reserveSetupOperation(
 const TAILNET_NAME_HELP_URL = "https://login.tailscale.com/admin/dns"
 
 const status: Record<SetupView["state"], (service: string) => string> = {
-  "authorization-required": service => `Sign in to ${service} to finish.`,
+  "authorization-required": service => `Waiting for you to sign in at ${service}.`,
   pending: () => "Waiting for you to finish signing in…",
   denied: service => `${service} sign-in was cancelled.`,
   expired: service => `${service} sign-in took too long.`,
@@ -120,13 +123,18 @@ function SetupOperationAction({
     (action.kind === "open-url" && !action.step?.browser)
   ) {
     const url = action.href ? URL.parse(action.href) : null
+    const isAccountPolicyStep = action.id === "tailscale-funnel-policy"
+    const instructions = action.instructions ?? action.help ?? action.disclosure.text
     return (
       <div className="grid gap-2">
-        <h4 className="pdpp-label">{plain(action.label)}</h4>
-        <p>{action.instructions ?? action.help ?? action.disclosure.text}</p>
+        <h4 className="pdpp-label">{isAccountPolicyStep ? "Tailscale account settings" : plain(action.label)}</h4>
+        <p>{isAccountPolicyStep ? "Ask an administrator to allow this address, then check again." : instructions}</p>
+        {isAccountPolicyStep ? (
+          <Diagnostics technicalOnly><p>{plain(action.label)}. {plain(instructions)}</p></Diagnostics>
+        ) : null}
         {url?.protocol === "https:" && !url.username && !url.password ? (
           <a href={url.href} rel="noreferrer" target="_blank">
-            {plain(action.label)}
+            {isAccountPolicyStep ? "Open account settings" : plain(action.label)}
           </a>
         ) : null}
         {consent ? <ApprovalDisclosure actionDisclosure={action.disclosure} consent={consent} shown={[action.label, action.instructions ?? action.help ?? action.disclosure.text]} /> : null}
@@ -159,7 +167,7 @@ function SetupOperationAction({
         <p>{action.instructions ?? action.help ?? ""}</p>
       ) : null}
       {obtain?.protocol === "https:" && !obtain.username && !obtain.password ? (
-        <a href={obtain.href} rel="noreferrer" target="_blank">
+        <a className="text-primary underline underline-offset-4" href={obtain.href} rel="noreferrer" target="_blank">
           Where to get it
         </a>
       ) : null}
@@ -240,10 +248,10 @@ function InputCard({
   const [typed, setTyped] = useState("")
   const [filled, setFilled] = useState(false)
   const approval = approvalFor(action)
-  // The action contract says `required: false` for an input that may stay blank; a blank one is omitted.
+// The action contract says `required: false` for an input that may stay blank; a blank one is omitted.
   const optional = action.required === false
-  const label = plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
-  const obtain = action.obtainUrl ? safeSignInUrl(action.obtainUrl) : null
+  const label = secret && service === "ngrok" ? "ngrok token (from your ngrok dashboard)" : plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
+  const obtain = action.obtainUrl ? safeSignInUrl(action.obtainUrl) : service === "ngrok" ? new URL("https://dashboard.ngrok.com/get-started/your-authtoken") : null
   const options = action.step?.options
   return (
     <section aria-label={`Details for ${service}`} className="grid gap-3">
@@ -282,14 +290,14 @@ function InputCard({
         )}
       </label>
       {obtain ? (
-        <a href={obtain.href} rel="noreferrer" target="_blank">
+        <a className="text-primary underline underline-offset-4" href={obtain.href} rel="noreferrer" target="_blank">
           {secret ? "Get a token" : "Where to get it"}
         </a>
       ) : null}
       {action.consent ? <WhatThisDoes actionDisclosure={action.disclosure} consents={[action.consent]} shown={[action.label]} /> : null}
       {approval ? null : <p role="status">We couldn't load this service's details. Try again.</p>}
       <div className="flex flex-wrap gap-3">
-        <button
+        <Button
           type="button"
           disabled={busy || !approval || (!optional && (secret ? !filled : typed.trim() === ""))}
           onClick={() => {
@@ -307,7 +315,7 @@ function InputCard({
           }}
         >
           {secret ? "Save token" : "Save"}
-        </button>
+        </Button>
       </div>
     </section>
   )
@@ -338,6 +346,7 @@ export function ProviderSetup({
 }) {
   const [view, setView] = useState<SetupView | null>(null)
   const [busy, setBusy] = useState(false)
+  const changing = useRef(false)
   const [error, setError] = useState<DisplayError | null>(null)
   const [missing, setMissing] = useState(false)
   // Bumped by Cancel setup: the input card remounts, so a half-typed secret is gone with its field.
@@ -452,6 +461,8 @@ export function ProviderSetup({
   // here, chosen by its code. The server's message and any echo of the request
   // never reach state, the page or the copied details.
   async function change(run: () => Promise<SetupView>, mutation = false, kind: ActionKind = "turn-on", secret = false) {
+    if (changing.current) return
+    changing.current = true
     ++readEpoch.current
     setBusy(true)
     setError(null)
@@ -466,6 +477,7 @@ export function ProviderSetup({
         secret ? new ReachabilityFailure(publicError(failure instanceof ReachabilityFailure ? failure.detail.code : "client_error", undefined, kind)) : failure
       setError(toDisplayError(reported, "action", reservation.providerLabel, kind))
     } finally {
+      changing.current = false
       setBusy(false)
     }
   }
@@ -523,7 +535,8 @@ export function ProviderSetup({
     return url
   }
   async function guarded(run: () => Promise<void>) {
-    if (!isCurrentWay()) return
+    if (!isCurrentWay() || changing.current) return
+    changing.current = true
     ++readEpoch.current
     setBusy(true)
     setNotice(null)
@@ -532,6 +545,7 @@ export function ProviderSetup({
     } catch (failure) {
       setNotice(toDisplayError(failure, "action", reservation.providerLabel).message)
     } finally {
+      changing.current = false
       setBusy(false)
     }
   }
@@ -622,7 +636,7 @@ export function ProviderSetup({
         if (next.id === "tailscale-account" || next.id === "tailscale-tailnet") {
           const typed = (next.id === "tailscale-account" ? account : tailnet).trim()
           if (typed === "") {
-            setNotice(next.id === "tailscale-account" ? "Enter your Tailscale email." : "Enter your tailnet name.")
+            setNotice(next.id === "tailscale-account" ? "Enter your email address." : "Enter your Tailscale address.")
             break
           }
           input = { value: typed }
@@ -664,10 +678,10 @@ export function ProviderSetup({
   const action = view?.nextAction
   const holdsResources = view?.resources.some(resource => resource.removal !== "confirmed") ?? false
   const cancelButton = view && (view.state !== "cancelled" || holdsResources) ? (
-    <button type="button" disabled={busy || disabled}
+    <Button variant="outline" type="button" disabled={busy || disabled}
       onClick={() => void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")}>
       {reservation.cleanup || !isCurrentWay() || view.state === "complete" ? "Undo setup" : "Cancel setup"}
-    </button>
+    </Button>
   ) : null
   // A setup that ended (cancelled, completed, denied or expired) and holds nothing is not shown, so a
   // cancelled or replaced one leaves no card. Only one that still retains something gets a card, so the
@@ -690,24 +704,24 @@ export function ProviderSetup({
     return (
       <section aria-label={`Sign in to ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
-        <p role="status">{`Sign in to ${service} to finish.`}</p>
-        {notice ? <p role="status">{notice}</p> : null}
+        <p role="status">{`Waiting for you to sign in at ${service}.`}</p>
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         {chainAsksFields(action) ? (
           <>
             <label className="grid gap-2">
-              Tailscale email
+              Email address
               <Input autoComplete="off" disabled={busy} onChange={event => setAccount(event.target.value)} placeholder="name@example.com" type="email" value={account} />
             </label>
             <label className="grid gap-2">
-              Your tailnet name (ends in .ts.net)
-              <Input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} placeholder="example.ts.net" type="text" value={tailnet} />
+              Your Tailscale address
+              <Input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} placeholder="Name shown in Tailscale" type="text" value={tailnet} />
             </label>
             <p>
-              Tailscale shows it under DNS in its admin console.{" "}
+              Find this address on the DNS page of your Tailscale admin console.{" "}
               <a href={dnsUrl ?? TAILNET_NAME_HELP_URL} rel="noreferrer" target="_blank">
-                Find it in Tailscale
+                Find your address
               </a>
             </p>
           </>
@@ -715,9 +729,9 @@ export function ProviderSetup({
         {computer ? <p>{`Tailscale found this computer: ${computer.label}.`}</p> : null}
         <WhatThisDoes consents={shown} />
         <div className="flex flex-wrap gap-3">
-          <button type="button" disabled={busy || disabled} onClick={() => void runChain(view)}>
+          <Button type="button" disabled={busy || disabled} onClick={() => void runChain(view)}>
             {computer ? `Use this computer (${computer.host})` : `Sign in to ${service}`}
-          </button>
+          </Button>
         </div>
       </section>
     )
@@ -730,16 +744,17 @@ export function ProviderSetup({
       <section aria-label={`Finish setting up ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{adminCopy.line}</p>
-        {notice ? <p role="status">{notice}</p> : null}
+        <Diagnostics><p>{adminCopy.detail}</p></Diagnostics>
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         <div className="flex flex-wrap gap-3">
-          <button type="button" disabled={busy} onClick={() => void openAdmin(adminCopy.href)}>
+          <Button type="button" disabled={busy} onClick={() => void openAdmin(adminCopy.href)}>
             Open Tailscale admin
-          </button>
-          <button type="button" disabled={busy} onClick={() => void checkAgain()}>
+          </Button>
+          <Button variant="outline" type="button" disabled={busy} onClick={() => void checkAgain()}>
             Check again
-          </button>
+          </Button>
         </div>
       </section>
     )
@@ -767,24 +782,24 @@ export function ProviderSetup({
       <section aria-label={`Sign in to ${service}`} className="grid gap-3">
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{copy.line}</p>
-        {notice ? <p role="status">{notice}</p> : null}
+        {notice ? <div role="status"><p>{notice}</p>{notice.includes("Try again") ? <CopyButton label="Copy details for support" text={notice} variant="outline" /> : null}</div> : null}
         {error ? <ErrorNotice error={error} /> : null}
         {cancelButton}
         {stage === "sign-in" ? <WhatThisDoes consents={shown} /> : null}
         <div className="flex flex-wrap gap-3">
           {copy.button ? (
-            <button
+            <Button
               type="button"
               disabled={busy || disabled}
               onClick={() => void (stage === "sign-in" ? runChain(view) : tryAgain(view))}
             >
               {copy.button}
-            </button>
+            </Button>
           ) : null}
           {stage === "sign-in" ? (
-            <button type="button" disabled={busy} onClick={() => void copySignIn(view)}>
+            <Button variant="outline" type="button" disabled={busy} onClick={() => void copySignIn(view)}>
               Copy sign-in link
-            </button>
+            </Button>
           ) : null}
         </div>
       </section>
@@ -872,19 +887,20 @@ export function ProviderSetup({
         {onResume &&
         view?.scope.draftId &&
         !["cancelled", "denied", "expired"].includes(view.state) ? (
-          <button type="button" disabled={busy || disabled} onClick={onResume}>
+          <Button type="button" disabled={busy || disabled} onClick={onResume}>
             Resume setup
-          </button>
+          </Button>
         ) : null}
-        <button
+        <Button
+          variant="outline"
           type="button"
           disabled={busy}
           onClick={() => void change(() => send<SetupView>(readPath), false, "check")}
         >
           Check setup status
-        </button>
+        </Button>
         {missing ? (
-          <button
+          <Button
             type="button"
             disabled={busy || disabled}
             onClick={() =>
@@ -897,19 +913,20 @@ export function ProviderSetup({
             }
           >
             Retry setup
-          </button>
+          </Button>
         ) : null}
         {view && view.state !== "cancelled" ? (
-          <button
+          <Button
+            variant="outline"
             type="button"
             disabled={busy || disabled}
-            onClick={() => {
+            onClick={() => void change(() => {
               setCancelEpoch(n => n + 1)
-              void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")
-            }}
+              return send<SetupView>(`${path}/cancel`, { providerId })
+            }, false, "turn-off")}
           >
             {view.state === "complete" ? "Undo setup" : "Cancel setup"}
-          </button>
+          </Button>
         ) : null}
       </div>
     </section>

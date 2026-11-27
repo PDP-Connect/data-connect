@@ -6,6 +6,7 @@ import type {
   ConnectorInstallRecord,
   ConnectorInstallService,
 } from "../connector-install/index.ts";
+import { isRegistryUnreachable } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
 import { type BrowserEnrollmentReadinessResolver, readReadinessCatalog, toReadinessWire } from "../connector-readiness.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
@@ -20,6 +21,8 @@ interface Response {
 }
 type Handler = (req: Request, res: Response) => Promise<void>;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const OFFLINE_INSTALL_MESSAGE = "Adding this service needs an internet connection. Try again when this computer is online.";
+const OFFLINE_CATALOG_MESSAGE = "The list of services could not be checked because the registry could not be reached.";
 interface App {
   get: (path: string, ...args: RouteArg<Handler>[]) => App;
   post: (path: string, ...args: RouteArg<Handler>[]) => App;
@@ -133,11 +136,20 @@ export function mountOwnerConnectorInstall(
   };
   const catalogHandler: Handler = async (_req, res) => {
     try {
+      const view = options.service.catalogView
+        ? await options.service.catalogView()
+        : { entries: await options.service.catalog(), fetchedAt: null, fresh: true };
       res.json({
-        data: (await options.service.catalog()).map(projectCatalogEntry),
+        data: view.entries.map(projectCatalogEntry),
+        ...(view.fetchedAt ? { fetched_at: view.fetchedAt } : {}),
+        fresh: view.fresh,
         object: "connector_install_catalog",
       });
     } catch (error) {
+      if (isRegistryUnreachable(error)) {
+        options.pdppError(res, 503, "registry_unreachable", OFFLINE_CATALOG_MESSAGE);
+        return;
+      }
       options.handleError(res, error);
     }
   };
@@ -164,6 +176,10 @@ export function mountOwnerConnectorInstall(
       implementationChanged();
       res.status(201).json({ data: projectStatus(installed), object: "connector_install" });
     } catch (error) {
+      if (isRegistryUnreachable(error)) {
+        options.pdppError(res, 503, "registry_unreachable", OFFLINE_INSTALL_MESSAGE);
+        return;
+      }
       options.handleError(res, error);
     }
   };
@@ -178,6 +194,10 @@ export function mountOwnerConnectorInstall(
       implementationChanged();
       res.json({ data: projectStatus(updated), object: "connector_install" });
     } catch (error) {
+      if (isRegistryUnreachable(error)) {
+        options.pdppError(res, 503, "registry_unreachable", OFFLINE_INSTALL_MESSAGE);
+        return;
+      }
       options.handleError(res, error);
     }
   };

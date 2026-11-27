@@ -1,0 +1,15 @@
+{
+  "id": "audit-history",
+  "name": "Audit event list",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/audit",
+      "readyText": "Activity",
+      "desktopReadyHeading": "Activity",
+      "phoneReadyHeading": "Activity",
+      "assertText": "Activity"
+    }
+  ]
+}

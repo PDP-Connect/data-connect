@@ -22,8 +22,8 @@
  * Every claim the feed makes about its own completeness is CONSTRAINED by
  * `data.descriptor` (the typed set-descriptor). The presentation layer reads the
  * descriptor; it never invents a completeness claim the descriptor does not
- * permit. The count line gates "Showing N of M" on an exact descriptor for the
- * current scope (`exactCountIsCurrent`); the search header label comes straight
+ * permit. The count line uses the exact total only for the current scope
+ * (`exactCountIsCurrent`); the search header label comes straight
  * from `feedHeaderLabel(descriptor)`; the exhaustive "Browse all matching
  * records" door appears only for descriptors that can page to the end.
  *
@@ -40,13 +40,10 @@
 "use client";
 
 import { IcInput, type ConnectorIconLike } from "@pdpp/brand-react";
-import { humanizeFieldLabel, rowPrimary, rowSecondary } from "@pdpp/display";
-import { kindGlyph, RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
-import { feedDescription, feedSectionTitle } from "@pdpp/operator-ui/components/views/explorer-utils";
+import { humanizeFieldLabel } from "@pdpp/display";
 import {
   type ExplorerConnectionFacet,
   type ExplorerFeedEntry,
-  type ExplorerLens,
   type ExplorerStreamDoor,
   type ExplorerStreamSeeAllLink,
   type ExplorerWarning,
@@ -54,14 +51,7 @@ import {
   type RecordsExplorerData,
 } from "@pdpp/operator-ui/components/views/records-explorer-view";
 import type { BucketSeries } from "@pdpp/operator-ui/explore/over-time-chart";
-import {
-  descriptorHasMore,
-  descriptorIsTimeOrdered,
-  descriptorNextCursor,
-  feedHeaderLabel,
-  legalSortOptions,
-} from "@pdpp/operator-ui/explore/set-descriptor";
-import { Timestamp } from "@pdpp/operator-ui/ui/timestamp";
+import { descriptorHasMore, descriptorIsTimeOrdered, descriptorNextCursor, legalSortOptions } from "@pdpp/operator-ui/explore/set-descriptor";
 import Link, { useLinkStatus } from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -96,9 +86,7 @@ import {
 } from "./explore-date.ts";
 import {
   computeSourceGroupedStreamFacets,
-  filterSourceGroups,
   type SourceStreamGroup,
-  totalVisibleStreamFacets,
 } from "./explore-facet-groups.ts";
 import {
   type BurstGroup,
@@ -152,8 +140,18 @@ import {
   type SavedView,
 } from "./explore-saved-views.ts";
 import { OverTimeChart } from "./over-time-chart.tsx";
+import {
+  exploreCountLine,
+  exploreDataSourceRows,
+  EXPLORE_EMPTY_MESSAGE,
+  EXPLORE_FAILED_MESSAGE,
+  exploreRecordRow,
+} from "./explore-presentation.ts";
+import { useExploreNow } from "./explore-clock.tsx";
+import "./explore-page.css";
 
 const UNDERSCORE_RE = /_/g;
+const EXPLORE_PATH_RE = /\/explore\/?$/;
 /** Split a query string on whitespace (used by zero-results token removal). */
 const QUERY_WHITESPACE_RE = /\s+/;
 /**
@@ -337,6 +335,9 @@ function dedupeWarnings(warnings: readonly ExplorerWarning[]): ExplorerWarning[]
 
 interface ExploreCanvasProps {
   data: RecordsExplorerData;
+  demoState?: "results" | "empty" | "failed" | "many-sources" | "untitled";
+  /** Demo only: open the date filter or the data sources sheet on first paint, so a picture can show it. */
+  demoOpen?: "date" | "data-sources";
   connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   /**
    * The Explore route base path (e.g. "/explore"). A plain string —
@@ -560,7 +561,7 @@ function buildFilterChips(args: {
       },
       negated: false,
       operator: "is",
-      property: "source",
+      property: "data source",
       value: name,
     });
   }
@@ -581,7 +582,7 @@ function buildFilterChips(args: {
       },
       negated: true,
       operator: "is not",
-      property: "source",
+      property: "data source",
       value: name,
     });
   }
@@ -590,15 +591,15 @@ function buildFilterChips(args: {
       canNegate: true,
       clear: () => args.toggleStream(s),
       id: `stream:${s}`,
-      label: `stream: ${s}`,
+      label: humanizeFieldLabel(s),
       negate: () => {
         args.toggleStream(s);
         args.toggleExcludeStream(s);
       },
       negated: false,
       operator: "is",
-      property: "stream",
-      value: s,
+      property: "kind",
+      value: humanizeFieldLabel(s),
     });
   }
   for (const s of args.excludeStreams) {
@@ -606,15 +607,15 @@ function buildFilterChips(args: {
       canNegate: true,
       clear: () => args.toggleExcludeStream(s),
       id: `xstream:${s}`,
-      label: `not stream: ${s}`,
+      label: humanizeFieldLabel(s),
       negate: () => {
         args.toggleExcludeStream(s);
         args.toggleStream(s);
       },
       negated: true,
       operator: "is not",
-      property: "stream",
-      value: s,
+      property: "kind",
+      value: humanizeFieldLabel(s),
     });
   }
   // NB: the active DATE window is NOT pushed here. It is rendered ONCE, by the
@@ -632,7 +633,13 @@ function buildFilterChips(args: {
     const negated = raw.startsWith("-");
     const body = negated ? raw.slice(1) : raw;
     const colon = body.indexOf(":");
-    const property = colon > 0 ? body.slice(0, colon) : "search";
+    const rawProperty = colon > 0 ? body.slice(0, colon) : "search";
+    let property = rawProperty;
+    if (rawProperty === "stream") {
+      property = "kind";
+    } else if (rawProperty === "con") {
+      property = "data source";
+    }
     const value = colon > 0 ? body.slice(colon + 1) : body;
     out.push({
       canNegate: false,
@@ -941,9 +948,7 @@ function QueryInput(props: QueryInputProps) {
                 tabIndex={-1}
               >
                 <span className="rr-x-typeahead__label">{s.label}</span>
-                {s.count === undefined ? (
-                  <span className="rr-x-typeahead__op">{s.operator}</span>
-                ) : (
+                {s.count === undefined ? null : (
                   <span className="rr-x-typeahead__count">{s.count.toLocaleString()}</span>
                 )}
               </div>
@@ -1050,45 +1055,17 @@ function LoadMoreSkeleton({ label }: { label: string }) {
 }
 
 function FeedStatusLine({
-  activitySummary,
   exactTotal,
-  fullStreamHref,
-  fullStreamScopeNote,
-  truncated,
   visibleCount,
   exactCountIsCurrent,
 }: {
-  activitySummary: RecordsExplorerData["activitySummary"];
   exactCountIsCurrent: boolean;
   exactTotal: number | null;
-  fullStreamHref: string | null;
-  fullStreamScopeNote: string | null;
-  truncated: boolean;
   visibleCount: number;
 }) {
-  const exactTotalLabel = exactTotal === null ? null : exactTotal.toLocaleString();
-  const countLine = exactCountIsCurrent
-    ? `Showing ${visibleCount.toLocaleString()} of ${exactTotalLabel} records in this stream`
-    : `${visibleCount.toLocaleString()} ${truncated ? "shown in this Explore preview" : "in view"}`;
-  const linkLabel =
-    exactCountIsCurrent && exactTotal !== null
-      ? `open all ${exactTotal.toLocaleString()} records →`
-      : "open complete stream →";
-
   return (
     <p className="rr-x-pulse__note">
-      {countLine}
-      {activitySummary && !exactCountIsCurrent ? ` · ${activitySummary.text}` : ""}
-      {truncated && !fullStreamHref ? " · select one stream to open its complete list" : ""}
-      {fullStreamHref ? (
-        <>
-          {" · "}
-          <Link className="rr-link" href={fullStreamHref}>
-            {linkLabel}
-          </Link>
-          {fullStreamScopeNote ? <span className="rr-x-scope-note"> {fullStreamScopeNote}</span> : null}
-        </>
-      ) : null}
+      {exploreCountLine({ exactTotal: exactCountIsCurrent ? exactTotal : null, pageCount: visibleCount })}
     </p>
   );
 }
@@ -1174,7 +1151,9 @@ function DateChip({
   onPreset,
   onApplyCustom,
   onClear,
+  initiallyOpen = false,
 }: {
+  initiallyOpen?: boolean;
   label: string;
   isActive: boolean;
   activeRange: ExploreRange | "custom";
@@ -1184,7 +1163,7 @@ function DateChip({
   onClear: () => void;
 }) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initiallyOpen);
   // Local draft of the Custom From/To inputs. Re-synced whenever the canonical
   // window changes (a preset / typed operator / reload reflects in here too).
   const [from, setFrom] = useState(customInputs.from);
@@ -1339,6 +1318,8 @@ function FeedControls({
   connectionCounts,
   streamCounts,
   currentViewHref,
+  fullListHref,
+  fullListScopeNote,
   recordIdJumpFeedback,
   recordsBasePath,
   scopedConnection,
@@ -1357,7 +1338,11 @@ function FeedControls({
   onToggleConnection,
   onToggleStream,
   onClearAll,
+  onOpenDataSources,
+  dataSourcesOpen,
+  dateInitiallyOpen,
   showTimeSort,
+  warnings,
 }: {
   draft: string;
   order: SortOrder;
@@ -1368,6 +1353,8 @@ function FeedControls({
   connectionCounts: ReadonlyMap<string, number>;
   streamCounts: ReadonlyMap<string, number>;
   currentViewHref: string;
+  fullListHref: string | null;
+  fullListScopeNote: string | null;
   recordIdJumpFeedback: string | null;
   recordsBasePath: string;
   scopedConnection: ExplorerConnectionFacet | null;
@@ -1386,11 +1373,15 @@ function FeedControls({
   onToggleConnection: (id: string) => void;
   onToggleStream: (s: string) => void;
   onClearAll: () => void;
+  onOpenDataSources: () => void;
+  dataSourcesOpen: boolean;
+  dateInitiallyOpen?: boolean;
   /**
    * Whether the inline newest/oldest TIME sort is legal for the active set.
    * Descriptor-gated so an unhonorable sort claim is structurally unreachable.
    */
   showTimeSort: boolean;
+  warnings: readonly ExplorerWarning[];
 }) {
   return (
     <div className="rr-x-controls">
@@ -1418,66 +1409,53 @@ function FeedControls({
         {/* The redundant "Search" button is removed: the command-bar commits on Enter
             (and selecting a typeahead value applies it). One input, no button — the
             SLVP recomposition (prototype/final: a single command-bar, not a toolbar). */}
-        {/* D12 mobile: sort + Options share a compact sub-row (.rr-x-searchrow__controls)
-            so they sit inline on mobile row 2, not stacked separately below the input.
-            On desktop this sub-row is itself inline in the single searchrow flex. */}
         <div className="rr-x-searchrow__controls">
-          {/* Sort stays inline (prototype keeps a small newest/oldest control beside the
-              bar). Everything ELSE that was a flat toolbar row — the date ranges, the
-              operators help, and copy-view-link — collapses into ONE quiet "Options"
-              disclosure so the command-bar is a single calm row, not a 16-control toolbar
-              (the SLVP recomposition; every capability stays reachable). */}
-          {showTimeSort ? (
-            <div className="rr-x-sort">
-              <span className="rr-x-sort__label">sort</span>
-              <button
-                aria-pressed={order === "newest"}
-                className={["rr-lens", order === "newest" ? "is-on" : ""].filter(Boolean).join(" ")}
-                onClick={() => onSetOrder("newest")}
-                type="button"
-              >
-                newest
-              </button>
-              <button
-                aria-pressed={order === "oldest"}
-                className={["rr-lens", order === "oldest" ? "is-on" : ""].filter(Boolean).join(" ")}
-                onClick={() => onSetOrder("oldest")}
-                type="button"
-              >
-                oldest
-              </button>
-            </div>
-          ) : null}
-          {/* The ONE Date control — replaces the four standalone today/7d/30d/all
-              buttons AND the separate "Since…" chip. One chip, one popover, one honest
-              statement of the active window (date-controls cell). */}
           <DateChip
             activeRange={activeRange}
             customInputs={customInputs}
+            initiallyOpen={dateInitiallyOpen}
             isActive={dateIsActive}
             label={dateLabel}
             onApplyCustom={onSetRange}
             onClear={onClearRange}
             onPreset={onSetRange}
           />
-          <details className="rr-x-options">
-            <summary className="rr-x-options__summary">Options</summary>
-            <div className="rr-x-options__body">
-              <div className="rr-x-options__group">
-                <span className="rr-x-options__label">Operators</span>
-                <div className="rr-x-help__body">
-                  <code>con:</code> <code>-con:</code> <code>stream:</code> <code>-stream:</code> <code>role:</code>{" "}
-                  <code>has:image</code> <code>has:link</code> <code>is:folded</code> <code>before:2026-06-11</code>{" "}
-                  <code>after:2026-06-10</code> — combine freely; a leading <code>-</code> excludes (everything except).
-                </div>
-              </div>
-              <CopyViewLinkButton href={currentViewHref} />
-            </div>
-          </details>
+          <button aria-controls="explore-data-sources" aria-expanded={dataSourcesOpen} className="rr-x-toolbar-button" onClick={onOpenDataSources} type="button">
+            Data sources
+          </button>
         </div>
       </div>
 
       <ActiveFilterChips chips={chips} onClearAll={onClearAll} />
+      <details className="rr-x-technical-details rr-x-explore-details">
+        <summary>Details</summary>
+        <div className="rr-x-explore-details__body">
+          {showTimeSort ? (
+            <div className="rr-x-sort">
+              <span className="rr-x-sort__label">Order</span>
+              <button aria-pressed={order === "newest"} className={order === "newest" ? "is-on" : ""} onClick={() => onSetOrder("newest")} type="button">Newest</button>
+              <button aria-pressed={order === "oldest"} className={order === "oldest" ? "is-on" : ""} onClick={() => onSetOrder("oldest")} type="button">Oldest</button>
+            </div>
+          ) : null}
+          <div className="rr-x-options__group">
+            <span className="rr-x-options__label">Search details</span>
+            <div className="rr-x-help__body">
+              <code>con:</code> <code>-con:</code> <code>stream:</code> <code>-stream:</code> <code>role:</code>{" "}
+              <code>has:image</code> <code>has:link</code> <code>is:folded</code> <code>before:2026-06-11</code>{" "}
+              <code>after:2026-06-10</code> — combine freely; a leading <code>-</code> excludes (everything except).
+            </div>
+          </div>
+          {fullListHref ? (
+            <div className="rr-x-options__group">
+              <span className="rr-x-options__label">For this kind</span>
+              <Link className="rr-link" href={fullListHref}>Open the full list →</Link>
+              {fullListScopeNote ? <span className="rr-x-scope-note">{fullListScopeNote}</span> : null}
+            </div>
+          ) : null}
+          <CopyViewLinkButton href={currentViewHref} />
+          {warnings.length > 0 ? <WarningList warnings={warnings} /> : null}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1517,8 +1495,7 @@ function SearchHeader({
   return (
     <div className="rr-x-search-header">
       <span className="rr-x-search-header__title">
-        {/* feedHeaderLabel is the structural claim source — never exceed it. */}
-        {feedHeaderLabel(descriptor)} for &lsquo;{query}&rsquo;
+        Search results
       </span>
       {/* Most relevant / Most recent sort toggle. "Most recent" is available only
           when the descriptor can be time-ordered or paged; for relevance_bounded
@@ -1588,7 +1565,7 @@ function StreamDoorLink({
   });
   return (
     <a className="rr-x-stream-door" href={streamHref}>
-      See all '{query}' records in <ConnectorMark spacing="around" connectorId={door.connectorId} icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
+      See all matching records from <ConnectorMark spacing="around" connectorId={door.connectorId} icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
     </a>
   );
 }
@@ -1607,12 +1584,10 @@ function StreamSeeAllLink({
     connectorId: link.connectorId,
     stream: link.stream,
   });
-  const totalLabel = typeof link.total === "number" ? ` - ${link.total.toLocaleString()} records` : "";
   return (
-    <a className="rr-x-see-all" href={streamHref} title={link.stream}>
+    <a className="rr-x-see-all" href={streamHref} title={humanizeFieldLabel(link.stream)}>
       <ConnectorMark spacing="after" connectorId={link.connectorId} icon={connectorIcons[link.connectorId]} name={link.displayName} />
-      {link.displayName} - {humanizeFieldLabel(link.stream)}
-      {totalLabel} - See all
+      {link.displayName} · {humanizeFieldLabel(link.stream)} · See all
     </a>
   );
 }
@@ -1622,7 +1597,7 @@ function StreamSeeAllLink({
 // A facet row: an INCLUDE toggle (the row) + an "is not" EXCLUDE toggle (Linear).
 // Both compile to the ONE query (include → `connection=`, exclude → `xconnection=`).
 // The count is the loaded-window count (item #8): a bare number reads as a total, so
-// it is qualified "in view"; when there are zero in view it is HIDDEN (never a "0"
+// it stays unqualified; when there are no loaded rows it is HIDDEN (never a "0"
 // that reads as "this source is empty"), never a loaded-window count dressed as a total.
 export function FacetRow({
   leading,
@@ -1660,12 +1635,12 @@ export function FacetRow({
           {leading}
           <span className="rr-x-facet__label">{label}</span>
         </span>
-        <span className="rr-x-facet__flag" />
-        {/* Exact-or-"in view"-or-hidden. count===null OR 0 → hidden (item #8). */}
+        {/* The selected row carries a check as well as a background, so a row
+            reads plainly as an on/off toggle (explore brief decision 3). */}
+        <span aria-hidden="true" className="rr-x-facet__flag rr-x-facet__check">{on ? "✓" : null}</span>
+        {/* Exact-or-hidden. count===null OR 0 → hidden (item #8). */}
         {count !== null && count > 0 ? (
-          <span className="rr-x-facet__n">
-            {count.toLocaleString()} <span className="rr-x-facet__inview">in view</span>
-          </span>
+          <span className="rr-x-facet__n">{count.toLocaleString()}</span>
         ) : null}
       </button>
       <button
@@ -1719,166 +1694,84 @@ function connectionsFacetRestartHref(explorePath: string): string {
 function ConnectionFacets({
   connectorIcons,
   connections,
+  groups,
   selected,
   excluded,
   countFor,
   onToggle,
   onToggleExclude,
+  onToggleStream,
+  onToggleExcludeStream,
 }: {
   connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   connections: readonly ExplorerConnectionFacet[];
+  groups: readonly SourceStreamGroup[];
   selected: readonly string[];
   excluded: readonly string[];
   countFor: (connectionId: string) => number;
   onToggle: (connectionId: string) => void;
   onToggleExclude: (connectionId: string) => void;
-}) {
-  return (
-    <div className="rr-x-facets">
-      <span className="rr-x-facets__label">Connections</span>
-      {connections.map((c) => (
-        <FacetRow
-          count={countFor(c.connectionId)}
-          excluded={excluded.includes(c.connectionId)}
-          key={c.connectionId}
-          label={c.displayName}
-          leading={<ConnectorMark connectorId={c.connectorId} icon={connectorIcons[c.connectorId]} name={c.displayName} />}
-          on={selected.includes(c.connectionId)}
-          onToggle={() => onToggle(c.connectionId)}
-          onToggleExclude={() => onToggleExclude(c.connectionId)}
-        />
-      ))}
-      {connections.length === 0 && <span className="rr-x-facets__note">No connections configured yet.</span>}
-    </div>
-  );
-}
-
-// Streams within one source are shown top-N-then-more so a busy source doesn't
-// reintroduce the flat wall inside its own group; 8 leads with the source's most
-// active streams and "Show all N" reveals the tail (Sentry top-10-then-more).
-const STREAM_GROUP_TOP_N = 8;
-
-// One source's collapsible group of stream facets. Default-collapsed (the rail is
-// a builder, not a wall) UNLESS it holds an active filter or a search is matching
-// inside it — then it opens so the relevant streams are visible without a click.
-function SourceFacetGroup({
-  connectorIcons,
-  group,
-  forceOpen,
-  onToggle,
-  onToggleExclude,
-}: {
-  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
-  group: SourceStreamGroup;
-  forceOpen: boolean;
-  onToggle: (stream: string) => void;
-  onToggleExclude: (stream: string) => void;
-}) {
-  const [showAll, setShowAll] = useState(false);
-  const hasActive = group.streams.some((s) => s.selected || s.excluded);
-  const visible = showAll ? group.streams : group.streams.slice(0, STREAM_GROUP_TOP_N);
-  const hiddenCount = group.streams.length - visible.length;
-  return (
-    <details className="rr-x-source-group" open={forceOpen || hasActive}>
-      <summary className="rr-x-source-group__summary">
-        <span className="rr-x-source-group__name" title={group.displayName}>
-          <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.displayName} />
-          {group.displayName}
-        </span>
-        {/* The source total is the SAME count KIND as each stream — loaded rows
-            for this source, labeled "in view" (RL2), never a lifetime total. */}
-        <span className="rr-x-source-group__n">
-          {group.loadedTotal.toLocaleString()} <span className="rr-x-facet__inview">in view</span>
-        </span>
-      </summary>
-      <div className="rr-x-source-group__body">
-        {visible.map((s) => (
-          <FacetRow
-            // Per-source loaded count: honest "in loaded results for this source".
-            count={s.loadedCount}
-            excluded={s.excluded}
-            key={s.stream}
-            label={humanizeFieldLabel(s.stream)}
-            on={s.selected}
-            onToggle={() => onToggle(s.stream)}
-            onToggleExclude={() => onToggleExclude(s.stream)}
-          />
-        ))}
-        {hiddenCount > 0 ? (
-          <button className="rr-x-source-group__more" onClick={() => setShowAll(true)} type="button">
-            Show all {group.streams.length.toLocaleString()} streams
-          </button>
-        ) : null}
-      </div>
-    </details>
-  );
-}
-
-// W4: source-grouped stream facets. The flat ~70-name wall is replaced by
-// collapsible parent→child groups (source → its streams). Every count is an
-// honest per-source loaded count (computeSourceGroupedStreamFacets); a stream on
-// two sources appears under EACH with that source's own number, never a global
-// tally (RL2/RL3). A "search within filters" box tames many sources/streams.
-function StreamFacets({
-  connectorIcons,
-  groups,
-  onToggle,
-  onToggleExclude,
-}: {
-  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
-  groups: readonly SourceStreamGroup[];
-  onToggle: (stream: string) => void;
-  onToggleExclude: (stream: string) => void;
+  onToggleStream: (stream: string) => void;
+  onToggleExcludeStream: (stream: string) => void;
 }) {
   const [filter, setFilter] = useState("");
-  const filtered = useMemo(() => filterSourceGroups(groups, filter), [groups, filter]);
-  const totalStreams = useMemo(() => totalVisibleStreamFacets(groups), [groups]);
-  // Search box appears only once the list is big enough to need it (prior art:
-  // search-within-filter for many values; below the threshold it is just noise).
-  const showSearch = totalStreams > STREAM_GROUP_TOP_N || groups.length > 3;
-  const searching = filter.trim() !== "";
-  // Open a group by default only when there is a single source (nothing to fold)
-  // or when a search is active (so the matching streams are visible immediately).
-  const singleSource = filtered.length === 1;
+  const query = filter.trim().toLowerCase();
+  const rows = exploreDataSourceRows(connections, groups);
+  const visibleRows = rows.filter(({ connection, kinds }) => {
+    if (!query) {
+      return true;
+    }
+    return connection.displayName.toLowerCase().includes(query) || kinds.some((kind) => kind.label.toLowerCase().includes(query));
+  });
+  const kindCount = rows.reduce((count, row) => count + row.kinds.length, 0);
+
   return (
-    <div className="rr-x-facets">
-      <span className="rr-x-facets__label">
-        Sources &amp; streams
-        {/* HONEST header count: how many stream facets are shown and that the
-            number is loaded-window scoped — resolves "what do the numbers mean". */}
-        {totalStreams > 0 ? (
-          <span className="rr-x-facets__count">
-            {totalStreams.toLocaleString()} {totalStreams === 1 ? "stream" : "streams"}{" "}
-            <span className="rr-x-facet__inview">in loaded results</span>
-          </span>
-        ) : null}
-      </span>
-      {showSearch ? (
+    <div className="rr-x-facets" id="explore-data-sources">
+      <span className="rr-x-facets__label">Data sources</span>
+      {connections.length > 10 || kindCount > 8 ? (
         <input
-          aria-label="Search sources and streams"
+          aria-label="Filter data sources and kinds"
           className="rr-x-facets__search"
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Search sources & streams…"
-          type="text"
+          onChange={(event) => setFilter(event.target.value)}
+          placeholder="Find a data source or kind…"
+          type="search"
           value={filter}
         />
       ) : null}
       <div className="rr-x-facets__scroll">
-        {filtered.map((g) => (
-          <SourceFacetGroup
-            connectorIcons={connectorIcons}
-            forceOpen={singleSource || searching}
-            group={g}
-            key={g.connectionId}
-            onToggle={onToggle}
-            onToggleExclude={onToggleExclude}
-          />
+        {visibleRows.map(({ connection, kinds }) => (
+            <div className="rr-x-source-entry" key={connection.connectionId}>
+              <FacetRow
+                count={countFor(connection.connectionId)}
+                excluded={excluded.includes(connection.connectionId)}
+                label={connection.displayName}
+                leading={<ConnectorMark connectorId={connection.connectorId} icon={connectorIcons[connection.connectorId]} name={connection.displayName} />}
+                on={selected.includes(connection.connectionId)}
+                onToggle={() => onToggle(connection.connectionId)}
+                onToggleExclude={() => onToggleExclude(connection.connectionId)}
+              />
+              {kinds.length ? (
+                <details className="rr-x-source-group" open={selected.includes(connection.connectionId) || Boolean(query)}>
+                  <summary className="rr-x-source-group__summary">{kinds.length === 1 ? "1 kind" : `${kinds.length} kinds`}</summary>
+                  <div className="rr-x-source-group__body">
+                    {kinds.map((kind) => (
+                      <FacetRow
+                        count={kind.count}
+                        excluded={kind.excluded}
+                        key={kind.stream}
+                        label={kind.label}
+                        on={kind.selected}
+                        onToggle={() => onToggleStream(kind.stream)}
+                        onToggleExclude={() => onToggleExcludeStream(kind.stream)}
+                      />
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </div>
         ))}
-        {filtered.length === 0 ? (
-          <span className="rr-x-facets__note">
-            {searching ? "No sources or streams match your search." : "No streams in the loaded results."}
-          </span>
-        ) : null}
+        {visibleRows.length === 0 ? <span className="rr-x-facets__note">No data sources or kinds match.</span> : null}
+        {connections.length === 0 ? <span className="rr-x-facets__note">No data sources yet.</span> : null}
       </div>
     </div>
   );
@@ -1898,230 +1791,69 @@ function FeedRow({
 }: {
   connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   entry: ExplorerFeedEntry;
-  /** Base path for the records section (e.g. "/sources"). Used to
-   *  build the full-page record detail href for the Open action + mobile tap. */
   recordsBasePath: string;
   selected: boolean;
-  /** Desktop row click / Enter — opens the in-place peek panel (inspect). */
   onSelect: () => void;
-  /**
-   * The Open ESCALATION — navigate to the full record-detail route. DISTINCT from
-   * `onSelect` (peek): the explicit Open button and Cmd/Ctrl-Enter route through
-   * this, so Open is never functionally identical to a plain row click (#12).
-   */
   onOpenFull: () => void;
-  /** Escape from a focused/selected row — clears the peek + selection. */
   onClearSelection: () => void;
-  /** Arrow-key feed nav handled on the interactive row button. */
   onArrow: (direction: -1 | 1) => void;
 }) {
-  // W1 content-first row primary (plan RL1): the primary line is real CONTENT a human
-  // recognizes, projected from the SAME honest `buildRecordPreview` output the card and
-  // inspector consume. `rowPrimary` applies the STRICT RL1 source order — declared
-  // role-backed slots (title → body → amount → actor), else the first HONEST GENERIC
-  // declared field, else a NEUTRAL fallback (the record id). The fallback is NEVER a
-  // stream name, kind noun, or a derived summary. (The field-name-guessing timeline
-  // summary is DELETED; a search hit's matched text rides below as a labelled excerpt,
-  // never promoted to the primary. The old `nounFor(stream)` stream-name leak is gone.)
-  // The honest primary line (declared title → first honest generic field → neutral
-  // record-id fallback) and its derived/generic weight treatment are now owned by the
-  // SHARED RecordIdentity cell (rendered below) — the feed no longer styles an
-  // arbitrary key:value or an id/uuid as if it were an authored title; that invariant
-  // lives in ONE place. `primaryLine` is still derived here for the row's aria-labels.
-  const primaryLine = rowPrimary(entry.preview ?? null, entry.recordId);
-  const role = entry.preview?.author ?? (entry.kind === "message" ? "message" : undefined);
-  // Secondary snippet: the NEXT honest content slot (never repeating the primary).
-  const snippet = rowSecondary(entry.preview ?? null);
-  // A SEARCH HIT has no record body, so it has no preview-backed snippet and its primary
-  // is the neutral record id. Surface the server's matched-text excerpt as a clearly-
-  // LABELLED "Match" line so the result is scannable by what matched — NEVER promoted to a
-  // faked title (F1 search scannability; the snippet is real matched record text, but it is
-  // a labelled excerpt, not a declared title). Shown only when there is no body-backed snippet.
-  const matchExcerpt = entry.retrievalMode && !snippet ? entry.snippet : undefined;
+  const { title, source: sourceName, kind, time } = exploreRecordRow(entry, useExploreNow());
   const detailHref = buildRecordDetailHref(recordsBasePath, entry);
-  const rowCls = ["rr-x-row", selected ? "is-selected" : ""].filter(Boolean).join(" ");
-  const desktopActionLabel = selected
-    ? `Selected ${entry.stream} record ${primaryLine}`
-    : `Inspect ${entry.stream} record ${primaryLine}`;
-  // Inner content is shared by both affordances; only the action verb changes
-  // because desktop opens the inspector while mobile opens the full record.
-  const inner = (actionLabel: "inspect" | "open" | "selected") => (
+  const rowClassName = `rr-x-row${selected ? " is-selected" : ""}`;
+  const content = (
     <>
-      {/* Leading type-glyph in a FIXED slot (W1, prior art: Primer leadingVisual) so
-          rows are scannable by category and every primary line left-aligns to one x.
-          The glyph map is the SHARED one promoted into record-identity.tsx. */}
-      <span aria-hidden="true" className="rr-x-row__glyph" data-kind={entry.kind ?? "generic"}>
-        {kindGlyph(entry.kind ?? null)}
+      <span aria-hidden="true" className="rr-x-record-logo">
+        <ConnectorMark connectorId={entry.connectorId} icon={connectorIcons[entry.connectorId]} name={sourceName} />
       </span>
       <span className="rr-x-row__body">
-        {/* Line 1 = CONTENT identity, rendered through the ONE shared RecordIdentity
-            cell so the feed, the stream table, the mobile card, and the detail H1
-            cannot render the same record's identity two ways (THE-LENS Gate 3).
-            The feed owns its own glyph slot (above), so the cell suppresses its glyph
-            and key (showGlyph/showKey=false). The cell OWNS the [primary][secondary]
-            pair (record-components design §row-anatomy); the meta block below adds only
-            the role badge + search "Match" excerpt + source/stream/time — it must NOT
-            re-render rowSecondary() (that double-rendered the secondary line). */}
-        <RecordIdentity
-          hasImage={entryHasImage(entry)}
-          preview={entry.preview ?? null}
-          recordKey={entry.recordId}
-          showGlyph={false}
-          showKey={false}
-          variant="feed"
-        />
-        {/* Line 2 = secondary context: the role badge (when present) + the search
-            "Match" excerpt + the source/stream/time metadata, MUTED alongside content.
-            The honest SECONDARY snippet itself is NOT re-rendered here — the shared
-            RecordIdentity cell above already owns `[primary][secondary]` (record-
-            components design §row-anatomy: [glyph][primary][secondary][key]). Rendering
-            rowSecondary() a second time in this meta block was the cause of the
-            duplicated secondary line (e.g. an Amazon cancelled order showing
-            "This order has been cancelled" twice); the cell is the single owner. */}
-        <span className="rr-x-row__meta">
-          {role && (
-            <span className="rr-x-row__snippet">
-              {/* The author/role badge is canvas-specific context the identity cell
-                  does not surface; it rides in the meta block, not the title line. */}
-              <span className="rr-x-role">{role}</span>
-            </span>
-          )}
-          {/* SEARCH HIT match excerpt (F1): a clearly-labelled "Match" line carrying the
-              server's matched text, so a bodyless retrieval row is scannable by what
-              matched. The "Match" mark keeps it honestly an excerpt, never a faked title. */}
-          {matchExcerpt && (
-            <span className="rr-x-row__snippet">
-              <span className="rr-x-mark">Match</span>
-              <span className="rr-x-row__snippet-text">
-                {/* Render the matched terms BOLD from the parsed snippet segments (the
-                    server's honest <mark> highlight, rendered as real <strong> elements —
-                    never dangerouslySetInnerHTML). Falls back to the plain excerpt. */}
-                {entry.snippetSegments && entry.snippetSegments.length > 0
-                  ? entry.snippetSegments.map((seg, i) =>
-                      seg.marked ? (
-                        <strong className="rr-x-snippet-hit" key={i}>
-                          {seg.text}
-                        </strong>
-                      ) : (
-                        <span key={i}>{seg.text}</span>
-                      )
-                    )
-                  : matchExcerpt}
-              </span>
-            </span>
-          )}
-          <span className="rr-x-row__attr">
-            <span className="rr-x-row__stream">{entry.stream}</span>
-            {/* F8: the connection name ellipses in the narrow row (…gmail.c…). A native
-                `title` makes the full name recoverable on hover/long-press. */}
-            <span className="rr-x-row__con" title={entry.connectionDisplayName ?? entry.connectorId}>
-              <ConnectorMark
-                spacing="after"
-                connectorId={entry.connectorId}
-                icon={connectorIcons[entry.connectorId]}
-                name={entry.connectionDisplayName ?? entry.connectorId}
-              />
-              {entry.connectionDisplayName ?? entry.connectorId}
-            </span>
-            {/* The per-row engine-mode badge (lexical/semantic/hybrid) was removed: it
-                carried zero owner-actionable meaning and read as dev-console output. The
-                row's own "Match" excerpt already conveys why a search hit appeared.
-                `entry.retrievalMode` stays in the data model (gates matchExcerpt above). */}
-          </span>
-        </span>
+        <span className="rr-x-row__title">{title}</span>
+        <span className="rr-x-row__meta">{kind} · {sourceName}</span>
       </span>
-      {/* Time right-aligned, abbreviated, recede-able (W1). The day header carries the
-          DATE, so the row carries the TIME (Slack/iMessage/Outlook pattern). When the
-          stream declares no semantic/authored time field (e.g. Gmail labels, which have
-          no API-provided creation date), `displayAt` is ingestion time — label it
-          "ingested" so it is never mistaken for the record's own event/creation time,
-          matching the source-detail and stream-list views (record-timestamps.ts). */}
-      <span className="rr-x-row__time">
-        {entry.displayIsSemantic ? null : <span className="text-muted-foreground">ingested </span>}
-        <Timestamp precision="time" value={entry.displayAt} />
-      </span>
-      <span className="rr-x-row__action">{actionLabel}</span>
+      <span className="rr-x-row__time">{time}</span>
     </>
   );
+
   return (
     <>
-      {/*
-       * Mobile (≤860px): tapping a feed row pushes to the full-page record
-       * detail route (R4). On phones there is no peek pane, so tap == open — a
-       * row tap and "Open" converge to the same full route (design.md §6). No
-       * in-flow inspector stacks below the feed on touch widths; hidden on
-       * desktop via CSS. No per-row stream-drill link (feedback #11): the
-       * scope-preserving drill-in lives at the group/burst level, not on rows.
-       */}
       <Link
         aria-current={selected ? "page" : undefined}
-        aria-label={`Open ${entry.stream} record ${primaryLine}`}
-        className={`${rowCls} rr-x-row--mobile`}
+        aria-label={`Open ${title} · ${kind} · ${sourceName}`}
+        className={`${rowClassName} rr-x-row--mobile`}
         data-feed-row
         href={detailHref}
       >
-        {inner("open")}
+        {content}
         <LinkPending />
       </Link>
-      {/*
-       * Desktop (>860px): the row body is the PEEK target — clicking it (or
-       * Enter on the focused row) opens the in-place inspector. Distinct from
-       * Open below, which routes to the full record-detail page (#12). Keyboard:
-       * ↑/↓ move the selection, Enter peeks, Cmd/Ctrl-Enter opens the full route,
-       * Escape clears. Hidden on mobile via CSS.
-       */}
-      <div className="rr-x-row-wrap rr-x-row-wrap--desktop">
-        <button
-          aria-label={desktopActionLabel}
-          // The row is a toggle button (press = open peek), so aria-pressed is the
-          // correct ARIA selected-state for a button role; aria-selected is NOT
-          // valid on a button. data-selected carries the machine-readable selected
-          // flag the contract requires (design.md §6 allows aria-selected OR
-          // data-selected — data-selected is the honest one for this element).
-          aria-pressed={selected}
-          className={`${rowCls} rr-x-row--desktop`}
-          data-feed-row
-          data-selected={selected ? "true" : undefined}
-          onClick={onSelect}
-          onKeyDown={(e) => {
-            // The keyboard contract is a PURE decision (resolveRowKeyAction):
-            // ↑/↓ move selection, Enter peeks, Cmd/Ctrl-Enter opens the full
-            // route, Escape clears (design.md §6, feedback #12). Unit-tested.
-            const { action, preventDefault } = resolveRowKeyAction(e);
-            if (preventDefault) {
-              e.preventDefault();
-            }
-            if (action === "move-down") {
-              onArrow(1);
-            } else if (action === "move-up") {
-              onArrow(-1);
-            } else if (action === "peek") {
-              onSelect();
-            } else if (action === "open-full") {
-              onOpenFull();
-            } else if (action === "clear") {
-              onClearSelection();
-            }
-          }}
-          type="button"
-        >
-          {inner(selected ? "selected" : "inspect")}
-        </button>
-        {/*
-         * Open ESCALATION (desktop): a separate explicit action that navigates to
-         * the full record-detail route — NEVER the same outcome as the plain row
-         * click (which peeks). This is the contract that makes Open meaningful
-         * (design.md §6, feedback #12). It is a real <Link> route change.
-         */}
-        <Link
-          aria-label={`Open ${entry.stream} record ${primaryLine} in full`}
-          className="rr-x-row-open"
-          href={detailHref}
-        >
-          Open →
-          <LinkPending />
-        </Link>
-      </div>
+      <button
+        aria-label={`Open ${title} · ${kind} · ${sourceName}`}
+        aria-pressed={selected}
+        className={`${rowClassName} rr-x-row--desktop`}
+        data-feed-row
+        data-selected={selected ? "true" : undefined}
+        onClick={onSelect}
+        onKeyDown={(event) => {
+          const { action, preventDefault } = resolveRowKeyAction(event);
+          if (preventDefault) {
+            event.preventDefault();
+          }
+          if (action === "move-down") {
+            onArrow(1);
+          } else if (action === "move-up") {
+            onArrow(-1);
+          } else if (action === "peek") {
+            onSelect();
+          } else if (action === "open-full") {
+            onOpenFull();
+          } else if (action === "clear") {
+            onClearSelection();
+          }
+        }}
+        type="button"
+      >
+        {content}
+      </button>
     </>
   );
 }
@@ -2152,34 +1884,18 @@ function BurstRow({
   selectedPeekParam: string | null;
 }) {
   const [rep] = burst.entries;
-  const loaded = burst.entries.length;
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const streamLabel = `${rep?.connectionDisplayName ?? rep?.connectorId ?? ""}${rep?.stream ? ` / ${humanizeFieldLabel(rep.stream)}` : ""}`;
-  // SLVP preview-content-by-default (review-gated 2026-06-22): a burst is NEVER
-  // a content-less count header. It always renders its first PREVIEW_COUNT rows
-  // (`burst.preview`); the remainder is reached via an explicit "Show all M" action.
-  // count==reachability holds: the count is the LOADED count for this
-  // (connection, stream) within the day, the action reaches EXACTLY those rows, and
-  // the label says "in view" (never a claimed day-total the client can't prove).
+  const entryCount = burst.entries.length;
+  const kindLabel = rep?.stream ? humanizeFieldLabel(rep.stream) : "Records";
+  const sourceName = rep?.connectionDisplayName ?? "Data source";
+  // Keep each record directly reachable while limiting the initial page to its
+  // preview rows. The toggle has no count because the server does not return a
+  // complete day total for this group.
   const visibleEntries = expanded ? burst.entries : burst.preview;
-  const hiddenCount = loaded - burst.preview.length;
+  const hiddenCount = entryCount - burst.preview.length;
   const hasMore = hiddenCount > 0;
   return (
     <div className="rr-x-burst">
-      <div className="rr-x-burst__head">
-        <span className="rr-x-burst__count">{loaded.toLocaleString()}</span>{" "}
-        <span className="rr-x-burst__stream">
-          {rep?.connectorId ? (
-            <ConnectorMark
-              spacing="after"
-              connectorId={rep.connectorId}
-              icon={connectorIcons[rep.connectorId]}
-              name={rep.connectionDisplayName ?? rep.connectorId}
-            />
-          ) : null}
-          {streamLabel}
-        </span>{" "}<span className="rr-x-burst__inview">in view</span>
-      </div>
+      <div className="rr-x-burst__head">{kindLabel} · {sourceName}</div>
       {/* Rows ALWAYS mount (preview or full) — the feed never shows zero content.
           The single reveal container (rr-x-burst__rows) plays the design-system
           reveal motion once on expand; preview rows render statically. */}
@@ -2205,15 +1921,15 @@ function BurstRow({
         <button
           aria-label={
             expanded
-              ? `Collapse ${streamLabel} to the first ${burst.preview.length}`
-              : `Show all ${loaded.toLocaleString()} ${streamLabel} records in view`
+              ? `Show fewer ${kindLabel} records`
+              : `Show more ${kindLabel} records from ${sourceName}`
           }
           className="rr-x-burst__toggle"
           onClick={onToggle}
           type="button"
         >
           <span className="rr-x-burst__action">
-            {expanded ? `Collapse to first ${burst.preview.length} ↑` : `Show all ${loaded.toLocaleString()} ↓`}
+            {expanded ? "Show fewer records ↑" : "Show more records ↓"}
           </span>
         </button>
       ) : null}
@@ -2256,7 +1972,7 @@ function buildRemoveLastChipAction(
 ): ZeroResultsEscapeAction | null {
   let href = "";
   let title = "";
-  if (lastChip.property === "source" && !lastChip.negated) {
+  if (lastChip.property === "data source" && !lastChip.negated) {
     // The chip's id is `con:<connectionId>` — strip the prefix to get the REAL
     // connection id and remove it by EXACT equality. (The previous substring match on
     // `lastChip.value`, the DISPLAY NAME, was an honesty bug: a name that is not a
@@ -2272,8 +1988,8 @@ function buildRemoveLastChipAction(
       streams: s.streams,
       until: s.until,
     });
-    title = `Remove source filter: ${lastChip.value}`;
-  } else if (lastChip.property === "stream" && !lastChip.negated) {
+    title = `Remove data source filter: ${lastChip.value}`;
+  } else if (lastChip.property === "kind" && !lastChip.negated) {
     href = buildHref(explorePath, {
       connectionIds: s.connectionIds,
       excludeConnectionIds: s.excludeConnectionIds,
@@ -2283,7 +1999,7 @@ function buildRemoveLastChipAction(
       streams: s.streams.filter((v) => v !== lastChip.value),
       until: s.until,
     });
-    title = `Remove stream filter: ${lastChip.value}`;
+    title = `Remove kind filter: ${lastChip.value}`;
   } else if (lastChip.property === "date") {
     href = buildHref(explorePath, {
       connectionIds: s.connectionIds,
@@ -2360,7 +2076,7 @@ function buildZeroEscapeActions(
   if (s.streams.length > 0) {
     actions.push({
       count: "all streams",
-      description: "Remove stream filter — search across all data types",
+      description: "Remove kind filter — search across all data types",
       href: buildHref(explorePath, {
         connectionIds: s.connectionIds,
         excludeConnectionIds: s.excludeConnectionIds,
@@ -2371,7 +2087,7 @@ function buildZeroEscapeActions(
         until: s.until,
       }),
       key: "all-streams",
-      title: "Search all streams",
+      title: "Search all kinds",
     });
   }
   if (hasFilters) {
@@ -2393,81 +2109,9 @@ function buildZeroEscapeActions(
   });
 }
 
-function ZeroResultsRouting({
-  chips,
-  loadedCount,
-  explorePath,
-  exploreState,
-  onClearAll,
-}: {
-  chips: readonly FilterChip[];
-  /** Number of records loaded by the server before client-side narrowing. */
-  loadedCount: number;
-  explorePath: string;
-  exploreState: ZeroResultsExploreState;
-  onClearAll: () => void;
-}) {
-  const hasFilters =
-    chips.length > 0 ||
-    exploreState.query.trim().length > 0 ||
-    Boolean(exploreState.since) ||
-    Boolean(exploreState.until);
-
-  const escapeActions = useMemo<ZeroResultsEscapeAction[]>(
-    () => buildZeroEscapeActions(chips, loadedCount, explorePath, exploreState, hasFilters),
-    [chips, loadedCount, explorePath, exploreState, hasFilters]
-  );
-
-  // Honest heading: loadedCount > 0 means server returned records but client filters removed them all.
-  const headingText = loadedCount > 0 ? "No records matched the active filters" : "No records in this view";
-  let descriptionText: string;
-  if (loadedCount > 0) {
-    const plural = loadedCount === 1 ? "" : "s";
-    descriptionText = `${loadedCount.toLocaleString()} record${plural} loaded before the active filters ran.`;
-  } else if (hasFilters) {
-    descriptionText = "The active filters returned nothing.";
-  } else {
-    descriptionText = "There are no records to show here yet.";
-  }
-
-  return (
-    <div aria-live="polite" className="rr-x-zero" role="status">
-      <div aria-hidden="true" className="rr-x-zero__icon">
-        ⊘
-      </div>
-      <div className="rr-x-zero__heading">{headingText}</div>
-      <p className="rr-x-zero__desc">{descriptionText}</p>
-      {escapeActions.length > 0 && (
-        <>
-          <div className="rr-x-zero__label">Try instead</div>
-          <ul className="rr-x-zero__list">
-            {escapeActions.map((action) => (
-              <li key={action.key}>
-                <Link className="rr-x-zero__action" href={action.href}>
-                  <span className="rr-x-zero__action-text">
-                    <span className="rr-x-zero__action-title">{action.title}</span>
-                    <span className="rr-x-zero__action-desc">{action.description}</span>
-                  </span>
-                  <span className="rr-x-zero__action-count">{action.count}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      {hasFilters && chips.length > 0 && (
-        <button className="rr-link rr-x-zero__clearall" onClick={onClearAll} type="button">
-          clear all filters →
-        </button>
-      )}
-    </div>
-  );
-}
-
 function FeedDays({
   connectorIcons,
   dayGroups,
-  lens,
   chipsPresent,
   chips,
   expandedBursts,
@@ -2486,7 +2130,6 @@ function FeedDays({
   chips: readonly FilterChip[];
   dayGroups: readonly DayGroupWithBursts[];
   expandedBursts: ReadonlySet<string>;
-  lens: ExplorerLens;
   onClearAll: () => void;
   onToggleBurst: (key: string) => void;
   onMoveSelection: (fromParam: string, direction: -1 | 1) => void;
@@ -2510,45 +2153,37 @@ function FeedDays({
   };
 }) {
   if (dayGroups.length === 0) {
-    if (zeroResultsProps) {
-      return (
-        <ZeroResultsRouting
-          chips={chips}
-          explorePath={zeroResultsProps.explorePath}
-          exploreState={zeroResultsProps.exploreState}
-          loadedCount={zeroResultsProps.loadedCount}
-          onClearAll={onClearAll}
-        />
-      );
+    const state = zeroResultsProps?.exploreState;
+    const hasFilters = Boolean(
+      chipsPresent || state?.query.trim() || state?.connectionIds.length || state?.excludeConnectionIds.length ||
+        state?.streams.length || state?.excludeStreams.length || state?.since || state?.until
+    );
+    const escapeAction = state && zeroResultsProps
+      ? buildZeroEscapeActions(chips, zeroResultsProps.loadedCount, zeroResultsProps.explorePath, state, hasFilters)[0]
+      : undefined;
+    let emptyAction: ReactNode;
+    if (escapeAction) {
+      emptyAction = <Link className="rr-link" href={escapeAction.href}>{escapeAction.title} →</Link>;
+    } else if (hasFilters) {
+      emptyAction = <button className="rr-link" onClick={onClearAll} type="button">Clear filters</button>;
+    } else {
+      const addSourceHref = zeroResultsProps?.explorePath.replace(EXPLORE_PATH_RE, "/sources/add") ?? "/sources/add";
+      emptyAction = <a className="rr-link" href={addSourceHref}>Add a data source</a>;
     }
     return (
       <div className="rr-x-empty">
-        <p className="rr-x-empty__line">
-          {feedSectionTitle(lens)} — nothing in view. Try different terms or a wider window.
-        </p>
-        {chipsPresent && (
-          <button className="rr-link" onClick={onClearAll} type="button">
-            clear filters →
-          </button>
-        )}
+        <p className="rr-x-empty__line">{EXPLORE_EMPTY_MESSAGE}</p>
+        {emptyAction}
       </div>
     );
   }
   return (
     <>
       {dayGroups.map((g) => {
-        const dayCount = g.singles.length + g.bursts.reduce((sum, b) => sum + b.entries.length, 0);
         return (
           <div className="rr-x-day" key={g.day || "undated"}>
             <div className="rr-x-day__head">
               <span className="rr-x-day__label">{g.label}</span>
-              {/* count==reachability (review red line): the day header counts records
-                  LOADED for this day, not a true day total (which needs a server
-                  per-day count). A bare number reads like a total, so it is qualified
-                  "in view" — every counted record is reachable in this group. */}
-              <span className="rr-x-day__n">
-                {dayCount.toLocaleString()} <span className="rr-x-day__inview">in view</span>
-              </span>
             </div>
             {/* Render the day's units in DISPLAY order (newest-first across bursts
                 AND singles). `g.units` is the single source of truth produced by the
@@ -2623,7 +2258,6 @@ function UpcomingSection({
   onClearSelection,
   recordsBasePath,
   selectedPeekParam,
-  lens,
 }: {
   connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   upcoming: readonly DayGroupWithBursts[];
@@ -2644,7 +2278,6 @@ function UpcomingSection({
   onClearSelection: () => void;
   recordsBasePath: string;
   selectedPeekParam: string | null;
-  lens: ExplorerLens;
 }) {
   const [expanded, setExpanded] = useState(false);
   // F5: even once the Upcoming disclosure is open, its loaded records (188 YNAB
@@ -2686,7 +2319,6 @@ function UpcomingSection({
             connectorIcons={connectorIcons}
             dayGroups={visibleDays}
             expandedBursts={expandedBursts}
-            lens={lens}
             onClearAll={() => {
               // no-op: the Upcoming section never owns the empty/clear-filters state
             }}
@@ -2741,6 +2373,7 @@ function UpcomingSection({
 function FeedBody({
   connectorIcons,
   data,
+  demoState,
   visibleFeed,
   chips,
   chipsPresent,
@@ -2761,6 +2394,7 @@ function FeedBody({
 }: {
   connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   data: RecordsExplorerData;
+  demoState?: ExploreCanvasProps["demoState"];
   /** The CLIENT-FILTERED feed (server slice narrowed by Explore-only operators). */
   visibleFeed: readonly ExplorerFeedEntry[];
   chips: readonly FilterChip[];
@@ -2801,6 +2435,23 @@ function FeedBody({
     descriptorHasMore(data.descriptor) && descriptorNextCursor(data.descriptor)
       ? descriptorNextCursor(data.descriptor)
       : null;
+  // After the hooks above, so they run in the same order on every render.
+  if (demoState === "failed") {
+    return (
+      <div className="rr-x-empty">
+        <p className="rr-x-empty__line">{EXPLORE_FAILED_MESSAGE}</p>
+        <a className="rr-x-loadmore" href={`${explorePath}?demo=atlas`}>Try again</a>
+      </div>
+    );
+  }
+  if (demoState === "empty") {
+    return (
+      <div className="rr-x-empty">
+        <p className="rr-x-empty__line">{EXPLORE_EMPTY_MESSAGE}</p>
+        <a className="rr-link" href={explorePath.replace(EXPLORE_PATH_RE, "/sources/add")}>Add a data source</a>
+      </div>
+    );
+  }
   return (
     <div className="rr-x-days">
       {upcomingCount > 0 ? (
@@ -2809,7 +2460,6 @@ function FeedBody({
           expandedBursts={expandedBursts}
           hasMore={data.upcomingHasMore && data.upcomingNextCursor !== null}
           isPending={isPending}
-          lens={data.lens}
           loadedCount={data.upcoming.length}
           onClearSelection={onClearSelection}
           onLoadMore={() => onLoadMoreUpcoming(data.upcomingNextCursor)}
@@ -2830,7 +2480,6 @@ function FeedBody({
         connectorIcons={connectorIcons}
         dayGroups={past}
         expandedBursts={expandedBursts}
-        lens={data.lens}
         onClearAll={onClearAll}
         onClearSelection={onClearSelection}
         onMoveSelection={onMoveSelection}
@@ -2966,66 +2615,19 @@ function SaveViewAction({ onSave }: { onSave: (name: string) => void }) {
 // One saved-view tab (or the built-in "All" tab). Count rides ONLY when this tab is
 // the active view — never a fabricated number for an unloaded view. The delete × is
 // rendered only for real saved views (not "All"), revealed on hover/focus via CSS.
-function SavedViewTab({
-  active,
-  count,
-  href,
-  name,
-  onDelete,
-  onNavigate,
-}: {
-  active: boolean;
-  count: number;
-  href: string;
-  name: string;
-  onDelete?: () => void;
-  onNavigate: (href: string) => void;
-}) {
-  const tab = (
-    <button
-      aria-selected={active}
-      className={["rr-x-views-tab", active ? "is-active" : ""].filter(Boolean).join(" ")}
-      onClick={() => onNavigate(href)}
-      role="tab"
-      type="button"
-    >
-      <span className="rr-x-views-tab__name">{name}</span>
-      {active ? <span className="rr-x-views-tab__count">{count.toLocaleString()}</span> : null}
-    </button>
-  );
-  if (!onDelete) {
-    return tab;
-  }
-  return (
-    <span className="rr-x-views-tab-wrap">
-      {tab}
-      <button aria-label={`Delete saved view ${name}`} className="rr-x-views-tab__del" onClick={onDelete} type="button">
-        ×
-      </button>
-    </span>
-  );
-}
-
-function SavedViewTabs({
-  activeCount,
+export function SavedViewTabs({
   allHref,
   currentHref,
   onNavigate,
 }: {
-  /** Reachable count for the ACTIVE view only (visibleFeed.length). */
-  activeCount: number;
-  /** The no-filter "All" href (buildHref(explorePath, {})). */
   allHref: string;
-  /** The shareable href of the CURRENT view (buildCurrentViewHref) — drives active-tab match. */
   currentHref: string;
-  /** Navigate to a view href through the canvas's transition-wrapped router.push. */
   onNavigate: (href: string) => void;
 }) {
-  // localStorage is read in an effect (never during render) so SSR and the first
-  // client paint agree (no hydration mismatch). `mounted` gates the save affordance
-  // until we have read storage, so we never flash a wrong tab set.
   const [views, setViews] = useState<SavedView[]>([]);
   const [mounted, setMounted] = useState(false);
+  // Delete is a destructive action, so it asks once before it removes the view.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useEffect(() => {
     setViews(parseSavedViews(window.localStorage.getItem(SAVED_VIEWS_STORAGE_KEY)));
@@ -3036,39 +2638,50 @@ function SavedViewTabs({
     setViews(next);
     window.localStorage.setItem(SAVED_VIEWS_STORAGE_KEY, JSON.stringify(next));
   }, []);
-
   const onSave = useCallback(
-    (name: string) => {
-      // A stable id; crypto.randomUUID is available in every browser the console targets.
-      persist(addSavedView(views, { href: currentHref, id: crypto.randomUUID(), name }));
-    },
+    (name: string) => persist(addSavedView(views, { href: currentHref, id: crypto.randomUUID(), name })),
     [persist, views, currentHref]
   );
-
   const active = activeSavedView(views, currentHref);
+  const selectedHref = isAllView(currentHref) ? allHref : (active?.href ?? allHref);
 
   return (
-    <div aria-label="Saved views" className="rr-x-views-tabs" role="tablist">
-      <SavedViewTab
-        active={isAllView(currentHref)}
-        count={activeCount}
-        href={allHref}
-        name="All"
-        onNavigate={onNavigate}
-      />
-      {views.map((v) => (
-        <SavedViewTab
-          active={active?.id === v.id}
-          count={activeCount}
-          href={v.href}
-          key={v.id}
-          name={v.name}
-          onDelete={() => persist(removeSavedView(views, v.id))}
-          onNavigate={onNavigate}
-        />
-      ))}
-      {/* "+ Save view" — offered ONLY when the current filter is a non-All view not
-          already saved (canSaveCurrentView). Gated on mounted so it never flashes. */}
+    <div className="rr-x-saved-views">
+      {mounted && views.length > 0 ? (
+        <label className="rr-x-view-select">
+          <span>View</span>
+          <select
+            aria-label="View"
+            onChange={(event) => onNavigate(event.currentTarget.value)}
+            value={selectedHref}
+          >
+            <option value={allHref}>All records</option>
+            {views.map((view) => <option key={view.id} value={view.href}>{view.name}</option>)}
+          </select>
+          {active && !confirmingDelete ? (
+            <button aria-label={`Delete saved view ${active.name}`} onClick={() => setConfirmingDelete(true)} type="button">
+              Delete
+            </button>
+          ) : null}
+        </label>
+      ) : null}
+      {mounted && active && confirmingDelete ? (
+        <div className="rr-x-view-confirm">
+          <span>{`This removes the saved view “${active.name}” from this browser.`}</span>
+          <button
+            onClick={() => {
+              setConfirmingDelete(false);
+              persist(removeSavedView(views, active.id));
+            }}
+            type="button"
+          >
+            Delete view
+          </button>
+          <button onClick={() => setConfirmingDelete(false)} type="button">
+            Cancel
+          </button>
+        </div>
+      ) : null}
       {mounted && canSaveCurrentView(views, currentHref) ? <SaveViewAction onSave={onSave} /> : null}
     </div>
   );
@@ -3080,6 +2693,8 @@ function SavedViewTabs({
 export function ExploreCanvas({
   connectorIcons = {},
   data,
+  demoOpen,
+  demoState,
   explorePath,
   order = "newest",
   peekRelationships = null,
@@ -3157,15 +2772,24 @@ export function ExploreCanvas({
   }, [bucketRequestKey]);
   // The band to render: only when it was loaded for the CURRENT scope-key. A stale
   // band (prior scope) or a not-yet-loaded scope ⇒ no chart this paint.
-  const bucketSeries = loadedBand && loadedBand.key === bucketRequestKey ? loadedBand.series : null;
+  const { bucketSeries: demoSeries } = data;
+  let bucketSeries: BucketSeries | null;
+  if (demoState !== undefined) {
+    bucketSeries = demoSeries;
+  } else if (loadedBand && loadedBand.key === bucketRequestKey) {
+    bucketSeries = loadedBand.series;
+  } else {
+    bucketSeries = null;
+  }
   // Pending = a request is live (non-null key) and no band for THIS key has landed.
-  const bucketBandPending = bucketRequestKey !== null && !(loadedBand && loadedBand.key === bucketRequestKey);
+  const bucketBandPending = demoState === undefined && bucketRequestKey !== null && !(loadedBand && loadedBand.key === bucketRequestKey);
 
   // The facet rail is a <details> that renders CLOSED (feed-first on phones).
   // On wide viewports we open it so the disclosure state matches the always-
   // shown desktop rail, and we keep it in sync across resizes. Desktop CSS
   // force-shows the body regardless, so first paint never hides desktop facets.
   const railRef = useRef<HTMLDetailsElement | null>(null);
+  const [sourcesSheetOpen, setSourcesSheetOpen] = useState(false);
   useEffect(() => {
     let cleanup: (() => void) | undefined;
     withPresentRef(railRef.current, (rail) => {
@@ -3174,10 +2798,23 @@ export function ExploreCanvas({
         rail.open = mql.matches;
       };
       sync();
+      if (demoOpen === "data-sources") {
+        rail.open = true;
+      }
       mql.addEventListener("change", sync);
       cleanup = () => mql.removeEventListener("change", sync);
     });
     return cleanup;
+  }, [demoOpen]);
+  const openDataSources = useCallback(() => {
+    if (window.matchMedia("(min-width: 861px)").matches) {
+      document.getElementById("explore-data-sources")?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    withPresentRef(railRef.current, (rail) => {
+      rail.open = !rail.open;
+      setSourcesSheetOpen(rail.open);
+    });
   }, []);
 
   // The search input holds local text; server tokens commit on Enter, while
@@ -3288,7 +2925,7 @@ export function ExploreCanvas({
   const showTimeSort = canShowTimeSort(data);
 
   // Facet counts: reactive over the CURRENTLY VISIBLE feed, ignoring the
-  // facet's own axis. Honest within the loaded window — labeled "in view".
+  // facet's own axis. These are row counts for the currently loaded window.
   const countForConnection = useCallback(
     (connectionId: string) => {
       const streamSel = new Set(selectedStreams);
@@ -3643,12 +3280,6 @@ export function ExploreCanvas({
   // for both the phrase and the active treatment / × affordance.
   const dateIsActive = dateLabel !== ANY_TIME_LABEL;
 
-  // ── Server-applied exact filters (for the scoped full-stream link) ──
-  const serverExactFilters = useMemo(
-    () => committedParsed.fields.filter((field) => serverFilterableFields.has(field.key.toLowerCase())),
-    [committedParsed.fields, serverFilterableFields]
-  );
-
   // Per-burst expand state. Starts collapsed; each burst toggles independently.
   const [expandedBursts, setExpandedBursts] = useState<ReadonlySet<string>>(new Set());
   const toggleBurst = useCallback(
@@ -3677,8 +3308,6 @@ export function ExploreCanvas({
 
   // Active facet-filter count powers the collapsed mobile "Filters (N)" label.
   // Includes BOTH include and exclude selections (both are active scope).
-  const activeFacetCount =
-    selectedConnectionIds.length + selectedStreams.length + excludeConnectionIds.length + excludeStreams.length;
   const activeRange = activeRangeKey({ since: data.since, until: data.until });
   const currentViewHref = useMemo(
     () =>
@@ -3719,22 +3348,6 @@ export function ExploreCanvas({
     },
     [router]
   );
-  const fullStreamHref =
-    scopedConnection && selectedStreams.length === 1
-      ? buildStreamRecordsHref(
-          recordsBasePath,
-          {
-            connectionId: scopedConnection.connectionId,
-            connectorId: scopedConnection.connectorId,
-            stream: selectedStreams[0] ?? "",
-          },
-          serverExactFilters,
-          order
-        )
-      : null;
-  const fullStreamScopeNote = unsupportedFullStreamState
-    ? "The full-stream list opens the whole stream; text search, date range, and local operators stay in Explore."
-    : null;
   // Exact total comes ONLY from an exact_window activity summary (a server-true
   // whole-window aggregate). A bounded/search sample never carries it.
   const exactTotal =
@@ -3748,6 +3361,25 @@ export function ExploreCanvas({
   // backs `exactTotal` (filtered_exact / exact whole-window) is structurally
   // unreachable for the local-slice case.
   const exactCountIsCurrent = exactTotal !== null && !unsupportedFullStreamState;
+  const serverExactFilters = useMemo(
+    () => committedParsed.fields.filter((field) => serverFilterableFields.has(field.key.toLowerCase())),
+    [committedParsed.fields, serverFilterableFields]
+  );
+  const fullListHref =
+    scopedConnection && selectedStreams.length === 1
+      ? buildCompleteStreamHref(
+          recordsBasePath,
+          {
+            connectionId: scopedConnection.connectionId,
+            connectorId: scopedConnection.connectorId,
+            stream: selectedStreams[0] ?? "",
+          },
+          { exactFilters: serverExactFilters, order }
+        )
+      : null;
+  const fullListScopeNote = unsupportedFullStreamState
+    ? "The full list opens the whole kind; text search, date range, and local filters stay in Explore."
+    : null;
   const recordIdJumpFeedback = useMemo(() => {
     const needle = lastRecordIdSearch?.trim();
     if (!needle || data.query.trim() !== needle) {
@@ -3780,9 +3412,11 @@ export function ExploreCanvas({
   // and the feed claims the freed width — no reserved-empty 420px inspector (the
   // dead-canvas + query-bar/inspector-overlap root cause). `data.peek != null` is
   // the single source of selection truth (selectedPeekParam derives from it).
-  const hasSelection = data.peek !== null && data.peek !== undefined;
+  // Empty and failed feed states have no selected record or inspector.
+  const feedStateOnly = demoState === "empty" || demoState === "failed" || (visibleFeed.length === 0 && data.upcomingTotal === 0 && !data.peek);
+  const hasSelection = !feedStateOnly && data.peek !== null && data.peek !== undefined;
   return (
-    <div className={hasSelection ? "rr-x has-selection" : "rr-x"}>
+    <div className={hasSelection ? "rr-x explore-page has-selection" : "rr-x explore-page"}>
       {/* ── In-page route progress bar ──
           A thin top bar shown while a soft same-route push is in flight (the
           soft push never fires loading.tsx). Token-based, reduced-motion-safe.
@@ -3795,58 +3429,58 @@ export function ExploreCanvas({
           spinner + reserved-height skeleton rows at the insertion point — so we
           scope the top bar to NON-Load-more navigations (full-route filter /
           sort / range / search / peek that reset scroll to the top, where the
-          top IS in view). `pendingKind !== "loadmore"` is the explicit gate. */}
+          top remains visible). `pendingKind !== "loadmore"` is the explicit gate. */}
       <RouteProgress active={isPending && pendingKind !== "loadmore"} />
 
       {/* ── Facet rail ──
           A <details> disclosure so the rail can FOLD on phones (≤860px): the
           feed is the primary reading surface there. On desktop the disclosure is
           forced open and its summary chrome is hidden (see components.css). */}
-      <details className="rr-x-rail" ref={railRef}>
+      <details className="rr-x-rail" onToggle={(event) => setSourcesSheetOpen(event.currentTarget.open)} ref={railRef}>
         <summary className="rr-x-rail__toggle">
-          <span className="rr-x-rail__toggle-label">Filters</span>
-          {activeFacetCount > 0 && <span className="rr-x-rail__toggle-n">{activeFacetCount}</span>}
+          <span className="rr-x-rail__toggle-label">Data sources</span>
         </summary>
+        <button
+          aria-label="Close data sources"
+          className="rr-x-rail__scrim"
+          onClick={() => {
+            withPresentRef(railRef.current, (rail) => {
+              rail.open = false;
+              setSourcesSheetOpen(false);
+            });
+          }}
+          type="button"
+        />
         <div className="rr-x-rail__body">
-          {/* VIEWS section (SLVP recomposition): a calm sidebar header above SOURCES,
-              matching the prototype. Explore = the count ACTUALLY SHOWN — `visibleFeed`,
-              AFTER client-side filters (has:image/has:link/is:folded/non-server-filterable
-              fields). Using data.feed.length (the raw loaded set) would OVERSTATE reachable
-              rows when a client filter is active — a count==reachability violation (review
-              HOLD). Upcoming = the true future-dated total. Both honest, no new data. */}
-          <div className="rr-x-views">
-            <span className="rr-x-views__label">Views</span>
-            <div className="rr-x-views__item is-active">
-              <span className="rr-x-views__name">Explore</span>
-              <span className="rr-x-views__count">{visibleFeed.length.toLocaleString()}</span>
-            </div>
-            {data.upcomingTotal > 0 ? (
-              <div className="rr-x-views__item">
-                <span className="rr-x-views__name">Upcoming</span>
-                <span className="rr-x-views__count">{data.upcomingTotal.toLocaleString()}</span>
-              </div>
-            ) : null}
-          </div>
+          <SavedViewTabs
+            allHref={allViewHref}
+            currentHref={currentViewHref}
+            onNavigate={navigateToHref}
+          />
           {data.connectionsPageError ? (
             <div className="rr-s-toast" data-tone="error" role="alert">
-              <p style={{ margin: "0 0 8px" }}>{data.connectionsPageError}</p>
-              <a href={connectionsFacetRestartHref(explorePath)}>Restart connections list from page 1</a>
+              <p>{EXPLORE_FAILED_MESSAGE}</p>
+              <details><summary>Details</summary><p>{data.connectionsPageError}</p></details>
+              <a href={connectionsFacetRestartHref(explorePath)}>Restart list</a>
             </div>
           ) : (
             <>
               <ConnectionFacets
                 connectorIcons={connectorIcons}
                 connections={data.connections}
+                groups={streamGroups}
                 countFor={countForConnection}
                 excluded={excludeConnectionIds}
                 onToggle={toggleConnection}
                 onToggleExclude={toggleExcludeConnection}
+                onToggleStream={toggleStream}
+                onToggleExcludeStream={toggleExcludeStream}
                 selected={selectedConnectionIds}
               />
-              <div className="rr-x-facets__pager" style={{ display: "flex", gap: 12 }}>
+              <div className="rr-x-facets__pager">
                 {data.connectionsPageIsPaged ? (
                   <a className="rr-x-facets__restart" href={connectionsFacetRestartHref(explorePath)}>
-                    ↺ Restart
+                    Restart
                   </a>
                 ) : null}
                 {data.connectionsPageHasMore && data.connectionsPageNextCursor ? (
@@ -3854,18 +3488,12 @@ export function ExploreCanvas({
                     className="rr-x-facets__more"
                     href={connectionsFacetPageHref(explorePath, data.connectionsPageNextCursor)}
                   >
-                    More connections →
+                    More data sources →
                   </a>
                 ) : null}
               </div>
             </>
           )}
-          <StreamFacets
-            connectorIcons={connectorIcons}
-            groups={streamGroups}
-            onToggle={toggleStream}
-            onToggleExclude={toggleExcludeStream}
-          />
         </div>
         {/* P1: sticky close affordance so users aren't trapped in the mobile rail */}
         <div className="rr-x-rail__close">
@@ -3874,6 +3502,7 @@ export function ExploreCanvas({
             onClick={() => {
               withPresentRef(railRef.current, (rail) => {
                 rail.open = false;
+                setSourcesSheetOpen(false);
               });
             }}
             type="button"
@@ -3896,12 +3525,17 @@ export function ExploreCanvas({
             failing the single-h1 a11y bar. This is the page's real, visible
             title, not a visually-hidden duplicate. */}
         <h1 className="rr-x-h1">Explore</h1>
+        {feedStateOnly ? null : (
+          <FeedStatusLine exactCountIsCurrent={exactCountIsCurrent} exactTotal={exactTotal} visibleCount={visibleFeed.length} />
+        )}
         <FeedControls
           activeRange={activeRange}
           chips={chips}
           connectionCounts={connectionCounts}
           connections={data.connections}
           currentViewHref={currentViewHref}
+          fullListHref={fullListHref}
+          fullListScopeNote={fullListScopeNote}
           customInputs={customInputs}
           dateIsActive={dateIsActive}
           dateLabel={dateLabel}
@@ -3922,21 +3556,17 @@ export function ExploreCanvas({
           selectedConnectionIds={selectedConnectionIds}
           selectedStream={selectedStreams.length === 1 ? (selectedStreams[0] ?? null) : null}
           selectedStreams={selectedStreams}
+          onOpenDataSources={openDataSources}
+          dataSourcesOpen={sourcesSheetOpen}
+          dateInitiallyOpen={demoOpen === "date"}
           showTimeSort={showTimeSort}
           streamCounts={streamCountsMap}
           streamSuggestions={streamSuggestions}
-        />
-
-        {/* ── Saved-view tabs (R5): [All] [user-saved views] [+ Save] ── */}
-        <SavedViewTabs
-          activeCount={visibleFeed.length}
-          allHref={allViewHref}
-          currentHref={currentViewHref}
-          onNavigate={navigateToHref}
+          warnings={feedStateOnly ? [] : data.warnings}
         />
 
         {/* ── Descriptor-driven search header (escape ramps + recall-honest sort) ── */}
-        {data.fromSearch && data.query ? (
+        {!feedStateOnly && data.fromSearch && data.query ? (
           <SearchHeader
             buildSearchSortHref={buildSearchSortHref}
             connectorIcons={connectorIcons}
@@ -3947,19 +3577,6 @@ export function ExploreCanvas({
             streamDoor={data.streamDoor}
           />
         ) : null}
-
-        <FeedStatusLine
-          activitySummary={data.activitySummary}
-          exactCountIsCurrent={exactCountIsCurrent}
-          exactTotal={exactTotal}
-          fullStreamHref={fullStreamHref}
-          fullStreamScopeNote={fullStreamScopeNote}
-          truncated={data.truncated}
-          visibleCount={visibleFeed.length}
-        />
-        <p className={`rr-x-feeddesc${data.fromSearch ? "" : "is-default"}`}>{feedDescription(data.lens)}</p>
-
-        <WarningList warnings={data.warnings} />
 
         {/* The redundant feed-level read-request disclosure was REMOVED (feedback
             #3): "copy view link" (the single share affordance, in FeedControls)
@@ -3972,7 +3589,7 @@ export function ExploreCanvas({
             Only on the non-search feed when the assembler detected records that
             arrived after the current snapshot anchor. Clicking refreshes to the
             live head (drops anchor + cursor). We do NOT auto-insert rows. */}
-        {!data.fromSearch && data.newSinceAnchor !== null && data.newSinceAnchor > 0 ? (
+        {!(feedStateOnly || data.fromSearch) && data.newSinceAnchor !== null && data.newSinceAnchor > 0 ? (
           <button className="rr-x-new-pill" onClick={() => navigate({ clearCursor: true })} type="button">
             {data.newSinceAnchor.toLocaleString()} new
           </button>
@@ -3990,7 +3607,7 @@ export function ExploreCanvas({
             height-matched skeleton so the feed never jumps; when `bucketRequest`
             is null (search / relevance_bounded / no targets) we render nothing,
             exactly the prior suppression contract. */}
-        {bucketSeries ? (
+        {!feedStateOnly && bucketSeries ? (
           <OverTimeChart
             descriptorKind={data.descriptor.kind}
             onSelectRange={setRange}
@@ -4004,13 +3621,14 @@ export function ExploreCanvas({
             has not landed). A loaded-but-empty/failed band resolves to null (NOT a
             forever-spinning skeleton), and search / relevance_bounded / no-targets ⇒
             null bucketRequest ⇒ no request ⇒ render nothing (prior suppression). */}
-        {bucketBandPending ? <ChartSkeleton /> : null}
+        {!feedStateOnly && bucketBandPending ? <ChartSkeleton /> : null}
 
         <FeedBody
           chips={chips}
           chipsPresent={chips.length > 0}
           connectorIcons={connectorIcons}
           data={data}
+          demoState={demoState}
           expandedBursts={expandedBursts}
           explorePath={explorePath}
           isPending={isPending}
@@ -4049,9 +3667,10 @@ export function ExploreCanvas({
 
       {/* ── Record inspector (shared) ── */}
       <RecordInspector
-        record={data.peek}
+        record={feedStateOnly ? null : data.peek}
+        recordHref={!feedStateOnly && data.peek ? buildRecordDetailHref(recordsBasePath, data.peek) : null}
         relationships={peekRelationships}
-        streamRecordsHref={data.peek ? buildStreamRecordsHref(recordsBasePath, data.peek) : null}
+        streamRecordsHref={!feedStateOnly && data.peek ? buildStreamRecordsHref(recordsBasePath, data.peek) : null}
       />
     </div>
   );

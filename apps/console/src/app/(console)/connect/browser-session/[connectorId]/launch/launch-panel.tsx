@@ -3,12 +3,16 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
+import { buttonVariants, type ConnectorIconLike } from "@pdpp/brand-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import { ConnectHeader, ConnectWorkingMark, WentWrong } from "../../../../sources/add/connect-parts.tsx";
+import { flowPreview } from "../../../flow-preview.ts";
+
 interface LaunchState {
   error: string | null;
+  networkLost: boolean;
   starting: boolean;
 }
 
@@ -106,68 +110,61 @@ function launchErrorMessage(err: unknown): string {
 export function BrowserSessionLaunchPanel({
   connectionId,
   connectorId,
+  displayName,
   draft,
+  previewState,
+  icon,
 }: {
   connectionId: string;
   connectorId: string;
+  displayName: string;
   draft: boolean;
+  previewState?: string;
+  icon?: ConnectorIconLike | null;
 }) {
-  const [state, setState] = useState<LaunchState>({ error: null, starting: true });
+  const [state, setState] = useState<LaunchState>({ error: previewState && previewState !== "opening" ? (previewState === "busy" ? flowPreview.busyError : flowPreview.startError) : null, networkLost: previewState === "lost-contact", starting: !previewState || previewState === "opening" });
   const startedRef = useRef(false);
 
   function start() {
-    setState({ error: null, starting: true });
+    if (previewState) return;
+    setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
-        window.location.assign(href);
+        window.location.assign(`${href}${href.includes("?") ? "&" : "?"}auto_open=1`);
       })
       .catch((err) => {
-        setState({ error: launchErrorMessage(err), starting: false });
+        setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
       });
   }
 
   useEffect(() => {
-    if (startedRef.current) {
+    if (previewState || startedRef.current) {
       return;
     }
     startedRef.current = true;
-    setState({ error: null, starting: true });
+    setState({ error: null, networkLost: false, starting: true });
     startBrowserRun(connectorId, connectionId, draft)
       .then((href) => {
-        window.location.assign(href);
+        window.location.assign(`${href}${href.includes("?") ? "&" : "?"}auto_open=1`);
       })
       .catch((err) => {
-        setState({ error: launchErrorMessage(err), starting: false });
+        setState({ error: launchErrorMessage(err), networkLost: isLostTransportError(err), starting: false });
       });
-  }, [connectionId, connectorId, draft]);
+  }, [connectionId, connectorId, draft, previewState]);
 
-  return (
-    <section className="grid gap-4 rounded-xl border border-border/70 bg-card/60 p-5 shadow-sm">
-      <div className="grid gap-2">
-        <p className="pdpp-eyebrow text-muted-foreground">secure browser</p>
-        <h2 className="pdpp-title text-foreground">
-          {state.starting ? "Starting the browser session..." : "Browser session did not finish starting"}
-        </h2>
-        <p className="pdpp-body text-muted-foreground">
-          {state.starting
-            ? "Keep this page open. DataConnect is preparing the run and will open the secure browser when it is ready."
-            : state.error}
-        </p>
-      </div>
+  return <LaunchPresentation connectorId={connectorId} displayName={displayName} icon={icon} onRetry={start} state={state} />;
+}
 
-      {state.error ? (
-        <div className="flex flex-wrap gap-2">
-          <button className={buttonVariants({ size: "sm", variant: "default" })} onClick={start} type="button">
-            Try again
-          </button>
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/syncs">
-            Open Syncs
-          </Link>
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources">
-            Back to Sources
-          </Link>
-        </div>
-      ) : null}
+export function LaunchPresentation({ connectorId, displayName, icon, onRetry, state }: { connectorId: string; displayName: string; icon?: ConnectorIconLike | null; onRetry: () => void; state: LaunchState }) {
+  const title = state.starting ? `Opening ${displayName}…` : state.networkLost ? "This page lost contact with DataConnect." : `${displayName}'s sign-in page couldn't be opened.`;
+  return <>
+    <ConnectHeader connectorKey={connectorId} icon={icon} name={displayName} title={title} step="Step 1 of 2: sign in" />
+    <section className="grid max-w-xl gap-4">
+      {state.starting ? <ConnectWorkingMark label={`Opening ${displayName}`} /> : null}
+      {state.starting ? <p className="text-muted-foreground">This can take a minute. Keep this page open.</p> : null}
+      {!state.starting && !state.networkLost && /busy|queued|deferred/i.test(state.error ?? "") ? <p className="text-muted-foreground">DataConnect is signing in to another service right now. Try again in a moment.</p> : null}
+      {!state.starting ? <div className="flex flex-wrap gap-2"><button className={buttonVariants({ size: "sm", variant: "default" })} onClick={onRetry} type="button">{state.networkLost ? "Check again" : "Try again"}</button>{!state.networkLost ? <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/sources/add">Back to all services</Link> : null}</div> : null}
+      {state.error && !state.networkLost ? <WentWrong message={state.error.replaceAll(/secure browser/giu, "browser")} /> : null}
     </section>
-  );
+  </>;
 }

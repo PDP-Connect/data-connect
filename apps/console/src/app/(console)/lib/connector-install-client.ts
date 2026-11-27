@@ -28,6 +28,7 @@ import {
 import { describeErrorText } from "./describe-error.ts";
 import {
   isConnectorInstallRouteUnavailableError,
+  isRegistryUnreachableCatalogError,
   isTransientConnectorInstallCatalogError,
 } from "./connector-install-transient.ts";
 import {
@@ -75,11 +76,16 @@ function warnSkippedCatalogEntries(skipped: number): void {
   }
 }
 
-async function fetchInstallCatalog(): Promise<{ entries: ConnectorInstallCatalogEntry[]; skipped: number }> {
+async function fetchInstallCatalog(): Promise<{
+  entries: ConnectorInstallCatalogEntry[];
+  fetchedAt: string | null;
+  fresh: boolean;
+  skipped: number;
+}> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/catalog");
   const parsed = parseConnectorInstallCatalogResponse(payload);
   warnSkippedCatalogEntries(parsed.skipped);
-  return { entries: [...parsed.data], skipped: parsed.skipped };
+  return { entries: [...parsed.data], fetchedAt: parsed.fetchedAt, fresh: parsed.fresh, skipped: parsed.skipped };
 }
 
 async function fetchInstallStatus(): Promise<{ entries: ConnectorInstallStatus[]; skipped: number }> {
@@ -145,7 +151,13 @@ async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot>
     fetchInstallCatalog().catch((err: unknown) => {
       if (isTransientConnectorInstallCatalogError(err)) {
         catalogUnavailableReason = "transient_busy";
-        return { entries: [], skipped: 0 };
+        return { entries: [], fetchedAt: null, fresh: false, skipped: 0 };
+      }
+      // Offline with no kept list: the services already on this computer
+      // still list, so this leg does not decide the page.
+      if (isRegistryUnreachableCatalogError(err)) {
+        catalogUnavailableReason = "registry_unreachable";
+        return { entries: [], fetchedAt: null, fresh: false, skipped: 0 };
       }
       return Promise.reject(err);
     }),
@@ -173,6 +185,7 @@ async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot>
   const skippedEntries = catalog.skipped + status.skipped;
   return {
     catalog: catalog.entries,
+    ...(catalog.fresh ? {} : { catalogNotFresh: { fetchedAt: catalog.fetchedAt } }),
     ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}),
     localSources: localSourcesLeg.value,
     ...(skippedEntries > 0 ? { skippedEntries } : {}),

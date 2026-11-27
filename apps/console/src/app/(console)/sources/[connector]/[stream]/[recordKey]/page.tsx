@@ -1,12 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { IcTimestamp } from "@pdpp/brand-react";
-import { buildRecordPreview, classifyRecordKind, deriveDeclaredFieldTypes } from "@pdpp/display";
+import {
+  buildRecordPreview,
+  classifyRecordKind,
+  deriveDeclaredFieldTypes,
+  deriveFieldSchemaTypes,
+  humanizeFieldLabel,
+} from "@pdpp/display";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
 import { buildBlobAffordance, buildPeekFields } from "@pdpp/operator-ui/components/views/explorer-utils";
 import { declaredRolesFromCapabilities } from "@pdpp/operator-ui/explore/explore-data-assembler";
+import { exploreRecordTime } from "../../../../explore/explore-presentation.ts";
 import { notFound } from "next/navigation";
 import { RecordInspector } from "@/app/(console)/components/record-inspector.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
@@ -14,12 +20,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../../components/warnings-banner.tsx";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../../lib/owner-token.ts";
-import {
-  formatSemanticTimestamp,
-  humanizeFieldName,
-  pickSemanticTimestamp,
-  primaryTimestamp,
-} from "../../../../lib/record-timestamps.ts";
+import { pickSemanticTimestamp } from "../../../../lib/record-timestamps.ts";
 import {
   type ExpandCapability,
   type ConnectorManifest,
@@ -32,8 +33,8 @@ import {
 import {
   connectorInstanceIdForConnection,
   resolveConnectionForRecordsRoute,
-  sourceLabelForConnection,
 } from "../../../connection-route.ts";
+import { connectionDisplayName } from "../../../../lib/connection-display-name.ts";
 import {
   buildRelatedLinks,
   candidateParentStreamsForChild,
@@ -45,6 +46,9 @@ import {
   reverseChildListDedupKey,
   reverseChildListLinksFromManifest,
 } from "../../../lib/relationships.ts";
+import { manifestFieldLabels } from "../../../../lib/record-field-words.ts";
+import { sourceRecordLabel } from "../../../../lib/source-record-label.ts";
+import { recordCrumbLabel, recordTitlePreview } from "./record-title.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -77,13 +81,14 @@ export default async function RecordDetailPage({
   let connectorStreams: ManifestStream[] = [];
   let connectorIcon: ConnectorManifest["icon"] = null;
   try {
-    const connection = await resolveConnectionForRecordsRoute(routeId);
-    if (!connection) {
-      notFound();
-    }
+    const connection = await resolveRecordsConnection(routeId);
     connectionId = connection.connection_id;
     connectorId = connection.connector_id;
-    sourceLabel = sourceLabelForConnection(connection);
+    sourceLabel = connectionDisplayName(
+      connection.display_name,
+      connection.connector_display_name,
+      connection.connector_id
+    );
     const connectorInstanceId = connectorInstanceIdForConnection(connection);
     // Fetch the record, this stream's metadata (for parent → child relations),
     // and the connector manifest together. The manifest is used only to prune
@@ -118,7 +123,7 @@ export default async function RecordDetailPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Sources" />
+          <PageHeader title="Data sources" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -130,9 +135,7 @@ export default async function RecordDetailPage({
     // for both, so this surfaces as the standard not-found page. Branch on the
     // typed `ResourceServerHttpError.status` — authoritative and 410-aware —
     // rather than substring-matching the wrapped message.
-    if (err instanceof ResourceServerHttpError && (err.status === 404 || err.status === 410)) {
-      notFound();
-    }
+    notFoundIfRecordGone(err);
     throw err;
   }
 
@@ -164,7 +167,8 @@ export default async function RecordDetailPage({
       }
     : null;
   const semanticTs = pickSemanticTimestamp(tsMetadata, record.data);
-  const ts = primaryTimestamp(semanticTs, record.emitted_at);
+  const sourceUpdatedAt = semanticTs ? exploreRecordTime(semanticTs.value) : "";
+  const updatedAt = sourceUpdatedAt || exploreRecordTime(record.emitted_at);
   const inspectorRecord = {
     bodyJson: JSON.stringify(record.data, null, 2),
     connectionDisplayName: sourceLabel,
@@ -176,10 +180,10 @@ export default async function RecordDetailPage({
     readUrl: recordReadUrl,
     recordId: record.id,
     recordSizeBytes: typeof record.record_json_bytes === "number" ? record.record_json_bytes : null,
-    // Honest: the authored date only when a semantic field is actually declared;
-    // null otherwise (the inspector falls back to showing "Emitted").
+    // Honest: the authored date is shown only when a semantic field is declared;
+    // the inspector keeps its raw value under Details.
     semanticTimestamp: semanticTs
-      ? { label: humanizeFieldName(semanticTs.field), value: formatSemanticTimestamp(semanticTs.value) }
+      ? { label: semanticTs.field, value: semanticTs.value }
       : null,
     stream: streamName,
   };
@@ -192,7 +196,12 @@ export default async function RecordDetailPage({
   const declaredRoles = declaredRolesFromCapabilities(fieldCapabilities);
   const declaredTypes = deriveDeclaredFieldTypes({ field_capabilities: recordMetadata?.field_capabilities });
   const detailKind = classifyRecordKind(streamName, record.data, declaredTypes, undefined, declaredRoles).kind;
-  const detailPreview = buildRecordPreview(detailKind, record.data, declaredTypes, declaredRoles);
+  const detailPreview = recordTitlePreview(
+    buildRecordPreview(detailKind, record.data, declaredTypes, declaredRoles),
+    detailKind,
+    streamName
+  );
+  const recordCrumb = recordCrumbLabel(detailPreview, streamName);
   // The reliable, server-declared image signal (declared blob field with a usable
   // fetch_url) — the SAME signal the inspector resolves; passed to the cell so the H1
   // shows the image mark from a reliable signal, never a preview sniff.
@@ -231,10 +240,10 @@ export default async function RecordDetailPage({
     <RecordroomShellWithPalette>
       <PageHeader
         breadcrumbs={[
-          { href: "/sources", label: "Sources" },
+          { href: "/sources", label: "Data sources" },
           { href: connectorHref, label: sourceLabel },
-          { href: streamHref, label: streamName },
-          { label: recordId },
+          { href: streamHref, label: humanizeFieldLabel(streamName) },
+          ...(recordCrumb ? [{ label: recordCrumb }] : []),
         ]}
         description={
           <>
@@ -242,23 +251,28 @@ export default async function RecordDetailPage({
               <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
               <span>{sourceLabel}</span>
             </span>
-            {ts.label} <IcTimestamp className="text-foreground" value={ts.value} />
-            {ts.secondary ? (
-              <>
-                {" · "}
-                {ts.secondary.label} <IcTimestamp className="text-muted-foreground" value={ts.secondary.value} />
-              </>
-            ) : null}
+            Updated {updatedAt}
           </>
         }
         title={
-          <RecordIdentity hasImage={detailHasImage} preview={detailPreview} recordKey={recordId} variant="header" />
+          <RecordIdentity hasImage={detailHasImage} preview={detailPreview} recordKey={recordId} showGlyph={false} variant="header" />
         }
       />
 
-      <WarningsBanner warnings={record.warnings} />
+      {record.warnings.length > 0 ? (
+        <details className="mb-6 border-border/70 border-y py-3">
+          <summary className="pdpp-caption cursor-pointer font-medium text-foreground">Details</summary>
+          <div className="pt-3">
+            <WarningsBanner warnings={record.warnings} />
+          </div>
+        </details>
+      ) : null}
 
       <RecordInspector
+        fieldLabels={manifestFieldLabels(childManifestStream as Parameters<typeof manifestFieldLabels>[0])}
+        streamLabel={sourceRecordLabel(streamName, connectorStreams as never)}
+        fieldSchemaTypes={deriveFieldSchemaTypes(recordMetadata)}
+        hiddenBodyFields={semanticTs ? [semanticTs.field] : undefined}
         record={inspectorRecord}
         relationships={{
           parentBackLinks: allParentBackLinks,
@@ -269,4 +283,18 @@ export default async function RecordDetailPage({
       />
     </RecordroomShellWithPalette>
   );
+}
+
+async function resolveRecordsConnection(routeId: string) {
+  const connection = await resolveConnectionForRecordsRoute(routeId);
+  if (!connection) {
+    notFound();
+  }
+  return connection;
+}
+
+function notFoundIfRecordGone(err: unknown): void {
+  if (err instanceof ResourceServerHttpError && (err.status === 404 || err.status === 410)) {
+    notFound();
+  }
 }

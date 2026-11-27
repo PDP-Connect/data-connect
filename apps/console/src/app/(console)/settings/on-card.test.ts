@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The On card, the automatic proof re-check, route loss, Turn on again, the
 // facts list in Details and Try again.
+import { copySupport } from "./support-copy.fixture.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { mock, type TestContext } from "node:test";
@@ -15,7 +16,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -84,7 +85,7 @@ const offState = ok({ routes: [], reasons: {}, starting: false, services: [] });
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -141,6 +142,8 @@ async function withScreen<T>(
     tick: (ms: number) => Promise<void>;
     text: () => string;
     allText: () => string;
+    /** Labels of the confirmation buttons the helper pressed, in order. */
+    confirmed: string[];
   }) => Promise<T>,
   t?: TestContext
 ): Promise<T> {
@@ -161,15 +164,30 @@ async function withScreen<T>(
     return handler(call);
   }) as typeof requestReachability;
   const settle = () => act(async () => {});
+  const confirmed: string[] = [];
+  const confirmDialogs = async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await settle();
+      const dialog = container.querySelector('[role="alertdialog"]');
+      const confirm = [...(dialog?.querySelectorAll("button") ?? [])].find((node) =>
+        /^(?:Continue turning on|Turn off|Turn off and on)$/.test(node.textContent ?? "")
+      );
+      if (!confirm) return;
+      confirmed.push(confirm.textContent ?? "");
+      await act(async () => confirm.click());
+    }
+  };
   try {
     await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
     await settle();
     return await run({
       container,
       calls,
+      confirmed,
       tick: async (ms) => {
         await act(async () => t?.mock.timers.tick(ms));
         await settle();
+        await confirmDialogs();
       },
       text: () => {
         const clone = container.cloneNode(true) as Element;
@@ -182,6 +200,7 @@ async function withScreen<T>(
         assert.ok(button, `no button matching ${label}`);
         await act(async () => button.click());
         await settle();
+        await confirmDialogs();
       },
     });
   } finally {
@@ -213,6 +232,13 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     const visible = text();
     assert.ok(container.querySelector('section[aria-label="Remote access"]'), "the card is the page's Remote access section");
     assert.match(visible, /On/);
+    // Remote-access brief, decision 2: show separate status and guidance for both outcomes.
+    assert.match(visible, /Available · ChatGPT/);
+    assert.match(visible, /This address works from the internet; connect ChatGPT below\./);
+    assert.match(visible, /Available · Your phone/);
+    assert.match(visible, /Open this address on your phone\./);
+    const accessRows = [...container.querySelectorAll('[aria-label="Who can open this address"] > div')];
+    assert.equal(accessRows[0]?.querySelector("span")?.className, "text-primary");
     // The address sits in a copyable field with its own label.
     assert.match(visible, /Your address/);
     assert.ok(visible.includes("https://one.example.invalid"), visible);
@@ -230,7 +256,7 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(factLines[0] ?? "", /⏱/);
     assert.match(factLines[0] ?? "", /Turns off at .*\. Keep this computer awake and online until then\./);
     assert.match(factLines[1] ?? "", /↔/);
-    assert.ok((factLines[1] ?? "").includes("Through Tunnel service (Tunnel service) · Free"), factLines[1] ?? "no way line");
+    assert.ok((factLines[1] ?? "").includes("Through Tunnel service · Free"), factLines[1] ?? "no way line");
     assert.match(factLines[2] ?? "", /👁/);
     assert.ok((factLines[2] ?? "").includes("The tunnel relay can read the traffic."), factLines[2] ?? "no readers line");
     // The next step names the apps; the link to them sits on its right.
@@ -240,10 +266,49 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     // Details is a footer row: what was checked on the left, the toggle on the right.
     const footer = onCard.querySelector("[data-diagnostics]");
     assert.ok(footer, "the On card carries one Details");
-    assert.match(footer.textContent ?? "", /What we checked, and everything Tunnel service reports/);
-    assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
+    assert.match(footer.textContent ?? "", /Copy details for support/);
+    assert.equal(onCard.querySelector("details"), null);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
+  }, t);
+});
+
+test("private and same-Wi-Fi routes state which outcome can use the address", async (t) => {
+  for (const [reach, phoneStatus, phoneSentence] of [
+    ["tailnet", "Needs Tailscale · Your phone", "Use Tailscale on your phone with the same account."],
+    ["lan", "Same Wi-Fi · Your phone", "Your phone and this computer need the same Wi-Fi."],
+  ] as const) {
+    const privateCatalog = ok({ ...catalog, providers: [{ ...provider, reach }] });
+    const route = routeAt({ providerId: "p-tunnel" });
+    await withScreen(host({ "/catalog": privateCatalog, "/state": onState(route) }), async ({ text }) => {
+      const visible = text();
+      assert.match(visible, /Not available · ChatGPT/);
+      assert.match(visible, /ChatGPT needs an address that works from the internet\./);
+      assert.ok(visible.includes(phoneStatus), visible);
+      assert.ok(visible.includes(phoneSentence), visible);
+    }, t);
+  }
+});
+
+test("an unlisted route does not claim that the phone or ChatGPT can open it", async (t) => {
+  const route = routeAt({ providerId: "unknown-way" });
+  await withScreen(host({ "/state": onState(route) }), async ({ text }) => {
+    const visible = text();
+    assert.match(visible, /Unknown · ChatGPT/);
+    assert.match(visible, /We don't know whether ChatGPT can open this address\./);
+    assert.match(visible, /Unknown · Your phone/);
+    assert.match(visible, /We don't know whether your phone can open this address\./);
+  }, t);
+});
+
+test("a public address without a public check stays unconfirmed", async (t) => {
+  const route = routeAt({ providerId: "p-tunnel" });
+  route.verification.vantage = "this-device";
+  await withScreen(host({ "/state": onState(route) }), async ({ text }) => {
+    const visible = text();
+    assert.match(visible, /Not confirmed · ChatGPT/);
+    assert.match(visible, /Not confirmed · Your phone/);
+    assert.doesNotMatch(visible, /Available · ChatGPT|Available · Your phone/);
   }, t);
 });
 
@@ -386,12 +451,12 @@ test("checks go on while the address answers, even when a check does not move th
       return ok(route);
     },
   });
-  await withScreen(handler, async ({ calls, tick, text }) => {
+  await withScreen(handler, async ({ calls, tick, text, container }) => {
     for (let second = 0; second < 150; second += 1) await tick(1_000);
     assert.ok(checks(calls).length >= 6, `checks kept going: ${checks(calls).length} in 150 s`);
     assert.ok(checks(calls).length <= 15, `and not in a tight loop: ${checks(calls).length} in 150 s`);
-    assert.doesNotMatch(text(), /Needs your action|can't confirm/i);
-    assert.match(text(), /On/);
+    assert.equal(container.querySelector('section[aria-label="On"]'), null, "an unchanged expired proof cannot keep On");
+    assert.match(text(), /Needs your action|Turning on/);
   }, t);
 });
 
@@ -683,7 +748,7 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     },
     "/operations/op-2": ok({ operationId: "op-2", stage: "settled", kind: "stop", failureCode: null, recovery: null }),
   });
-  await withScreen(handler, async ({ calls, press, tick, text }) => {
+  await withScreen(handler, async ({ calls, confirmed, press, tick, text }) => {
     await press(/^Turn on remote access$/);
     await tick(3_000);
     assert.ok(text().includes("https://one.example.invalid"));
@@ -691,8 +756,11 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     stage = "lost";
     await tick(3_000);
     assert.match(text(), /Needs your action/);
+    const before = confirmed.length;
     await press(/^Turn on again$/);
     await tick(3_000);
+    // Remote-access brief, decision 2: the stop asks once; the turn-on on approved facts asks nothing more.
+    assert.deepEqual(confirmed.slice(before), ["Turn off and on"]);
     const approvals = calls.filter((call) => call.url === "/operations");
     assert.equal(approvals.length, 2, "Turn on again approves once, with no second click");
     assert.equal(approvals[1]!.body?.consentFactsDigest, "digest-1", "on the facts the owner already approved");
@@ -808,29 +876,12 @@ test("Turn on again waits for a click when the facts changed since the owner app
 
 // ---------- Details ----------
 
-test("Details show facts with a value, known-empty facts as None, and one count for facts the service doesn't publish", async (t) => {
-  const facts = [
-    fact("Cost", "free"),
-    fact("Account", null),
-    fact("Region", null, false),
-    fact("Speed limit", null, false),
-    fact("Uptime", null, false),
-  ];
-  await withScreen(host({ "/state": onState(routeAt({ facts })) }), async ({ allText }) => {
-    const text = allText();
-    assert.match(text, /Cost\s*free/);
-    assert.match(text, /Account\s*None/);
-    assert.match(text, /3 facts Tunnel service doesn't publish\./);
-    assert.doesNotMatch(text, /needs.provider.call|Region|Uptime|Speed limit/);
-  }, t);
-});
-
-test("one unknown fact is a singular count, and none is no line", async (t) => {
-  await withScreen(host({ "/state": onState(routeAt({ facts: [fact("Region", null, false)] })) }), async ({ allText }) => {
-    assert.match(allText(), /1 fact Tunnel service doesn't publish\./);
-  }, t);
-  await withScreen(host({ "/state": onState(routeAt({ facts: [fact("Cost", "free")] })) }), async ({ allText }) => {
-    assert.doesNotMatch(allText(), /doesn't publish/);
+test("route facts are copied for support without exposing the raw report on the card", async (t) => {
+  const facts = [fact("Cost", "free"), fact("Account", null), fact("Region", null, false)];
+  await withScreen(host({ "/state": onState(routeAt({ facts })) }), async ({ container }) => {
+    const report = await copySupport(container);
+    assert.match(report, /Cost/); assert.match(report, /free/); assert.match(report, /"count":1/);
+    assert.equal(container.querySelector("details"), null);
   }, t);
 });
 
@@ -962,7 +1013,7 @@ for (const providerId of ["localhost-run", "cloudflare-named"]) {
       const address = container.querySelector("[aria-label='Your address']");
       assert.ok(address, "the live route is mounted");
       assert.ok(
-        [...address.querySelectorAll("dd")].some((node) => node.textContent === line),
+        (await copySupport(address)).includes(line),
         "an unidentified route keeps its own condition, regardless of the selected way"
       );
     }, t);
@@ -984,8 +1035,31 @@ test("live localhost.run facts use the creating provider, not the selected way",
   }), async ({ container }) => {
     const address = container.querySelector("[aria-label='Your address']");
     assert.ok(address, "the live route is mounted");
-    const values = [...address.querySelectorAll("dd")].map((node) => node.textContent);
-    assert.ok(!values.includes(line), "known-false localhost.run condition is removed");
+    const values = await copySupport(address);
+    assert.doesNotMatch(address.textContent ?? "", new RegExp(line), "the condition stays out of the plain card");
     assert.ok(values.includes(retained), "other route facts remain visible");
   }, t);
 });
+
+
+test("an expired proof is not On while an unrelated stop prevents its recheck", async (t) => {
+  const expired = routeAt({ observedAt: T0 - 60_000, validUntil: T0 - 30_000 });
+  const other = routeAt({ id: "route-other", origin: "https://other.example.invalid" });
+  const held = deferred<Result>();
+  const handler = host({
+    "/state": ok({ routes: [other, expired], reasons: {}, starting: false, services: [], lifecycle: lifecycle("stale"), operations: [] }),
+    "/routes/route-other/stop": () => held.promise,
+    "/routes/route-1/check": () => ok(expired),
+  });
+  await withScreen(handler, async ({ container, calls, press, tick }) => {
+    await press(/^Turn off$/);
+    assert.ok(calls.some(call => call.url === "/routes/route-other/stop"));
+    await tick(3_000);
+    assert.equal(checks(calls).length, 0, "another action holds off the check");
+    const card = container.querySelector('section[aria-label="Your address"]')?.children[1];
+    assert.ok(card);
+    assert.equal(card.matches('section[aria-label="On"]'), false);
+    held.resolve(fail("service_unreachable"));
+    await act(async () => {});
+  }, t);
+})

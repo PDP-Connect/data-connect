@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ProductIdentity } from "@pdpp/brand-react"
-import { KV, KVRow } from "@pdpp/brand-react"
+import { KV, KVRow, Text } from "@pdpp/brand-react"
 import { Section } from "@pdpp/operator-ui/components/primitives"
+import Link from "next/link"
 import { OpenExternalLink } from "../components/open-external-link.tsx"
 
 const PROJECT_URL = "https://github.com/PDP-Connect/data-connect"
@@ -20,14 +21,10 @@ const SUPPORT_URL = `${PROJECT_URL}/issues`
 export function AboutSection({ identity }: { identity: ProductIdentity }) {
   return (
     <Section
-      description={`${identity.protocolName} is the protocol ${identity.name} uses to grant apps access to your data without giving up control of it.`}
       title="About"
     >
       <KV>
         <KVRow k="Product">{identity.name}</KVRow>
-        <KVRow k="Version">{identity.version}</KVRow>
-        <KVRow k="Build">{identity.build}</KVRow>
-        <KVRow k="Protocol">{identity.protocolName}</KVRow>
         <KVRow k="Copyright">© 2026 The PDP-Connect Contributors</KVRow>
       </KV>
       <nav
@@ -64,6 +61,13 @@ export function AboutSection({ identity }: { identity: ProductIdentity }) {
         >
           Support
         </OpenExternalLink>
+        <Text
+          as={Link}
+          className="pdpp-caption text-foreground underline underline-offset-4"
+          href="/privacy"
+        >
+          Privacy
+        </Text>
       </nav>
     </Section>
   )

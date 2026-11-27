@@ -11,7 +11,7 @@
    These classes are used by the React components in this directory.
    All values reference tokens from tokens.css — never hard-code colors.
 
-   Square paper. Typed protocol voice. Spent color only inside endorsements.
+   Quiet surfaces. Typed protocol voice. Spent color only inside endorsements.
    No resting shadows. No left-border accents. No gradients.
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -26,17 +26,21 @@
   line-height: 1.4;
   background: var(--card);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 .pdpp-tooltip {
   pointer-events: none;
 }
 .pdpp-popover {
   z-index: 20;
+  background: var(--popover);
+  box-shadow: var(--shadow-floating);
 }
 
 .pdpp-sheet {
   background: var(--card);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 .pdpp-sheet__head {
   display: flex;
@@ -53,8 +57,9 @@
   font-weight: 700;
 }
 .pdpp-sheet__serial {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -94,11 +99,9 @@
 /* The carbon caption that accompanies a retained object. */
 .pdpp-copyline {
   font-family: var(--font-sans);
-  font-size: 0.6rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  color: var(--primary);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
   white-space: nowrap;
 }
 
@@ -121,7 +124,7 @@
 .pdpp-scope__terms {
   align-self: center;
   font-family: var(--font-sans);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -160,11 +163,9 @@
 }
 .pdpp-table__h {
   font-family: var(--font-sans);
-  font-size: 0.625rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  color: var(--foreground-faint);
   white-space: nowrap;
 }
 .pdpp-table__row {
@@ -208,22 +209,24 @@
   white-space: nowrap;
 }
 .pdpp-data-row__id {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .pdpp-data-row__detail {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .pdpp-data-row__meta {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   text-align: right;
@@ -245,13 +248,20 @@
   justify-content: center;
   width: 26px;
   height: 26px;
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   background: var(--card);
+  border-radius: 26%;
   box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.pdpp-connector-icon {
+  border-radius: 26%;
+  /* A 1px hairline in both themes so a dark logo on a dark row keeps its edge. */
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .pdpp-monogram::before {
   content: attr(data-initials);
@@ -278,12 +288,13 @@
 .pdpp-endorse {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-weight: 500;
   letter-spacing: 0.06em;
   white-space: nowrap;
   background: color-mix(in oklab, currentColor 11%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 42%, transparent);
+  border-radius: var(--radius-control);
 }
 .pdpp-endorse--active {
   color: var(--success);
@@ -314,11 +325,12 @@
 .pdpp-tag {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
   white-space: nowrap;
   box-shadow: inset 0 0 0 1px var(--border);
+  border-radius: var(--radius-control);
 }
 
 /* ─── Buttons ─────────────────────────────────────────────────────
@@ -375,11 +387,11 @@
   font-weight: 600;
   color: var(--foreground);
   background: transparent;
-  border-color: var(--input);
+  border-color: var(--control-border, var(--input));
 }
 .pdpp-btn--ghost:hover:not(:disabled) {
   background: var(--muted);
-  border-color: var(--border-strong);
+  border-color: var(--foreground);
 }
 .pdpp-btn--destructive {
   color: var(--destructive);
@@ -397,6 +409,12 @@
   padding: 6px 12px;
   font-size: 0.75rem;
 }
+/* Round 11 (F27): an outlined button has one size, whichever size it asks for. */
+.pdpp-btn--ghost.pdpp-btn--sm {
+  min-height: 44px;
+  padding: 9px 18px;
+  font-size: 0.84rem;
+}
 .pdpp-btn--lg {
   padding: 12px 22px;
   font-size: 0.92rem;
@@ -406,11 +424,12 @@
 .pdpp-input {
   width: 100%;
   padding: 8px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   background: var(--card);
-  border: 1px solid var(--input);
+  border: 1px solid var(--control-border, var(--input));
   border-radius: var(--radius-control);
   transition: border-color var(--duration-state) var(--ease-standard);
 }
@@ -434,13 +453,13 @@
 }
 .pdpp-field__label {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--foreground);
 }
 .pdpp-field__hint {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -452,7 +471,7 @@
 
    Trigger: same geometry as IcInput (radius-control, hairline --border,
    --card bg, mono font) with a typographic › caret at right.
-   Popup: radius 0, hairline --border-strong, --card bg, menu shadow
+   Popup: shared control radius, --border-strong hairline, --card bg, menu shadow
    (the ONE elevation exception, same as dialog), mono items. */
 
 /* ── Trigger wrapper: positions the caret pseudo-element ── */
@@ -467,7 +486,8 @@
   width: 100%;
   /* Right padding leaves room for the › caret. */
   padding: 8px 30px 8px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   text-align: left;
@@ -477,7 +497,7 @@
   cursor: pointer;
   outline: none;
   background: var(--card);
-  border: 1px solid var(--input);
+  border: 1px solid var(--control-border, var(--input));
   border-radius: var(--radius-control);
   transition: border-color var(--duration-state) var(--ease-standard);
 }
@@ -502,7 +522,8 @@
   position: absolute;
   top: 50%;
   right: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.95rem;
   line-height: 1;
   color: var(--muted-foreground);
@@ -517,18 +538,17 @@
   outline: none;
 }
 
-/* ── Popup: the win — OS never styled this. radius 0, hairline, menu shadow ── */
+/* ── Popup: the win — OS never styled this. Shared control radius and menu shadow. ── */
 .pdpp-select-popup {
   min-width: var(--anchor-width, 120px);
   padding: 4px 0;
   color: var(--foreground);
   outline: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-radius: 0;
+  border-radius: var(--radius-control);
   /* Same elevation exception as IcDialog: a floating surface earns one shadow. */
-  box-shadow: 0 8px 24px -6px
-    color-mix(in oklab, var(--foreground) 28%, transparent);
+  box-shadow: var(--shadow-floating);
   /* Fade on open/close (base-ui data attrs). */
   transition: opacity var(--duration-state) var(--ease-standard);
 }
@@ -551,7 +571,8 @@
   gap: 6px;
   align-items: center;
   padding: 7px 32px 7px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8125rem;
   color: var(--foreground);
   cursor: pointer;
@@ -587,7 +608,7 @@
    relative label ("5 minutes ago") is post-mount; the absolute value
    rides along as the title tooltip. */
 .pdpp-timestamp {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: inherit;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
@@ -602,8 +623,8 @@
    A modal surface skinned over @base-ui/react's Dialog (base-ui owns
    focus-trap / dismissal / portal). A dialog floats above the page, so
    it earns the ONE resting-shadow exception the kit grants modal/menu
-   surfaces — flat document surfaces never get a shadow. Square corners,
-   a hairline --border, --card paper, mono title eyebrow. */
+   surfaces — flat document surfaces never get a shadow. Shared box corners,
+   a hairline --border, --card paper, and a sans title. */
 .pdpp-dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -628,12 +649,11 @@
   padding: 20px;
   color: var(--foreground);
   outline: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-radius: 0;
+  border-radius: var(--radius);
   /* The one shadow exception: a floating modal earns soft elevation. */
-  box-shadow: 0 16px 48px -12px
-    color-mix(in oklab, var(--foreground) 40%, transparent);
+  box-shadow: var(--shadow-floating);
   transform: translate(-50%, -50%);
   transition:
     opacity var(--duration-state) var(--ease-standard),
@@ -643,15 +663,13 @@
 .pdpp-dialog[data-ending-style] {
   opacity: 0;
 }
-/* Mono eyebrow title — protocol voice for the modal heading. */
+/* Plain sans title for the modal heading. */
 .pdpp-dialog__title {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: 0.8125rem;
+  font-weight: 500;
   color: var(--foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .pdpp-dialog__desc {
   margin: 0;
@@ -674,12 +692,12 @@
 }
 .pdpp-kv__k {
   font-family: var(--font-sans);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--muted-foreground);
 }
 .pdpp-kv__v {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   overflow-wrap: break-word;
@@ -691,6 +709,7 @@
   grid-auto-columns: 1fr;
   grid-auto-flow: column;
   border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 .pdpp-band__cell {
   display: flex;
@@ -703,18 +722,17 @@
   border-left: 0;
 }
 .pdpp-band__v {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 1.2rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
 .pdpp-band__k {
-  font-size: 0.66rem;
+  font-size: 12px;
   font-weight: 500;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 /* ─── Surface wrappers — owned by packages/pdpp-brand/styles/components.css ─────────
@@ -723,24 +741,26 @@
   /* Same recipe as [data-surface="human"] in packages/pdpp-brand/styles/components.css */
   background-color: color-mix(in oklab, var(--card) 95%, var(--human));
   border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 .pdpp-surface-protocol {
   background-color: color-mix(in oklab, var(--card) 95%, var(--primary));
   border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 /* Protocol-data compatibility classes. The shared .pdpp-* typography aliases
    live in packages/pdpp-brand/styles/typography.css. */
 .pdpp-typed {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8125rem;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1.55;
 }
 .pdpp-typed-sm {
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
@@ -780,7 +800,7 @@
   padding: 4px 0 14px;
 }
 .rr-hero--money .rr-hero__amount {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 2rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -796,7 +816,7 @@
   color: var(--foreground);
 }
 .rr-hero__wire {
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -818,7 +838,7 @@
   border: 1px solid var(--border);
 }
 .rr-rec-image__cap {
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 
@@ -832,11 +852,10 @@
   background: var(--muted);
 }
 .rr-bodytext__label {
-  font-size: 0.66rem;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 .rr-bodytext__text {
   margin: 0;
@@ -864,24 +883,20 @@
 .rr-fld:last-child {
   border-bottom: 0;
 }
-.rr-fld__id {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
 .rr-fld__label {
   font-size: 0.8rem;
   font-weight: 500;
 }
 .rr-fld__wire {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-fld__val {
   min-width: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 0.8rem;
   text-align: right;
   overflow-wrap: anywhere;
@@ -922,8 +937,9 @@
    ═══════════════════════════════════════════════════════════════════ */
 .rr-copyid {
   padding: 0;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
   cursor: pointer;
@@ -939,7 +955,7 @@
    SYNCS — the Runs route reskin (syncs-view.tsx).
    Ported from docs/design-system/ink-carbon/project/recordroom/syncs.css.
    Health-first: a failure is a CARD with an action, not a row. All
-   state color via tokens (success/warning only), radius 0.
+   state color via tokens (success/warning only), shared control radius.
    ═══════════════════════════════════════════════════════════════════ */
 .rr-sync {
   display: flex;
@@ -987,6 +1003,7 @@
 .rr-sync__empty {
   padding: 18px;
   border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 /* Recent syncs and Streams by source are peer sections of the page, so they
@@ -1017,13 +1034,14 @@
   min-width: 1.4em;
   padding: 0 5px;
   margin-left: 4px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   text-align: center;
   background: var(--muted);
   border: 1px solid var(--border);
+  border-radius: var(--radius-control);
 }
 
 /* One recent run per row. The whole row is the link, so the hover affordance
@@ -1055,8 +1073,9 @@
 .rr-recent-row__run {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1067,7 +1086,7 @@
   min-width: 0;
 }
 .rr-recent-row__duration {
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -1082,12 +1101,13 @@
    stays neutral on purpose — an unclassified run must not read as a success. */
 .rr-recent-row__chip {
   padding: 1px 7px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--muted-foreground);
   white-space: nowrap;
   background: var(--muted);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
 }
 .rr-recent-row__chip[data-outcome="ok"] {
   color: var(--success);
@@ -1111,7 +1131,7 @@
 .rr-sync__overflow {
   max-width: 78ch;
   margin: -6px 0 0;
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -1127,7 +1147,7 @@
 .rr-sync-health__note {
   max-width: 80ch;
   margin: 0;
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -1157,8 +1177,7 @@
   margin: 0;
   font-size: 0.78rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 .rr-sync__fix-section-cards {
   display: flex;
@@ -1175,6 +1194,7 @@
   padding: 16px 18px;
   background: var(--warning-tint);
   border: 1px solid var(--warning);
+  border-radius: var(--radius);
   box-shadow: inset 3px 0 0 var(--warning);
 }
 .rr-fix[data-source-work="review"] {
@@ -1182,13 +1202,10 @@
   border-color: var(--border-strong);
   box-shadow: inset 3px 0 0 var(--border-strong);
 }
-.rr-fix[data-source-work="systemIssue"] {
-  background: var(--destructive-tint);
-  border-color: var(--destructive);
-  box-shadow: inset 3px 0 0 var(--destructive);
-}
 .rr-fix[data-source-work="checking"],
-.rr-fix[data-source-work="other"] {
+.rr-fix[data-source-work="notMeasured"],
+.rr-fix[data-source-work="other"],
+.rr-fix[data-source-work="systemIssue"] {
   background: var(--muted);
   border-color: var(--border-strong);
   box-shadow: inset 3px 0 0 var(--muted-foreground);
@@ -1212,6 +1229,12 @@
   font-size: 0.95rem;
   font-weight: 700;
 }
+/* "Not measured" and system-side issues are not the person's to act on:
+   faint words, no red (red is only for removing things and real failures). */
+.rr-fix[data-source-work="notMeasured"] .rr-fix__title,
+.rr-fix[data-source-work="systemIssue"] .rr-fix__title {
+  color: var(--foreground-faint);
+}
 .rr-fix__expl {
   max-width: 70ch;
   margin: 0;
@@ -1221,8 +1244,8 @@
 }
 .rr-fix__meta {
   margin: 0;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-fix__act {
@@ -1237,28 +1260,28 @@
 }
 .rr-fix__waiting {
   padding: 3px 8px;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   white-space: nowrap;
   box-shadow: inset 0 0 0 1px var(--border-strong);
+  border-radius: var(--radius-control);
 }
 
 .rr-sync-duplicates {
   padding: 14px 16px;
   background: var(--muted);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 .rr-sync-duplicates__eyebrow {
   display: block;
   margin-bottom: 5px;
   font-family: var(--font-sans);
-  font-size: 0.62rem;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
 }
 .rr-sync-duplicates__head {
   margin: 0;
@@ -1276,7 +1299,7 @@
 .rr-sync-duplicates__link {
   display: inline-block;
   margin-top: 8px;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
 }
 /* At mobile the side-by-side (body | action) layout crushes both columns.
    Stack body then action full-width so Reconnect / wait badge sits clearly
@@ -1285,6 +1308,10 @@
   .rr-fix {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
+  }
+  /* A full-width wait note wraps instead of running past the card at 390px. */
+  .rr-fix__waiting {
+    white-space: normal;
   }
   .rr-fix__act {
     align-self: auto;
@@ -1306,6 +1333,8 @@
 }
 .rr-sync-group__head {
   display: flex;
+  /* Wrap so the schedule and last-run notes stay inside the column at 390px. */
+  flex-wrap: wrap;
   gap: 10px;
   align-items: baseline;
   padding-bottom: 2px;
@@ -1315,6 +1344,7 @@
   align-self: center;
   width: 7px;
   height: 7px;
+  border-radius: 50%;
 }
 .rr-sync-group__dot.is-ok {
   background: var(--success);
@@ -1328,10 +1358,9 @@
 }
 .rr-sync-group__status {
   font-family: var(--font-sans);
-  font-size: 0.61rem;
+  font-size: 12px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .rr-sync-group__status.is-ok {
@@ -1345,14 +1374,16 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .rr-sync-group__count {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1361,7 +1392,7 @@
   gap: 8px;
   align-items: center;
   margin-left: auto;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 .rr-sync-group__delta {
@@ -1375,7 +1406,7 @@
   white-space: nowrap;
 }
 .rr-sync-group__run-link {
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 700;
   color: var(--foreground);
   white-space: nowrap;
@@ -1415,8 +1446,9 @@
   white-space: nowrap;
 }
 .rr-sync-row__cadence {
-  font-family: var(--font-mono);
-  font-size: 0.69rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1437,8 +1469,9 @@
   color: var(--warning);
 }
 .rr-sync-row__when {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
 }
@@ -1447,13 +1480,13 @@
   color: var(--muted-foreground);
 }
 .rr-sync-row__coverage {
-  font-size: 0.69rem;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted-foreground);
 }
 .rr-sync-row__next {
-  font-family: var(--font-mono);
-  font-size: 0.69rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   white-space: nowrap;
@@ -1512,7 +1545,7 @@
   border-bottom: 1px solid var(--border);
 }
 .rr-sync-detail__browse {
-  font-size: 0.72rem;
+  font-size: 0.75rem;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1535,13 +1568,13 @@
   gap: 12px;
   padding: 30px 32px 28px;
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 .rr-stand-hero__kicker {
   font-family: var(--font-sans);
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0;
 }
 .rr-stand-hero__line {
   max-width: 22ch;
@@ -1622,6 +1655,7 @@
 .rr-bearer {
   border: 1px solid var(--border-strong);
   box-shadow: inset 3px 0 0 var(--human);
+  border-radius: var(--radius);
 }
 .rr-bearer__row {
   display: grid;
@@ -1663,7 +1697,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-sans);
-  font-size: 0.64rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1672,20 +1706,21 @@
   grid-column: 2;
   align-self: baseline;
   padding: 2px 7px;
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 600;
   color: var(--human);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   white-space: nowrap;
   box-shadow: inset 0 0 0 1px var(--human);
+  border-radius: var(--radius-control);
 }
 .rr-bearer__how {
   grid-row: 2;
   grid-column: 1 / 3;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
@@ -1777,8 +1812,9 @@
 }
 .rr-rel__meta {
   grid-column: 1;
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
 }
 /* biome-ignore lint/style/noDescendingSpecificity: the bearer-row override intentionally retains its more-specific grid placement. */
@@ -1832,8 +1868,9 @@
   line-height: 1.45;
 }
 .rr-lately__when {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1859,12 +1896,12 @@
   margin: 0;
   font-size: 0.78rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
 }
 .rr-attn__section-count {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -1899,8 +1936,9 @@
 }
 .rr-attn__why {
   grid-column: 1;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   line-height: 1.45;
   color: var(--muted-foreground);
 }
@@ -1943,6 +1981,7 @@
   padding: 16px 18px;
   border: 1px solid var(--border);
   box-shadow: inset 3px 0 0 var(--human);
+  border-radius: var(--radius);
 }
 .rr-allclear__text {
   font-size: 0.88rem;
@@ -2003,7 +2042,7 @@
 /* ═══════════════════════════════════════════════════════════════════
    EXPLORE — the reading room (dashboard/explore/explore-canvas.tsx)
    3-column reading room: facet rail | feed | record inspector.
-   Ported from the Recordroom design (explore.css), token-driven, radius 0.
+   Ported from the Recordroom design (explore.css), token-driven corners.
    ═══════════════════════════════════════════════════════════════════ */
 .rr-x {
   position: relative;
@@ -2082,10 +2121,9 @@
 .rr-x-views__label {
   margin-bottom: 4px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 .rr-x-views__item {
   display: flex;
@@ -2104,8 +2142,8 @@
   background: color-mix(in oklab, var(--primary) 8%, transparent);
 }
 .rr-x-views__count {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -2164,8 +2202,8 @@
 }
 /* Count rides ONLY on the active tab → mono (machine value), muted. */
 .rr-x-views-tab__count {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
@@ -2225,17 +2263,16 @@
   /* Give the section eyebrow real room below before the first facet row. */
   margin-bottom: 8px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   border-bottom: 1px solid var(--border-strong);
 }
-/* F4: the "N in view" magnitude badge beside a facet section eyebrow, so the
-   stream rail reads as a bounded, countable set rather than an endless wall. */
+/* F4: a loaded count beside the facet section label, so the source rail reads
+   as a bounded, countable set rather than an endless wall. */
 .rr-x-facets__count {
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
@@ -2256,7 +2293,7 @@
 }
 .rr-x-facets__note {
   padding: 0 0 4px;
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.4;
   color: var(--muted-foreground);
 }
@@ -2268,8 +2305,9 @@
   width: 100%;
   padding: 5px 8px;
   margin-bottom: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--foreground);
   background: var(--input);
   border: 1px solid var(--border);
@@ -2329,7 +2367,7 @@
 }
 .rr-x-source-group__n {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2344,8 +2382,9 @@
 .rr-x-source-group__more {
   align-self: flex-start;
   padding: 4px 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -2393,39 +2432,38 @@
   white-space: nowrap;
 }
 .rr-x-facet__name--mono {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 .rr-x-facet.is-revoked .rr-x-facet__name {
   text-decoration: line-through;
   text-decoration-thickness: 1px;
 }
 .rr-x-facet__flag {
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
 }
 .rr-x-facet__flag.is-warn {
   color: var(--warning);
 }
 .rr-x-facet__n {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
-/* "in view" qualifier — a facet/day count is the LOADED-window count, never a
-   claimed total (item #8 / review red line: day counts). The quiet qualifier makes
-   the bare number unmistakably "what's loaded", not "the total". */
+/* Loaded-window qualifier — a facet/day count is never a claimed total (item #8 /
+   review red line: day counts). The quiet qualifier makes the bare number
+   unmistakably "what's loaded", not "the total". */
 .rr-x-facet__inview {
-  font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  /* Sidebar count contrast (verifier polish): lifted from 0.75 so the "in view"
-     qualifier is legible, not a ghost. */
+  letter-spacing: 0;
+  /* Sidebar count contrast (verifier polish): lifted from 0.75 so the
+     loaded-window qualifier is legible, not a ghost. */
   opacity: 0.9;
 }
 
@@ -2480,24 +2518,25 @@
   padding: 1px 5px;
   margin-right: 7px;
   font-family: var(--font-sans);
-  font-size: 0.6rem;
+  font-size: 12px;
   vertical-align: 1px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   box-shadow: inset 0 0 0 1px var(--border-strong);
+  border-radius: var(--radius-control);
 }
 
 /* ─── Lens / link controls ─── */
 .rr-lens {
   padding: 3px 8px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
   background: none;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border, var(--border-strong));
+  border-radius: var(--radius-control);
   transition:
     color var(--duration-state) var(--ease-standard),
     border-color var(--duration-state) var(--ease-standard);
@@ -2513,7 +2552,7 @@
 .rr-link {
   padding: 0;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   cursor: pointer;
@@ -2539,8 +2578,7 @@
   font-size: 0.8125rem;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 .rr-x-controls {
   display: flex;
@@ -2578,10 +2616,9 @@
 }
 .rr-x-sort__label {
   font-family: var(--font-sans);
-  font-size: 9px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 /* (.rr-x-ranges removed — the four standalone date buttons were replaced by the
    single Date chip below; the class is no longer rendered.) */
@@ -2652,7 +2689,7 @@
   align-items: center;
   justify-content: center;
   padding: 4px 6px 4px 2px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   color: var(--primary);
   cursor: pointer;
@@ -2679,13 +2716,12 @@
   width: min(280px, calc(100vw - 32px));
   max-width: min(280px, calc(100vw - 32px));
   padding: 12px;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow: var(--shadow-floating);
+  border-radius: var(--radius);
 }
 .rr-x-datechip__presets {
   display: flex;
@@ -2728,11 +2764,10 @@
 }
 .rr-x-datechip__custom-label {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 .rr-x-datechip__fields {
   display: flex;
@@ -2747,7 +2782,7 @@
 }
 .rr-x-datechip__field-label {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 /* The literal date inputs are MACHINE values → mono (the mono-rule). */
@@ -2755,7 +2790,8 @@
   width: 100%;
   min-width: 0;
   padding: 5px 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--foreground);
   background: var(--background);
@@ -2807,7 +2843,7 @@
 }
 .rr-x-browse-all-escape {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -2829,10 +2865,9 @@
 }
 .rr-x-goto__label {
   font-family: var(--font-sans);
-  font-size: 9px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .rr-x-goto__input {
@@ -2840,7 +2875,7 @@
 }
 .rr-x-goto__feedback {
   grid-column: 2 / -1;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   color: var(--muted-foreground);
 }
@@ -2879,13 +2914,15 @@
 .rr-x-queryinput__chevron {
   flex: 0 0 auto;
   padding: 4px 7px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   line-height: 1;
   color: var(--muted-foreground);
   cursor: pointer;
   background: none;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border, var(--border-strong));
+  border-radius: var(--radius-control);
   transition:
     color var(--duration-state) var(--ease-standard),
     border-color var(--duration-state) var(--ease-standard);
@@ -2901,7 +2938,7 @@
   padding: 4px 9px;
   margin-top: 6px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--primary);
   cursor: pointer;
   background: var(--primary-tint);
@@ -2937,14 +2974,12 @@
   margin: 0;
   overflow-y: auto;
   list-style: none;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
-  border-radius: 0;
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-typeahead__item {
   display: block;
@@ -2971,7 +3006,7 @@
 }
 .rr-x-typeahead__op {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -2981,11 +3016,10 @@
   padding: 6px 8px 2px;
   /* Separate from the previous group without a visible divider. */
   margin-top: 2px;
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 .rr-x-typeahead__section:first-child {
   margin-top: 0;
@@ -2993,8 +3027,9 @@
 /* Count badge: honest record count shown next to source/stream suggestions. */
 .rr-x-typeahead__count {
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -3012,11 +3047,13 @@
   min-width: 0;
   max-width: 100%;
   padding: 4px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   border: 1px solid var(--border);
+  border-radius: var(--radius-control);
 }
 
 .rr-x-see-all:hover {
@@ -3028,8 +3065,9 @@
   position: relative;
 }
 .rr-x-help > summary {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   cursor: pointer;
   outline: none;
@@ -3057,30 +3095,28 @@
   /* D-6: clamp to viewport width so the popup never escapes on 390px screens */
   width: min(360px, calc(100vw - 32px));
   max-width: min(360px, calc(100vw - 32px));
-  /* Ink Carbon card treatment: --card bg, hairline --border-strong, menu
-     shadow, comfortable padding, radius 0 (square paper).
+  /* Ink Carbon floating surface: --popover bg, hairline --border-strong,
+     shared shadow, comfortable padding, shared box radius.
      border-top uses --primary at low opacity so the card reads visually
      anchored to its trigger (the primary-colored "operators" summary). */
   padding: 14px 16px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 2;
   color: var(--muted-foreground);
   /* D-12: allow inline code chips to wrap rather than overflow */
   overflow-wrap: break-word;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
-  border-radius: 0;
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-help__body code {
   display: inline-block;
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--foreground);
   background: var(--muted);
 }
@@ -3129,14 +3165,12 @@
   width: min(360px, calc(100vw - 32px));
   max-width: min(360px, calc(100vw - 32px));
   padding: 14px 16px;
-  background: var(--card);
+  background: var(--popover);
   border: 1px solid var(--border-strong);
-  border-top: 2px solid
+  border-top: 1px solid
     color-mix(in oklab, var(--primary) 40%, var(--border-strong));
-  border-radius: 0;
-  box-shadow:
-    0 4px 16px -2px color-mix(in oklab, var(--foreground) 18%, transparent),
-    0 1px 4px -1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-floating);
 }
 .rr-x-options__group {
   display: flex;
@@ -3145,11 +3179,10 @@
 }
 .rr-x-options__label {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 /* ─── Chip bar ─── */
@@ -3169,7 +3202,7 @@
   align-items: center;
   overflow: hidden;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   /* keep the legacy color on the container for border/background tinting */
   color: var(--primary);
   user-select: none;
@@ -3179,7 +3212,7 @@
 /* Property zone — muted label so the value leads */
 .rr-x-chip__property {
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--primary);
   background: var(--primary-tint);
@@ -3188,7 +3221,7 @@
 /* Operator zone — secondary; click toggles is ↔ is not when canNegate */
 .rr-x-chip__op {
   padding: 3px 5px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--muted-foreground);
   background: color-mix(in oklab, var(--primary-tint) 60%, var(--background));
@@ -3218,7 +3251,7 @@
 /* Value zone */
 .rr-x-chip__value {
   padding: 3px 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--primary);
   background: var(--primary-tint);
@@ -3248,7 +3281,7 @@
 .rr-x-clearall {
   padding: 4px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   cursor: pointer;
   background: none;
@@ -3272,7 +3305,7 @@
   gap: 4px;
   align-items: center;
   font-family: var(--font-sans);
-  font-size: 9.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -3311,14 +3344,48 @@
   margin-top: 14px;
   background: var(--muted);
   border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 .rr-x-raw > summary {
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
+}
+.rr-x-inspector-details > summary {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  letter-spacing: 0;
+}
+.rr-x-inspector-details__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+.rr-x-inspector-details__fields {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.rr-x-inspector-details__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.rr-x-inspector-details__row dt,
+.rr-x-inspector-details__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.rr-x-inspector-details__body > p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
 }
 .rr-x-raw > summary:focus-visible {
   outline: 2px solid var(--ring);
@@ -3329,7 +3396,7 @@
   margin: 0;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--foreground);
   word-break: break-word;
@@ -3338,7 +3405,7 @@
 }
 .rr-x-stream-all {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--foreground);
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -3350,7 +3417,7 @@
 /* ─── Count + lens-description line ─── */
 .rr-x-pulse__note {
   font-family: var(--font-sans);
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-scope-note {
@@ -3359,7 +3426,7 @@
 .rr-x-feeddesc {
   max-width: 70ch;
   margin: 0;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
@@ -3378,7 +3445,7 @@
    Records-per-time-bucket of the SAME filtered set the feed shows (TRUE totals
    from the server group_by_time aggregate). Brushable into the ONE canonical
    (since,until). Calm single band, never a hero panel: two text colors, the one
-   accent for the selection, tabular-nums on the count, sharp Ink-Carbon corners.
+   accent for the selection, tabular-nums on the count, shared Ink Carbon corners.
    See over-time-chart.tsx + explore-over-time-chart.ts. */
 .rr-x-chart {
   display: flex;
@@ -3394,17 +3461,17 @@
 }
 .rr-x-chart__caption {
   /* Prose caption (sans) — names the set kind + bucket unit; never a machine wall. */
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-chart__total {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
 .rr-x-chart__total-num {
-  /* The count is a machine value → tabular-nums, mono. */
-  font-family: var(--font-mono);
+  /* The count is a machine value → tabular figures in the sans face. */
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
   color: var(--foreground);
 }
@@ -3467,8 +3534,9 @@
   opacity: 0.32;
 }
 .rr-x-chart__readout {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   letter-spacing: 0.04em;
 }
@@ -3501,8 +3569,9 @@
 /* The machine code is secondary — present for engineers/reviewers but not shouting.
    Ink Carbon: state colors live only inside .pdpp-endorse; free-floating neutral. */
 .rr-x-warn__line {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   font-weight: 400;
   color: var(--muted-foreground);
   text-transform: lowercase;
@@ -3540,24 +3609,22 @@
      structure (read via weight + caps + tracking), recessive in COLOR so it never
      out-shouts the actual records below it. An earlier polish made this 12.5px full-
      foreground non-caps — that out-competed the row titles; reverted to the gate. */
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .rr-x-day__n {
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
 }
-/* "in view" qualifier on the day header — the count is records LOADED for the day,
-   not a true day total (review red line: a bare number reads like a total). */
+/* Day header qualifier — the count is records LOADED for the day, not a true
+   day total (review red line: a bare number reads like a total). */
 .rr-x-day__inview {
-  font-size: 8.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  letter-spacing: 0;
   opacity: 0.7;
 }
 
@@ -3594,10 +3661,9 @@
   color: var(--foreground);
 }
 .rr-x-upcoming__hint {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 .rr-x-upcoming__body {
   display: flex;
@@ -3633,9 +3699,9 @@
   display: flex;
   flex-direction: column;
 }
-/* Summary line: "<count> <connection / stream> in view". LEFT-aligned and muted
-   so it reads as a quiet group label above its preview rows, never centered (the
-   F6 center-alignment defect) and never competing with the rows themselves. */
+/* Kind/source summary line. LEFT-aligned and muted so it reads as a quiet group
+   label above its preview rows, never centered (the F6 center-alignment defect)
+   and never competing with the rows themselves. */
 .rr-x-burst__head {
   display: flex;
   flex-wrap: wrap;
@@ -3675,10 +3741,9 @@
    stream) within the day, not a claimed complete day-total — so it reads "N in
    view", never implying completeness the client can't prove. */
 .rr-x-burst__inview {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 /* ─── Record rows ───
@@ -3787,8 +3852,8 @@ a.rr-x-row {
   /* A timestamp is a machine value → MONO (the SLVP type rule: mono only for
      ids/timestamps/amounts/operators). It was sans; this aligns it with the
      verified target type scale. tabular-nums keeps the times column-aligned. */
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.45;
   color: var(--muted-foreground);
@@ -3797,10 +3862,9 @@ a.rr-x-row {
 .rr-x-row__action {
   flex: 0 0 auto;
   padding: 1px 6px;
-  font-size: 9px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   white-space: nowrap;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
@@ -3929,8 +3993,9 @@ a.rr-x-row {
    muted, never the visual lead. */
 .rr-x-identity__key {
   flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -3963,7 +4028,8 @@ a.rr-x-row {
 .rr-x-identity--header .rr-x-identity__primary.is-derived {
   overflow: visible;
   text-overflow: clip;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   font-weight: 400;
   color: var(--muted-foreground);
@@ -3987,7 +4053,7 @@ a.rr-x-row {
 }
 .rr-x-kv__label {
   min-width: 0;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
@@ -4072,8 +4138,9 @@ a.rr-x-row {
   align-items: center;
   align-self: flex-start;
   padding: 5px 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   cursor: pointer;
@@ -4340,8 +4407,9 @@ a.rr-x-row {
   align-self: center;
   padding: 2px 9px;
   margin-left: 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -4372,11 +4440,11 @@ a.rr-x-row {
 .rr-x-role {
   flex-shrink: 0;
   padding: 1px 5px;
-  font-size: 9px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   box-shadow: inset 0 0 0 1px var(--border-strong);
+  border-radius: var(--radius-control);
 }
 
 /* ─── Empty state ─── */
@@ -4388,10 +4456,9 @@ a.rr-x-row {
 }
 .rr-x-empty__eyebrow {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 .rr-x-empty__line {
   max-width: 50ch;
@@ -4419,11 +4486,10 @@ a.rr-x-row {
   border-bottom: 1px solid var(--border);
 }
 .rr-x-empty__preview-k {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .rr-x-empty__preview-v {
@@ -4466,11 +4532,10 @@ a.rr-x-row {
 .rr-x-zero__label {
   margin-top: 4px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0;
   opacity: 0.7;
 }
 .rr-x-zero__list {
@@ -4518,13 +4583,14 @@ a.rr-x-row {
   color: var(--foreground);
 }
 .rr-x-zero__action-desc {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 .rr-x-zero__action-count {
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   opacity: 0.8;
 }
@@ -4545,6 +4611,10 @@ a.rr-x-row {
   position: static;
   background: color-mix(in oklab, var(--card) 60%, transparent);
 }
+/* In the narrow Explore inspector a long value must not squeeze its label to zero width. */
+.rr-x .rr-inspector .rr-fld {
+  grid-template-columns: minmax(5rem, 40%) minmax(0, 1fr);
+}
 .rr-x-foldnote {
   margin: 10px 0 0;
   font-size: 12px;
@@ -4563,10 +4633,9 @@ a.rr-x-row {
 }
 .rr-ex-lens__label {
   font-family: var(--font-sans);
-  font-size: 9px;
+  font-size: 12px;
   color: var(--muted-foreground);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 .rr-ex-lens__row {
   display: flex;
@@ -4584,17 +4653,18 @@ a.rr-x-row {
   border-top: 1px solid var(--border);
 }
 .rr-ex-keep__label {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
 }
 .rr-ex-keep__fields {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
 .rr-ex-keep__note {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 
@@ -4624,8 +4694,9 @@ a.rr-x-row {
   color: var(--primary);
 }
 .rr-x-rel__k {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -4669,8 +4740,9 @@ a.rr-x-row {
   border: 1px solid var(--border);
 }
 .rr-x-blob__open {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--primary);
   text-decoration: none;
   text-underline-offset: 2px;
@@ -4681,8 +4753,9 @@ a.rr-x-row {
 .rr-x-blob--off {
   align-self: flex-start;
   padding: 2px 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
   color: var(--muted-foreground);
   letter-spacing: 0.04em;
   border-radius: 999px;
@@ -4690,21 +4763,17 @@ a.rr-x-row {
 }
 
 /* ─── Responsive ─── */
-/* P0-3: bump breakpoint slightly to keep 3-col layout visible longer */
+/* Keep the selected inspector beside the feed through laptop widths. */
 @media (max-width: 1280px) {
-  /* ≤1280: the inspector drops out of the column track and STACKS below the feed
-     (grid-column: 2; position: static) — for BOTH states. The `.has-selection`
-     selector must be matched explicitly here: `.rr-x.has-selection` (specificity
-     0,2,0) outranks a bare `.rr-x` (0,1,0) regardless of source order, so without
-     this a selected record would keep forcing the 3-col 420px track below 1280. */
-  .rr-x,
-  .rr-x.has-selection {
+  .rr-x {
     grid-template-columns: 200px minmax(0, 1fr);
+    gap: 20px;
   }
-  /* biome-ignore lint/style/noDescendingSpecificity: the no-selection rule remains more specific while this breakpoint changes placement. */
+  .rr-x.has-selection {
+    grid-template-columns: 200px minmax(0, 1fr) 360px;
+  }
   .rr-x .rr-inspector {
-    position: static;
-    grid-column: 2;
+    grid-column: 3;
   }
 }
 @media (max-width: 980px) {
@@ -4712,10 +4781,30 @@ a.rr-x-row {
   .rr-x.has-selection {
     grid-template-columns: minmax(0, 1fr);
   }
-  /* biome-ignore lint/style/noDescendingSpecificity: the no-selection rule remains more specific while this breakpoint changes placement. */
   .rr-x .rr-inspector {
     grid-column: 1;
   }
+}
+/* 981-1200px: three columns leave the feed under 300px. With a record open, the
+   data source list moves above the feed and the inspector keeps the right column. */
+@media (min-width: 981px) and (max-width: 1200px) {
+  .rr-x.has-selection {
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+  .rr-x.has-selection > .rr-x-rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .rr-x.has-selection > .rr-x-main {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .rr-x.has-selection > .rr-inspector {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+@media (max-width: 980px) {
   /* Tablet: lay the two facet groups side-by-side so the rail stays a short
      band above the feed instead of a tall single column. */
   .rr-x-rail__body {
@@ -4739,7 +4828,7 @@ a.rr-x-row {
      phone the owner scrolls the feed, so a document-top bar is scrolled ABOVE THE
      FOLD and a filter/search/load-more gives no visible feedback. Pinning it
      `position: fixed; top: 0` anchors it to the top of the VISIBLE viewport, so the
-     "server is re-rendering" signal is always in view no matter how far down the
+     "server is re-rendering" signal remains visible no matter how far down the
      feed the owner has scrolled (the wireframe's "⟳ loading… (sticky TOP)").
      `fixed` takes it out of flow → ZERO layout shift when it appears/disappears,
      and it dims NOTHING — already-rendered records stay fully readable and
@@ -4807,8 +4896,8 @@ a.rr-x-row {
     border-color: var(--border-strong);
   }
   .rr-x-rail__toggle-n {
-    font-family: var(--font-mono);
-    font-size: 10px;
+    font-family: var(--font-sans);
+    font-size: 12px;
     font-variant-numeric: tabular-nums;
     color: var(--primary);
   }
@@ -4821,8 +4910,9 @@ a.rr-x-row {
     margin-top: 4px;
     background: var(--card);
     border: 1px solid var(--border);
-    border-top: 2px solid
+    border-top: 1px solid
       color-mix(in oklab, var(--primary) 40%, var(--border-strong));
+    border-radius: var(--radius);
   }
   /* F4: on mobile the whole rail is already a scrollable <details> disclosure, so
      the desktop inner-scroll cap on the stream list would nest a second scroll
@@ -4924,7 +5014,6 @@ a.rr-x-row {
      record detail route, so the inspector is never populated here. This
      eliminates dead scroll depth from both the empty placeholder and any
      previously-selected filled inspector. */
-  /* biome-ignore lint/style/noDescendingSpecificity: the no-selection rule remains more specific while mobile hides every inspector. */
   .rr-x .rr-inspector {
     display: none;
   }
@@ -5046,11 +5135,11 @@ a.rr-x-row {
    label text. No JS toggle needed. */
 @media (max-width: 640px) {
   .rr-x-compiled__label {
-    font-size: 8.5px;
+    font-size: 12px;
   }
   /* Operators help text — also secondary on mobile */
   .rr-x-help > summary {
-    font-size: 9px;
+    font-size: 12px;
   }
 }
 
@@ -5240,8 +5329,9 @@ a.rr-x-row {
   white-space: nowrap;
 }
 .rr-s-item__kind {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
   opacity: 0.75;
 }
 .rr-s-item__flag {
@@ -5251,17 +5341,5 @@ a.rr-x-row {
   margin-top: 1px;
 }
 .rr-s-dot {
-  font-size: 10px;
-}
-
-/* B-3 — narrow-screen eyebrow relief */
-@media (max-width: 390px) {
-  .pdpp-eyebrow,
-  .rr-x-facets__label,
-  .pdpp-table__h,
-  .pdpp-copyline,
-  .rr-stand-hero__kicker {
-    font-size: 0.63rem;
-    letter-spacing: 0.07em;
-  }
+  font-size: 12px;
 }

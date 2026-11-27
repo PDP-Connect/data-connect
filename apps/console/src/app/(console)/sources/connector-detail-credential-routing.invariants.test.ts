@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const DETAIL_PAGE = `${HERE}[connector]/page.tsx`;
+const DETAIL_PAGE = `${HERE}[connector]/source-page.tsx`;
 
 const STATIC_SECRET_CAPTURE_RESOLVED_ONCE =
   /const staticSecretCapture = staticSecretCredentialCaptureFromManifest\(manifest\)/;
@@ -31,7 +31,7 @@ const SESSION_BOUND_PRECEDES_STATIC_SECRET =
 // drives the button). A browser-session connection never offers a
 // credential-capture button as its repair.
 const STATIC_SECRET_UPDATE_CAPABILITY_GATED_ON_BINDING_AND_SURFACE =
-  /hasStaticSecretCredentialUpdate=\{\s*storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"\s*\}/;
+  /hasStaticSecretCredentialUpdate=\{\s*credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"\s*\}/;
 const STATIC_SECRET_UPDATE_LINK_VISIBLE = /storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate/;
 // The rendered `reauth` action routes by the server-owned owner-action surface,
 // not by connector-manifest capability alone.
@@ -59,33 +59,26 @@ test("detail-page repair routing is connection-binding-first (session repair bef
   assert.match(src, STATIC_SECRET_UPDATE_LINK_VISIBLE);
 });
 
-// A recovered historical-archive row (paused, never revoked) surfaces ONE
-// reconnect notice, reusing the SAME `credentialUpdateHref` repair routes
-// resolve above — no separate resume button/action (a recovered row typically
-// has no surviving credential; resuming without one would just fail on the
-// next run).
-// The gate is now expressed in two steps — a general `paused` lifecycle flag
-// (shared with the plain Resume action, which every OTHER paused row gets)
-// narrowed by the archive binding kind. The invariant is unchanged: an
-// archive row is gated on being paused, non-revoked, AND historical_archive.
+// A recovered historical-archive row (paused, never revoked) is repaired by
+// updating its sign-in, not by a bare resume: a recovered row typically has no
+// surviving credential, so resuming without one would just fail on the next
+// run (the server resumes a paused archive when it saves the sign-in). The
+// decision now lives in the one status-words file; the page renders the action
+// kind it is given. A bare resume is chosen for an archive only when the page
+// knows there is no sign-in to update (`signInRepairAvailable === false`).
+const STATUS_WORDS = `${HERE}../lib/source-status-words.ts`;
 const PAUSED_GATE = /const paused = !revoked && overview\.connectionStatus === "paused"/;
-const PAUSED_HISTORICAL_ARCHIVE_GATE =
-  /const pausedHistoricalArchive = paused && sourceBindingKind === "historical_archive"/;
-const PAUSED_HISTORICAL_ARCHIVE_SECTION_RENDERED =
-  /pausedHistoricalArchive \? <PausedHistoricalArchiveSection credentialUpdateHref=\{credentialUpdateHref\} \/> : null/;
-const PAUSED_HISTORICAL_ARCHIVE_SECTION_HAS_NO_RESUME_ACTION =
-  /function PausedHistoricalArchiveSection\(\{ credentialUpdateHref \}: \{ credentialUpdateHref: string \| null \}\) \{[\s\S]{0,400}href=\{credentialUpdateHref\}/;
-// A paused row that is NOT a recovered archive gets the plain Resume action;
-// an actively-collecting row gets Pause. Both post to their owner-session
-// server action, so the console's pause/resume cycle is closed.
-const PAUSED_RESUMABLE_GATE = /const pausedResumable = paused && !pausedHistoricalArchive/;
-const PAUSED_CONNECTION_SECTION_RENDERED =
-  /pausedResumable \? <PausedConnectionSection connectionId=\{renameSelector\} \/> : null/;
-const PAUSED_CONNECTION_SECTION_POSTS_RESUME =
-  /function PausedConnectionSection\([\s\S]{0,600}<form action=\{resumeConnectionAction\}>/;
-const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused\) && overview\.connectionStatus === "active"/;
+const PAUSED_ARCHIVE_REPAIRS_SIGN_IN_FIRST =
+  /source\.source_binding_kind === "historical_archive"\s*\?\s*signInRepairAvailable === false\s*\?\s*action\("resume", [^)]*\)\s*:\s*action\("repair_credential", [^)]*\)\s*:\s*action\("resume", /;
+const REPAIR_CREDENTIAL_ACTION_LINKS_TO_REPAIR =
+  /statusAction\?\.kind === "repair_credential" && credentialUpdateHref\) \{\s*return <Link [^>]*href=\{credentialUpdateHref\}/;
+// Every OTHER paused row - notably one the owner paused deliberately - gets a
+// real Resume action that posts to its owner-session server action, and an
+// actively-collecting row gets Pause, so the pause/resume cycle is closed.
+const RESUME_ACTION_POSTS_RESUME = /statusAction\?\.kind === "resume"\) \{\s*return <ResumeConnectionButton/;
+const PAUSABLE_GATE = /const pausable = !\(revoked \|\| paused \|\| archived \|\| oneTime \|\| connectorNotInstalled\) && Boolean\(model.schedule\) && model\.schedule\?\.effective_mode !== "manual" && overview\.connectionStatus === "active"/;
 const PAUSE_CONNECTION_SECTION_POSTS_PAUSE =
-  /function PauseConnectionSection\([\s\S]{0,600}<form action=\{pauseConnectionAction\}>/;
+  /function PauseConnectionSection\([\s\S]{0,600}<form[^>]*action=\{pauseConnectionAction\}>/;
 
 test("detail-page rendered reauth routes and labels by the server-owned action surface", async () => {
   const src = await readFile(DETAIL_PAGE, "utf8");
@@ -97,25 +90,17 @@ test("detail-page rendered reauth routes and labels by the server-owned action s
   assert.match(src, REAUTH_FALLBACK_FOR_OLD_PAYLOADS);
 });
 
-test("a recovered historical-archive row surfaces one reconnect notice, no separate resume action", async () => {
-  const src = await readFile(DETAIL_PAGE, "utf8");
-  assert.match(src, PAUSED_GATE);
-  assert.match(src, PAUSED_HISTORICAL_ARCHIVE_GATE);
-  assert.match(src, PAUSED_HISTORICAL_ARCHIVE_SECTION_RENDERED);
-  // Still the archive journey's ONLY action: repair the credential. A bare
-  // resume would flip the row to active and then fail on the next run,
-  // because a recovered archive typically carries no surviving credential.
-  assert.match(src, PAUSED_HISTORICAL_ARCHIVE_SECTION_HAS_NO_RESUME_ACTION);
+test("a recovered historical-archive row repairs its sign-in before any bare resume", async () => {
+  const page = await readFile(DETAIL_PAGE, "utf8");
+  const words = await readFile(STATUS_WORDS, "utf8");
+  assert.match(page, PAUSED_GATE);
+  assert.match(words, PAUSED_ARCHIVE_REPAIRS_SIGN_IN_FIRST);
+  assert.match(page, REPAIR_CREDENTIAL_ACTION_LINKS_TO_REPAIR);
 });
 
-// The complement of the archive case: every OTHER paused row — notably one
-// the owner paused deliberately — must get a real Resume action, or pausing
-// from the console would be a one-way door.
 test("a non-archive paused row surfaces a real resume action, and an active row a pause action", async () => {
   const src = await readFile(DETAIL_PAGE, "utf8");
-  assert.match(src, PAUSED_RESUMABLE_GATE);
-  assert.match(src, PAUSED_CONNECTION_SECTION_RENDERED);
-  assert.match(src, PAUSED_CONNECTION_SECTION_POSTS_RESUME);
+  assert.match(src, RESUME_ACTION_POSTS_RESUME);
   assert.match(src, PAUSABLE_GATE);
   assert.match(src, PAUSE_CONNECTION_SECTION_POSTS_PAUSE);
 });

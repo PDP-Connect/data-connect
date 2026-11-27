@@ -139,7 +139,7 @@ export function proofLine(
   const { status, vantage, observedAt } = route.verification;
   const age = relativeAge(observedAt, now);
   const when = age ? `checked ${age}` : "check time unknown";
-  const where = vantage === "public" ? "Works from the internet" : "Works on this computer";
+  const where = vantage === "public" ? "Works from the internet" : "Works on your devices";
   const verified = route.presentation ? route.presentation.label === "Verified" : status === "verified";
   const base = verified ? `${where} · ${when}` : `Not confirmed yet · ${when}`;
   return `${options.synthetic ? "Test data: " : ""}${base}`;

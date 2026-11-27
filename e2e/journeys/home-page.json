@@ -1,0 +1,13 @@
+{
+  "id": "home-page",
+  "name": "Home page",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "home-overview",
+      "open": "/",
+      "readyText": "Nothing needs you",
+      "assertText": "Nothing needs you"
+    }
+  ]
+}

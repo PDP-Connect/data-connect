@@ -1,0 +1,15 @@
+{
+  "id": "connect-an-mcp-client",
+  "name": "Connect an app setup",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/connect",
+      "readyText": "Connect an app",
+      "assertText": "Connect an app",
+      "desktopReadyHeading": "Connect an app",
+      "phoneReadyHeading": "Connect an app"
+    }
+  ]
+}

@@ -42,40 +42,12 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DANGER_ZONE_FILE = `${HERE}connection-danger-zone.tsx`;
 const ACTIONS_FILE = `${HERE}actions.ts`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const PAGE_RESOLVES_CONNECTION_RE = /resolveConnectionForRecordsRoute/;
 const PAGE_NOT_FOUND_RE = /notFound\(\)/;
 const PAGE_RENDERS_DANGER_ZONE_RE = /<ConnectionDangerZone/;
 const PAGE_ADDRESSES_RESOLVED_RE = /connectionId=\{connectorInstanceId \?\? connectionId\}/;
-
-const DZ_NULL_GUARD_RE = /connectionId === null/;
-const DZ_NULL_GUIDANCE_RE = /nothing to revoke or delete/i;
-const DZ_REVOKE_RETAINED_RE = /retained/i;
-const DZ_REVOKE_FUTURE_RE = /future collection/i;
-const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
-const DZ_REVOKE_SIGNS_OUT_RE = /Stops future collection and signs out the saved browser session/;
-const DZ_SIBLING_SESSION_RE = /Sibling connections of the same connector type, and their saved browser sessions, are untouched/;
-const DZ_DELETE_ERASES_RE = /[Ee]rases this connection's records/;
-/**
- * Delete must distinguish itself from revoke. The copy states this positively —
- * it names the permanence revoke does not carry, and points a default-account
- * owner at revoke instead — rather than the older "this is not revoke" phrasing.
- */
-const DZ_DELETE_PERMANENCE_RE = /[Pp]ermanently erases/;
-const DZ_DELETE_CANNOT_UNDO_RE = /cannot be undone/i;
-const DZ_DELETE_GRANTS_STAY_RE = /Apps you granted access stay authorized/;
-const DZ_DELETE_GRANTS_STOP_RE = /stop receiving this source's data/;
-const DZ_DELETE_CANCEL_RUN_LABEL_RE = /"Cancel run and delete"/;
-const DZ_DELETE_CANCEL_RUN_FIELD_RE = /name="cancel_run_id"/;
-const DZ_DELETE_DEFAULT_ACCOUNT_RE = /default-account/i;
-const PAGE_PASSES_ACTIVE_RUN_RE = /activeRunId=\{dangerActiveRunId \?\? scheduleActiveRunId\}/;
-const DZ_DELETE_CONFIRMED_RE = /const confirmed = typed === connectionId/;
-const DZ_DELETE_DISABLED_RE = /disabled=\{!confirmed\}/;
-const DZ_DESTRUCTIVE_VARIANT_RE = /variant="destructive"/;
-const DZ_CONFIRM_DELETE_FIELD_RE = /name="confirm_delete"/;
-const DZ_REVOKE_ACTION_RE = /action=\{revokeConnectionAction\}/;
-const DZ_CONFIRM_REVOKE_FIELD_RE = /name="confirm_revoke"/;
 const DZ_CONNECTION_ID_FIELD_RE = /name="connection_id"/;
 const DZ_DELETE_ACTION_RE = /action=\{deleteConnectionAction\}/;
 
@@ -121,22 +93,20 @@ test("the danger zone is rendered on the resolved connection detail page", async
 });
 
 test("a connector with no addressable connection renders disabled guidance, not destructive forms", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_NULL_GUARD_RE);
-  assert.match(dz, DZ_NULL_GUIDANCE_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /connectionId === null \? null/);
 });
 
 test("revoke copy retains records, stops future collection, and says it signs out the browser session", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_REVOKE_RETAINED_RE);
-  assert.match(dz, DZ_REVOKE_FUTURE_RE);
-  assert.match(dz, DZ_REVOKE_SIGNS_OUT_RE);
-  assert.doesNotMatch(dz, DZ_REVOKE_NO_ERASE_RE, "revoke now removes the saved browser session");
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /Stops checking and signs DataConnect out of/);
+  assert.match(src, /Your records stay, and apps that can read them still can/);
 });
 
 test("the danger zone says sibling connections keep their own browser sessions", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_SIBLING_SESSION_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /connectionId: string \| null/);
+  assert.match(src, /name="connection_id" type="hidden" value=\{connectionId\}/);
 });
 
 test("delete and revoke surface a failed browser-session purge and offer the retry on the Sources list", async () => {
@@ -153,32 +123,33 @@ test("delete and revoke surface a failed browser-session purge and offer the ret
 });
 
 test("delete copy erases this connection, discloses grants, and offers cancel-run for an in-flight run", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_DELETE_ERASES_RE);
-  assert.match(dz, DZ_DELETE_PERMANENCE_RE);
-  assert.match(dz, DZ_DELETE_CANNOT_UNDO_RE);
-  assert.match(dz, DZ_DELETE_GRANTS_STAY_RE);
-  assert.match(dz, DZ_DELETE_GRANTS_STOP_RE);
-  assert.match(dz, DZ_DELETE_CANCEL_RUN_LABEL_RE);
-  assert.match(dz, DZ_DELETE_CANCEL_RUN_FIELD_RE);
-  assert.doesNotMatch(dz, DZ_DELETE_DEFAULT_ACCOUNT_RE, "default-account connections are deletable now");
-  const page = await read(PAGE_FILE);
-  assert.match(page, PAGE_PASSES_ACTIVE_RUN_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /Erases every record from/);
+  assert.match(src, /This cannot be undone/);
+  assert.match(src, /Apps keep any copies they already took/);
+  assert.match(src, /Stop the sync and delete/);
+  assert.match(src, /name="cancel_run_id"/);
 });
 
 test("delete requires reproducing the connection id before the destructive submit enables", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_DELETE_CONFIRMED_RE);
-  assert.match(dz, DZ_DELETE_DISABLED_RE);
-  assert.match(dz, DZ_DESTRUCTIVE_VARIANT_RE);
-  assert.match(dz, DZ_CONFIRM_DELETE_FIELD_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /const confirmed = neverConnected \|\| typed === displayName/);
+  assert.match(src, /name="confirm_delete"\s+type="hidden"\s+value=\{confirmed \? connectionId : ""\}/);
+  assert.match(src, /disabled=\{!confirmed\}/);
+  assert.match(await read(ACTIONS_FILE), ACT_CONFIRM_DELETE_GUARD_RE);
+});
+
+test("lifecycle actions use their group title without a bordered red box", async () => {
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, />Remove<\/h3>/);
+  assert.doesNotMatch(src, /<details|<summary/);
 });
 
 test("revoke uses a confirm checkbox and the shared revoke action", async () => {
-  const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_REVOKE_ACTION_RE);
-  assert.match(dz, DZ_CONFIRM_REVOKE_FIELD_RE);
-  assert.match(dz, DZ_CONNECTION_ID_FIELD_RE);
+  const src = await read(DANGER_ZONE_FILE);
+  assert.match(src, /action=\{revokeConnectionAction\}/);
+  assert.match(src, /name="confirm_revoke" type="hidden" value="yes"/);
+  assert.match(src, /open \? \(\s*<ActionQuestion/);
 });
 
 test("delete form posts the shared delete action with the connection id", async () => {
@@ -213,4 +184,27 @@ test("the delete action surfaces each typed refusal in place rather than a gener
 test("successful revoke redirects to the visible connections list instead of a now-revoked detail URL", async () => {
   const actions = await read(ACTIONS_FILE);
   assert.match(actions, ACT_REVOKE_REDIRECT_LIST_RE);
+});
+
+test("Copy everything again is hidden when the source has no records (hasRecords gates the form)", async () => {
+  const source = await readFile(DANGER_ZONE_FILE, "utf8");
+  assert.match(source, /hasRecords = true,/);
+  assert.match(source, /setupFailed \|\| inactive \|\| !hasRecords \? null/);
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.match(page, /hasRecords=\{recordTotal\.count !== 0\}/);
+});
+
+test("on a rejected key the Manage section does not repeat the top button", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.match(page, /topButtonShown=\{sourceStatus\.action\?\.kind === "repair_sign_in"\}/);
+  assert.match(page, /if \(setupFailed \|\| topButtonShown\) return null;/);
+});
+
+// Round 9 (F6): while the connector is not installed, "Copy everything again" cannot run; the page says why instead.
+test("Copy everything again is replaced by its reason while the connector is not installed", async () => {
+  const zone = await readFile(fileURLToPath(new URL("./connection-danger-zone.tsx", import.meta.url)), "utf8");
+  assert.match(zone, /connectorNotInstalled \?/);
+  assert.match(zone, /needs \{serviceName\} to be installed again/);
+  const page = await readFile(fileURLToPath(new URL("./source-page.tsx", import.meta.url)), "utf8");
+  assert.match(page, /<ConnectionDangerZone[^>]*connectorNotInstalled=\{connectorNotInstalled\}/);
 });

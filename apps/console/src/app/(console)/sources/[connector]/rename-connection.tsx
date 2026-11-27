@@ -9,6 +9,7 @@ import { Pencil } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { type RenameConnectionResult, renameConnectionAction } from "./actions.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 interface Props {
   /**
@@ -23,8 +24,6 @@ interface Props {
    * starts from a blank field rather than re-typing a meaningless default.
    */
   currentLabel: string;
-  /** The connection's current display name, for the icon's aria-label. */
-  displayName: string;
   /** Connector type name, shown as placeholder guidance (e.g. "Gmail"). */
   typeName: string;
 }
@@ -36,7 +35,7 @@ interface Props {
  * toast and refresh in place without a redirect. The stable selector stays
  * `connection_id`; the label is a human-facing alias only.
  */
-export function RenameConnection({ connectionId, currentLabel, displayName, typeName }: Props) {
+export function RenameConnection({ connectionId, currentLabel, typeName }: Props) {
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(currentLabel);
@@ -91,18 +90,23 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
 
   if (!editing) {
     return (
-      <span className="inline-flex flex-col items-start gap-1">
-        <button
-          aria-label={`Rename ${displayName}`}
-          className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground/70 transition-colors before:absolute before:inset-[-10px] before:content-[''] hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+        <p className="pdpp-body">Change the name shown in DataConnect.</p>
+        <div className="shrink-0">
+        <IcButton
+          aria-label="Rename"
+          className="relative before:absolute before:inset-[-10px] before:content-['']"
           onClick={() => setEditing(true)}
-          title="Rename"
+          size="sm"
           type="button"
+          variant="ghost"
         >
-          <Pencil aria-hidden className="h-3.5 w-3.5" />
-        </button>
+          <Pencil aria-hidden className="size-4" />
+          Rename
+        </IcButton>
         {toast ? <Toast message={toast.message} tone={toast.tone} /> : null}
-      </span>
+        </div>
+      </div>
     );
   }
 
@@ -116,7 +120,7 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
         }}
       >
         <IcInput
-          aria-label="Connection label"
+          aria-label="Data source name"
           className="w-56"
           disabled={isPending}
           maxLength={200}
@@ -130,7 +134,7 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
           ref={inputRef}
           value={value}
         />
-        <IcButton disabled={isPending || !value.trim()} size="sm" type="submit">
+        <IcButton disabled={isPending || !value.trim()} size="sm" type="submit" variant="ghost">
           {isPending ? "Saving…" : "Save"}
         </IcButton>
         <IcButton disabled={isPending} onClick={cancel} size="sm" type="button" variant="ghost">
@@ -144,12 +148,19 @@ export function RenameConnection({ connectionId, currentLabel, displayName, type
 
 function Toast({ message, tone }: { message: string; tone: "info" | "error" }) {
   return (
-    <span
-      aria-live="polite"
+    <div
       className={tone === "error" ? "pdpp-caption text-destructive" : "pdpp-caption text-muted-foreground"}
-      role="status"
+      role={tone === "error" ? "alert" : "status"}
     >
-      {message}
-    </span>
+      {tone === "error" ? (
+        <>
+          {ACTION_ERROR_COPY}
+          <details className="mt-1 text-muted-foreground">
+            <summary className="cursor-pointer">What went wrong</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{message}</code>
+          </details>
+        </>
+      ) : message}
+    </div>
   );
 }

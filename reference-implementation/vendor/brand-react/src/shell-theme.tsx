@@ -3,7 +3,10 @@
 
 "use client";
 
-import { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
+import { Moon, Sun } from "lucide-react";
+// The vendor tests compile JSX with the classic runtime, which needs React in scope.
+// biome-ignore lint/correctness/noUnusedImports: classic-runtime JSX in the vendor tests reads React from scope.
+import React, { createContext, type ReactNode, useContext, useSyncExternalStore } from "react";
 
 type Theme = "dark" | "light";
 const ThemeSetterContext = createContext<((next: Theme) => void) | null>(null);
@@ -33,6 +36,7 @@ export function ShellThemeProvider({ children, setTheme }: { children: ReactNode
 export function ShellThemeButton() {
   const theme = useSyncExternalStore<Theme | null>(subscribeToPaintedTheme, paintedTheme, serverTheme);
   const setTheme = useContext(ThemeSetterContext);
+  const label = theme ? `Switch to ${theme === "dark" ? "light" : "dark"} theme` : "Switch theme";
 
   function toggle() {
     const target = paintedTheme() === "dark" ? "light" : "dark";
@@ -47,12 +51,13 @@ export function ShellThemeButton() {
 
   return (
     <button
+      aria-label={label}
       className="rr-side__theme rr-chrome-btn"
       onClick={toggle}
-      title={theme ? `Switch to ${theme === "dark" ? "light" : "dark"}` : undefined}
+      title={label}
       type="button"
     >
-      {theme === null ? "Theme" : theme === "dark" ? "Dark" : "Light"}
+      {theme === "dark" ? <Sun aria-hidden="true" size={16} /> : <Moon aria-hidden="true" size={16} />}
     </button>
   );
 }

@@ -93,8 +93,14 @@ const UNDERSCORE_RE = /_/g;
 const REF_WORD_RE = /\bref\b/;
 const FIRST_WORD_RE = /^\w/;
 
+const JOINED_ID_RE = /^(app|steam|user|clan|game|order|item|account|post|team)id$/;
+
 /** Prettify a snake_case wire key into a human label. */
 export function prettify(key: string): string {
+  const joined = JOINED_ID_RE.exec(key);
+  if (joined) {
+    return `${joined[1]?.replace(FIRST_WORD_RE, (c) => c.toUpperCase())} id`;
+  }
   return key
     .replace(UNDERSCORE_RE, " ")
     .replace(REF_WORD_RE, "")

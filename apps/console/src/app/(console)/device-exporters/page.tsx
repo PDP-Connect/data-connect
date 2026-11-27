@@ -1,173 +1,157 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { IcButton } from "@pdpp/brand-react";
-import { formatConnectorKeyForDisplay } from "@pdpp/display";
-import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
-import { EmptyState } from "@pdpp/operator-ui/components/empty-state";
-import { Callout, DataList, MetaPill, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
-import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
-import { ServerUnreachable } from "../components/server-unreachable.tsx";
-import { formatSourceOutboxState } from "../lib/connection-evidence.ts";
-import { loadBrowserBoundVerdict } from "../lib/load-browser-connect-support.ts";
-import { loadLocalCollectorTemplates } from "../lib/load-local-collector-support.ts";
+import { SupportCopy } from "../components/support-copy.tsx";
+import { formatConnectorKeyForDisplay } from "@pdpp/display"
+import { Callout, PageHeader } from "@pdpp/operator-ui/components/primitives"
+import Link from "next/link"
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx"
+import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
+import { loadBrowserBoundVerdict } from "../lib/load-browser-connect-support.ts"
+import { loadLocalCollectorTemplates } from "../lib/load-local-collector-support.ts"
 import {
-  type LocalCollectorTemplate,
   localCollectorEnrollmentKeys,
   resolveLocalCollectorEnrollmentKey,
-} from "../lib/local-collector-support.ts";
-import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
+} from "../lib/local-collector-support.ts"
 import {
-  type DeviceExporter,
-  type DeviceSourceInstance,
-  listDeviceExporterDiagnostics,
-  listDeviceExporterSourceInstances,
-} from "../lib/ref-client.ts";
-import { listConnectorManifests } from "../lib/rs-client.ts";
-import { revokeDeviceExporterAction } from "./actions.ts";
-import { EnrollmentForm } from "./enrollment-form.tsx";
-import { ReenrollButton } from "./reenroll-button.tsx";
-import {
-  classifyHeartbeatFreshness,
-  formatIngestCount,
-  formatLastError,
-  formatRelativeTime,
-  sourceLabel,
-  summarizeIngestCounts,
-} from "./render.ts";
+  getReferencePublicOrigin,
+  ReferenceServerUnreachableError,
+} from "../lib/owner-token.ts"
+import { listDeviceExporterDiagnostics } from "../lib/ref-client.ts"
+import { listConnectorManifests } from "../lib/rs-client.ts"
+import { CollectorSetup } from "./collector-setup.tsx"
+import { CollectorList } from "./collector-list.tsx"
+import { buildCollectorPractice } from "./collector-model.ts"
+import { settingsTrail } from "../settings/settings-trail.ts"
 
 export const metadata = {
-  title: "Local device exporters",
-};
-
-const DEVICE_STATUS_VOCABULARY = {
-  active: { label: "active", tone: "success" },
-  fresh: { label: "fresh", tone: "success" },
-  never: { label: "no heartbeat", tone: "warning" },
-  revoked: { label: "revoked", tone: "danger" },
-  stale: { label: "stale", tone: "warning" },
-} as const;
+  title: "Collectors on your devices",
+}
 
 export default async function DeviceExportersPage({
   searchParams,
 }: {
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
 }) {
   // The Sources "Add source" catalog deep-links here only for packaged local
   // collectors (`?connector=claude-code` / `codex`). Browser-bound
   // connectors are deliberately not prefilled here: their old monorepo proof
   // command is not an owner-usable setup path.
-  const resolvedSearchParams = searchParams ? await searchParams : undefined;
-  const connectorParam = resolvedSearchParams?.connector;
-  const requestedConnector = Array.isArray(connectorParam) ? connectorParam[0] : connectorParam;
+  const resolvedSearchParams = searchParams ? await searchParams : undefined
+  const demo = resolvedSearchParams?.demo
+  const practice =
+    process.env.NODE_ENV !== "production" && typeof demo === "string"
+      ? buildCollectorPractice(demo)
+      : null
+  if (practice)
+    return (
+      <RecordroomShellWithPalette>
+        <main className="mx-auto grid max-w-5xl gap-6">
+          <CollectorHeading />
+          <CollectorList devices={practice} practice />
+          <CollectorSetup collectorConnectorIds={["sample"]} referenceBaseUrl="https://maple.example.test" practice />
+        </main>
+      </RecordroomShellWithPalette>
+    )
+  const connectorParam = resolvedSearchParams?.connector
+  const requestedConnector = Array.isArray(connectorParam)
+    ? connectorParam[0]
+    : connectorParam
   // The server's connector templates say which connectors can enroll a local
   // collector; the console holds no key list of its own.
-  const collectorTemplates = (await loadLocalCollectorTemplates()) ?? [];
-  const collectorConnectorIds = localCollectorEnrollmentKeys(collectorTemplates);
-  const defaultConnectorId = resolveLocalCollectorEnrollmentKey(collectorTemplates, requestedConnector) ?? undefined;
+  const collectorTemplates = (await loadLocalCollectorTemplates()) ?? []
+  const collectorConnectorIds = localCollectorEnrollmentKeys(collectorTemplates)
+  const defaultConnectorId =
+    resolveLocalCollectorEnrollmentKey(
+      collectorTemplates,
+      requestedConnector
+    ) ?? undefined
+  // A deep-link to an unsupported *browser-bound* connector is an intentful
+  // request this page cannot generate commands for yet. Only the server's
+  // verdict that the connector is browser-bound shows the notice; without a
+  // verdict the page shows no notice and keeps its diagnostics. The verdict is
+  // read inside the try below so a failed read cannot reject the page.
+
   // When the owner arrives here from the "Add source" picker (a validated
   // `?connector=` deep-link), frame the page as finishing the connector they
   // chose — a "Sources / Add <Connector>" breadcrumb — instead of the bare
   // diagnostics-console header. The breadcrumb is only shown for a connector key
   // already validated against the supported sets, so it never names an arbitrary
   // value. The bare page (no deep-link) keeps its existing diagnostics framing.
+
   const addConnectionBreadcrumbs = defaultConnectorId
-    ? [{ label: "Sources", href: "/sources" }, { label: `Add ${formatConnectorKeyForDisplay(defaultConnectorId)}` }]
-    : undefined;
-
+    ? [
+        { label: "Sources", href: "/sources" },
+        { label: `Add ${formatConnectorKeyForDisplay(defaultConnectorId)}` },
+      ]
+    : undefined
+  let loaded
   try {
-    // A deep-link to an unsupported *browser-bound* connector is an intentful
-    // request this page cannot generate commands for yet. Only the server's
-    // verdict that the connector is browser-bound shows the notice; without a
-    // verdict the page shows no notice and keeps its diagnostics.
-    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests, requestIsBrowserBound] =
-      await Promise.all([
-        listDeviceExporterDiagnostics(),
-        listDeviceExporterSourceInstances(),
-        getReferencePublicOrigin(),
-        listConnectorManifests().catch(() => []),
-        !defaultConnectorId && requestedConnector ? loadBrowserBoundVerdict(requestedConnector) : null,
-      ]);
-    const browserBoundRequest = requestIsBrowserBound === true ? requestedConnector : undefined;
-    const connectorIcons = Object.fromEntries(
-      connectorManifests.flatMap((manifest) => [
-        [manifest.connector_id, manifest.icon] as const,
-        ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-      ])
-    );
-    const devices = diagnostics.data;
-
-    return (
-      <RecordroomShellWithPalette>
-        <PageHeader
-          breadcrumbs={addConnectionBreadcrumbs}
-          count={`${devices.length}`}
-          description="Connect a supported local collector to send data from the machine where it is stored. The collector controls when it runs; this server manages enrollment, data receipt, and connection health."
-          meta={
-            <>
-              <MetaPill label="surface" tone="protocol" value="reference-experimental" />
-              <MetaPill label="source instances" value={sourceInstances.data.length} />
-            </>
-          }
-          title="Local device exporters"
-        />
-
-        {browserBoundRequest ? (
-          <BrowserBoundEnrollmentNotice connectorIcon={connectorIcons[browserBoundRequest]} connectorId={browserBoundRequest} />
-        ) : null}
-
-        <Section>
-          <EnrollmentForm
-            collectorConnectorIds={collectorConnectorIds}
-            defaultConnectorId={defaultConnectorId}
-            referenceBaseUrl={referenceBaseUrl}
-          />
-        </Section>
-
-        <Section
-          description="This server shows enrolled devices, received data, and connection health. The device controls when collection runs."
-          title="Enrolled devices"
-        >
-          {devices.length === 0 ? (
-            <EmptyState
-              hint="Create an enrollment code and run the local collector on the device that has the data. This list updates after the device sends its first heartbeat."
-              title="No local device exporters enrolled"
-            />
-          ) : (
-            <DataList ariaLabel="Local device exporters">
-              {devices.map((device) => (
-                <DeviceRow
-                  collectorTemplates={collectorTemplates}
-                  connectorIcons={connectorIcons}
-                  device={device}
-                  key={device.device_id}
-                  referenceBaseUrl={referenceBaseUrl}
-                />
-              ))}
-            </DataList>
-          )}
-        </Section>
-      </RecordroomShellWithPalette>
-    );
+    loaded = await Promise.all([
+      listDeviceExporterDiagnostics(),
+      getReferencePublicOrigin(),
+      listConnectorManifests().catch(() => []),
+      !defaultConnectorId && requestedConnector ? loadBrowserBoundVerdict(requestedConnector) : null,
+    ])
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <ServerUnreachable />
+          <PageHeader breadcrumbs={settingsTrail("Collectors on your devices")} title="Collectors on your devices" />
+          <p>
+            This could not be loaded.{" "}
+            <Link href="/device-exporters">Try again</Link>.
+          </p>
+          <SupportCopy details={err.message} />
         </RecordroomShellWithPalette>
-      );
+      )
     }
-    throw err;
+    throw err
   }
+  const [diagnostics, referenceBaseUrl, connectorManifests, requestIsBrowserBound] = loaded
+  const browserBoundRequest = requestIsBrowserBound === true ? requestedConnector : undefined;
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap(manifest => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key
+        ? ([[manifest.connector_key, manifest.icon]] as const)
+        : []),
+    ])
+  )
+  const devices = diagnostics.data
+
+  return (
+    <RecordroomShellWithPalette>
+      <CollectorHeading breadcrumbs={addConnectionBreadcrumbs} />
+
+      {browserBoundRequest ? (
+        <BrowserBoundEnrollmentNotice
+          connectorIcon={connectorIcons[browserBoundRequest]}
+          connectorId={browserBoundRequest}
+        />
+      ) : null}
+
+      <CollectorSetup
+        collectorConnectorIds={collectorConnectorIds}
+        defaultConnectorId={defaultConnectorId}
+        referenceBaseUrl={referenceBaseUrl}
+      />
+      <CollectorList devices={devices} collectorConnectorIds={collectorConnectorIds} referenceBaseUrl={referenceBaseUrl} />
+    </RecordroomShellWithPalette>
+  )
 }
 
 /**
  * Honest notice for a browser-bound connector deep-link that has no generated
  * console setup path yet.
  */
-function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null; connectorId: string }) {
+function BrowserBoundEnrollmentNotice({
+  connectorIcon,
+  connectorId,
+}: {
+  connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null
+  connectorId: string
+}) {
   return (
     <Callout
       className="mb-4"
@@ -175,218 +159,45 @@ function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connecto
       surface="human"
       title={
         <span className="inline-flex items-center gap-2">
-          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
+          <ConnectorMark
+            connectorId={connectorId}
+            icon={connectorIcon}
+            name={formatConnectorKeyForDisplay(connectorId)}
+          />
           Browser setup not available yet
         </span>
       }
     >
       <p className="pdpp-caption text-muted-foreground">
-        Existing data remains available. Adding another account is not available yet. See available setup paths on the{" "}
-        <Link className="underline underline-offset-2 hover:text-foreground" href="/sources/add">
-          Add source
+        Existing data remains available. Adding another account is not available
+        yet. See available setup paths on the{" "}
+        <Link
+          className="underline underline-offset-2 hover:text-foreground"
+          href="/sources/add"
+        >
+          Add a data source
         </Link>{" "}
         page.
       </p>
     </Callout>
-  );
+  )
 }
 
-function DeviceRow({
-  collectorTemplates,
-  connectorIcons,
-  device,
-  referenceBaseUrl,
+function CollectorHeading({
+  breadcrumbs,
 }: {
-  collectorTemplates: readonly LocalCollectorTemplate[];
-  connectorIcons: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
-  device: DeviceExporter;
-  referenceBaseUrl: string;
+  breadcrumbs?: { label: string; href?: string }[]
 }) {
-  const heartbeat = classifyHeartbeatFreshness(device.last_heartbeat_at, device.stale);
-  const counts = summarizeIngestCounts(device);
-  const visibleStatus = device.status === "revoked" ? "revoked" : heartbeat;
-
-  // Re-enroll affordance: shown when the device is stale or revoked and has at
-  // least one source instance for a packaged local-collector connector. Uses the
-  // first qualifying source instance to pre-fill the enrollment form — the owner
-  // can always edit the fields in the main EnrollmentForm above if they need
-  // a different binding name.
-  const reenrollSource =
-    device.status === "revoked" || heartbeat === "stale" || heartbeat === "never"
-      ? device.source_instances.find((s) => resolveLocalCollectorEnrollmentKey(collectorTemplates, s.connector_id) !== null)
-      : null;
-
   return (
-    <li className="py-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-        <div className="min-w-0 flex-1">
-          {/* P1: device name on its own line, badges below with consistent gap */}
-          <h2 className="pdpp-title text-foreground">{device.display_name || device.device_id}</h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <StatusBadge status={device.status} vocabulary={DEVICE_STATUS_VOCABULARY} />
-            <StatusBadge status={visibleStatus} vocabulary={DEVICE_STATUS_VOCABULARY} />
-          </div>
-          <div className="pdpp-caption mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
-            <span className="inline-flex min-w-0 items-center gap-1">
-              device
-              <code className="max-w-[20rem] truncate font-mono text-foreground/80">{device.device_id}</code>
-              <CopyButton ariaLabel={`Copy ${device.device_id}`} value={device.device_id} />
-            </span>
-            <span>created {formatRelativeTime(device.created_at)}</span>
-            <span>heartbeat {formatRelativeTime(device.last_heartbeat_at)}</span>
-            <span>last ingest {formatRelativeTime(device.last_ingest_at)}</span>
-            {device.agent_version ? (
-              <span className="inline-flex min-w-0 items-center gap-1">
-                build
-                <code className="max-w-[14rem] truncate font-mono text-foreground/80">{device.agent_version}</code>
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-2">
-            {/* An incomplete sum renders "unknown" in a neutral tone rather
-                than a number. The rejected tone in particular must follow the
-                PROVEN count: a device whose counts were omitted has not been
-                shown to have zero rejects, and a neutral pill reading "0" said
-                exactly that. `success` on accepted is likewise withheld —
-                there is nothing to celebrate about a total we cannot read. */}
-            <MetaPill
-              label="accepted"
-              tone={counts.accepted.complete ? "success" : "neutral"}
-              value={formatIngestCount(counts.accepted)}
-            />
-            <MetaPill
-              label="rejected"
-              tone={counts.rejected.complete && counts.rejected.total > 0 ? "danger" : "neutral"}
-              value={formatIngestCount(counts.rejected)}
-            />
-            {counts.accepted.complete && counts.rejected.complete ? null : (
-              <span className="pdpp-caption self-center text-muted-foreground">
-                some source instances reported no counts
-              </span>
-            )}
-            <MetaPill label="sources" value={device.source_instances.length} />
-            <MetaPill
-              label="last error"
-              tone={formatLastError(device.last_error) === "none" ? "neutral" : "danger"}
-              value={formatLastError(device.last_error)}
-            />
-          </div>
-        </div>
-
-        <div className="shrink-0">
-          {device.status === "active" ? (
-            <form action={revokeDeviceExporterAction}>
-              <input name="device_id" type="hidden" value={device.device_id} />
-              <IcButton size="sm" type="submit" variant="destructive">
-                Revoke
-              </IcButton>
-            </form>
-          ) : (
-            <span className="pdpp-caption text-muted-foreground">Revoked {formatRelativeTime(device.revoked_at)}</span>
-          )}
-        </div>
-      </div>
-
-      {reenrollSource ? (
-        <ReenrollButton
-          connectorId={reenrollSource.connector_id}
-          localBindingName={reenrollSource.local_binding_name}
-          referenceBaseUrl={referenceBaseUrl}
-        />
-      ) : null}
-
-      {device.source_instances.length > 0 ? (
-        /* P1: single column on mobile, 2-col on lg only — cards need breathing room */
-        <ul className="mt-4 grid gap-3 lg:grid-cols-2">
-          {device.source_instances.map((source) => (
-            <SourceInstanceCard connectorIcon={connectorIcons[source.connector_id]} key={source.source_instance_id} source={source} />
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
-}
-
-function SourceInstanceCard({
-  connectorIcon,
-  source,
-}: {
-  connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null;
-  source: DeviceSourceInstance;
-}) {
-  const lastError = formatLastError(source.last_error);
-  const outbox = formatSourceOutboxState(source);
-  // `source_instance_id` identifies the device-side binding row; the durable
-  // server-side connection identity is `connector_instance_id`. Surface both
-  // honestly: the records dashboard, schedules, and ref API key on
-  // connector_instance_id, so that is the value worth copying into URLs.
-  const recordsHref = source.connector_instance_id
-    ? `/sources/${encodeURIComponent(source.connector_instance_id)}`
-    : null;
-
-  return (
-    <li className="rounded-md border border-border/70 bg-muted/20 p-3">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="pdpp-body truncate font-medium text-foreground">
-            <ConnectorMark spacing="after" connectorId={source.connector_id} icon={connectorIcon} name={sourceLabel(source)} />
-            {sourceLabel(source)}
-          </h3>
-          <p className="pdpp-caption truncate text-muted-foreground">
-            {formatConnectorKeyForDisplay(source.connector_id)} / {source.local_binding_name}
-          </p>
-          {source.connector_instance_id ? (
-            <p className="pdpp-caption mt-1 flex min-w-0 items-center gap-1 text-muted-foreground">
-              connection
-              <code className="truncate font-mono text-foreground/80">{source.connector_instance_id}</code>
-              <CopyButton ariaLabel={`Copy ${source.connector_instance_id}`} value={source.connector_instance_id} />
-              {recordsHref ? (
-                <Link className="ml-1 underline-offset-2 hover:underline" href={recordsHref}>
-                  Records →
-                </Link>
-              ) : null}
-            </p>
-          ) : (
-            <p
-              className="pdpp-caption mt-1 flex min-w-0 items-center gap-1 text-muted-foreground"
-              data-testid="source-no-connector-instance"
-              title="This device source has not yet been bound to a connector instance on the server."
-            >
-              connection: not bound yet
-            </p>
-          )}
-          <p className="pdpp-caption flex min-w-0 items-center gap-1 text-muted-foreground">
-            source
-            <code className="truncate font-mono text-foreground/80">{source.source_instance_id}</code>
-            <CopyButton ariaLabel={`Copy ${source.source_instance_id}`} value={source.source_instance_id} />
-          </p>
-        </div>
-        <span className="pdpp-caption text-muted-foreground">ingest {formatRelativeTime(source.last_ingest_at)}</span>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {/* Matches `sources/[connector]/connection-diagnostics.tsx`, which
-            already renders an omitted count as "unknown" rather than 0. Both
-            fields are optional in the published contract, so `?? 0` here was
-            presenting an absent count as a measured one. */}
-        <MetaPill
-          label="accepted"
-          tone={typeof source.accepted_record_count === "number" ? "success" : "neutral"}
-          value={
-            typeof source.accepted_record_count === "number" ? source.accepted_record_count.toLocaleString() : "unknown"
-          }
-        />
-        <MetaPill
-          label="rejected"
-          tone={
-            typeof source.rejected_record_count === "number" && source.rejected_record_count > 0 ? "danger" : "neutral"
-          }
-          value={
-            typeof source.rejected_record_count === "number" ? source.rejected_record_count.toLocaleString() : "unknown"
-          }
-        />
-        <MetaPill label="last error" tone={lastError === "none" ? "neutral" : "danger"} value={lastError} />
-        <MetaPill label="outbox" tone={outbox.tone} value={outbox.label.replace("Outbox · ", "")} />
-      </div>
-    </li>
-  );
+    <PageHeader
+      breadcrumbs={breadcrumbs ?? settingsTrail("Collectors on your devices")}
+      title={
+        <>
+          <span className="mb-1 flex w-fit items-center rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground" data-testid="experimental-badge">Experimental</span>
+          Collectors on your devices
+        </>
+      }
+      description="A collector runs on a phone or computer that holds data DataConnect can’t reach from here, and sends it to DataConnect. Setting one up needs a terminal on that device."
+    />
+  )
 }

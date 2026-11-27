@@ -200,7 +200,7 @@ export async function POST(request: Request, { params }: { params: Promise<Route
   if (!browserConnect.browserBound) {
     return redirectToPublicPath(
       request,
-      `/sources/add?error=${encodeURIComponent("This source does not use browser setup.")}`,
+      "/sources/add?error=not-browser",
     );
   }
 
@@ -223,7 +223,7 @@ export async function POST(request: Request, { params }: { params: Promise<Route
     if (!(browserConnect.canAddAccount || existingConnectionId)) {
       return redirectToPublicPath(
         request,
-        `/sources/add?error=${encodeURIComponent("This browser-backed source is not available for self-service setup.")}`,
+        "/sources/add?error=not-self-service",
       );
     }
 

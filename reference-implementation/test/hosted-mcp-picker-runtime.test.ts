@@ -563,3 +563,22 @@ test("picker runtime: the parent checkbox selects and clears its own source, wit
     await p.close();
   }
 });
+
+test("picker runtime: Enter in a field never answers the request", async () => {
+  // Allow is the form's first submit button, so a browser's implicit submit
+  // on Enter would approve. Only a click on Allow or Don't allow may decide.
+  const p = await openPickerDom();
+  try {
+    const KeyboardEvent = (p.dom.window as unknown as {
+      KeyboardEvent: new (type: string, init: { key: string; bubbles: boolean; cancelable: boolean }) => MinimalDomEvent;
+    }).KeyboardEvent;
+    const dateInput = mustExist(p.form.querySelector('input[type="date"]'), "a date field must render");
+    const sourceBox = mustExist(p.sourceBoxes()[0], "a source checkbox must render");
+    for (const field of [dateInput, sourceBox]) {
+      const notPrevented = field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+      assert.equal(notPrevented, false, "Enter in a field is held back from the form's default button");
+    }
+  } finally {
+    await p.close();
+  }
+});

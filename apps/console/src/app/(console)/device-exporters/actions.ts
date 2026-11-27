@@ -59,7 +59,7 @@ export async function createEnrollmentCodeAction(
 
 export async function revokeDeviceExporterAction(formData: FormData): Promise<void> {
   const deviceId = String(formData.get("device_id") ?? "").trim();
-  if (!deviceId) {
+  if (!deviceId || formData.get("confirm_revoke") !== "yes") {
     return;
   }
   await revokeDeviceExporter(deviceId);

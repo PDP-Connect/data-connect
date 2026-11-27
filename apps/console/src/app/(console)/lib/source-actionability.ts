@@ -21,6 +21,7 @@ import {
   projectSourceVerdict,
   TERMINAL_SETUP_DISPOSITION_COPY,
 } from "@pdpp/display";
+import { connectionDisplayName } from "./connection-display-name.ts";
 import { deriveFailureSummary, type FailureSummary } from "./connection-evidence.ts";
 import type { FormattedNextAction } from "./next-action.ts";
 import type {
@@ -170,8 +171,6 @@ export function sourceAttentionHeadline(groups: SourceWorkGroups): SourceAttenti
   return { needsYou: groups.needsOwner.length };
 }
 
-const UNDERSCORE_RE = /_/g;
-
 const UI_GROUP_BY_SERVER_GROUP: Readonly<Record<RefSourceWorkGroup, SourceWorkGroupId | null>> = {
   needs_owner: "needsOwner",
   not_measured: "notMeasured",
@@ -196,20 +195,12 @@ const SERVER_GROUP_STATUS_LABEL: Readonly<Record<Exclude<RefSourceWorkGroup, "no
   working: "is working",
 };
 
-function readableConnectorId(connectorId: string): string {
-  return connectorId.replace(UNDERSCORE_RE, " ").trim() || connectorId;
-}
-
 function connectionRouteId(connector: RefConnectorSummary): string {
   return connector.connector_instance_id ?? connector.connection_id;
 }
 
 function connectorLabel(connector: RefConnectorSummary): string {
-  return (
-    connector.display_name.trim() ||
-    connector.connector_display_name?.trim() ||
-    readableConnectorId(connector.connector_id)
-  );
+  return connectionDisplayName(connector.display_name, connector.connector_display_name, connector.connector_id);
 }
 
 /**
@@ -481,7 +472,7 @@ export function sourceWorkItemFromConnector(connector: RefConnectorSummary): Sou
     return itemFromConnector(connector, "review", {
       actionLabel: RESUME_PAUSED_CTA_LABEL,
       statusLabel: "is paused",
-      what: "Collection is paused. Your existing records, schedule, and sign-in are kept — resume to start collecting again.",
+      what: "Collection is paused. Your existing records and schedule are kept — resume to start collecting again.",
     });
   }
 

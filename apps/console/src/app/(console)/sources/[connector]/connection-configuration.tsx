@@ -3,11 +3,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatRelative } from "@pdpp/display";
 import { IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState, useTransition } from "react";
 import { confirmConfigAction, proposeConfigAction } from "./config-actions.ts";
+import { summarizeSettingList } from "./setting-value-summary.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 import {
   buildCurrentSettings,
   buildDraft,
@@ -19,12 +22,11 @@ import {
   type ConfigRevisionWire,
   type ConfigValue,
   type ConnectionConfigWire,
-  confirmationReason,
-  describeAgentActor,
   describeCommit,
   diffDraft,
   findPendingProposal,
   optionLabel,
+  configChoiceLabel,
   parseStaleConflict,
   reasonError,
   resolveAvailability,
@@ -65,43 +67,7 @@ type Step = "edit" | "review" | "summary";
 export function ConnectionConfiguration({ config, connectionId, connectorId, revisions }: Props) {
   const availability = useMemo(() => resolveAvailability(config), [config]);
 
-  if (availability.kind === "not_declared") {
-    return (
-      <ConfigShell>
-        <p className="pdpp-caption text-muted-foreground">{availability.message}</p>
-        <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={null} />
-      </ConfigShell>
-    );
-  }
-
-  if (availability.kind === "unreadable") {
-    return (
-      <ConfigShell>
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{availability.message}</span>
-        </div>
-        <TechnicalDetails>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-            <dt className="text-muted-foreground">Connector</dt>
-            <dd className="font-mono">{config.connector_key}</dd>
-            <dt className="text-muted-foreground">Schema status</dt>
-            <dd className="font-mono">{config.options_schema_status}</dd>
-          </dl>
-        </TechnicalDetails>
-      </ConfigShell>
-    );
-  }
-
-  if (availability.kind === "empty") {
-    return (
-      <ConfigShell>
-        <p className="pdpp-caption text-muted-foreground">
-          This connector has described its settings and has none to change.
-        </p>
-        <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={availability.schema} />
-      </ConfigShell>
-    );
-  }
+  if (availability.kind !== "editable") return null;
 
   return (
     <ConfigEditor
@@ -116,7 +82,7 @@ export function ConnectionConfiguration({ config, connectionId, connectorId, rev
 
 function ConfigShell({ children }: { children: React.ReactNode }) {
   return (
-    <Section description="What this source collects, and how collection runs." id="configuration" title="Configuration">
+    <Section id="configuration" title="Settings">
       <div className="flex flex-col gap-4">{children}</div>
     </Section>
   );
@@ -130,11 +96,12 @@ function ConfigEditor({
   schema,
 }: Props & { schema: NonNullable<ConnectionConfigWire["options_schema"]> }) {
   const router = useRouter();
-  const [step, setStep] = useState<Step>("summary");
+  const [step, setStep] = useState<Step>("edit");
   const [draft, setDraft] = useState<ConfigDraft>(() => buildDraft(schema, config.active_revision));
   const [reason, setReason] = useState("");
   const [showReasonError, setShowReasonError] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const [dismissed, setDismissed] = useState<number | null>(null);
   /** A revision the server actually persisted, awaiting owner confirmation. */
   const [persisted, setPersisted] = useState<ConfigRevisionWire | null>(null);
   const [stale, setStale] = useState<{ actualRevision: number | null; message: string } | null>(null);
@@ -153,10 +120,11 @@ function ConfigEditor({
   const commit = useMemo(() => describeCommit(changes), [changes]);
   const fieldErrors = useMemo(() => validateDraft(schema, draft), [schema, draft]);
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
-  const pending = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
+  const proposal = useMemo(() => persisted ?? findPendingProposal(revisions), [persisted, revisions]);
+  const pending = proposal?.revision === dismissed || (proposal && (proposal.origin === "migration" || proposal.source_of_change.startsWith("migration:"))) ? null : proposal;
 
   const resetToSummary = useCallback(() => {
-    setStep("summary");
+    setStep("edit");
     setReason("");
     setShowReasonError(false);
     setFailure(null);
@@ -194,7 +162,7 @@ function ConfigEditor({
         resetToSummary();
       } else {
         setPersisted(result.revision);
-        setStep("summary");
+        setStep("edit");
         setReason("");
       }
       router.refresh();
@@ -230,27 +198,35 @@ function ConfigEditor({
   return (
     <ConfigShell>
       {applied ? (
-        <div className="pdpp-caption rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5">
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">
-            Revision {applied.revision} is active. Future syncs use this configuration.
+        <div className="pdpp-body border-y border-border py-2.5">
+          <span className="font-medium text-muted-foreground">
+            Saved. Future syncs use these settings.
           </span>
         </div>
       ) : null}
 
       {failure ? (
-        <div className="pdpp-caption rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{failure}</span>
+        <div className="pdpp-body py-2.5" role="alert">
+          <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
+          <details className="mt-1 text-muted-foreground">
+            <summary className="cursor-pointer">What went wrong</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{failure}</code>
+          </details>
         </div>
       ) : null}
 
       {stale ? (
-        <div className="pdpp-caption flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-4 py-2.5">
-          <span className="font-medium text-amber-700 dark:text-amber-400">{stale.message}</span>
+        <div className="pdpp-body flex flex-col gap-2 border-y border-border py-2.5" role="alert">
+          <span className="font-medium text-destructive">{ACTION_ERROR_COPY}</span>
+          <details className="text-muted-foreground">
+            <summary className="cursor-pointer">What went wrong</summary>
+            <code className="mt-1 block break-words font-mono text-xs">{stale.message}</code>
+          </details>
           <span className="text-muted-foreground">
-            Your edits are still here. Review them against the latest configuration before saving.
+            Your edits are still here. Review them against the latest settings before saving.
           </span>
           <div>
-            <IcButton onClick={reviewAgainstLatest} size="sm" type="button">
+            <IcButton onClick={reviewAgainstLatest} size="sm" type="button" variant="ghost">
               Review against latest
             </IcButton>
           </div>
@@ -258,14 +234,14 @@ function ConfigEditor({
       ) : null}
 
       {pending ? (
-        <PendingProposal isPending={isPending} onConfirm={onConfirm} revision={pending} schema={schema} />
+        <PendingProposal isPending={isPending} onConfirm={onConfirm} onDecline={() => { setDismissed(pending.revision); setPersisted(null); }} revision={pending} activeRevision={config.active_revision} schema={schema} />
       ) : null}
 
       {step === "summary" ? (
         <CurrentSettings onEdit={() => setStep("edit")} revision={config.active_revision} rows={currentSettings} />
       ) : null}
 
-      {step === "edit" ? (
+      {step === "edit" && !pending ? (
         <DraftEditor
           draft={draft}
           errors={fieldErrors}
@@ -275,6 +251,7 @@ function ConfigEditor({
           }}
           onChange={(key, value) => setDraft((prev) => setDraftValue(prev, key, value))}
           onReview={() => setStep("review")}
+          edited={changes.length > 0}
           reviewDisabled={changes.length === 0 || hasFieldErrors}
           schema={schema}
         />
@@ -294,7 +271,7 @@ function ConfigEditor({
         />
       ) : null}
 
-      <HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={schema} />
+      {config.active_revision?.set_at ? <p className="pdpp-body text-muted-foreground">{config.active_revision.origin === "migration" || config.active_revision.source_of_change.startsWith("migration:") ? `DataConnect updated this setting on ${new Date(config.active_revision.set_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}.` : `Last changed ${formatRelative(new Date(config.active_revision.set_at), Date.now())}.`}</p> : null}
     </ConfigShell>
   );
 }
@@ -314,13 +291,13 @@ function CurrentSettings({
       {groups.map(([group, rowsInGroup]) => (
         <div className="flex flex-col gap-1" key={group.id}>
           <h3 className="pdpp-body font-medium text-foreground">{group.title}</h3>
-          <p className="pdpp-caption text-muted-foreground">{group.description}</p>
+          <p className="pdpp-body text-muted-foreground">{group.description}</p>
           <dl className="mt-1 flex flex-col gap-1">
             {rowsInGroup.map((row) => (
               <div className="flex flex-wrap items-baseline justify-between gap-2" key={row.optionKey}>
-                <dt className="pdpp-caption text-foreground">{row.label}</dt>
-                <dd className="pdpp-caption flex items-baseline gap-2">
-                  <span className="text-foreground">{row.valueLabel}</span>
+                <dt className="pdpp-body text-foreground">{row.label}</dt>
+                <dd className="pdpp-body flex items-baseline gap-2">
+                  <span className="text-foreground">{formatWireValue(row.option, row.value)}</span>
                   <span className="text-muted-foreground/70">{row.provenanceLabel}</span>
                 </dd>
               </div>
@@ -328,19 +305,10 @@ function CurrentSettings({
           </dl>
         </div>
       ))}
-      {revision ? (
-        <p className="pdpp-caption text-muted-foreground">
-          Last changed by {revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by)} — “
-          {revision.source_of_change}”
-        </p>
-      ) : (
-        <p className="pdpp-caption text-muted-foreground">
-          No owner-set configuration yet. These are the connector's own defaults.
-        </p>
-      )}
+      {!revision ? <p className="pdpp-body text-muted-foreground">These are the data source's own defaults.</p> : null}
       <div>
-        <IcButton onClick={onEdit} size="sm" type="button">
-          Edit configuration
+        <IcButton onClick={onEdit} size="sm" type="button" variant="ghost">
+          Change settings
         </IcButton>
       </div>
     </div>
@@ -354,6 +322,7 @@ function DraftEditor({
   onChange,
   onReview,
   reviewDisabled,
+  edited,
   schema,
 }: {
   draft: ConfigDraft;
@@ -362,6 +331,7 @@ function DraftEditor({
   onChange: (key: string, value: ConfigValue) => void;
   onReview: () => void;
   reviewDisabled: boolean;
+  edited: boolean;
   schema: NonNullable<ConnectionConfigWire["options_schema"]>;
 }) {
   // `null` here asks only for the schema's grouping and order, not for values:
@@ -369,11 +339,10 @@ function DraftEditor({
   // active revision. Passing the revision again would change nothing rendered.
   const groups = groupRows(buildCurrentSettings(schema, null));
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+    <div className="flex flex-col gap-4 border-y border-border py-4">
       {groups.map(([group, rowsInGroup]) => (
         <fieldset className="flex flex-col gap-3" key={group.id}>
           <legend className="pdpp-body font-medium text-foreground">{group.title}</legend>
-          <p className="pdpp-caption text-muted-foreground">{group.description}</p>
           {rowsInGroup.map((row) => (
             <OptionControl
               error={errors[row.optionKey] ?? null}
@@ -386,12 +355,12 @@ function DraftEditor({
         </fieldset>
       ))}
       <div className="flex flex-wrap gap-2">
-        <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button">
-          Review changes
+        <IcButton disabled={reviewDisabled} onClick={onReview} size="sm" type="button" variant="ghost">
+          Save
         </IcButton>
-        <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
+        {edited ? <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
           Cancel
-        </IcButton>
+        </IcButton> : null}
       </div>
     </div>
   );
@@ -417,29 +386,23 @@ function OptionControl({
   value: ConfigValue;
 }) {
   const label = optionLabel(option.option_key);
-  const gate = confirmationReason(option);
+
   const controlId = `config-${option.option_key}`;
   return (
     <div className="flex flex-col gap-1">
       {option.type === "boolean" ? (
-        <label className="pdpp-caption flex items-center gap-2 text-foreground" htmlFor={controlId}>
+        <label className="pdpp-body flex items-center gap-2 text-foreground" htmlFor={controlId}>
           <input checked={value === true} id={controlId} onChange={(e) => onChange(e.target.checked)} type="checkbox" />
           <span>{label}</span>
         </label>
       ) : (
-        <label className="pdpp-caption flex flex-col gap-1 text-foreground" htmlFor={controlId}>
+        <label className="pdpp-body flex flex-col gap-1 text-foreground" htmlFor={controlId}>
           <span>{label}</span>
           <ValueControl controlId={controlId} onChange={onChange} option={option} value={value} />
         </label>
       )}
-      <p className="pdpp-caption text-muted-foreground">{option.description}</p>
-      {option.type === "integer" && (option.minimum !== null || option.maximum !== null) ? (
-        <p className="pdpp-caption text-muted-foreground/70">
-          {option.minimum ?? "any"}–{option.maximum ?? "any"}
-        </p>
-      ) : null}
-      {gate ? <p className="pdpp-caption text-muted-foreground/70">{gate}</p> : null}
-      {error ? <p className="pdpp-caption text-destructive">{error}</p> : null}
+      <p className="pdpp-body text-muted-foreground">{optionExplanation(option)}</p>
+      {error ? <p className="pdpp-body text-destructive">{error}</p> : null}
     </div>
   );
 }
@@ -460,7 +423,8 @@ interface ControlProps {
  * connector has not said what the allowed values are.
  */
 function ValueControl(props: ControlProps) {
-  const { option } = props;
+  const { option, value } = props;
+  if (option.type === "string_array" && Array.isArray(value) && (value.length > 5 || value.some((entry) => !/^[a-z][a-z -]{1,39}$/iu.test(String(entry))))) return <span className="pdpp-body break-words">{summarizeSettingList(option.option_key, value)}</span>;
   if (option.type === "integer") {
     return <IntegerControl {...props} />;
   }
@@ -477,7 +441,7 @@ function ValueControl(props: ControlProps) {
 function IntegerControl({ controlId, onChange, option, value }: ControlProps) {
   return (
     <IcInput
-      className="w-40"
+      className="!w-28"
       id={controlId}
       max={option.maximum ?? undefined}
       min={option.minimum ?? undefined}
@@ -498,7 +462,7 @@ function ChoiceControl({ controlId, onChange, option, value }: ControlProps) {
     >
       {(option.enum ?? []).map((choice) => (
         <option key={choice} value={choice}>
-          {choice}
+          {configChoiceLabel(option.option_key,choice)}
         </option>
       ))}
     </select>
@@ -518,7 +482,7 @@ function MultiChoiceControl({ onChange, option, value }: ControlProps) {
             }
             type="checkbox"
           />
-          <span>{choice}</span>
+          <span>{configChoiceLabel(option.option_key,choice)}</span>
         </label>
       ))}
     </span>
@@ -572,31 +536,31 @@ function ReviewChanges({
   unchanged: number;
 }) {
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+    <div className="flex flex-col gap-4 border-y border-border py-4">
       <div className="flex flex-col gap-2">
         <h3 className="pdpp-body font-medium text-foreground">What changes</h3>
         {changes.map((change) => (
           <div className="flex flex-col gap-0.5" key={change.optionKey}>
-            <span className="pdpp-caption text-foreground">{change.label}</span>
-            <span className="pdpp-caption text-muted-foreground">
-              <span>{change.currentLabel}</span>
+            <span className="pdpp-body text-foreground">{change.label}</span>
+            <span className="pdpp-body text-muted-foreground">
+              <span>{formatWireValue(change.option, change.currentValue)}</span>
               <span aria-hidden className="mx-2">
                 →
               </span>
-              <span className="text-foreground">{change.proposedLabel}</span>
+              <span className="text-foreground">{formatWireValue(change.option, change.proposedValue)}</span>
             </span>
           </div>
         ))}
         {unchanged > 0 ? (
-          <p className="pdpp-caption text-muted-foreground/70">
+          <p className="pdpp-body text-muted-foreground/70">
             {unchanged} unchanged {unchanged === 1 ? "setting" : "settings"}
           </p>
         ) : null}
       </div>
 
-      <p className="pdpp-caption text-muted-foreground">{commit.supportingText}</p>
+      <p className="pdpp-body text-muted-foreground">{commit.expectedStatus === "active" ? "These settings take effect when you save." : "This change needs your confirmation before it takes effect."}</p>
 
-      <label className="pdpp-caption flex flex-col gap-1 text-foreground" htmlFor="config-reason">
+      <label className="pdpp-body flex flex-col gap-1 text-foreground" htmlFor="config-reason">
         <span>Why are you changing this?</span>
         <IcInput
           className="w-full max-w-md"
@@ -606,14 +570,14 @@ function ReviewChanges({
           value={reason}
         />
       </label>
-      {reasonMessage ? <p className="pdpp-caption text-destructive">{reasonMessage}</p> : null}
+      {reasonMessage ? <p className="pdpp-body text-destructive">{reasonMessage}</p> : null}
 
       <div className="flex flex-wrap gap-2">
         <IcButton onClick={onBack} size="sm" type="button" variant="ghost">
           Back to edit
         </IcButton>
-        <IcButton disabled={isPending} onClick={onCommit} size="sm" type="button">
-          {isPending ? "Saving…" : commit.buttonLabel}
+        <IcButton disabled={isPending} onClick={onCommit} size="sm" type="button" variant="ghost">
+          {isPending ? "Saving…" : "Save"}
         </IcButton>
       </div>
     </div>
@@ -629,24 +593,28 @@ function ReviewChanges({
 function PendingProposal({
   isPending,
   onConfirm,
+  onDecline,
   revision,
+  activeRevision,
   schema,
 }: {
+  activeRevision: ConfigRevisionWire | null;
   isPending: boolean;
   onConfirm: (revision: number) => void;
+  onDecline: () => void;
   revision: ConfigRevisionWire;
   schema: NonNullable<ConnectionConfigWire["options_schema"]>;
 }) {
   const byKey = new Map(schema.options.map((option) => [option.option_key, option]));
-  const proposedBy = revision.origin === "owner" ? "you" : describeAgentActor(revision.set_by);
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4">
+    <div className="flex flex-col gap-3 border-y border-border py-4">
       <div className="flex flex-col gap-0.5">
-        <h3 className="pdpp-body font-medium text-amber-700 dark:text-amber-400">Awaiting your confirmation</h3>
-        <p className="pdpp-caption text-muted-foreground">
-          Revision {revision.revision}, proposed by {proposedBy}. Nothing changes until you confirm.
+        <h3 className="pdpp-body font-medium text-attention">Awaiting your confirmation</h3>
+        <p className="pdpp-body text-muted-foreground">
+          Nothing changes until you confirm.
         </p>
       </div>
+      <p className="pdpp-body text-muted-foreground">{revision.origin === "owner" ? "You" : revision.set_by.startsWith("app:") ? revision.set_by.slice(4) : "DataConnect"} asked to change this:</p>
       <dl className="flex flex-col gap-1">
         {Object.keys(revision.config)
           .sort()
@@ -654,18 +622,18 @@ function PendingProposal({
             const option = byKey.get(key);
             const raw = revision.config[key];
             return (
-              <div className="flex flex-wrap items-baseline justify-between gap-2" key={key}>
-                <dt className="pdpp-caption text-foreground">{optionLabel(key)}</dt>
-                <dd className="pdpp-caption text-foreground">{option ? formatWireValue(option, raw) : String(raw)}</dd>
+              <div className="flex flex-wrap items-baseline gap-2" key={key}>
+                <dt className="pdpp-body text-foreground">{optionLabel(key)}</dt>
+                <dd className="pdpp-body text-foreground">{option ? <>{formatWireValue(option, activeRevision?.config[key] ?? option.default)} → {formatWireValue(option, raw)}</> : "This setting changed."}</dd>
               </div>
             );
           })}
       </dl>
-      <p className="pdpp-caption text-muted-foreground">Reason: “{revision.source_of_change}”</p>
-      <div>
-        <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button">
-          {isPending ? "Confirming…" : "Confirm and make active"}
+      <div className="flex gap-2">
+        <IcButton disabled={isPending} onClick={() => onConfirm(revision.revision)} size="sm" type="button" variant="ghost">
+          {isPending ? "Confirming…" : "Confirm"}
         </IcButton>
+        <IcButton disabled={isPending} onClick={onDecline} size="sm" type="button" variant="ghost">Don't change</IcButton>
       </div>
     </div>
   );
@@ -686,7 +654,7 @@ function HistoryBlock({
     [revisions, schema, activeRevision]
   );
   if (entries.length === 0) {
-    return <p className="pdpp-caption text-muted-foreground">No configuration changes have been recorded yet.</p>;
+    return <p className="pdpp-body text-muted-foreground">No configuration changes have been recorded yet.</p>;
   }
   return (
     <div className="flex flex-col gap-2">
@@ -694,17 +662,17 @@ function HistoryBlock({
       <ol className="flex flex-col gap-3">
         {entries.map((entry) => (
           <li className="flex flex-col gap-0.5" key={entry.revision.revision}>
-            <span className="pdpp-caption font-medium text-foreground">{entry.statusLabel}</span>
-            <span className="pdpp-caption text-foreground">{entry.summary}</span>
-            <span className="pdpp-caption text-muted-foreground">Reason: “{entry.reason}”</span>
-            <span className="pdpp-caption text-muted-foreground/70">{entry.attribution}</span>
+            <span className="pdpp-body font-medium text-foreground">{entry.statusLabel}</span>
+            <span className="pdpp-body text-foreground">{entry.summary}</span>
+            <span className="pdpp-body text-muted-foreground">Reason: “{entry.reason}”</span>
+            <span className="pdpp-body text-muted-foreground/70">{entry.attribution}</span>
           </li>
         ))}
       </ol>
       <TechnicalDetails>
         <ul className="flex flex-col gap-2">
           {entries.map((entry) => (
-            <li className="font-mono" key={entry.revision.revision}>
+            <li className="break-words text-xs" key={entry.revision.revision}>
               rev {entry.revision.revision} · {entry.revision.status} · {entry.revision.option_kind} ·{" "}
               {entry.revision.origin} · set_by {entry.revision.set_by} · {entry.revision.set_at}
               {entry.revision.confirmed_by ? ` · confirmed_by ${entry.revision.confirmed_by}` : ""}
@@ -725,7 +693,7 @@ function HistoryBlock({
 /** Exact machine evidence, never the default visible panel. */
 function TechnicalDetails({ children }: { children: React.ReactNode }) {
   return (
-    <details className="pdpp-caption">
+    <details className="pdpp-body">
       <summary className="cursor-pointer text-muted-foreground">Technical details</summary>
       <div className="mt-2 overflow-x-auto text-muted-foreground">{children}</div>
     </details>
@@ -737,9 +705,10 @@ function formatWireValue(option: ConfigOptionWire, raw: unknown): string {
     return raw === true ? "On" : "Off";
   }
   if (Array.isArray(raw)) {
-    return raw.length === 0 ? "None selected" : (raw as readonly string[]).join(", ");
+    return summarizeSettingList(option.option_key, raw);
   }
-  return raw === "" ? "Not set" : String(raw);
+  if (option.type === "integer") return typeof raw === "number" && Number.isFinite(raw) ? raw.toLocaleString() : "Not set";
+  return typeof raw === "string" && /^[a-z][a-z .,-]{0,79}$/iu.test(raw) ? raw : raw === "" ? "Not set" : "Set";
 }
 
 function groupRows(rows: ReturnType<typeof buildCurrentSettings>) {
@@ -757,4 +726,24 @@ function groupRows(rows: ReturnType<typeof buildCurrentSettings>) {
     const bucket = buckets.get(id);
     return bucket ? [bucket] : [];
   });
+}
+
+export function ConnectionSettingsHistory({ config, revisions }: Pick<Props, "config" | "revisions">) {
+  return <Section title="Settings history"><HistoryBlock activeRevision={config.active_revision} revisions={revisions} schema={config.options_schema} /></Section>;
+}
+
+function optionExplanation(option: ConfigOptionWire): string {
+  const explanations: Record<string, string> = {
+    HISTORY_DAYS: "Increase this to copy older messages.",
+    LOOKBACK_DAYS: "Increase this to copy older records.",
+    CHANNELS: "Copy messages from the channels you choose.",
+    CHANNEL_ALLOWLIST: "Copy messages from the channels you choose.",
+    CLAUDE_CODE_PROJECT_EXCLUDE: "Leave out projects whose folder names contain these words.",
+    CLAUDE_CODE_PROJECT_INCLUDE: "Copy only projects whose folder names contain these words; leave empty to copy all projects.",
+    CHANNEL_TYPES: "Copy only the types of channels you choose.",
+    MEMBER_ONLY: "Copy only channels you have joined.",
+    SKIP_FILES: "Leave files out of the copy.",
+    RECLAIM_UPLOADS: "Include files sent in messages.",
+  };
+  return explanations[option.option_key.toUpperCase()] ?? "Choose the value to use when this data source syncs.";
 }

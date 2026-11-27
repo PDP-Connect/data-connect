@@ -26,7 +26,9 @@ async function resolveByDisplayNameInFirstPage(routeId: string): Promise<RefConn
   if (!needle) {
     return null;
   }
-  const page = await listConnectorSummaries({ limit: CONNECTOR_SUMMARY_PAGE_SIZE });
+  const page = await listConnectorSummaries({ limit: CONNECTOR_SUMMARY_PAGE_SIZE, sourcesVisibility: true });
+  const exact = page.data.find((summary) => summary.connection_id === routeId || summary.connector_instance_id === routeId);
+  if (exact) return exact;
   const matches = page.data.filter((summary) => summary.display_name.trim().toLowerCase() === needle);
   // Ambiguous (2+ connections sharing a display name) resolves to null, same
   // discipline as the reference's own connector_id ambiguity rule
@@ -79,8 +81,4 @@ export async function resolveConnectionForRecordsRoute(
 
 export function connectorInstanceIdForConnection(summary: RefConnectorSummary): string {
   return summary.connector_instance_id ?? summary.connection_id;
-}
-
-export function sourceLabelForConnection(summary: RefConnectorSummary): string {
-  return summary.display_name.trim() || summary.connector_display_name?.trim() || summary.connection_id;
 }

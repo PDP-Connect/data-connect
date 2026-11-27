@@ -1,19 +1,19 @@
+import { readPersonOffset } from "../history/server-day.ts";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Sources — the Ink Carbon "loading dock" view.
+ * Sources — the paged data sources list.
  *
- * Reskinned per docs/design-system/ink-carbon/project/recordroom/rr-sources.jsx: a
- * master-detail over the owner's configured source instances. The left list is
- * health-flagged; the right "passport" (a Sheet) carries identity + a KV block
- * + foot actions; below it a stream manifest Table links every stream into
- * Explore. Records are never rendered here — Explore is the one reader.
+ * The page reads one bounded page of summaries and projects each data source
+ * into a row. Row actions and folded groups keep the other list controls close
+ * to the data source they affect. Records are never rendered here — Explore is
+ * the one reader.
  *
  * Data path is REAL: the page fetches exactly ONE bounded page of connector
  * summaries (`listConnectorSummaries({ cursor, limit: 100 })` — never the
  * exhaustive fold) through the existing owner-token `liveDashboardDataSource`,
- * and projects it with the pure `toSourcesView` mapping. A fleet larger than
+ * and projects it with the pure `toSourcesView` mapping. A list larger than
  * one page is reachable via the shared `ConnectorSummaryPager` (a bounded
  * `page_cursor` Next link + explicit Restart; Previous is the browser's own
  * back button, never URL-side history), not by prefetching every page
@@ -27,7 +27,8 @@
  * ceremony without a live server. The live path never imports the fixtures
  * when `demo` is absent.
  */
-import { IcButton } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, Text } from "@pdpp/brand-react";
+import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import {
   ConnectorSummaryPageError,
@@ -41,16 +42,25 @@ import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
-import { purgeBrowserProfileAction, reactivateConnectionAction, revokeConnectionAction } from "./[connector]/actions.ts";
+import {
+  purgeBrowserProfileAction,
+  reactivateConnectionAction,
+  resumeConnectionAction,
+  resumeConnectorScheduleAction,
+  resumeSetupConnectionAction,
+  revokeConnectionAction,
+} from "./[connector]/actions.ts";
+import { runConnectorNowAction } from "./actions.ts";
+import { readConnectorUpdates } from "./connector-updates-read.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
-import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
+import { actionEmphasis } from "../lib/action-emphasis.ts";
 import { SourcesView } from "./sources-view.tsx";
 import {
-  buildSourcesChurnAdvisory,
   buildSourcesRuntimeAdvisory,
   type SourcesRuntimeAdvisory,
   toSourcesView,
 } from "./sources-view-model.ts";
+import { buildUpdatesReadyDemo, isUpdatesReadyDemoScenario, readUpdatesReadySafely } from "./updates-ready-model.ts";
 
 const SOURCES_PATH = "/sources";
 const REFERENCE_REVISION = process.env.PDPP_REFERENCE_REVISION?.trim() || undefined;
@@ -99,20 +109,28 @@ export default async function RecordsIndexPage({
   // DEV-ONLY seeded demo. Gated by NODE_ENV so production never reads fixtures.
   const demoParam = typeof params.demo === "string" ? params.demo : undefined;
   if (process.env.NODE_ENV !== "production" && demoParam) {
-    const { buildSourcesDemoSummaries, buildSourcesDemoChurnRows, isSourcesDemoScenario } = await import(
+    const { buildSourcesDemoSummaries, isSourcesDemoScenario } = await import(
       "./sources-demo-data.ts"
     );
     const scenario = isSourcesDemoScenario(demoParam) ? demoParam : "mixed";
     const instances = toSourcesView(buildSourcesDemoSummaries(scenario));
-    // Seed a churn advisory for the demo so the protocol-toned notice is
-    // screenshot-able without a live version-stats route.
-    const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
+    const updatesReadyDemo = isUpdatesReadyDemoScenario(demoParam) ? buildUpdatesReadyDemo(demoParam) : undefined;
     return (
       <RecordroomShellWithPalette host={host}>
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
-        <SourcesView churnAdvisory={churnAdvisory} instances={instances} interactive={false} />
+        <SourcesView
+          instances={instances}
+          interactive={false}
+          reactivateAction={reactivateConnectionAction}
+          resumeAction={resumeConnectionAction}
+          resumeScheduleAction={resumeConnectorScheduleAction}
+          resumeSetupAction={resumeSetupConnectionAction}
+          revokeAction={revokeConnectionAction}
+          runNowAction={runConnectorNowAction}
+          updatesReadyDemo={updatesReadyDemo}
+        />
       </RecordroomShellWithPalette>
     );
   }
@@ -151,7 +169,8 @@ export default async function RecordsIndexPage({
 
   const summaries = [...page.items];
   const runtimeAdvisory: SourcesRuntimeAdvisory | null = buildSourcesRuntimeAdvisory(page.runtime);
-  const instances = toSourcesView(summaries, { connectorIcons, manifests });
+  const instances = toSourcesView(summaries, { connectorIcons, manifests,offset:await readPersonOffset() });
+  const updatesReady = readUpdatesReadySafely(readConnectorUpdates);
   // The poller is mounted unconditionally; `running` (derived from any active
   // run) only selects the fast vs. idle cadence. Named `runningCount` to match
   // the records-poller mount invariant.
@@ -161,13 +180,19 @@ export default async function RecordsIndexPage({
 
   return (
     <RecordroomShellWithPalette host={host}>
-      <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} />
+      <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} quietAdd={actionEmphasis(instances.some((instance) => instance.statusWords.needsYou)).optional === "quiet"} />
       <SourcesView
         instances={instances}
         interactive={true}
+        pagingInPlay={isPagedRequest(pageState) || page.hasMore}
         reactivateAction={reactivateConnectionAction}
+        resumeAction={resumeConnectionAction}
+        resumeScheduleAction={resumeConnectorScheduleAction}
+        resumeSetupAction={resumeSetupConnectionAction}
         revokeAction={revokeConnectionAction}
+        runNowAction={runConnectorNowAction}
         runtimeAdvisory={runtimeAdvisory}
+        updatesReady={updatesReady}
       />
       <ConnectorSummaryPager
         basePath={SOURCES_PATH}
@@ -182,45 +207,39 @@ export default async function RecordsIndexPage({
 }
 
 function SourcesHeader({
+  quietAdd = false,
   error,
   message,
   notice,
   purgeRetryId,
 }: {
+  quietAdd?: boolean;
   error?: string;
   message?: string;
   notice?: string;
   purgeRetryId?: string;
 }) {
   return (
-    <header data-pdpp-reference-revision={REFERENCE_REVISION} style={{ marginBottom: 24, maxWidth: 760 }}>
-      <h1 className="pdpp-heading text-foreground" style={{ margin: "0 0 4px" }}>
-        Sources
-      </h1>
-      <p
-        style={{
-          color: "var(--muted-foreground)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          margin: 0,
-        }}
-      >
-        {SOURCE_ACCESS_NOTE}
-      </p>
+    <header className="rr-s-header" data-pdpp-reference-revision={REFERENCE_REVISION}>
+      <div className="rr-s-header__title-row">
+        <Text as="h1" className="rr-s-header__title" size="title" weight="semi">Data sources</Text>
+        <Link className={buttonVariants({ size: "sm", variant: quietAdd ? "ghost" : "default" })} href={`${SOURCES_PATH}/add`}>Add a data source</Link>
+      </div>
       {notice ? (
-        <div className="rr-s-toast" data-tone="ok" role="status" style={{ marginTop: 12 }}>
+        // Lead decision (list-pictures 5): the demo line matches Home's, 13px in the second text colour.
+        <Text as="p" className="rr-s-header__demo text-[13px] text-muted-foreground">
           {notice}
-        </div>
+        </Text>
       ) : null}
       {error ? (
-        <div className="rr-s-toast" data-tone="error" role="status" style={{ marginTop: 12 }}>
+        <div className="rr-s-toast rr-s-header__notice" data-tone="error" role="status">
           {error}
         </div>
       ) : null}
       {error && purgeRetryId ? (
         // The connection is already revoked or deleted; only its saved browser
         // session is left. The retry runs the same purge again.
-        <form action={purgeBrowserProfileAction} data-testid="sources-purge-retry" style={{ marginTop: 8 }}>
+        <form action={purgeBrowserProfileAction} className="rr-s-header__purge" data-testid="sources-purge-retry">
           <input name="connection_id" type="hidden" value={purgeRetryId} />
           <IcButton size="sm" type="submit" variant="destructive">
             Remove saved browser session
@@ -228,10 +247,16 @@ function SourcesHeader({
         </form>
       ) : null}
       {message && !error ? (
-        <div className="rr-s-toast" data-tone="ok" role="status" style={{ marginTop: 12 }}>
-          {message}
+        <div className="rr-s-toast rr-s-header__notice" data-tone="ok" role="status">
+          <SyncStartedNotice message={message} />
         </div>
       ) : null}
     </header>
   );
+}
+
+function SyncStartedNotice({ message }: { message: string }) {
+  const match = /^Run started(?: \(([^)]+)\))?$/.exec(message);
+  if (!match) return message;
+  return <>Sync started.{match[1] ? <> <Link href={`/syncs/${encodeURIComponent(match[1])}`}>See this sync</Link></> : null}</>;
 }

@@ -1,0 +1,14 @@
+{
+  "id": "provider-verification",
+  "name": "Inspecting a completed source run for provider assistance",
+  "seed": ["spotify"],
+  "steps": [
+    {
+      "id": "run-detail",
+      "open": "/syncs/[seed-run:spotify]",
+      "readyText": "succeeded",
+      "openDetails": true,
+      "assertText": "View records in Explore"
+    }
+  ]
+}

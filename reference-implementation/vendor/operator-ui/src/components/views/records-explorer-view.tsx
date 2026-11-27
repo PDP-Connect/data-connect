@@ -657,7 +657,7 @@ function StreamFacets({
         return (
           <Link
             aria-pressed={isOn}
-            className={`inline-flex items-baseline gap-1.5 rounded-full border px-2 py-0.5 font-mono transition-colors ${
+            className={`inline-flex items-baseline gap-1.5 rounded-full border px-2 py-0.5 font-sans tabular-nums transition-colors ${
               isOn
                 ? "border-foreground/60 bg-muted text-foreground"
                 : "border-border/80 bg-background hover:bg-muted/50"
@@ -687,7 +687,7 @@ function ExplorerWarnings({ warnings }: { warnings: ExplorerWarning[] }) {
       <ul className="pdpp-caption mt-1 list-disc space-y-1 pl-5 text-muted-foreground">
         {warnings.map((w) => (
           <li key={`${w.code}:${w.message}`}>
-            <span className="font-mono text-foreground">{w.code}</span>
+            <span className="font-sans text-foreground">{w.code}</span>
             <span> — </span>
             <span>{w.message}</span>
           </li>
@@ -719,7 +719,7 @@ function BlobAffordance({ affordance }: { affordance: ExplorerBlobAffordance }) 
   }
   return (
     <a
-      className="pdpp-caption inline-flex items-center rounded-full border border-border/80 px-2 py-0.5 font-mono text-primary underline-offset-2 hover:underline"
+      className="pdpp-caption inline-flex items-center rounded-full border border-border/80 px-2 py-0.5 font-sans text-primary underline-offset-2 hover:underline"
       href={affordance.href}
     >
       Open blob →
@@ -757,8 +757,8 @@ function CardEyebrow({ entry }: { entry: ExplorerFeedEntry }) {
   });
   return (
     <div className="pdpp-eyebrow flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-muted-foreground">
-      <span className="font-medium font-mono text-foreground/80">{connectorKey}</span>
-      <span className="font-mono">{entry.stream}</span>
+      <span className="font-medium font-sans text-foreground">{connectorKey}</span>
+      <span className="font-sans">{entry.stream}</span>
       {entry.connectionDisplayName ? (
         <span className="truncate normal-case tracking-normal" title={entry.connectionId ?? ""}>
           · {connectionDisplayName}
@@ -789,7 +789,7 @@ function MoneyBody({ preview }: { preview: RecordPreview }) {
       </div>
       {preview.amount ? (
         <span
-          className={`shrink-0 font-mono text-base tabular-nums ${
+          className={`shrink-0 font-sans text-base tabular-nums ${
             preview.amountPositive ? "text-[color:var(--success)]" : "text-foreground"
           }`}
         >
@@ -822,7 +822,7 @@ function EventBody({ preview }: { preview: RecordPreview }) {
   return (
     <div className="min-w-0">
       {preview.eventTime ? (
-        <span className="font-medium font-mono text-primary text-sm tabular-nums">{preview.eventTime}</span>
+        <span className="font-medium font-sans text-primary text-sm tabular-nums">{preview.eventTime}</span>
       ) : null}
       {preview.title ? <p className="truncate font-medium text-foreground text-sm">{preview.title}</p> : null}
       {preview.body ? <p className="pdpp-caption truncate text-muted-foreground">{preview.body}</p> : null}
@@ -855,7 +855,7 @@ function ActivityBody({ preview }: { preview: RecordPreview }) {
         <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1">
           {preview.stats.map((stat) => (
             <div className="min-w-0" key={stat.label}>
-              <span className="font-mono font-semibold text-[color:var(--human)] text-sm tabular-nums">
+              <span className="font-sans font-semibold text-[color:var(--human)] text-sm tabular-nums">
                 {stat.value}
               </span>
               <span className="pdpp-eyebrow ml-1.5 text-muted-foreground">{stat.label}</span>
@@ -892,7 +892,7 @@ function LocationBody({ preview }: { preview: RecordPreview }) {
     <div className="min-w-0">
       {preview.title ? <p className="truncate font-medium text-foreground text-sm">{preview.title}</p> : null}
       {preview.coordinates ? (
-        <p className="pdpp-caption mt-0.5 font-mono text-muted-foreground tabular-nums">{preview.coordinates}</p>
+        <p className="pdpp-caption mt-0.5 font-sans text-muted-foreground tabular-nums">{preview.coordinates}</p>
       ) : null}
     </div>
   );
@@ -1044,7 +1044,7 @@ function ExplorerPeek({
     >
       <div className="pdpp-caption sticky top-0 flex items-center justify-between gap-2 border-border/80 border-b bg-muted/40 px-3 py-2 backdrop-blur">
         <div className="min-w-0">
-          <span className="truncate font-medium font-mono">
+          <span className="truncate font-medium font-sans">
             {connectorKey} / {peek.stream}
           </span>
           {peek.connectionDisplayName ? (
@@ -1066,7 +1066,7 @@ function ExplorerPeek({
       <div className="pdpp-caption flex flex-col gap-3 p-3">
         <div>
           <div className="pdpp-eyebrow mb-1">Record id</div>
-          <code className="break-all font-mono text-foreground">{peek.recordId}</code>
+          <code className="break-all font-sans text-foreground tabular-nums">{peek.recordId}</code>
         </div>
         {peek.semanticTimestamp ? (
           <div>
@@ -1106,7 +1106,7 @@ function PeekBody({ peek }: { peek: ExplorerPeekData }) {
                   mono so the inspector remains debuggable. The humanization is a
                   LABEL transform only — never a type/role signal. */}
               <span className="break-words font-medium text-foreground">{humanizeFieldLabel(field.name)}</span>
-              <code className="block break-all font-mono text-[0.7rem] text-muted-foreground">{field.name}</code>
+              <code className="block break-all font-sans text-xs text-muted-foreground">{field.name}</code>
               {field.type ? (
                 <span className="mt-0.5 inline-block rounded bg-muted px-1 py-0.5 text-muted-foreground">
                   {field.type}

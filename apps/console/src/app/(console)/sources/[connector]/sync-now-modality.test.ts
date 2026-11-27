@@ -28,7 +28,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}source-page.tsx`;
 
 const IMPORTS_SHARED_CLASSIFIER =
   /derivePrimaryRowAction[\s\S]*type PrimaryRowAction[\s\S]*from "\.\.\/\.\.\/lib\/connection-evidence\.ts"/;
@@ -43,9 +43,7 @@ const ACTIVE_SUMMARY_STATUS_HELPER_CALL =
   /isRunning:[\s\S]*?lastRun != null &&[\s\S]*?isActiveConnectorRunSummaryStatus\(lastRun\.status\)/;
 const ACTIVE_RUN_HREF_FROM_ID =
   /activeRunHref:\s*activeRunId \? `\/syncs\/\$\{encodeURIComponent\(activeRunId\)\}` : null,/;
-const ACTIVE_RUN_LINK_NO_PREFETCH = /href=\{activeRunHref\}\s+prefetch=\{false\}/;
-const ACTIVE_SYNC_LINK = /Active sync →/;
-const ALL_SYNCS_LINK = /All syncs →/;
+const ALL_SYNCS_LINK = />All sync history</;
 const ACTIONABILITY_PROJECTION = /const actionability = projectSourceActionability\(summary\)/;
 const RENDERED_VERDICT_ACTION_FROM_PROJECTION = /connectionPrimaryAction: actionability\.primaryAction/;
 const RENDERED_VERDICT_HEADER_ACTION = /function RenderedVerdictHeaderAction/;
@@ -56,36 +54,29 @@ const NON_OWNER_HEADER_ACTIONS_RETURN_NULL =
   /if \(action\.audience !== "owner" \|\| action\.satisfied_when\.kind === "none"\) \{\s*return null;\s*\}/;
 const EXACT_SYNC_TARGET_GUARD = /action\.target\?\.kind !== "sync"/;
 const EXACT_SYNC_RUN_HREF = /href=\{`\/syncs\/\$\{encodeURIComponent\(action\.target\.run_id\)\}`\}/;
-const EXACT_SYNC_LINK_LABEL = /\{action\.cta\}/;
+const EXACT_SYNC_LINK_LABEL = /\{label \?\? action\.cta\}/;
 const EXACT_SYNC_LINK_NO_TITLE = /title="Open the exact sync that needs owner input\."/;
 const EXACT_SYNC_LINK_NO_GENERIC_FALLBACK = /href=\{syncDetailHref \?\? "\/syncs"\}/;
 // A device-local add_info recovery is NOT navigable — it must render as
 // non-clickable guidance pointing to the Diagnostics commands, never a <Link>
 // to /runs (which sent the owner in a hero→panel→runs→panel circle).
 const DEVICE_LOCAL_GUARD = /action\.remediation\?\.target\.kind === "local_device"/;
-const DEVICE_LOCAL_TESTID = /data-testid="detail-action-rendered-verdict-device-local"/;
-const RENDERED_OWNER_ACTION_PRECEDES_SYNC = /if \(renderedOwnerAction\)[\s\S]*if \(primaryAction\.kind === "sync"\)/;
-const SYNC_BRANCH_GUARD = /if \(primaryAction\.kind === "sync"\)/;
-const COOLDOWN_BRANCH_GUARD = /if \(primaryAction\.kind === "cooldown_wait"\)/;
+const RENDERED_OWNER_ACTION_PRECEDES_SYNC = /if \(statusAction\?\.kind === "server_cta" && renderedOwnerAction\)[\s\S]*if \(statusAction\?\.kind === "sync_now"\)/;
+const SYNC_BRANCH_GUARD = /if \(statusAction\?\.kind === "sync_now"\)/;
+const COOLDOWN_BRANCH_GUARD = /primaryAction\.kind === "cooldown_wait"/;
 const COOLDOWN_FORCE_BUTTON = /<SyncNowButton[\s\S]{0,260}force[\s\S]{0,260}idleLabel="Force run anyway"/;
 const FORCE_BUTTON_WARNING = /Bypasses the provider-pressure cooldown/;
 const MANUAL_UPLOAD_IMPORT_LINK = /Add another export/;
-const MANUAL_UPLOAD_REPROCESS_BUTTON = /idleLabel="Reprocess all exports"/;
-const MANUAL_UPLOAD_RUNNING_LABEL = /runningLabel="Import running"/;
+const MANUAL_UPLOAD_REPROCESS_BUTTON = /idleLabel="Read the files again"/;
+const MANUAL_UPLOAD_RUNNING_LABEL = /runningLabel="Reading the files"/;
 const STATIC_SECRET_CAPTURE_RESOLVED_ONCE =
   /const staticSecretCapture = staticSecretCredentialCaptureFromManifest\(manifest\)/;
 const SESSION_BOUND_REPAIR_PRECEDES_STATIC_SECRET =
   /if \(sessionBound\) \{[\s\S]{0,120}return browserSessionRepairHref;[\s\S]{0,120}if \(storedCredentialUpdateHref !== null\) \{/;
 const STATIC_SECRET_UPDATE_CAPABILITY_PASSED =
-  /hasStaticSecretCredentialUpdate=\{\s*storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"\s*\}/;
+  /hasStaticSecretCredentialUpdate=\{\s*credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"\s*\}/;
 const STATIC_SECRET_UPDATE_LINK_VISIBLE = /storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate/;
-const NON_SYNC_NOTICE = /return <PrimaryActionNotice action=\{primaryAction\} \/>/;
-const DEVICE_WAIT_NOTICE_TESTID = /data-testid="detail-action-device-wait"/;
-// The "Click Sync now" copy must be gated behind the owner-syncable branch of
-// `emptyStreamsHint`, never shown unconditionally for every connection.
-const SYNC_HINT_GATED_RE =
-  /if \(action\.kind === "sync"\) \{\s*return `No records for this connector yet\. \$\{syncIdleLabel\}/;
-const EMPTY_STREAMS_HINT_RECEIVES_IDLE_LABEL = /emptyStreamsHint\(primaryAction, syncIdleLabel\)/;
+const NON_SYNC_NOTICE = /statusAction\?\.kind === "view_device"/;
 const SYNC_BUTTON_FILE = `${HERE}sync-now-button.tsx`;
 const SYNC_BUTTON_NO_OPTIMISTIC_RUNNING = /optimisticRunning/;
 const SYNC_BUTTON_PENDING_LABEL = /else if \(isPending\) \{\s*buttonLabel = "Starting…";\s*\}/;
@@ -118,18 +109,19 @@ test("detail page labels failed owner syncs as retryable", async () => {
   assert.match(src, SYNC_BUTTON_RECEIVES_IDLE_LABEL);
 });
 
-test("detail page uses the durable schedule active-run id for exact active-sync navigation", async () => {
+test("detail page links the latest-sync section to the active sync and full sync history", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, ACTIVE_RUN_ID_FROM_SCHEDULE);
   assert.match(src, ACTIVE_SUMMARY_STATUS_HELPER_IMPORT);
   assert.match(src, ACTIVE_SUMMARY_STATUS_HELPER_CALL);
   assert.match(src, ACTIVE_RUN_HREF_FROM_ID);
-  assert.match(src, ACTIVE_RUN_LINK_NO_PREFETCH);
-  assert.match(src, ACTIVE_SYNC_LINK);
+  assert.match(src, /href=\{`\/syncs\//);
+  assert.match(src, /href=\{`\/syncs\//);
   assert.match(src, ALL_SYNCS_LINK);
+  // DIRECTION.md: Latest syncs links to the active sync and to /syncs.
 });
 
-test("rendered verdict owner action owns the header before generic sync fallback", async () => {
+test("the status-table action owns the header before the outlined sync fallback", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, ACTIONABILITY_PROJECTION);
   assert.match(src, RENDERED_VERDICT_ACTION_FROM_PROJECTION);
@@ -138,6 +130,7 @@ test("rendered verdict owner action owns the header before generic sync fallback
   assert.match(src, RENDERED_OWNER_ACTION_GUARD);
   assert.match(src, NON_OWNER_HEADER_ACTIONS_RETURN_NULL);
   assert.match(src, RENDERED_OWNER_ACTION_PRECEDES_SYNC);
+  // DIRECTION.md: the status table supplies the single action at the top of the page.
   assert.match(src, EXACT_SYNC_TARGET_GUARD);
   assert.match(src, EXACT_SYNC_RUN_HREF);
   assert.match(src, EXACT_SYNC_LINK_LABEL);
@@ -153,30 +146,30 @@ test("credential repair follows the connection binding before connector capabili
   assert.match(src, STATIC_SECRET_UPDATE_LINK_VISIBLE);
 });
 
-test("SyncNowButton renders only inside owner-actionable branches", async () => {
+test("SyncNowButton renders only in status or named secondary-action branches", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, SYNC_BRANCH_GUARD);
-  // Five render sites are allowed: the rendered-verdict repair action,
-  // ordinary sync, manual-upload reprocess nested under the owner-syncable
-  // branch, paused-schedule sync, and the separately-named force override nested under cooldown.
+  // DIRECTION.md §One data source: one status action is at the top; other sync controls stay named below.
   const renders = src.match(/<SyncNowButton/g) ?? [];
   assert.equal(
     renders.length,
-    5,
-    "expected repair, ordinary sync, manual reprocess, paused-schedule sync, and cooldown force render sites"
+    7,
+    "expected repair, status sync, first-sync fallback, manual reprocess, optional schedule sync, outlined fallback, and cooldown force render sites"
   );
   assert.match(src, MANUAL_UPLOAD_IMPORT_LINK);
   assert.match(src, MANUAL_UPLOAD_REPROCESS_BUTTON);
   assert.match(src, MANUAL_UPLOAD_RUNNING_LABEL);
+  // DIRECTION.md §One data source: the cooldown notice stays with sync options.
   assert.match(src, COOLDOWN_BRANCH_GUARD);
+  // DIRECTION.md §One data source: keep the existing cooldown override label.
   assert.match(src, COOLDOWN_FORCE_BUTTON);
   assert.match(src, FORCE_BUTTON_WARNING);
 });
 
-test("push-mode connections get an honest non-clickable notice, not a dead button", async () => {
+test("a device source uses its existing device action and never gets a sync button", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, NON_SYNC_NOTICE);
-  assert.match(src, DEVICE_WAIT_NOTICE_TESTID);
+  assert.match(src, /href=\{`\/device-exporters#/);
 });
 
 test("a device-local add_info recovery renders non-clickable guidance, not a /runs link", async () => {
@@ -187,17 +180,12 @@ test("a device-local add_info recovery renders non-clickable guidance, not a /ru
   // non-clickable guidance span instead.
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, DEVICE_LOCAL_GUARD);
-  assert.match(src, DEVICE_LOCAL_TESTID);
+  assert.match(src, /return <p className="pdpp-body text-muted-foreground">Check DataConnect on the computer/);
 });
 
-test("the empty-streams hint gates Sync now copy on the owner-runnable branch", async () => {
-  const src = await readFile(PAGE_FILE, "utf8");
-  // The owner-run copy must be gated behind the owner-runnable branch so
-  // push-mode connections are not told to click a button they do not have. It
-  // also uses the same idle label as the button ("Sync now" / "Retry sync") so
-  // failed first attempts do not fall back to stale first-run copy.
-  assert.match(src, SYNC_HINT_GATED_RE);
-  assert.match(src, EMPTY_STREAMS_HINT_RECEIVES_IDLE_LABEL);
+test("empty records omit invented counts", async () => {
+ const src = await readFile(PAGE_FILE, "utf8");
+ assert.match(src, /sourceKindLine\(source,\s*stream.name\)/);
 });
 
 test("detail Sync now acknowledges accepted starts without stale optimistic running state", async () => {
@@ -254,7 +242,7 @@ test("resumeConnectorScheduleAction reaches the real instance-scoped schedule-re
   assert.match(src, REATTACH_SCHEDULE_RESUME_CALL);
 });
 
-test("paused schedules retain primary Resume and offer an independent secondary one-off sync", async () => {
+test("paused schedules keep Resume alone at the top and offer one-off sync below", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const branch = src.slice(
     src.indexOf('  if (action.kind === "reattach_schedule")'),
@@ -264,11 +252,16 @@ test("paused schedules retain primary Resume and offer an independent secondary 
   assert.match(pausedBranch, REATTACH_SCHEDULE_FORM_ACTION);
   assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTOR_ID_INPUT);
   assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTION_ID_INPUT);
-  assert.match(pausedBranch, /<IcButton[^>]*variant="default">\s*\{action\.cta\}/);
-  assert.match(pausedBranch, /<\/form>\s*\{canSync \? \(\s*<SyncNowButton/);
-  const sync = pausedBranch.match(/<SyncNowButton[\s\S]*?\/>/)?.[0];
-  assert.ok(sync, "paused schedule offers Sync now outside the Resume form");
-  for (const prop of ["connectionId", "connectorId", "displayName", "installPromptShown"]) {
+  // DIRECTION.md §One data source: the server action follows its status-table filled/outlined choice.
+  assert.match(pausedBranch, /<IcButton[^>]*variant=\{filled \? "default" : "ghost"\}>\s*\{label \?\? action\.cta\}/);
+  // DIRECTION.md §One data source: the status-table action is the only action at the top of the page.
+  assert.doesNotMatch(pausedBranch, /canSync|<SyncNowButton/);
+  const sync = src.match(/\{scheduleSyncAvailable \? \(\s*<SyncNowButton([\s\S]*?)\/>\s*\) : null\}/)?.[1];
+  assert.ok(sync, "paused schedule keeps Sync now in the secondary sync options");
+  // DIRECTION.md §One data source: the secondary control keeps its existing source-scoped target.
+  assert.ok(sync.includes("connectionId={connectorInstanceId ?? connectionId}"));
+  // DIRECTION.md §One data source: the secondary control forwards the same source and run state.
+  for (const prop of ["connectorId", "displayName", "installPromptShown"]) {
     assert.ok(sync.includes(`${prop}={${prop}}`), `forwards ${prop} like ordinary sync`);
   }
   assert.match(sync, /idleLabel=\{syncIdleLabel\}/);
@@ -277,26 +270,20 @@ test("paused schedules retain primary Resume and offer an independent secondary 
   assert.doesNotMatch(sync, /\bforce\b|runningLabel|action\.cta|resumeConnectorScheduleAction/);
 });
 
-test("paused-schedule sync preserves modality, setup, revoked and running guards", async () => {
+test("a paused schedule keeps its one primary server action and secondary sync control", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   const primary = src.slice(
     src.indexOf("function ConnectorPrimaryHeaderAction"),
     src.indexOf("function reauthActionPresentation")
   );
-  assert.match(primary, /if \(setupFailed\) \{\s*return null;/);
-  const revokedGuard = primary.indexOf("if (revoked)");
-  const dispatch = primary.indexOf("<RenderedVerdictHeaderAction");
-  assert.ok(revokedGuard >= 0, "the revoked guard must exist");
-  assert.ok(dispatch >= 0, "the owner action dispatch must exist");
-  assert.ok(revokedGuard < dispatch, "a revoked connection returns before any owner action renders");
-  assert.match(primary, /canSync=\{primaryAction\.kind === "sync"\}/);
-  assert.match(primary, /syncIdleLabel=\{syncIdleLabel\}/);
   const rendered = src.slice(
     src.indexOf("function RenderedVerdictHeaderAction"),
     src.indexOf("function AcquisitionCoverageSection")
   );
-  assert.match(rendered, /canSync,/);
-  assert.match(rendered, /syncIdleLabel,/);
+  // DIRECTION.md: the server action is the one top action; optional sync stays in the main column.
+  assert.match(primary, /statusAction\?\.kind === "server_cta"/);
+  assert.match(src, /const scheduleSyncAvailable = connectionPrimaryAction\?\.kind === "reattach_schedule" && primaryAction\.kind === "sync"/);
+  assert.match(src, /scheduleSyncAvailable \? \([\s\S]*<SyncNowButton[\s\S]*variant="outline"/);
   assert.match(rendered, NON_OWNER_HEADER_ACTIONS_RETURN_NULL);
   const button = await readFile(SYNC_BUTTON_FILE, "utf8");
   assert.match(button, /const busy = running \|\| isPending/);

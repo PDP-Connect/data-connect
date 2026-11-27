@@ -3,7 +3,9 @@
 
 import assert from "node:assert/strict"
 import { mock, test } from "node:test"
+import * as React from "react"
 import { createElement } from "react"
+Object.assign(globalThis, { React })
 import { renderToStaticMarkup } from "react-dom/server"
 
 type Setting = typeof import("./owner-password-setting.tsx")
@@ -50,57 +52,28 @@ async function render(
   return renderToStaticMarkup(createElement(OwnerPasswordSetting, props))
 }
 
-test("desktop password copy describes local storage without naming a storage mechanism", async () => {
-  const html = await render({ canReveal: true, source: "desktop" })
-  assert.match(html, /stores this password on this computer for signing in\s+on other devices/)
-  assert.match(html, /Reveal password/)
-  assert.match(html, /Change password/)
-  assert.match(html, /signs out other browser sessions and\s+command-line tokens/)
-  assert.match(html, /Make sure no one else can see your screen/)
-  assert.doesNotMatch(html, /keychain/)
-  assert.equal((html.match(/signing in\s+on other devices/g) ?? []).length, 1)
-  assert.doesNotMatch(html, /PDPP_OWNER_PASSWORD/)
+test("generated and chosen desktop passwords have distinct states and local actions", async () => {
+  const generated = await render({ canReveal: true, passwordSet: false, source: "desktop" })
+  assert.match(generated, /DataConnect made a password for you/)
+  assert.match(generated, /Show password/)
+  assert.match(generated, /Change password/)
+  const chosen = await render({ canReveal: true, passwordSet: true, source: "desktop" })
+  assert.match(chosen, /You chose this password/)
+  assert.match(chosen, /Change password/)
 })
-
-test("reveal appears only where the desktop webview can prove it is local", async () => {
+test("a browser reaching the desktop gets directions without unusable controls", async () => {
   const html = await render({ canReveal: false, source: "desktop" })
-  assert.doesNotMatch(html, /Reveal password/)
-  assert.match(html, /Change password/)
+  assert.match(html, /Change or show the password in the DataConnect app/)
+  assert.doesNotMatch(html, /<button/)
 })
-
-test("the desktop copy omits the Linux OS prompt message and change stays available", async () => {
-  const html = await render({
-    canReveal: true,
-    source: "desktop",
-  })
-  assert.match(html, /Reveal password/)
-  assert.match(html, /<button[^>]*type="button"[^>]*>Change password</)
-  assert.doesNotMatch(html, /No OS prompt on Linux yet\./)
+test("environment passwords say where to change them without technical names or folds", async () => {
+  for (const managedDesktop of [true, false]) {
+    const html = await render({ managedDesktop, source: "env" })
+    assert.match(html, /This password is set where DataConnect was installed/)
+    assert.doesNotMatch(html, /<details|PDPP_|DATACONNECT_|<button/)
+  }
 })
-
-test("an operator's PDPP_OWNER_PASSWORD keeps the env copy", async () => {
-  const html = await render({ source: "env" })
-  assert.match(
-    html,
-    /Password change is disabled because this install uses\s+<code>PDPP_OWNER_PASSWORD<\/code>/
-  )
-  assert.match(html, /restart the server/)
-})
-
-test("a desktop started with an owner password env var names both variables and DataConnect", async () => {
-  const html = await render({ managedDesktop: true, source: "env" })
-  assert.match(html, /DATACONNECT_OWNER_PASSWORD/)
-  assert.match(html, /restart DataConnect/)
-  assert.doesNotMatch(html, /restart the server/)
-})
-
-test("the desktop button says Set password until the owner has set one, then Change password", async () => {
-  const unset = await render({ canReveal: true, passwordSet: false, source: "desktop" })
-  assert.match(unset, /<button[^>]*type="button"[^>]*>Set password</)
-  assert.doesNotMatch(unset, /Change password/)
-  const set = await render({ canReveal: true, passwordSet: true, source: "desktop" })
-  assert.match(set, /<button[^>]*type="button"[^>]*>Change password</)
-  assert.doesNotMatch(set, /Set password/)
-  const unspecified = await render({ canReveal: true, source: "desktop" })
-  assert.match(unspecified, />Change password</)
+test("setup passwords keep the current, new and confirmation form", async () => {
+  const html = await render({ source: "app" })
+  for (const label of ["Current password", "New password", "Confirm new password", "Change password"]) assert.ok(html.includes(label))
 })

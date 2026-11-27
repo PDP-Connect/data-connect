@@ -4,202 +4,360 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcInput } from "@pdpp/brand-react";
-import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
-import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
+import { useId, useState, useTransition, type ReactNode } from "react";
+import { WentWrong } from "../add/connect-parts.tsx";
+import { keptSecretWord } from "../../lib/saved-secret-words.ts";
+import {
+	deleteConnectionAction,
+	resetAndSyncConnectionAction,
+	revokeConnectionAction,
+} from "./actions.ts";
+import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
 interface Props {
-  /**
-   * The in-flight run that blocks a delete, when known (from the delete
-   * refusal or the connection's schedule). Enables "Cancel run and delete".
-   */
-  activeRunId?: string | null;
-  /**
-   * The concrete connection selector (`connection_id` / `connector_instance_id`).
-   * Null only when this connector type has no addressable connection yet — the
-   * danger zone renders disabled guidance in that case rather than destructive
-   * forms with no target.
-   */
-  connectionId: string | null;
-  /** Result banner forwarded from the server action redirect. */
-  error?: string;
-  /** Result banner forwarded from the server action redirect. */
-  message?: string;
-  /** Setup-failed shells have no collection state or authorization to revoke. */
-  setupFailed?: boolean;
+	activeRunId?: string | null;
+	connectionId: string | null;
+	displayName: string;
+  serviceName?: string;
+  /** What the source saved ("username_password", a key…): the noun in "Your records and <noun> are kept". */
+  credentialKind?: string | null;
+	error?: string;
+	message?: string;
+	setupFailed?: boolean;
+  inactive?: boolean;
+  neverConnected?: boolean;
+  /** The connector is not installed: nothing that has to run it can start. */
+  connectorNotInstalled?: boolean;
+  /** False when nothing has been copied: copying everything again would change nothing. */
+  hasRecords?: boolean;
+	initialDialog?: "reset" | "disconnect" | "delete";
 }
 
-/**
- * Per-connection danger zone: confirmed Revoke and Delete controls. This
- * component renders only on the connection detail page, which resolves a
- * concrete configured connection (catalog-only / unavailable rows `notFound()`
- * before reaching it), so destructive controls never attach to a catalog row.
- *
- * Revoke is a lightweight confirm (checkbox); it stops future collection while
- * retaining records, grants, and audit. Delete requires reproducing the
- * connection id (typed-id confirmation) before the destructive submit enables;
- * it erases exactly this connection's records and is refused while a run is in
- * flight; when the blocking run is known, the same confirmed submit cancels it
- * and retries. Both confirmations are enforced again on the server — the client
- * gating is a guardrail, not the gate.
- */
-export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
-  return (
-    <Section
-      description="These actions affect only this connection. Sibling connections of the same connector type, and their saved browser sessions, are untouched."
-      id="danger-zone"
-      title="Danger zone"
-    >
-      {error ? (
-        <div className="pdpp-caption mb-4 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
-          <span className="font-medium text-destructive">{error}</span>
-        </div>
-      ) : null}
-      {message ? (
-        <div className="pdpp-caption mb-4 rounded-md border border-emerald-500/30 border-l-4 border-l-emerald-500/60 bg-emerald-500/5 px-4 py-2.5">
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">{message}</span>
-        </div>
-      ) : null}
+export const sourceRemovalCopy = {
+	reset: (name: string, credentialKind?: string | null) =>
+		`Starts over and copies all of ${name} again. Your records and ${keptSecretWord(credentialKind)} are kept while it runs.`,
+	disconnect: (name: string) =>
+		`Stops checking and signs DataConnect out of ${name}. Your records stay, and apps that can read them still can.`,
+	delete: (name: string) =>
+		`Erases every record from ${name} on this computer. This cannot be undone. Apps keep any copies they already took.`,
+};
 
-      {connectionId === null ? (
-        <p className="pdpp-caption text-muted-foreground italic">
-          This connector type has no addressable connection yet, so there is nothing to revoke or delete.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-6 rounded-md border border-border p-4">
-          {setupFailed ? null : (
-            <>
-              <RevokeForm connectionId={connectionId} />
-              <div className="border-border border-t" />
-              <ResetSourceForm connectionId={connectionId} />
-              <div className="border-border border-t" />
-            </>
-          )}
-          <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
-        </div>
-      )}
-    </Section>
-  );
+export function ConnectionDangerZone({
+	activeRunId = null,
+	connectionId,
+	displayName,
+  serviceName = displayName,
+  credentialKind,
+	error,
+	message,
+	setupFailed = false,
+  inactive = false,
+  neverConnected = false,
+  connectorNotInstalled = false,
+  hasRecords = true,
+	initialDialog,
+}: Props) {
+	return (
+		<div
+			className="mt-6 flex flex-col gap-5"
+			data-testid="danger-zone"
+			id="danger-zone"
+		>
+			{error ? <ActionFeedback message={error} tone="error" /> : null}
+			{message ? <ActionFeedback message={message} tone="success" /> : null}
+			{connectionId === null ? null : (
+				<>
+					{setupFailed || inactive || !hasRecords ? null : connectorNotInstalled ? (
+						<p className="pdpp-body text-muted-foreground">Copying everything again needs {serviceName} to be installed again first.</p>
+					) : (
+						<ResetSourceForm
+							connectionId={connectionId}
+							displayName={displayName}
+              serviceName={serviceName}
+              credentialKind={credentialKind}
+							initialOpen={initialDialog === "reset"}
+						/>
+					)}
+					<div className="border-t border-border pt-4">
+						<h3 className="pdpp-eyebrow mb-4">Remove</h3>
+						<div className="flex flex-col gap-5">
+							{setupFailed || inactive ? null : (
+								<RevokeForm
+									connectionId={connectionId}
+									displayName={displayName}
+              serviceName={serviceName}
+									initialOpen={initialDialog === "disconnect"}
+								/>
+							)}
+							<DeleteForm
+                neverConnected={neverConnected}
+								activeRunId={activeRunId}
+								connectionId={connectionId}
+								displayName={displayName}
+              serviceName={serviceName}
+								initialOpen={initialDialog === "delete"}
+							/>
+						</div>
+					</div>
+				</>
+			)}
+		</div>
+	);
 }
 
-function ResetSourceForm({ connectionId }: { connectionId: string }) {
-  const router = useRouter();
-  const [confirmed, setConfirmed] = useState(false);
-  const [message, setMessage] = useState<{ text: string; tone: "error" | "success" } | null>(null);
-  const [isPending, startTransition] = useTransition();
-  return (
-    <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-foreground">Reset and re-sync</h3>
-      <p className="pdpp-caption text-muted-foreground">
-        Clears this source’s cursor and sync checkpoints, then starts a full sync. Records, credentials, and browser
-        profile are kept.
-      </p>
-      <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
-        <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-        <span>Clear sync state and start a full sync for {connectionId}.</span>
-      </label>
-      <div className="flex flex-wrap items-center gap-3">
-        <IcButton
-          disabled={!confirmed || isPending}
-          onClick={() => {
-            setMessage(null);
-            startTransition(async () => {
-              const result = await resetAndSyncConnectionAction(connectionId);
-              if (result.ok) router.refresh();
-              setMessage(
-                result.ok
-                  ? { text: "Sync state cleared. Full sync started.", tone: "success" }
-                  : { text: result.message, tone: "error" }
-              );
-            });
-          }}
-          type="button"
-        >
-          {isPending ? "Resetting…" : "Reset and re-sync"}
-        </IcButton>
-        {message ? (
-          <span
-            aria-live="polite"
-            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-status-success-fg"}`}
-            role={message.tone === "error" ? "alert" : "status"}
-          >
-            {message.text}
-          </span>
-        ) : null}
-      </div>
+function ActionRow({
+	label,
+	sentence,
+	onClick,
+	children,
+  open,
+  destructive = false,
+}: {
+  open: boolean;
+  destructive?: boolean;
+	label: string;
+	sentence: string;
+	onClick: () => void;
+	children?: ReactNode;
+}) {
+	return (
+		<div>
+      {!open ? <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
+        <div className="min-w-0">
+          <p className="pdpp-body text-muted-foreground">{sentence}</p>
+        </div>
+        <IcButton className="shrink-0 !whitespace-normal text-left" onClick={onClick} size="sm" type="button" variant={destructive ? "destructive" : "ghost"}>{label}</IcButton>
+      </div> : null}
+      {children}
     </div>
-  );
+	);
 }
 
-function RevokeForm({ connectionId }: { connectionId: string }) {
-  return (
-    <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-foreground">Revoke</h3>
-      <p className="pdpp-caption text-muted-foreground">
-        Stops future collection and signs out the saved browser session for this source. Records, grants, and audit
-        history are retained. To resume, reconnect this source.
-      </p>
-      <form action={revokeConnectionAction} className="mt-1 flex flex-wrap items-center gap-3">
-        <input name="connection_id" type="hidden" value={connectionId} />
-        <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
-          <input name="confirm_revoke" type="checkbox" value="yes" />
-          <span>
-            Stop future collection for <code className="font-mono">{connectionId}</code>; keep its records.
-          </span>
-        </label>
-        <IcButton type="submit" variant="ghost">
-          Revoke connection
-        </IcButton>
-      </form>
-    </div>
-  );
+function ActionQuestion({
+	label,
+	sentence,
+	onCancel,
+	children,
+}: {
+	label: string;
+	sentence: string;
+	onCancel: () => void;
+	children: ReactNode;
+}) {
+	const id = useId();
+	return (
+		<div
+			aria-describedby={`${id}-sentence`}
+			aria-labelledby={`${id}-title`}
+			className="grid w-full max-w-xl gap-3 rounded-md border border-border p-4"
+			onKeyDown={(event) => {
+				if (event.key === "Escape") onCancel();
+			}}
+			role="alertdialog"
+			tabIndex={-1}
+		>
+			<h4 className="pdpp-body font-medium" id={`${id}-title`}>
+				{label}?
+			</h4>
+			<p className="pdpp-caption text-muted-foreground" id={`${id}-sentence`}>
+				{sentence}
+			</p>
+			{children}
+		</div>
+	);
 }
 
-function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null; connectionId: string }) {
-  const [typed, setTyped] = useState("");
-  const confirmed = typed === connectionId;
-  return (
-    <div className="flex flex-col gap-2">
-      <h3 className="pdpp-body font-medium text-destructive">Delete</h3>
-      <p className="pdpp-caption text-muted-foreground">
-        Permanently erases this connection's records, including everything already collected, its sync position, and
-        the saved browser session, and removes the connection. This cannot be undone.
-      </p>
-      <p className="pdpp-caption text-muted-foreground">
-        Apps you granted access stay authorized. They stop receiving this source's data, and they keep any copies they
-        already received. To end their access, revoke their grants.
-      </p>
-      {activeRunId ? (
-        <p className="pdpp-caption text-muted-foreground">
-          A collection run is in progress. Deleting cancels run <code className="font-mono">{activeRunId}</code> first;
-          records it already saved are erased with the rest.
-        </p>
-      ) : null}
-      <form action={deleteConnectionAction} className="mt-1 flex flex-col gap-2">
-        <input name="connection_id" type="hidden" value={connectionId} />
-        {activeRunId ? <input name="cancel_run_id" type="hidden" value={activeRunId} /> : null}
-        <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground" htmlFor="confirm-delete-input">
-          <span>
-            Type the connection id <code className="font-mono">{connectionId}</code> to confirm.
-          </span>
-          <IcInput
-            aria-label="Type the connection id to confirm deletion"
-            autoComplete="off"
-            className="w-full max-w-md font-mono"
-            id="confirm-delete-input"
-            name="confirm_delete"
-            onChange={(e) => setTyped(e.target.value)}
-            placeholder={connectionId}
-            value={typed}
-          />
-        </label>
-        <div>
-          <IcButton disabled={!confirmed} type="submit" variant="destructive">
-            {activeRunId ? "Cancel run and delete" : "Delete connection and erase its records"}
-          </IcButton>
-        </div>
-      </form>
-    </div>
-  );
+function QuestionButtons({ children, onCancel }: { children: ReactNode; onCancel: () => void }) {
+  return <div className="flex flex-row-reverse justify-start gap-2">
+    {children}
+    <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">Cancel</IcButton>
+  </div>;
+}
+
+function ResetSourceForm({
+	connectionId,
+	displayName,
+  serviceName = displayName,
+  credentialKind,
+	initialOpen,
+}: {
+	connectionId: string;
+	displayName: string;
+  serviceName?: string;
+  credentialKind?: string | null;
+	initialOpen: boolean;
+}) {
+	const router = useRouter();
+	const [open, setOpen] = useState(initialOpen);
+	const [message, setMessage] = useState<{
+		text: string;
+		tone: "error" | "success";
+	} | null>(null);
+	const [isPending, startTransition] = useTransition();
+	const label = "Copy everything again";
+	const sentence = sourceRemovalCopy.reset(serviceName, credentialKind);
+	return (
+		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
+			{open ? (
+				<ActionQuestion
+					label={label}
+					sentence={sentence}
+					onCancel={() => setOpen(false)}
+				>
+					<QuestionButtons onCancel={() => setOpen(false)}><IcButton
+						disabled={isPending}
+						onClick={() => {
+							setMessage(null);
+							startTransition(async () => {
+								const result = await resetAndSyncConnectionAction(connectionId);
+								if (result.ok) {
+									router.refresh();
+									setOpen(false);
+								}
+								setMessage(
+									result.ok
+										? { text: "Started copying again.", tone: "success" }
+										: { text: result.message, tone: "error" },
+								);
+							});
+						}}
+						size="sm"
+						type="button"
+						variant="ghost"
+					>
+						{isPending ? "Starting…" : label}
+					</IcButton></QuestionButtons>
+				</ActionQuestion>
+			) : null}
+			{message ? (
+				<ActionFeedback message={message.text} tone={message.tone} />
+			) : null}
+		</ActionRow>
+	);
+}
+
+function RevokeForm({
+	connectionId,
+	displayName,
+  serviceName = displayName,
+	initialOpen,
+}: {
+	connectionId: string;
+	displayName: string;
+  serviceName?: string;
+	initialOpen: boolean;
+}) {
+	const [open, setOpen] = useState(initialOpen);
+	const label = "Disconnect and keep the records";
+	const sentence = sourceRemovalCopy.disconnect(serviceName);
+	return (
+		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
+			{open ? (
+				<ActionQuestion
+					label={label}
+					sentence={sentence}
+					onCancel={() => setOpen(false)}
+				>
+					<form action={revokeConnectionAction}>
+						<input name="connection_id" type="hidden" value={connectionId} />
+						<input name="confirm_revoke" type="hidden" value="yes" />
+						<QuestionButtons onCancel={() => setOpen(false)}><IcButton size="sm" type="submit" variant="ghost">
+							{label}
+						</IcButton></QuestionButtons>
+					</form>
+				</ActionQuestion>
+			) : null}
+		</ActionRow>
+	);
+}
+
+function DeleteForm({
+  neverConnected,
+	activeRunId,
+	connectionId,
+	displayName,
+  serviceName = displayName,
+	initialOpen,
+}: {
+	neverConnected: boolean;
+  activeRunId: string | null;
+	connectionId: string;
+	displayName: string;
+  serviceName?: string;
+	initialOpen: boolean;
+}) {
+	const [open, setOpen] = useState(initialOpen);
+	const [typed, setTyped] = useState("");
+	const confirmed = neverConnected || typed === displayName;
+	const label = neverConnected ? "Delete it" : "Delete and erase the records";
+	const sentence = neverConnected ? `Takes ${serviceName} off your list. There is nothing to erase.` : sourceRemovalCopy.delete(serviceName);
+	const close = () => {
+		setOpen(false);
+		setTyped("");
+	};
+	return (
+		<ActionRow label={label} sentence={sentence} open={open} destructive={!neverConnected} onClick={() => setOpen(true)}>
+			{open ? (
+				<ActionQuestion label={label} sentence={sentence} onCancel={close}>
+					<form action={deleteConnectionAction} className="grid gap-3">
+						<input name="connection_id" type="hidden" value={connectionId} />
+						{activeRunId ? (
+							<input name="cancel_run_id" type="hidden" value={activeRunId} />
+						) : null}
+						<input
+							name="confirm_delete"
+							type="hidden"
+							value={confirmed ? connectionId : ""}
+						/>
+						{!neverConnected ? <label
+							className="pdpp-caption flex flex-col gap-1 text-muted-foreground"
+							htmlFor="confirm-delete-input"
+						>
+							<span>Type {displayName} to confirm.</span>
+							<IcInput
+								aria-label="Type the data source name to confirm deletion"
+								autoComplete="off"
+								className="w-full max-w-md"
+								id="confirm-delete-input"
+								onChange={(event) => setTyped(event.target.value)}
+								value={typed}
+							/>
+						</label> : null}
+						<QuestionButtons onCancel={close}><IcButton
+							disabled={!confirmed}
+							size="sm"
+							type="submit"
+							variant="destructive"
+						>
+							{activeRunId ? "Stop the sync and delete" : label}
+						</IcButton></QuestionButtons>
+					</form>
+				</ActionQuestion>
+			) : null}
+		</ActionRow>
+	);
+}
+
+function ActionFeedback({
+	message,
+	tone,
+}: {
+	message: string;
+	tone: "error" | "success";
+}) {
+	return tone === "error" ? (
+		<div className="text-sm" role="alert">
+			<p className="text-destructive">{ACTION_ERROR_COPY}</p>
+			<WentWrong message={message} />
+		</div>
+	) : (
+		<p
+			aria-live="polite"
+			className="text-sm text-muted-foreground"
+			role="status"
+		>
+			{message}
+		</p>
+	);
 }

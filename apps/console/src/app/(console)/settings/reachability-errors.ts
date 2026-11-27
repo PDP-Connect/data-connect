@@ -20,7 +20,7 @@ const GENERIC_BY_ACTION: Readonly<Record<ActionKind, string>> = {
 };
 export const genericErrorFor = (action: ActionKind): string => GENERIC_BY_ACTION[action];
 
-export const CLEANUP_UNCONFIRMED = "Couldn't confirm the service closed your address.";
+export const CLEANUP_UNCONFIRMED = "DataConnect couldn't confirm that your address closed. Turn it off again to check.";
 const TRY_AGAIN = "Something changed while we were connecting. Try again.";
 const SERVICE_DOWN = "DataConnect's background service isn't running. Quit and reopen DataConnect.";
 export const SERVICE_DETAILS = "We couldn't load this service's details. Try again.";
@@ -29,8 +29,8 @@ const STEP_GONE = "That step is no longer available. Reload this page and try ag
 const KEYCHAIN = "DataConnect couldn't use your saved sign-in details. Enter them again.";
 
 export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  owner_password_required: "Set a password first. Remote access needs one so only you can sign in.",
-  provider_unavailable: "Couldn't reach the service. It may be busy or down. Remote access did not turn on.",
+  owner_password_required: "Set a password first so only you can sign in.",
+  provider_unavailable: "Couldn't reach the service. It may be busy or down. Try again.",
   verification_failed: "The address isn't working from the internet yet. Try again.",
   proof_refresh_unsupported:
     "We can't confirm the address still works. Turn it off and on to get a fresh one.",
@@ -59,34 +59,34 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
     "A DataConnect folder can be changed by other accounts on this computer. Fix its permissions to continue.",
   cleanup_unconfirmed: CLEANUP_UNCONFIRMED,
   setup_required: "A step is needed before remote access can turn on. Finish setup, then try again.",
-  host_path_too_long: "DataConnect's data folder path is too long for remote access.",
+  host_path_too_long: "DataConnect's data folder path is too long for remote access. Choose a shorter folder path and try again.",
   host_supervisor_unavailable: SERVICE_DOWN,
   host_runtime_unavailable: SERVICE_DOWN,
   service_unreachable: SERVICE_DOWN,
-  host_policy_denied: "This computer's settings don't allow remote access.",
+  host_policy_denied: "This computer's settings don't allow remote access. Ask its administrator to change them.",
   remote_disconnect_acknowledgment_required:
-    "Check the box to confirm you understand this page may disconnect, then try again.",
+    "This page may disconnect while remote access changes. Try again and confirm when asked.",
   operation_in_progress: ALREADY_WORKING,
   operation_conflict: ALREADY_WORKING,
   operation_superseded: ALREADY_WORKING,
   configuration_in_use: ALREADY_WORKING,
-  cleanup_debt: "A previous address couldn't be confirmed closed. Turn it off first, then try again.",
+  cleanup_debt: "A previous address may still work. Turn it off first, then try again.",
   operation_not_found: STEP_GONE,
   review_not_found: STEP_GONE,
   draft_not_found: STEP_GONE,
   route_not_found: STEP_GONE,
-  unsupported: "This way isn't supported on this computer.",
+  unsupported: "This way can't work on this computer. Choose another way.",
   requirements_unsatisfied: "This computer is missing something this way needs. Check what's missing, then try again.",
   artifact_integrity_failed: "A required download didn't pass its safety check. Try again.",
   invalid_input: "Something you entered isn't valid. Check it and try again.",
   secret_input_unavailable: KEYCHAIN,
   secret_reference_inconsistent: KEYCHAIN,
-  secret_in_use: "Those sign-in details are still in use. Turn off remote access first.",
-  secret_backend_locked: "The system keychain is locked. Unlock it, then try again.",
-  secret_backend_unavailable: "DataConnect couldn't reach the system keychain. Try again.",
+  secret_in_use: "Those sign-in details are still in use. Turn off remote access first, then try again.",
+  secret_backend_locked: "This computer’s password store is locked. Unlock it, then try again.",
+  secret_backend_unavailable: "DataConnect couldn't reach this computer’s password store. Try again.",
   // Not codes from the server: reasons a recovery check reports.
   public_operation_recovery_unavailable: "We can't check this automatically. Turn it off, then try again.",
-  route_reconciliation_required: "We lost track of the address. It may still be on. Turn it off.",
+  route_reconciliation_required: "We lost track of the address. It may still be on. Turn it off to check.",
   // Fallbacks the server maps everything else to.
   reachability_unavailable: GENERIC_ERROR,
   internal_error: GENERIC_ERROR,

@@ -37,6 +37,15 @@ export interface AutostartStore {
   requestChange: (desiredEnabled: boolean) => Promise<AutostartState>
 }
 
+export class AutostartStateNotReportedError extends Error {
+  readonly code = "autostart_state_not_reported"
+
+  constructor() {
+    super("Autostart state is not available yet. The DataConnect desktop app has not reported its autostart state.")
+    this.name = "AutostartStateNotReportedError"
+  }
+}
+
 export function autostartStatePath(dataDir: string): string {
   return join(dataDir, "autostart-state.json")
 }
@@ -136,7 +145,7 @@ export function createAutostartStore(dataDir: string, onWrite: () => void = () =
   async function load(): Promise<AutostartState> {
     const raw = await readJson(statePath)
     if (!raw) {
-      throw new Error("Autostart state is not available yet. The DataConnect desktop app has not reported its autostart state.")
+      throw new AutostartStateNotReportedError()
     }
     const state = parseObserved(raw)
     return { enabled: state.enabled, error: state.error, pending: await hasPendingCommand() }

@@ -67,8 +67,10 @@ test("the source detail surface renders both durable confirmation journeys", () 
     pendingHorizons: HORIZONS,
   });
 
+  // DIRECTION.md §Values: display dates as relative text or a date, never as raw ISO.
   for (const value of [
-    'id="coverage-confirmation"',
+    // DIRECTION.md: evidence actions stay visible in the main column with plain headings.
+    'id="history-confirmation"',
     'name="earliest_available"',
     'name="note"',
     'name="acknowledged_by"',
@@ -137,12 +139,28 @@ test("the owner sees the full structured acknowledgement record", () => {
     "provider_data_contradictory",
     "partial",
     "Alex",
-    "2026-08-21T00:00:00.000Z",
+    "21 Aug 2026",
     "Reviewed with the owner.",
     'name="acknowledged_by"',
   ]) {
     assert.equal(html.includes(value), true, `rendered record is missing ${value}`);
   }
+});
+
+test("malformed evidence dates do not expose raw ISO-looking text", () => {
+  const malformed = "2026-99-99T00:00:00.000Z";
+  const html = renderConfirmation({
+    ...ACTIONS,
+    acknowledgedLoss: null,
+    connectionId: "connection-1",
+    latestKnownGaps: [],
+    pendingHorizons: [{ ...HORIZONS[0], earliestAvailable: malformed }],
+  });
+
+  // DIRECTION.md §Values: render evidence dates as relative text or a date, never as raw ISO.
+  assert.ok(html.includes("Date unavailable"));
+  // DIRECTION.md §One data source: raw ISO dates are not visible on the page.
+  assert.ok(!html.includes(malformed));
 });
 
 test("a stream-scoped acknowledgement leaves other loss evidence pending", () => {

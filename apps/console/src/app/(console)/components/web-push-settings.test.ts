@@ -4,7 +4,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import test from "node:test";
+import { isCurrentBrowserSubscriptionRegistered, unavailableSentence, WebPushSettings } from "./web-push-settings.tsx";
+import type { WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
 const HERE = new URL(".", import.meta.url).pathname;
 const APP_ROOT = join(HERE, "..", "..", "..", "..");
@@ -48,10 +53,17 @@ const DIAGNOSTICS_SETUP_STEP_SUBSCRIBE_PATTERN = /Subscribe this device/;
 const DIAGNOSTICS_SETUP_STEP_TEST_PATTERN = /Send a test/;
 const DIAGNOSTICS_INSTALL_DISTINCT_FROM_SUBSCRIBE_PATTERN = /A PWA install is not enough/;
 const DIAGNOSTICS_DEVICE_SUBSCRIBED_PATTERN = /This device is subscribed/;
-const DIAGNOSTICS_SERVER_UNRECOGNIZED_PATTERN = /server does not recognize it/;
+const DIAGNOSTICS_SERVER_UNRECOGNIZED_PATTERN = /server does not list it/;
 const DIAGNOSTICS_DEVICE_DISPLAY_CONFIRMATION_PATTERN = /Only the device can confirm whether it displayed/;
-const DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN = />\s*Enable this device\s*</;
-const DIAGNOSTICS_DISABLE_DEVICE_BUTTON_PATTERN = />\s*Disable this device\s*</;
+// history-pages brief, decision 4: the one enable control reads "Turn on notifications".
+const DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN = />\s*Turn on notifications\s*</;
+const DIAGNOSTICS_TURN_OFF_BUTTON_PATTERN = />Turn off</;
+const TURN_OFF_CONFIRMATION_PATTERN = /Turn off notifications for \{label\}\? This device will stop receiving them\./;
+const SERVER_LIST_GATES_ENABLE_PATTERN = /const enabled = matchesThisBrowser && !unavailable/;
+const OLD_SUBSCRIPTION_CONFLICT_COPY_PATTERN = /This device is not receiving notifications yet|Turn off this device/;
+const OUTSIDE_DETAILS_TITLE_SUBSCRIPTION_PATTERN = /title:\s*"[^"]*subscription/i;
+const OLD_SUBSCRIPTION_REMOVE_ACTION_PATTERN = /onClick=\{\(\) => onDisable\(endpoint\)\}/;
+const LOCAL_SUBSCRIPTION_CLEANUP_HANDLER_PATTERN = /onDisable=\{disable\}/;
 const DIAGNOSTICS_TEST_PUSH_PATTERN = /fetch\("\/_ref\/web-push\/test"/;
 const DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN = /method:\s*"POST"/;
 const DIAGNOSTICS_SEND_TEST_BUTTON_PATTERN = />\s*Send test notification\s*</;
@@ -79,11 +91,19 @@ const DATACONNECT_ICON_GRADIENT_PATTERN = /stop-color="#304DC0"/;
 const DATACONNECT_ICON_WORDMARK_PATTERN = /aria-label="DataConnect"/;
 const ENABLE_CLEARS_TEST_STATUS_PATTERN = /async function enable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
 const DISABLE_CLEARS_TEST_STATUS_PATTERN =
-  /async function disable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
+  /async function disable\(targetEndpoint: string\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
 const WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN =
-  /<p aria-atomic="true" aria-live="polite" className="pdpp-body[^"]+" role="status">/;
+  /<p aria-live="polite"[^>]+role="status">Checking this device…/;
 const WEB_PUSH_DETAIL_LIVE_REGION_PATTERN =
   /<div aria-atomic="true" aria-live="polite" role="status">[\s\S]*?Last check: \{status\}[\s\S]*?\{testStatus \? <p/;
+const BANNED_VISIBLE_WORDS = /\b(verdict|coverage|fleet|projection|grant|bearer|manifest|run|stream|connector|instance|reference server|vapid|push api)\b/i;
+
+function visibleNotificationText(config: { enabled: boolean; object: "web_push_config"; public_key: string | null; unavailable_reason: string | null }, subscriptions: WebPushSubscriptionSummary[]) {
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions }));
+  const document = new JSDOM(markup).window.document;
+  for (const details of document.querySelectorAll("details")) details.remove();
+  return document.body.textContent ?? "";
+}
 
 test("WebPushSettings renders unsupported, denied-permission, insecure-context, VAPID, and iOS/PWA caveat states", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
@@ -99,6 +119,34 @@ test("WebPushSettings renders unsupported, denied-permission, insecure-context, 
   ]) {
     assert.match(src, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+test("server-not-ready wording tells the owner what is missing and where to set it", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  const config = {
+    enabled: false,
+    object: "web_push_config" as const,
+    public_key: null,
+    unavailable_reason: "VAPID public/private keys are not configured",
+  };
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions: [] }));
+  const detailsStart = markup.indexOf("<details");
+
+  // DIRECTION.md, “Few words”: a state is one plain sentence; round 4 item 6 names the server environment as its fix.
+  assert.equal(unavailableSentence(config.unavailable_reason, true), "This server needs its notification keys set in its environment.");
+  assert.ok(detailsStart >= 0);
+  assert.doesNotMatch(src, /ask its administrator to set them up/);
+  assert.match(markup.slice(detailsStart), /PDPP_WEB_PUSH_VAPID_PUBLIC_KEY/);
+  assert.match(markup.slice(detailsStart), /PDPP_WEB_PUSH_VAPID_PRIVATE_KEY/);
+  assert.match(src, /unavailableSentence\(unavailable, !\(config\.enabled && config\.public_key\)\)/);
+});
+
+test("notification server environment is hidden when the server is ready", () => {
+  const markup = renderToStaticMarkup(createElement(WebPushSettings, {
+    config: { enabled: true, object: "web_push_config", public_key: "public-key", unavailable_reason: null },
+    subscriptions: [],
+  }));
+  assert.doesNotMatch(markup, /Server environment:|PDPP_WEB_PUSH_VAPID_(?:PUBLIC|PRIVATE)_KEY/);
 });
 
 test("dashboard service worker fails closed and click-through targets clean owner URLs", async () => {
@@ -149,7 +197,10 @@ test("dashboard test notification button posts to /_ref/web-push/test and gates 
   assert.match(src, DIAGNOSTICS_TEST_PUSH_PATTERN);
   assert.match(src, DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN);
   assert.match(src, DIAGNOSTICS_ENABLE_DEVICE_BUTTON_PATTERN);
-  assert.match(src, DIAGNOSTICS_DISABLE_DEVICE_BUTTON_PATTERN);
+  assert.equal(src.match(/>\s*Turn on notifications\s*</g)?.length, 2);
+  assert.doesNotMatch(src, /Enable this device/);
+  assert.match(src, DIAGNOSTICS_TURN_OFF_BUTTON_PATTERN);
+  assert.match(src, TURN_OFF_CONFIRMATION_PATTERN);
   assert.match(src, DIAGNOSTICS_SEND_TEST_BUTTON_PATTERN);
   assert.match(src, DIAGNOSTICS_SEND_DISABLED_PATTERN);
   assert.match(src, DIAGNOSTICS_NO_SUBSCRIPTIONS_PATTERN);
@@ -165,10 +216,88 @@ test("dashboard Web Push enable and disable clear any stale test-notification st
   assert.match(src, DISABLE_CLEARS_TEST_STATUS_PATTERN);
 });
 
+test("successful notification enable and disable reread the server device list", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  const refresh = src.slice(src.indexOf("async function refreshSubscriptions"), src.indexOf("async function enable"));
+  const enable = src.slice(src.indexOf("async function enable"), src.indexOf("async function sendTest"));
+  const disable = src.slice(src.indexOf("async function disable"), src.indexOf("// Per-device install reminder"));
+  // Brief item 4: after either successful action, use the same server list endpoint as page load.
+  assert.match(refresh, /fetch\("\/_ref\/web-push\/subscriptions"[\s\S]*method:\s*"GET"/);
+  assert.match(enable, /await refreshSubscriptions\(\)/);
+  assert.match(disable, /await refreshSubscriptions\(\)/);
+});
+
 test("dashboard Web Push status changes are announced as live status regions", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
   assert.match(src, WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN);
   assert.match(src, WEB_PUSH_DETAIL_LIVE_REGION_PATTERN);
+});
+
+test("notification availability uses plain words and explains the next step", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  assert.match(src, /export function unavailableSentence/);
+  assert.match(src, /This browser can’t receive notifications\. Use Chrome, Edge or Firefox/);
+  assert.match(src, /notifications are blocked in your browser or device settings; allow them there, then return here/i);
+  // Round 4 item 6: the server provides its keys through environment settings.
+  assert.match(src, /This server needs its notification keys set in its environment\./);
+  // DIRECTION.md, Notifications: browser support details are folded under Details.
+  assert.match(src, /<summary className="min-h-11 cursor-pointer py-3 text-\[13px\] text-muted-foreground">Details<\/summary>/);
+});
+
+test("notification list states keep visible words plain and show only receiving devices", () => {
+  const config = { enabled: true, object: "web_push_config" as const, public_key: "key", unavailable_reason: null };
+  const emptyText = visibleNotificationText(config, []);
+  assert.match(emptyText, /Checking this device/);
+  assert.doesNotMatch(emptyText, BANNED_VISIBLE_WORDS);
+
+  const subscription: WebPushSubscriptionSummary = {
+    created_at: "2026-01-01T00:00:00Z",
+    device_label: "Desk computer",
+    endpoint: "https://push.example/one",
+    endpoint_redacted: null,
+    id: "one",
+    last_failure_at: null,
+    last_failure_reason: null,
+    last_success_at: null,
+    last_used_at: null,
+    owner_subject_id: "owner",
+    platform: null,
+    revoked_at: null,
+    updated_at: "2026-01-01T00:00:00Z",
+    user_agent: null,
+  };
+  const revoked = { ...subscription, endpoint: "https://push.example/revoked", id: "revoked", revoked_at: "2026-01-02T00:00:00Z" };
+  const rowsMarkup = renderToStaticMarkup(createElement(WebPushSettings, { config, subscriptions: [subscription, revoked] }));
+  const rowsDocument = new JSDOM(rowsMarkup).window.document;
+  for (const details of rowsDocument.querySelectorAll("details")) details.remove();
+  const rowsText = rowsDocument.body.textContent ?? "";
+  assert.match(rowsText, /Desk computer/);
+  assert.doesNotMatch(rowsText, /revoked/i);
+  assert.doesNotMatch(rowsText, BANNED_VISIBLE_WORDS);
+
+  // DIRECTION.md, Notifications: unavailable browsers get one plain explanation with a next step.
+  const failedText = unavailableSentence("This browser does not support service workers.");
+  assert.match(failedText, /This browser can’t receive notifications/);
+  assert.doesNotMatch(failedText, BANNED_VISIBLE_WORDS);
+});
+
+test("the server list controls notification state and local cleanup stays in Details", async () => {
+  const endpoint = "https://push.example/local-only";
+  const listed = { endpoint, revoked_at: null } as WebPushSubscriptionSummary;
+  const revoked = { endpoint, revoked_at: "2026-01-02T00:00:00Z" } as WebPushSubscriptionSummary;
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+
+  // history-repair brief P2: the server list is the truth when browser state disagrees.
+  assert.equal(isCurrentBrowserSubscriptionRegistered(endpoint, []), false);
+  assert.equal(isCurrentBrowserSubscriptionRegistered(endpoint, [revoked]), false);
+  assert.equal(isCurrentBrowserSubscriptionRegistered(endpoint, [listed]), true);
+  assert.match(src, SERVER_LIST_GATES_ENABLE_PATTERN);
+  assert.doesNotMatch(src, OLD_SUBSCRIPTION_CONFLICT_COPY_PATTERN);
+  const deviceStatus = src.slice(src.indexOf("function deviceStatus"), src.indexOf("export function unavailableSentence"));
+  assert.doesNotMatch(deviceStatus, OUTSIDE_DETAILS_TITLE_SUBSCRIPTION_PATTERN);
+  assert.ok(src.indexOf("Remove this browser&apos;s old subscription") > src.indexOf("<details"));
+  assert.match(src, OLD_SUBSCRIPTION_REMOVE_ACTION_PATTERN);
+  assert.match(src, LOCAL_SUBSCRIPTION_CLEANUP_HANDLER_PATTERN);
 });
 
 test("dashboard Web Push actions surface structured endpoint error details", async () => {
@@ -188,6 +317,7 @@ test("dashboard Web Push setup explains install, permission, subscription, and t
   assert.match(src, DIAGNOSTICS_SETUP_STEP_TEST_PATTERN);
   assert.match(src, DIAGNOSTICS_INSTALL_DISTINCT_FROM_SUBSCRIBE_PATTERN);
   assert.match(src, DIAGNOSTICS_DEVICE_SUBSCRIBED_PATTERN);
+  // history-repair brief P2: the server list is the truth for this browser's status.
   assert.match(src, DIAGNOSTICS_SERVER_UNRECOGNIZED_PATTERN);
   assert.match(src, DIAGNOSTICS_DEVICE_DISPLAY_CONFIRMATION_PATTERN);
 });

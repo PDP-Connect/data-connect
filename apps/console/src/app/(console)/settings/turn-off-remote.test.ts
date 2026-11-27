@@ -12,7 +12,7 @@ import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
-  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+  namedExports: { canOpenOwnerPasswordWindowAction: async () => true, requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
 mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
@@ -29,6 +29,7 @@ const fail = (code: string): Result => ({ ok: false, ...publicError(code, "serve
 
 const REMOTE = "https://one.example.test";
 const CONFIRM = "You're using this address now. Turning it off will close this page.";
+const LOCAL_CONFIRM = "Turning off remote access will make this address stop working.";
 const STOPPING = "Turning off… this page will stop working in a moment.";
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -68,7 +69,7 @@ const stateWith = (r: unknown, phase = "verified") =>
 const provider = {
   providerId: "p-tunnel",
   label: "Tunnel service",
-  reach: "public",
+  reach: "internet",
   transport: "https",
   availability: { session: { state: "available", reason: "" } },
   configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
@@ -171,21 +172,26 @@ test("from the remote address, confirming sends exactly one stop with the acknow
   });
 });
 
-test("from this computer, there is no dialog and one stop is sent", async () => {
+test("from this computer, Turn off still asks before it closes the address", async () => {
   for (const page of ["http://localhost:3000", "http://127.0.0.1:3000"]) {
     await withScreen(page, { "/state": stateWith(route(REMOTE)), "/routes/route-1/stop": ok({ operationId: "op-1" }) }, async ({ calls, press, text }) => {
       await press(turnOffCase.label);
-      assert.ok(!text().includes(CONFIRM), page);
+      // RAISE rule 5: turning off names the effect and waits for confirmation from every address.
+      assert.ok(text().includes(LOCAL_CONFIRM), page);
+      assert.equal(stops(calls).length, 0, page);
+      await press(/^Turn off$/);
       assert.equal(stops(calls).length, 1, page);
       assert.deepEqual(stops(calls)[0]!.body, stopBody);
     });
   }
 });
 
-test("with the route's address unknown, there is no dialog even on a remote-looking page", async () => {
+test("with the route's address unknown, the close still needs confirmation", async () => {
   await withScreen(REMOTE, { "/state": stateWith(route(null)), "/routes/route-1/stop": ok({ operationId: "op-1" }) }, async ({ calls, press, text }) => {
     await press(turnOffCase.label);
-    assert.ok(!text().includes(CONFIRM));
+    assert.ok(text().includes(LOCAL_CONFIRM));
+    assert.equal(stops(calls).length, 0);
+    await press(/^Turn off$/);
     assert.equal(stops(calls).length, 1);
   });
 });
@@ -258,6 +264,7 @@ test("from this computer, a stop that fails shows its error and no far-away mess
   };
   await withScreen("http://localhost:3000", table, async ({ press, text }) => {
     await press(turnOffCase.label);
+    await press(/^Turn off$/);
     assert.ok(!text().includes(STOPPING));
   });
 });
@@ -273,14 +280,16 @@ test("Turn on again from far away follows the same rule", async () => {
     await press(/^Cancel$/);
     assert.equal(stops(calls).length, 0);
     await press(/^Turn on again$/);
-    // The dialog's Turn off is the first button with this label after the dialog opens.
-    await press(/^Turn off$/);
+    // RAISE rule 5: confirm the close before the route is replaced.
+    await press(/^Turn off and on$/);
     assert.equal(stops(calls).length, 1);
     assert.deepEqual(stops(calls)[0]!.body, stopBody);
   });
   await withScreen("http://localhost:3000", table, async ({ calls, press, text }) => {
     await press(/^Turn on again$/);
-    assert.ok(!text().includes(CONFIRM));
+    assert.ok(text().includes(LOCAL_CONFIRM));
+    assert.equal(stops(calls).length, 0);
+    await press(/^Turn off and on$/);
     assert.equal(stops(calls).length, 1);
   });
 });
@@ -446,7 +455,9 @@ test("the read after a finished operation, answering after a later poll, does no
 
 test("two fast clicks on Turn off send one stop", async () => {
   const table = { "/state": stateWith(route(REMOTE)), "/routes/route-1/stop": ok({ operationId: "op-1" }) };
-  await withScreen("http://localhost:3000", table, async ({ calls, pressTwiceAtOnce }) => {
+  await withScreen("http://localhost:3000", table, async ({ calls, press, pressTwiceAtOnce }) => {
+    await press(turnOffCase.label);
+    assert.equal(stops(calls).length, 0, "opening the confirmation sends nothing");
     await pressTwiceAtOnce(turnOffCase.label);
     assert.equal(stops(calls).length, 1);
   });

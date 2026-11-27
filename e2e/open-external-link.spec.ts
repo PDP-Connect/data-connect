@@ -56,7 +56,7 @@ async function loginAsOwner(
     throw new Error("E2E_OWNER_PASSWORD is not set.")
   }
   await page.goto(`${BASE_URL}/owner/login?return_to=%2F`)
-  await page.getByLabel("Owner password").fill(OWNER_PASSWORD)
+  await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
   const [response] = await Promise.all([
     page.waitForResponse(
       res =>

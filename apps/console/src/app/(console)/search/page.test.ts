@@ -24,6 +24,11 @@ const EXPLORE_REDIRECT_ROUTES_RE =
   /redirect\(`\$\{dashboardRoutes\.section\.explore\}\?q=\$\{encodeURIComponent\(query\)\}`\)/;
 const SPINE_EXACT_RESULT_RE = /spineResult\.exact/;
 const EXACT_JUMP_OPT_OUT_RE = /jump\s*!==\s*["']0["']/;
+const NOTHING_FOUND_RE = /Nothing found for/;
+const FOUND_RESULTS_RE = /Found results for/;
+const SEARCH_RESULT_SECTION_TITLES_RE = /title="(?:Search|Activity|Apps|Sync history)"/;
+const LEGACY_SEARCH_COPY_RE = /Jump to artifact|Artifact id|trace id, grant id, or run id/;
+const SHARED_SEARCH_VIEW_RE = /SearchView/;
 
 test("the console search page does not import the rs-client record-search helpers", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -62,4 +67,18 @@ test("the console search page preserves exact-id jump redirects", async () => {
     "search/page.tsx must keep the exact-id branch that powers trace/grant/run deep links"
   );
   assert.match(src, EXACT_JUMP_OPT_OUT_RE, "search/page.tsx must keep the jump=0 opt-out for exact-id redirects");
+});
+
+test("the drawn search page explains its results in plain words, including an empty result", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  // data-pages.md, decision 5: explain an empty result in plain words.
+  assert.match(src, NOTHING_FOUND_RE);
+  // data-pages.md, decision 5: explain successful results in plain words.
+  assert.match(src, FOUND_RESULTS_RE);
+  // data-pages.md, decision 5: use section names people recognize.
+  assert.match(src, SEARCH_RESULT_SECTION_TITLES_RE);
+  // data-pages.md, decision 5: keep the redirecting route's own page view.
+  assert.doesNotMatch(src, SHARED_SEARCH_VIEW_RE);
+  // data-pages.md, decision 5: remove the old system-word search copy.
+  assert.doesNotMatch(src, LEGACY_SEARCH_COPY_RE);
 });

@@ -19,8 +19,8 @@ export function DeveloperModeSetting() {
   )
 
   return (
-    <div className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3">
-      <label className="flex items-start gap-2" htmlFor="developer-mode">
+    <div className="border-y border-border/70 py-3">
+      <label className="flex min-h-11 items-start gap-3" htmlFor="developer-mode">
         <input
           checked={enabled}
           id="developer-mode"
@@ -28,11 +28,11 @@ export function DeveloperModeSetting() {
           type="checkbox"
         />
         <span className="grid gap-1">
-          <span className="pdpp-caption font-medium text-foreground">
-            Enable developer connector surfaces
+          <span className="text-[15px] font-medium text-foreground">
+            Show data sources that are still being built
           </span>
-          <span className="pdpp-caption text-muted-foreground">
-            This reveals in-development connectors on Add source. It is stored
+          <span className="text-[13px] text-muted-foreground">
+            This shows in-development data sources on Add a data source. It is stored
             in this browser and is off by default.
           </span>
         </span>

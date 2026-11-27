@@ -5,37 +5,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { getCurrentBrowserSurfaceAssistance } from "../../../lib/run-assistance.ts";
 import { resolveNoAssistanceEndedTerminalStatus, selectNoAssistanceStreamState } from "./stream-state.ts";
 
-const pageSource = readFileSync(fileURLToPath(new URL("./page.tsx", import.meta.url)), "utf8");
+const pageSource = readFileSync(fileURLToPath(new URL("./page.tsx", import.meta.url)), "utf8") + readFileSync(fileURLToPath(new URL("./sign-in-parts.tsx", import.meta.url)), "utf8");
 const streamViewerSource = readFileSync(fileURLToPath(new URL("./stream-viewer.tsx", import.meta.url)), "utf8");
-const TERMINAL_STATUS_SELECTOR_RE =
-  /selectNoAssistanceStreamState\(\{[\s\S]{0,200}runHandleStatus:\s*runStatus\?\.status \?\? null,\s*terminalStatus:\s*envelope\.terminal_status,\s*\}\)/;
-const RUN_STATUS_FETCH_RE =
-  /Promise\.all\(\[\s*getRunTimeline\(runId, \{ cursor: null \}\),\s*getRunStatus\(runId\)\s*\]\)/;
-const RESOLVED_SURFACE_GATE_RE = /noAssistanceState === "resolved"[\s\S]{0,120}<ResolvedSurface/;
-const ENDED_SURFACE_GATE_RE =
-  /noAssistanceState === "ended"[\s\S]{0,360}<RunEndedSurface[\s\S]{0,360}resolveNoAssistanceEndedTerminalStatus/;
-const CONTINUING_SURFACE_RE = /<RunContinuingSurface/;
-const CONTINUING_POLLER_RE = /<NoAssistanceRunPoller runId=\{runId\} \/>/;
-const SETUP_STATUS_LINK_RE =
-  /function SetupStatusLink[\s\S]{0,520}\/connect\/status\/\$\{encodeURIComponent\(connectionId\)\}/;
-const SETUP_STATUS_CTA_RE = /<SetupStatusLink connectionId=\{connectionId\} runId=\{runId\} \/>/g;
-const NO_PENDING_TIMELINE_DETOUR_RE = /still being checked[\s\S]{0,220}Open the run timeline/;
-const UNAVAILABLE_STREAM_POLLER_RE =
-  /function UnavailableStreamSurface[\s\S]{0,520}<NoAssistanceRunPoller runId=\{runId\} \/>/;
-const PREPARING_BROWSER_SURFACE_GATE_RE =
-  /hasActiveBrowserSurface\(envelope\.events\)[\s\S]{0,120}<PreparingBrowserSurface/;
-const PREPARING_BROWSER_SURFACE_COPY_RE = /Preparing the secure browser\./;
-const ASSISTANCE_COMPLETE_GATE_RE =
-  /hasResolvedBrowserSurfaceAssistance\(envelope\.events\)[\s\S]{0,120}<AssistanceCompleteSurface/;
-const ASSISTANCE_COMPLETE_COPY_RE = /Browser step complete\./;
-const ASSISTANCE_COMPLETE_POLLER_RE =
-  /function AssistanceCompleteSurface[\s\S]{0,520}<NoAssistanceRunPoller runId=\{runId\} \/>/;
-const EXTERNAL_APPROVAL_COPY_RE = /Approve the request with the provider\./;
-const EXTERNAL_APPROVAL_WAITING_COPY_RE = /No browser controls are\s+waiting/;
-const OPTIONAL_RUN_DETAILS_COPY_RE = /View run details \(optional\)/;
-const LEGACY_RUN_TIMELINE_CTA_RE = /Open run timeline/;
+// Brief item 4 and DIRECTION.md, “What must stay true” #3: keep the visible state in plain words.
 const POLLER_TIMELINE_PROBE_RE = /fetch\(`\/_ref\/runs\/\$\{encodeURIComponent\(runId\)\}\/timeline`/;
 const POLLER_STREAM_READY_RE = /getCurrentBrowserSurfaceAssistance\(timelineEventsFrom\(body\)\) !== null/;
 const POLLER_HARD_RELOAD_RE = /window\.location\.reload\(\)/;
@@ -49,15 +24,11 @@ const RUN_STATUS_INSTANCE_CONTEXT_RE =
 const INSTANCE_SCOPED_SUMMARY_MATCH_RE =
   /listConnectorSummaries\(\{\s*connectionRouteId:\s*resolveConnectorSummaryRouteId\(connectorId,\s*connectorInstanceId\)/;
 const BROWSER_ASSISTANCE_STREAM_KIND_RE =
-  /interactionKind="manual_action"[\s\S]{0,180}interactionMessage=\{streamableAssistance\.message\}/;
+  /interactionKind=\{streamableAssistance\.kind === "otp" \? "otp" : "manual_action"\}[\s\S]{0,220}interactionMessage=\{normalizeInteractionPrompt\([\s\S]{0,80}streamableAssistance\.message/;
 const BROWSER_ASSISTANCE_RESPONSE_CONTRACT_RE =
   /interactionRequiresResponse=\{streamableAssistance\.responseContract === "response_required"\}/;
-const DEFERRED_BROWSER_SLOT_COPY_RE = /Secure browser slot unavailable\./;
-const DEFERRED_BROWSER_SLOT_NOT_DANGER_RE = /terminalStatus === "deferred"[\s\S]{0,600}border border-border bg-card/;
-const RESOLVED_SURFACE_ACCEPTS_RUN_ID_RE = /export function ResolvedSurface\(\{ connector, runId \}/;
-const RESOLVED_SURFACE_RUN_LINK_RE = /href=\{`\/syncs\/\$\{encodeURIComponent\(runId\)\}`\}/;
+// Brief item 4 and DIRECTION.md, “What must stay true” #3: keep system terms out of visible state copy.
 const WINDOW_CLOSE_RE = /window\.close\(\)/;
-const CLOSE_TAB_COPY_RE = />\s*Close this tab\s*</;
 const NO_CLIENT_SIDE_FIRST_MATCH_RE = /summaries\.data\.find\(\(c\) => c\.connector_id === connectorId\)/;
 const BUILDS_CONTEXT_FROM_MATCH_RE = /return buildConnectorContext\(connectorId, match\);/;
 const BUILDS_CONTEXT_FROM_UNDEFINED_RE = /return buildConnectorContext\(connectorId, undefined\);/;
@@ -94,48 +65,71 @@ test("ended fallback status preserves specific terminal labels when timeline sta
   );
 });
 
-test("stream page does not render resolved copy solely because assistance disappeared", () => {
-  assert.match(pageSource, RUN_STATUS_FETCH_RE);
-  assert.match(pageSource, TERMINAL_STATUS_SELECTOR_RE);
-  assert.match(pageSource, RESOLVED_SURFACE_GATE_RE);
-  assert.match(pageSource, ENDED_SURFACE_GATE_RE);
-  assert.match(pageSource, PREPARING_BROWSER_SURFACE_GATE_RE);
-  assert.match(pageSource, PREPARING_BROWSER_SURFACE_COPY_RE);
-  assert.match(pageSource, CONTINUING_SURFACE_RE);
-  assert.match(pageSource, CONTINUING_POLLER_RE);
-  assert.match(pageSource, SETUP_STATUS_LINK_RE);
-  assert.equal([...pageSource.matchAll(SETUP_STATUS_CTA_RE)].length, 3);
-  assert.doesNotMatch(pageSource, NO_PENDING_TIMELINE_DETOUR_RE);
+test("active runs without assistance go to status; only reported completion shows signed-in", () => {
+  assert.match(pageSource, /signInDestination\(state, statusHref\)/);
+  assert.match(pageSource, /state === "resolved" \|\| hasResolvedBrowserSurfaceAssistance/);
+  assert.match(pageSource, /if \(state === "ended"\) redirect\(statusHref\)/);
 });
-
-// fr-setup-status-lifecycle-0806: a browser-assistance connector (e.g. H-E-B)
-// that already resolved its login step must not fall back to the generic
-// "No browser action is waiting" copy — that copy is now reserved for a run
-// that genuinely never raised browser assistance at all. Once assistance was
-// requested and resolved, the page must say so plainly and keep polling for
-// any FURTHER assistance request, not just for the run's own terminal state.
-test("stream page hands off with explicit copy once browser assistance resolves, instead of the generic no-action copy", () => {
-  assert.match(pageSource, ASSISTANCE_COMPLETE_GATE_RE);
-  assert.match(pageSource, ASSISTANCE_COMPLETE_COPY_RE);
-  assert.match(pageSource, ASSISTANCE_COMPLETE_POLLER_RE);
-  // The resolved-assistance gate must be checked before the generic
-  // RunContinuingSurface fallback, so a resolved run never regresses to the
-  // ambiguous copy.
-  const assistanceCompleteGateIndex = pageSource.search(ASSISTANCE_COMPLETE_GATE_RE);
-  const continuingSurfaceIndex = pageSource.lastIndexOf("return <RunContinuingSurface");
-  assert.notEqual(assistanceCompleteGateIndex, -1);
-  assert.notEqual(continuingSurfaceIndex, -1);
-  assert.ok(
-    assistanceCompleteGateIndex < continuingSurfaceIndex,
-    "resolved-assistance handoff must be checked before the generic no-action fallback"
-  );
+test("completed browser assistance uses the signed-in surface and same-copy destination", () => {
+  assert.match(pageSource, /hasResolvedBrowserSurfaceAssistance\(envelope.events\)/);
+  assert.match(pageSource, /statusHref=\{statusHref\}/);
+  assert.match(streamViewerSource, /You're signed in to/);
+  assert.match(streamViewerSource, /scheduleSignInContinuation/);
 });
+test("automatic browser waits have no history detour", () => {
+  assert.doesNotMatch(pageSource, /Sync details|Data source status/);
+  assert.match(pageSource, /sign-in page will appear here/);
+});
+test("browser assistance keeps the server's OTP kind through to the live code field", () => {
+  const otpEvent = {
+    actor_id: "runtime",
+    actor_type: "runtime",
+    client_id: null,
+    data: {
+      assistance_request_id: "assist_otp",
+      attachments: [{ kind: "browser_surface", ref: "surface_1" }],
+      kind: "otp",
+      message: "Enter the code in the browser.",
+      owner_action: "operate_attachment",
+      progress_posture: "blocked",
+      response_contract: "response_required",
+    },
+    event_id: "evt_assist_otp",
+    event_type: "run.assistance_requested",
+    grant_id: null,
+    interaction_id: null,
+    object_id: null,
+    object_type: null,
+    occurred_at: "2026-11-25T12:00:00.000Z",
+    recorded_at: "2026-11-25T12:00:00.000Z",
+    request_id: null,
+    run_id: "run_1",
+    scenario_id: null,
+    status: null,
+    stream_id: null,
+    subject_id: null,
+    subject_type: null,
+    token_id: null,
+    trace_id: "trace_1",
+    version: "1",
+  };
+  const assistance = getCurrentBrowserSurfaceAssistance([otpEvent]);
 
-test("automatic waits keep run details visibly optional", () => {
-  assert.match(pageSource, OPTIONAL_RUN_DETAILS_COPY_RE);
-  assert.match(streamViewerSource, OPTIONAL_RUN_DETAILS_COPY_RE);
-  assert.doesNotMatch(pageSource, LEGACY_RUN_TIMELINE_CTA_RE);
-  assert.doesNotMatch(streamViewerSource, LEGACY_RUN_TIMELINE_CTA_RE);
+  assert.equal(assistance?.kind, "otp");
+  // A structured browser step carries no kind on the timeline, so it parses as
+  // "assistance". It must still reach the dock as a manual step (Done button),
+  // never as a kind the dock refuses to render.
+  const structured = getCurrentBrowserSurfaceAssistance([
+    {
+      ...otpEvent,
+      data: { ...otpEvent.data, assistance_request_id: "assist_structured", kind: undefined },
+      event_id: "evt_assist_structured",
+    },
+  ]);
+  assert.equal(structured?.kind, "assistance");
+  assert.match(pageSource, BROWSER_ASSISTANCE_STREAM_KIND_RE);
+  assert.match(streamViewerSource, /interactionKind === "otp" && !browserLost \? \(\s*<label[\s\S]{0,150}<IcInput/);
+  // DIRECTION.md, “What must stay true” #4: keep the one-time code control reachable.
 });
 
 test("external provider approval does not render as a browser-session repair", () => {
@@ -151,12 +145,12 @@ test("external provider approval does not render as a browser-session repair", (
     "external app approval must be handled before the generic active-browser fallback"
   );
   const externalApprovalStart = pageSource.indexOf("function ExternalApprovalSurface(");
-  const externalApprovalEnd = pageSource.indexOf("function UnavailableStreamSurface(", externalApprovalStart);
+  const externalApprovalEnd = pageSource.length;
   assert.notEqual(externalApprovalStart, -1);
   assert.ok(externalApprovalEnd > externalApprovalStart, "approval surface must have a stable source boundary");
   const externalApprovalSource = pageSource.slice(externalApprovalStart, externalApprovalEnd);
-  assert.match(externalApprovalSource, EXTERNAL_APPROVAL_COPY_RE);
-  assert.match(externalApprovalSource, EXTERNAL_APPROVAL_WAITING_COPY_RE);
+  assert.match(externalApprovalSource, /Approve the sign-in to/);
+  assert.match(externalApprovalSource, /There is nothing to do on this page/);
 });
 
 test("stream page labels multi-account runs by connection instance before connector type", () => {
@@ -215,23 +209,20 @@ test("stream page opens browser-surface assistance without assuming a response i
   assert.match(pageSource, BROWSER_ASSISTANCE_RESPONSE_CONTRACT_RE);
 });
 
-test("ended browser stream labels browser-capacity deferrals without danger styling", () => {
-  assert.match(pageSource, DEFERRED_BROWSER_SLOT_COPY_RE);
-  assert.match(pageSource, DEFERRED_BROWSER_SLOT_NOT_DANGER_RE);
+test("ended browser work goes to status to explain the outcome", () => {
+  assert.match(pageSource, /if \(state === "ended"\) redirect\(statusHref\)/);
 });
-
 test("no-assistance poller explicitly transitions into current browser assistance", () => {
   const pollerSource = readFileSync(fileURLToPath(new URL("./no-assistance-run-poller.tsx", import.meta.url)), "utf8");
 
   assert.match(pollerSource, POLLER_TIMELINE_PROBE_RE);
   assert.match(pollerSource, POLLER_STREAM_READY_RE);
   assert.match(pollerSource, POLLER_HARD_RELOAD_RE);
-  assert.match(pageSource, UNAVAILABLE_STREAM_POLLER_RE);
+  assert.match(pageSource, /function PreparingBrowserSurface[\s\S]{0,520}<NoAssistanceRunPoller/);
 });
 
-test("resolved browser stream offers reliable navigation instead of blocked tab close", () => {
-  assert.match(streamViewerSource, RESOLVED_SURFACE_ACCEPTS_RUN_ID_RE);
-  assert.match(streamViewerSource, RESOLVED_SURFACE_RUN_LINK_RE);
+test("resolved browser work offers Continue and never asks for tab close", () => {
+  assert.match(streamViewerSource, /onClick=\{\(\) => router\.replace\(statusHref\)\}[^>]*>Continue/);
+  assert.doesNotMatch(streamViewerSource, /close this tab/i);
   assert.doesNotMatch(streamViewerSource, WINDOW_CLOSE_RE);
-  assert.doesNotMatch(streamViewerSource, CLOSE_TAB_COPY_RE);
 });

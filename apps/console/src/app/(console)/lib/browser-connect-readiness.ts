@@ -8,6 +8,8 @@ export interface BrowserConnectSupport {
   readonly browserBound: boolean;
   /** The server says the owner can add an account now. */
   readonly canAddAccount: boolean;
+  /** The server's reason when it says an account cannot be added; null when it can, or when there is no verdict. */
+  readonly blockedReason: string | null;
 }
 
 /**
@@ -29,5 +31,6 @@ export function browserConnectSupportFromReadiness(
   return {
     browserBound: readiness ? readiness.browserBound : deferToOlderServer,
     canAddAccount: readiness ? readiness.action === "connect" : deferToOlderServer,
+    blockedReason: readiness && readiness.action !== "connect" ? readiness.reason : null,
   };
 }

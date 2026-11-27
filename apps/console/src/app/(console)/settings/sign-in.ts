@@ -97,17 +97,23 @@ export function observedComputer(action: SetupAction): { host: string; value: st
   return { host: only!.label.replace(/\s*\(.*\)\s*$/, ""), value: only!.value, label: only!.label };
 }
 
-const ADMIN_COPY: Record<string, string> = {
-  "tailscale-magicdns": "Turn on MagicDNS for your tailnet.",
-  "tailscale-https": "Turn on HTTPS certificates for your tailnet.",
+const ADMIN_COPY: Record<string, { line: string; detail: string }> = {
+  "tailscale-magicdns": {
+    line: "Set up your Tailscale network address.",
+    detail: "Turn on MagicDNS for your tailnet.",
+  },
+  "tailscale-https": {
+    line: "Turn on HTTPS certificates for your Tailscale network address.",
+    detail: "Turn on HTTPS certificates for your tailnet.",
+  },
 };
 
 /** An administrator step the owner finishes in the Tailscale admin pages. */
-export function adminStepCopy(view: SetupView): { line: string; href: string } | null {
+export function adminStepCopy(view: SetupView): { line: string; detail: string; href: string } | null {
   const action = view.nextAction;
-  const line = action ? ADMIN_COPY[action.id] : undefined;
+  const copy = action ? ADMIN_COPY[action.id] : undefined;
   const href = action?.href && safeSignInUrl(action.href);
-  return action?.kind === "open-url" && !action.step?.browser && line && href ? { line, href: href.href } : null;
+  return action?.kind === "open-url" && !action.step?.browser && copy && href ? { ...copy, href: href.href } : null;
 }
 
 /** An account token or another typed value an account service asks for. */

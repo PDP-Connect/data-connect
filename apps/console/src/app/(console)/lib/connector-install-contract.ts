@@ -65,6 +65,10 @@ export interface ConnectorLocalSource {
 
 export interface ConnectorInstallCatalogResponse {
   readonly data: readonly ConnectorInstallCatalogEntry[];
+  /** When the list was last fetched from the registry, if the server said. */
+  readonly fetchedAt: string | null;
+  /** False when the registry could not be reached and the server sent its kept copy. */
+  readonly fresh: boolean;
   readonly object: "connector_install_catalog";
   /** Entries dropped because they failed validation; the rest are still usable. */
   readonly skipped: number;
@@ -79,7 +83,9 @@ export interface ConnectorInstallStatusResponse {
 
 export interface ConnectorInstallSnapshot {
   readonly catalog: readonly ConnectorInstallCatalogEntry[];
-  readonly catalogUnavailableReason?: "transient_busy";
+  /** Set when the list is the server's kept copy, not a fresh fetch. */
+  readonly catalogNotFresh?: { readonly fetchedAt: string | null };
+  readonly catalogUnavailableReason?: "transient_busy" | "registry_unreachable";
   readonly localSources?: readonly ConnectorLocalSource[];
   /** Catalog and status entries that failed validation and were left out. */
   readonly skippedEntries?: number;
@@ -266,7 +272,15 @@ function readEntries<T>(
 
 export function parseConnectorInstallCatalogResponse(payload: unknown): ConnectorInstallCatalogResponse {
   const { entries, skipped } = readEntries(readData(payload, "connector_install_catalog"), readCatalogEntry);
-  return { data: entries, object: "connector_install_catalog", skipped };
+  const record = payload as { fetched_at?: unknown; fresh?: unknown };
+  return {
+    data: entries,
+    fetchedAt: typeof record.fetched_at === "string" ? record.fetched_at : null,
+    // A server that predates the field only ever sent fresh lists.
+    fresh: record.fresh !== false,
+    object: "connector_install_catalog",
+    skipped,
+  };
 }
 
 export function parseConnectorInstallStatusResponse(payload: unknown): ConnectorInstallStatusResponse {

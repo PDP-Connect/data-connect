@@ -3,9 +3,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
-import { Section } from "@pdpp/operator-ui/components/primitives";
-import { useEffect, useReducer, useState } from "react";
+import { IcButton, buttonVariants } from "@pdpp/brand-react";
+import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import type { WebPushConfig, WebPushSubscriptionSummary } from "../lib/ref-client.ts";
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
@@ -175,7 +174,7 @@ function hasNavigatorFeature(feature: string) {
 }
 
 async function webPushResponseError(response: Response, fallbackAction: string) {
-  let detail: string | null = null;
+  let detail: string | null;
   try {
     const body = (await response.json()) as { error?: { code?: string; message?: string }; message?: string };
     detail = body.error?.message || body.message || body.error?.code || null;
@@ -187,26 +186,26 @@ async function webPushResponseError(response: Response, fallbackAction: string) 
 
 function diagnosticToneClass(state: DiagnosticState) {
   if (state === "ok") {
-    return "text-emerald-700 dark:text-emerald-400";
+    return "text-muted-foreground";
   }
   if (state === "warn") {
-    return "text-amber-700 dark:text-amber-400";
+    return "text-attention";
   }
   if (state === "fail") {
-    return "text-red-700 dark:text-red-400";
+    return "text-destructive";
   }
   return "text-muted-foreground";
 }
 
 function setupStepToneClass(state: DiagnosticState) {
   if (state === "ok") {
-    return "border-[color:var(--success)]/30 bg-[color:var(--success-wash)] text-foreground";
+    return "border-border bg-muted/40 text-foreground";
   }
   if (state === "fail") {
-    return "border-destructive/30 bg-destructive/5 text-foreground";
+    return "border-destructive bg-muted/40 text-foreground";
   }
   if (state === "warn") {
-    return "border-[color:var(--warning)]/30 bg-[color:var(--warning-wash)] text-foreground";
+    return "border-border bg-muted/40 text-foreground";
   }
   return "border-border bg-muted/40 text-foreground";
 }
@@ -250,7 +249,7 @@ function swRow(swState: "registered" | "absent" | "unknown" | "unsupported"): Di
     return { detail: "The DataConnect service worker controls /.", label, state: "ok" };
   }
   if (swState === "absent") {
-    return { detail: "Not registered yet - use Enable this device.", label, state: "warn" };
+    return { detail: "Not registered yet - use Turn on notifications.", label, state: "warn" };
   }
   if (swState === "unsupported") {
     return { detail: "Browser lacks serviceWorker.", label, state: "fail" };
@@ -272,7 +271,7 @@ function permissionRow(permission: NotificationPermission | "unknown"): Diagnost
   }
   if (permission === "default") {
     return {
-      detail: "Permission has not been requested on this device - use Enable this device.",
+      detail: "Permission has not been requested on this device - use Turn on notifications.",
       label,
       state: "warn",
     };
@@ -285,7 +284,7 @@ function browserSubscriptionRow(endpoint: string | null, matchesThisBrowser: boo
   if (!endpoint) {
     return {
       detail:
-        "No active subscription on this device - use Enable this device to create one (installing the PWA alone does not subscribe).",
+        "No active subscription on this device - use Turn on notifications to create one (installing the PWA alone does not subscribe).",
       label,
       state: "warn",
     };
@@ -295,7 +294,7 @@ function browserSubscriptionRow(endpoint: string | null, matchesThisBrowser: boo
   }
   return {
     detail:
-      "Browser has a subscription but the server does not list it for this owner - use Enable this device to re-register.",
+      "Browser has a subscription but the server does not list it for this owner - use Turn on notifications to re-register.",
     label,
     state: "warn",
   };
@@ -305,7 +304,7 @@ function deliveryHealthRow(lastSubscription: WebPushSubscriptionSummary | undefi
   const label = "Last delivery health";
   if (lastSubscription?.last_failure_reason) {
     return {
-      detail: `Most recent failure: ${lastSubscription.last_failure_reason} (${lastSubscription.last_failure_at ?? "unknown time"}). Use Enable this device on the affected device to re-subscribe.`,
+      detail: `Most recent failure: ${lastSubscription.last_failure_reason} (${lastSubscription.last_failure_at ?? "unknown time"}). Use Turn on notifications on the affected device to re-subscribe.`,
       label,
       state: "warn",
     };
@@ -355,13 +354,13 @@ function deviceStatus({
   }
   if (endpoint) {
     return {
-      detail: "Enable this device again to repair the server-side subscription.",
-      title: "This browser has a local subscription, but the server does not recognize it.",
+      detail: "Turn on notifications again to repair the server-side subscription.",
+      title: "Notifications are not on for this browser.",
     };
   }
   if (permission === "granted") {
     return {
-      detail: "Enable this device once so DataConnect can send alerts here.",
+      detail: "Turn on notifications once so DataConnect can send alerts here.",
       title: "Notifications are allowed, but this device is not subscribed.",
     };
   }
@@ -369,6 +368,33 @@ function deviceStatus({
     detail: "Installing the PWA only adds the app icon. You still need to enable notifications from this device.",
     title: "This device is not subscribed yet.",
   };
+}
+
+export function unavailableSentence(reason: string, serverNotReady = false): string {
+  if (serverNotReady) {
+    return "This server needs its notification keys set in its environment.";
+  }
+  const normalized = reason.toLowerCase();
+  if (normalized.includes("https") || normalized.includes("localhost")) return "Notifications need a secure address. Turn on remote access in Settings to get one.";
+  if (normalized.includes("denied")) {
+    return "Notifications are blocked in your browser or device settings; allow them there, then return here.";
+  }
+  if (normalized.includes("vapid") || normalized.includes("key") || normalized.includes("server")) {
+    return "This server needs its notification keys set in its environment.";
+  }
+  return "This browser can’t receive notifications. Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.";
+}
+
+export function receivingDeviceLabel(subscription: WebPushSubscriptionSummary, currentEndpoint: string | null): string {
+  if (subscription.endpoint === currentEndpoint) return "This device";
+  return subscription.device_label?.trim() || "Another device";
+}
+
+export function isCurrentBrowserSubscriptionRegistered(
+  endpoint: string | null,
+  subscriptions: WebPushSubscriptionSummary[]
+): boolean {
+  return endpoint ? subscriptions.some((subscription) => subscription.endpoint === endpoint && !subscription.revoked_at) : false;
 }
 
 function buildSetupSteps({
@@ -432,7 +458,7 @@ function setupPermissionDetail(permission: NotificationPermission | "unknown"): 
   if (permission === "denied") {
     return "Browser or OS settings currently block notifications.";
   }
-  return "Tap Enable this device and approve the browser prompt.";
+  return "Tap Turn on notifications and approve the browser prompt.";
 }
 
 function setupSubscriptionState({
@@ -584,19 +610,48 @@ function DiagnosticsDisclosure({
   );
 }
 
+const subscribeBrowser = () => () => {};
+
 export function WebPushSettings({
   config,
   subscriptions,
+  plain = false,
+  practice,
 }: {
+  plain?: boolean;
+  practice?: string;
   config: WebPushConfig;
   subscriptions: WebPushSubscriptionSummary[];
 }) {
+  const browserAgent = useSyncExternalStore(subscribeBrowser, () => navigator.userAgent, () => "");
+  const [currentSubscriptions, setCurrentSubscriptions] = useState(subscriptions);
   const [device, dispatch] = useReducer(deviceReducer, INITIAL_DEVICE_STATE);
   const { status, endpoint, unavailable, permission, swState } = device;
   const [busy, setBusy] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
-  const [showSetup, setShowSetup] = useState(false);
+  const [confirmingEndpoint, setConfirmingEndpoint] = useState<string | null>(null);
+  const [removedEndpoints, setRemovedEndpoints] = useState<string[]>([]);
+
+  async function refreshSubscriptions() {
+    try {
+      const response = await fetch("/_ref/web-push/subscriptions", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        method: "GET",
+      });
+      if (!response.ok) {
+        throw await webPushResponseError(response, "Refresh device list failed");
+      }
+      const body = (await response.json()) as { data?: unknown };
+      if (!Array.isArray(body.data)) {
+        throw new Error("Device list response was not valid.");
+      }
+      setCurrentSubscriptions(body.data as WebPushSubscriptionSummary[]);
+    } catch {
+      dispatch({ status: "The device list could not be refreshed.", type: "status" });
+    }
+  }
 
   async function refreshSubscriptionState() {
     if (!hasNavigatorFeature("serviceWorker")) {
@@ -615,6 +670,7 @@ export function WebPushSettings({
   }
 
   useEffect(() => {
+    if (practice) return;
     const reason = detectSupport(config);
     dispatch({
       permission: "Notification" in window ? Notification.permission : "unknown",
@@ -630,7 +686,7 @@ export function WebPushSettings({
     return () => {
       cancelled = true;
     };
-  }, [config]);
+  }, [config, practice]);
 
   async function enable() {
     if (!config.public_key) {
@@ -677,6 +733,7 @@ export function WebPushSettings({
         status: "Web Push is enabled for this browser.",
         type: "subscribed",
       });
+      await refreshSubscriptions();
     } catch (err) {
       dispatch({ status: err instanceof Error ? err.message : "Failed to enable Web Push.", type: "status" });
     } finally {
@@ -706,7 +763,7 @@ export function WebPushSettings({
       } else if ((body.sent ?? 0) > 0) {
         setTestStatus(`Test notification sent to ${body.sent} subscription${body.sent === 1 ? "" : "s"}.`);
       } else if ((body.attempted ?? 0) === 0) {
-        setTestStatus("No active subscriptions for this owner. Enable this device first.");
+        setTestStatus("No active subscriptions for this owner. Turn on notifications first.");
       } else {
         setTestStatus("Push provider did not accept the test notification. Re-enable Web Push for this browser.");
       }
@@ -717,28 +774,32 @@ export function WebPushSettings({
     }
   }
 
-  async function disable() {
+  async function disable(targetEndpoint: string) {
     setBusy(true);
     setTestStatus(null);
     try {
-      const registration = await navigator.serviceWorker.getRegistration("/");
-      const subscription = await registration?.pushManager.getSubscription();
-      const targetEndpoint = subscription?.endpoint ?? endpoint;
-      if (subscription) {
+      if (targetEndpoint === endpoint && hasNavigatorFeature("serviceWorker")) {
+        const registration = await navigator.serviceWorker.getRegistration("/");
+        const subscription = await registration?.pushManager.getSubscription();
+        if (subscription?.endpoint === targetEndpoint) {
         await subscription.unsubscribe();
-      }
-      if (targetEndpoint) {
-        const response = await fetch("/_ref/web-push/subscriptions", {
-          body: JSON.stringify({ endpoint: targetEndpoint }),
-          credentials: "same-origin",
-          headers: { Accept: "application/json", "Content-Type": "application/json" },
-          method: "DELETE",
-        });
-        if (!response.ok) {
-          throw await webPushResponseError(response, "Unsubscribe failed");
         }
       }
-      dispatch({ status: "Web Push is disabled for this browser.", type: "disabled" });
+      const response = await fetch("/_ref/web-push/subscriptions", {
+        body: JSON.stringify({ endpoint: targetEndpoint }),
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw await webPushResponseError(response, "Unsubscribe failed");
+      }
+      setRemovedEndpoints((current) => [...current, targetEndpoint]);
+      setConfirmingEndpoint(null);
+      if (targetEndpoint === endpoint) {
+        dispatch({ status: "Web Push is disabled for this browser.", type: "disabled" });
+      }
+      await refreshSubscriptions();
     } catch (err) {
       dispatch({ status: err instanceof Error ? err.message : "Failed to disable Web Push.", type: "status" });
     } finally {
@@ -752,8 +813,8 @@ export function WebPushSettings({
   const caveat =
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
-  const [lastSubscription] = subscriptions;
-  const matchesThisBrowser = endpoint ? subscriptions.some((s) => s.endpoint === endpoint && !s.revoked_at) : false;
+  const [lastSubscription] = currentSubscriptions;
+  const matchesThisBrowser = isCurrentBrowserSubscriptionRegistered(endpoint, currentSubscriptions);
   const currentDeviceStatus = deviceStatus({ endpoint, matchesThisBrowser, permission, swState, unavailable });
   const setupSteps = buildSetupSteps({ endpoint, matchesThisBrowser, permission, testStatus, unavailable });
 
@@ -763,90 +824,125 @@ export function WebPushSettings({
     lastSubscription,
     matchesThisBrowser,
     permission,
-    subscriptions,
+    subscriptions: currentSubscriptions,
     swState,
   });
 
-  // Whether this browser is set up and healthy, so the demoted summary line can
-  // wear a calm "enabled" tone and skip pushing a setup CTA.
   const enabled = matchesThisBrowser && !unavailable;
-  let setupToggleLabel = "Set up notifications";
-  if (showSetup) {
-    setupToggleLabel = "Hide setup";
-  } else if (enabled) {
-    setupToggleLabel = "Manage";
+  const checking = status === "Checking this browser…";
+  const receivingDevices = currentSubscriptions.filter(
+    (subscription) => !subscription.revoked_at && !removedEndpoints.includes(subscription.endpoint)
+  );
+
+  if (plain || practice) {
+    const insecure = practice ? practice === "insecure" : unavailable === "Web Push needs HTTPS or localhost.";
+    const blocked = !insecure && (practice ? practice === "blocked" : permission === "denied");
+    const unsupported = practice ? ["unsupported", "insecure"].includes(practice) : Boolean(unavailable) && !blocked;
+    const on = practice ? ["on", "devices"].includes(practice) : enabled;
+    const otherDevices = practice === "devices" ? [{ endpoint: "practice-phone", device_label: "Phone" }, { endpoint: "practice-tablet", device_label: "Tablet" }] : receivingDevices.filter((row) => row.endpoint !== endpoint);
+    return <section aria-label="Notification settings" className="grid gap-4">
+      {!config.enabled ? <p>Notifications are not available on this install yet.</p> : blocked ? <>
+        <p>This browser is blocking notifications from DataConnect.</p>
+        <p className="text-sm text-muted-foreground">{notificationSettingsSteps(browserAgent)[0]}<br />{notificationSettingsSteps(browserAgent)[1]}</p>
+        <IcButton variant="ghost" disabled={Boolean(practice)} onClick={() => window.location.reload()}>Check again</IcButton>
+      </> : unsupported ? <>
+        <p>This browser can’t receive notifications.</p>
+        {insecure ? <p>Notifications need a secure address. <a className="underline" href="/settings/remote-access">Turn on remote access</a> to get one.</p> : <p>Use Chrome, Edge or Firefox, or on an iPhone add DataConnect to the Home Screen first.</p>}
+      </> : !practice && checking ? <p role="status">Checking this device…</p> : on ? <>
+        <p>On for this browser.</p>
+        <div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={sendTest} variant="ghost">Send a test</IcButton><IcButton disabled={busy || Boolean(practice)} onClick={() => endpoint && setConfirmingEndpoint(endpoint)} variant="ghost">Turn off</IcButton></div>
+      </> : <>
+        <p>Only when a data source needs you to sign in or approve something. The message never contains your data.</p>
+        <IcButton className="w-fit" disabled={busy || Boolean(practice)} onClick={enable}>Turn on notifications</IcButton>
+      </>}
+      {otherDevices.length ? <div className="grid gap-2"><h2>Other devices that get notifications</h2><ul className="divide-y divide-border">{otherDevices.map((row) => <li className="flex items-center justify-between gap-3 py-3" key={row.endpoint}><span>{row.device_label || "Another device"}</span><IcButton variant="ghost" disabled={busy || Boolean(practice)} onClick={() => setConfirmingEndpoint(row.endpoint)}>Turn off</IcButton></li>)}</ul></div> : null}
+      {confirmingEndpoint ? <div role="alertdialog" aria-label="Turn off notifications" className="grid gap-2"><p>Turn off notifications for this device? It will stop receiving them.</p><div className="flex gap-2"><IcButton disabled={busy || Boolean(practice)} onClick={() => disable(confirmingEndpoint)}>Turn off</IcButton><IcButton variant="ghost" onClick={() => setConfirmingEndpoint(null)}>Cancel</IcButton></div></div> : null}
+      {testStatus ? <p role="status">{testStatus.startsWith("Test notification sent") ? "Test sent. Check your notifications." : "The test could not be sent. Try again."}</p> : null}
+      {status.startsWith("Permission:") || status === "Checking this browser…" || status.includes("enabled") || status.includes("disabled") || status === "Unavailable in this browser" ? null : <div role="status"><p>This could not be completed. Try again.</p><IcButton variant="ghost" onClick={() => navigator.clipboard.writeText(status)}>Copy details for support</IcButton></div>}
+    </section>;
   }
 
   return (
-    <Section
-      description="Optional browser-native alerts for pending connector interactions."
-      title="Browser notifications"
-    >
-      <div className="rounded-md border border-border bg-card px-4 py-3">
-        {/* Demoted-by-default summary: one quiet status line + a single
-            affordance. The full multi-step setup grid and diagnostics live
-            behind the "Set up notifications" / "Manage" disclosure so this reads
-            as a calm secondary utility rather than the loudest block on the
-            overview. */}
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <p aria-atomic="true" aria-live="polite" className="pdpp-body flex min-w-0 items-center gap-2" role="status">
-            <span
-              aria-hidden="true"
-              className={`size-2 shrink-0 rounded-full ${enabled ? "bg-[color:var(--success)]" : "bg-muted-foreground/50"}`}
-            />
-            <span className="min-w-0 font-medium text-foreground">{currentDeviceStatus.title}</span>
-          </p>
-          <div className="flex shrink-0 items-center gap-2">
-            {enabled || unavailable ? null : (
-              <button
-                className={buttonVariants({ size: "sm", variant: "default" })}
-                disabled={busy}
-                onClick={enable}
-                type="button"
-              >
-                Enable this device
-              </button>
-            )}
-            <button
-              aria-controls="web-push-setup"
-              aria-expanded={showSetup}
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted/40"
-              onClick={() => setShowSetup((open) => !open)}
-              type="button"
-            >
-              {setupToggleLabel}
-            </button>
-          </div>
-        </div>
+    <section aria-label="Notification settings" className="grid gap-4">
+      {unavailable ? (
+        <p className="text-[15px] text-muted-foreground">
+          {unavailableSentence(unavailable, !(config.enabled && config.public_key))}
+        </p>
+      ) : checking ? (
+        <p aria-live="polite" className="text-[15px] text-muted-foreground" role="status">Checking this device…</p>
+      ) : null}
 
-        {showSetup ? (
-          <WebPushSetupDetails
-            busy={busy}
-            caveat={caveat}
-            detail={currentDeviceStatus.detail}
-            diagnostics={diagnostics}
-            endpoint={endpoint}
-            lastSubscription={lastSubscription}
-            onDisable={disable}
-            onEnable={enable}
-            onTest={sendTest}
-            onToggleDetails={async () => {
-              const next = !showDetails;
-              setShowDetails(next);
-              if (next) {
-                await refreshSubscriptionState();
-              }
-            }}
-            setupSteps={setupSteps}
-            showDetails={showDetails}
-            status={status}
-            subscriptionsCount={subscriptions.length}
-            testStatus={testStatus}
-            unavailable={unavailable}
-          />
-        ) : null}
-      </div>
-    </Section>
+      {!unavailable && !checking && !enabled ? (
+        <button
+          className={`${buttonVariants({ size: "sm", variant: "default" })} min-h-11 w-fit`}
+          disabled={busy}
+          onClick={enable}
+          type="button"
+        >
+          Turn on notifications
+        </button>
+      ) : null}
+
+      {receivingDevices.length > 0 ? (
+        <ul aria-label="Devices receiving notifications" className="divide-y divide-border/70 border-y border-border/70">
+          {receivingDevices.map((subscription) => {
+            const label = receivingDeviceLabel(subscription, endpoint);
+            const confirming = confirmingEndpoint === subscription.endpoint;
+            return (
+              <li className="grid gap-2 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center" key={subscription.endpoint}>
+                <p className="text-[15px] text-foreground">{label}</p>
+                {confirming ? (
+                  <div aria-label={`Turn off notifications for ${label}`} className="grid gap-2 sm:col-span-2" role="alertdialog">
+                    <p className="text-[13px] text-muted-foreground">Turn off notifications for {label}? This device will stop receiving them.</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="min-h-11 px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => void disable(subscription.endpoint)} type="button">Turn off</button>
+                      <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setConfirmingEndpoint(null)} type="button">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="min-h-11 w-fit px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => setConfirmingEndpoint(subscription.endpoint)} type="button">Turn off</button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+
+      <details
+        className="border-t border-border/70"
+        onToggle={(event) => {
+          if (event.currentTarget.open) void refreshSubscriptionState();
+        }}
+      >
+        <summary className="min-h-11 cursor-pointer py-3 text-[13px] text-muted-foreground">Details</summary>
+        <WebPushSetupDetails
+          busy={busy}
+          caveat={caveat}
+          detail={currentDeviceStatus.detail}
+          diagnostics={diagnostics}
+          endpoint={endpoint}
+          confirmingEndpoint={confirmingEndpoint}
+          lastSubscription={lastSubscription}
+          onCancelRemoval={() => setConfirmingEndpoint(null)}
+          onDisable={disable}
+          onRemoveOldSubscription={() => endpoint && setConfirmingEndpoint(endpoint)}
+          matchesThisBrowser={matchesThisBrowser}
+          onTest={sendTest}
+          onToggleDetails={async () => {
+            const next = !showDetails;
+            setShowDetails(next);
+            if (next) await refreshSubscriptionState();
+          }}
+          setupSteps={setupSteps}
+          showDetails={showDetails}
+          serverNotReady={!(config.enabled && config.public_key)}
+          status={status}
+          subscriptionsCount={currentSubscriptions.length}
+          testStatus={testStatus}
+          unavailable={unavailable}
+        />
+      </details>
+    </section>
   );
 }
 
@@ -861,8 +957,11 @@ function WebPushSetupDetails({
   busy,
   unavailable,
   endpoint,
-  onEnable,
+  matchesThisBrowser,
+  confirmingEndpoint,
+  onCancelRemoval,
   onDisable,
+  onRemoveOldSubscription,
   onTest,
   setupSteps,
   status,
@@ -870,6 +969,7 @@ function WebPushSetupDetails({
   subscriptionsCount,
   lastSubscription,
   diagnostics,
+  serverNotReady,
   showDetails,
   onToggleDetails,
 }: {
@@ -878,8 +978,11 @@ function WebPushSetupDetails({
   busy: boolean;
   unavailable: string | null;
   endpoint: string | null;
-  onEnable: () => void;
-  onDisable: () => void;
+  matchesThisBrowser: boolean;
+  confirmingEndpoint: string | null;
+  onCancelRemoval: () => void;
+  onDisable: (endpoint: string) => void;
+  onRemoveOldSubscription: () => void;
   onTest: () => void;
   setupSteps: SetupStep[];
   status: string;
@@ -887,6 +990,7 @@ function WebPushSetupDetails({
   subscriptionsCount: number;
   lastSubscription: WebPushSubscriptionSummary | undefined;
   diagnostics: DiagnosticRow[];
+  serverNotReady: boolean;
   showDetails: boolean;
   onToggleDetails: () => void;
 }) {
@@ -894,25 +998,36 @@ function WebPushSetupDetails({
     <div className="mt-4 border-border/60 border-t pt-4" id="web-push-setup">
       <p className="pdpp-caption max-w-3xl text-muted-foreground">{detail}</p>
       <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">{caveat}</p>
+      {serverNotReady ? (
+        <p className="pdpp-caption mt-1 max-w-3xl text-muted-foreground">
+          Server environment: <code>PDPP_WEB_PUSH_VAPID_PUBLIC_KEY</code> and <code>PDPP_WEB_PUSH_VAPID_PRIVATE_KEY</code>.
+        </p>
+      ) : null}
+      <div className="mt-4 grid gap-3 text-[13px] text-muted-foreground md:grid-cols-3">
+        <p><strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for sign-ins and syncs that need your attention.</p>
+        <p><strong className="text-foreground">Headline only.</strong> The message does not contain private data and brings you back to the console for details.</p>
+        <p><strong className="text-foreground">Per device.</strong> Each phone, computer, and app must be enabled separately.</p>
+      </div>
+      {endpoint && !matchesThisBrowser ? (
+        <div className="mt-4 grid gap-2 border-border/60 border-t pt-3">
+          {confirmingEndpoint === endpoint ? (
+            <div aria-label="Remove this browser's old subscription" className="grid gap-2" role="alertdialog">
+              <p className="text-[13px] text-muted-foreground">Remove this browser&apos;s old subscription?</p>
+              <div className="flex gap-2">
+                <button className="min-h-11 px-3 text-[13px] text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={() => onDisable(endpoint)} type="button">Remove subscription</button>
+                <button className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={onCancelRemoval} type="button">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button className="min-h-11 w-fit px-1 text-[13px] text-muted-foreground underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" disabled={busy} onClick={onRemoveOldSubscription} type="button">
+              Remove this browser&apos;s old subscription
+            </button>
+          )}
+        </div>
+      ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
         <button
-          className={buttonVariants({ size: "sm", variant: "default" })}
-          disabled={busy || Boolean(unavailable)}
-          onClick={onEnable}
-          type="button"
-        >
-          Enable this device
-        </button>
-        <button
-          className="rounded-md border border-border px-3 py-1.5 text-sm disabled:opacity-50"
-          disabled={busy || !endpoint}
-          onClick={onDisable}
-          type="button"
-        >
-          Disable this device
-        </button>
-        <button
-          className="rounded-md border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+          className="min-h-11 rounded-[6px] border border-border px-3 text-[13px] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           disabled={busy || !endpoint || Boolean(unavailable)}
           onClick={onTest}
           type="button"
@@ -947,4 +1062,11 @@ function WebPushSetupDetails({
       <DiagnosticsDisclosure diagnostics={diagnostics} expanded={showDetails} onToggle={onToggleDetails} />
     </div>
   );
+}
+
+export function notificationSettingsSteps(userAgent: string): [string, string] {
+  if (/Firefox/i.test(userAgent)) return ["Open Firefox Settings, then Privacy & Security.", "Under Permissions, allow notifications for DataConnect, then come back here."];
+  if (/Safari/i.test(userAgent) && !/Chrome|Chromium|Edg/i.test(userAgent)) return ["Open Safari Settings, then Websites and Notifications.", "Allow notifications for DataConnect, then come back here."];
+  if (/Chrome|Chromium|Edg/i.test(userAgent)) return ["Open this browser’s site settings for DataConnect.", "Set Notifications to Allow, then come back here."];
+  return ["Open this browser’s settings for this site.", "Allow notifications, then come back here."];
 }

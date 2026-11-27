@@ -10,6 +10,7 @@
  * remote media, while the direct-CDP canvas is sized by Remote Surface's assembled session. */
 "use client";
 
+import { interactionStepLabel } from "./interaction-step.ts";
 import "./stream.css";
 import {
   assessNekoMediaSettle,
@@ -96,7 +97,8 @@ import {
   useState,
   useTransition,
 } from "react";
-import { PdppLogo } from "@/components/pdpp-logo.tsx";
+import { SignInFrame } from "./sign-in-parts.tsx";
+import { scheduleSignInContinuation } from "./sign-in-flow.ts";
 import { ConnectorMark } from "../../../components/connector-mark.tsx";
 import type { ConnectorContext } from "./connector-context-resolution.ts";
 import { submitRunInteractionAction } from "../actions.ts";
@@ -129,6 +131,7 @@ import {
 } from "./stream-keyboard-focus.ts";
 import { claimPopupNotice, createPopupNoticeSeenRegistry } from "./stream-popup-notice-dedupe.ts";
 import { beginPresentationSession } from "./stream-presentation-session.ts";
+import { COULDNT_REACH_BROWSER, LOST_BROWSER_MEANS, plainBrowserTrouble, retryPlan, type SurfaceErrorKind } from "./browser-trouble-words.ts";
 import { classifyStreamReachFailure, type StreamReachProbeResult } from "./stream-reach-diagnostics.ts";
 import { createStreamSurfaceMeasureCoordinator } from "./stream-surface-measure-gate.ts";
 import {
@@ -152,8 +155,12 @@ import { createViewportWriters } from "./stream-viewport-writer.ts";
 import { sampleVideoSharpnessTelemetry } from "./stream-visual-quality.ts";
 import { STREAMING_UNAVAILABLE_TAG } from "./streaming-protocol.ts";
 
+import { flowPreview } from "../../../connect/flow-preview.ts";
+
 interface StreamSurfaceProps {
-  /** Open the Stage-2 overlay on mount (preview only). */
+  previewState?: string;
+  statusHref?: string;
+  /** Open the browser on arrival from the connect launch page. */
   autoOpen?: boolean;
   connector: ConnectorContext | null;
   interactionId: string;
@@ -430,20 +437,20 @@ function classifyMintError(err: unknown): ConnectionStatus {
     return {
       cause: "unavailable",
       display: "trouble",
-      troubleMessage: "The browser stream isn't available right now.",
+      troubleMessage: "The browser isn't available right now.",
     };
   }
   if (message.includes("expired") || message.includes("not_found")) {
     return {
       cause: "expired",
       display: "trouble",
-      troubleMessage: "Session expired. Try again to start a fresh one.",
+      troubleMessage: "This browser session expired. Try again.",
     };
   }
   return {
     cause: "network",
     display: "trouble",
-    troubleMessage: "Couldn't reach the browser stream.",
+    troubleMessage: COULDNT_REACH_BROWSER,
   };
 }
 
@@ -1464,7 +1471,11 @@ function streamEventData(event: Event): string {
   return typeof data === "string" ? data : "";
 }
 
-export function StreamSurface({
+export function StreamSurface(props: StreamSurfaceProps) {
+  return <LiveStreamSurface {...props} previewState={process.env.NODE_ENV !== "production" ? props.previewState : undefined} />;
+}
+
+function LiveStreamSurface({
   autoOpen = false,
   connector,
   interactionId,
@@ -1472,11 +1483,13 @@ export function StreamSurface({
   interactionMessage,
   interactionRequiresResponse = true,
   pollForResolution = true,
+  previewState,
   runId,
+  statusHref,
 }: StreamSurfaceProps) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<ConnectionStatus>(CONNECTING);
+  const [open, setOpen] = useState(Boolean(previewState && !previewState.startsWith("card")));
+  const [status, setStatus] = useState<ConnectionStatus>(previewState === "card-error" || previewState === "browser-trouble" ? classifyMintError(new Error("Couldn't reach the browser.")) : previewState ? LIVE : CONNECTING);
   // Held minted session passed down to <StreamStage>. The modal effect
   // consumes this for first attach instead of minting itself — moving the
   // mint out of `useEffect` is the architectural fix for React StrictMode's
@@ -1499,9 +1512,10 @@ export function StreamSurface({
     if (!pollForResolution) {
       return;
     }
+    if (previewState) return;
     const id = setInterval(() => router.refresh(), RESOLUTION_POLL_MS);
     return () => clearInterval(id);
-  }, [pollForResolution, router]);
+  }, [pollForResolution, previewState, router]);
 
   // ─── Open-browser click handler ────────────────────────────────────────────
   //
@@ -1512,6 +1526,7 @@ export function StreamSurface({
   // The minted session is then handed down to the modal as a prop; the
   // modal's effect just consumes it.
   const openBrowser = useCallback(async () => {
+    if (previewState) { setOpen(true); return; }
     if (isMintingRef.current) {
       return; // re-entrancy guard for double-tap
     }
@@ -1536,7 +1551,7 @@ export function StreamSurface({
       isMintingRef.current = false;
       setIsMinting(false);
     }
-  }, [interactionId, runId]);
+  }, [interactionId, previewState, runId]);
 
   // Preview mode (`?_preview=1&_state=task`) used to open the modal on mount.
   // After fix 3a, "open" requires a minted session; reproduce the preview
@@ -1560,33 +1575,27 @@ export function StreamSurface({
       <UnsupportedSurface
         connector={connector}
         interactionMessage={interactionMessage}
-        runHref={dashboardRoutes.run(runId)}
+        runHref={`${dashboardRoutes.run(runId)}?return_to=browser#sign-in-details`}
       />
     );
   }
 
   // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const connectorName = connector?.displayName ?? "the connector";
+  const connectorName = connector?.displayName ?? "the data source";
 
   return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-
-      <div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
+    <SignInFrame connector={connector} step={status.display !== "trouble" ? interactionStepLabel(interactionKind, interactionMessage) : false} title={`Sign in to ${connectorName}`}>
         <OrientationCard
-          buttonLabel="Open browser"
-          connectorId={connector?.connectorId}
-          connectorIcon={connector?.icon}
-          connectorName={connector?.displayName}
+          buttonLabel={`Open ${connectorName}`}
           isMinting={isMinting}
-          message={interactionMessage}
+          message={interactionMessage || `This is ${connectorName}'s own sign-in page, in a browser that DataConnect runs for you. When you are signed in, DataConnect carries on by itself.`}
           onAction={openBrowser}
           troubleMessage={status.display === "trouble" ? status.troubleMessage : null}
         />
-      </div>
-
       <StreamOverlay
+        connector={connector}
         connectorName={connectorName}
+        wayBackHref={statusHref}
         initialSession={mintedSession}
         interactionId={interactionId}
         interactionKind={interactionKind}
@@ -1599,31 +1608,25 @@ export function StreamSurface({
           // an already-torn-down companion.
           setMintedSession(null);
         }}
+        onRetry={() => {
+          setOpen(false);
+          setMintedSession(null);
+          void openBrowser();
+        }}
         onStatus={setStatus}
         open={open}
+        previewState={previewState}
         runId={runId}
         status={status}
       />
-    </main>
+    </SignInFrame>
   );
 }
 
 // ─── Wordmark and orientation card ───────────────────────────────────────────
 
-function WordmarkCorner() {
-  return (
-    <div className="pointer-events-none absolute top-3 left-3 z-10 flex items-center gap-2 opacity-65">
-      <PdppLogo className="block" size={14} title="PDPP" />
-      <span className="pdpp-caption font-medium text-foreground tracking-tight">pdpp</span>
-    </div>
-  );
-}
-
 interface OrientationCardProps {
   buttonLabel: string;
-  connectorId?: ConnectorContext["connectorId"];
-  connectorIcon?: ConnectorContext["icon"];
-  connectorName?: string;
   /** While the click handler is awaiting the mint POST. Disables the button + flips the label. */
   isMinting: boolean;
   message: string;
@@ -1631,11 +1634,8 @@ interface OrientationCardProps {
   troubleMessage: string | null;
 }
 
-function OrientationCard({
+export function OrientationCard({
   buttonLabel,
-  connectorId,
-  connectorIcon,
-  connectorName,
   isMinting,
   message,
   onAction,
@@ -1647,7 +1647,7 @@ function OrientationCard({
   // mid-flight when an earlier mint failure is still in `troubleMessage`.
   let label: string;
   if (isMinting) {
-    label = "Opening...";
+    label = "Opening…";
   } else if (troubleMessage) {
     label = "Try again";
   } else {
@@ -1655,19 +1655,22 @@ function OrientationCard({
   }
   return (
     <section
-      aria-labelledby="stream-orientation-title"
-      className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
+      aria-labelledby={troubleMessage ? undefined : "stream-orientation-title"}
+      aria-label={troubleMessage ? "The browser is not reachable" : undefined}
+      className="flex flex-col gap-5 p-4"
       data-surface="human"
     >
-      {connectorName && connectorId ? (
-        <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
-          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={connectorName} />
-          {connectorName}
-        </p>
+      {troubleMessage ? (
+        <div className="grid gap-1" id="stream-trouble-note" role="status">
+          <p className="font-medium text-destructive">{plainBrowserTrouble(troubleMessage)}</p>
+          <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>
+        </div>
       ) : null}
-      <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
-        {message}
-      </p>
+      {troubleMessage ? null : (
+        <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
+          {message}
+        </p>
+      )}
       <IcButton
         aria-busy={isMinting || undefined}
         aria-describedby={troubleMessage ? "stream-trouble-note" : undefined}
@@ -1679,11 +1682,6 @@ function OrientationCard({
       >
         {label}
       </IcButton>
-      {troubleMessage ? (
-        <p className="pdpp-caption text-destructive/85" id="stream-trouble-note" role="status">
-          {troubleMessage}
-        </p>
-      ) : null}
     </section>
   );
 }
@@ -1691,7 +1689,10 @@ function OrientationCard({
 // ─── Stage 2: the overlay holding the live stream ─────────────────────────────
 
 interface StreamOverlayProps {
+  connector: ConnectorContext | null;
   connectorName: string;
+  /** Where the one-line DataConnect bar leads back to (the source's setup status page). */
+  wayBackHref?: string;
   /**
    * The session minted by the orientation card's "Open browser" click.
    * `null` is only valid when `open === false` (the overlay isn't visible);
@@ -1704,13 +1705,18 @@ interface StreamOverlayProps {
   interactionMessage: string;
   interactionRequiresResponse: boolean;
   onClose: () => void;
+  /** Opens a fresh browser session after the connection was lost. */
+  onRetry?: () => void;
   onStatus: (status: ConnectionStatus) => void;
   open: boolean;
+  previewState?: string;
   runId: string;
   status: ConnectionStatus;
 }
 
 function StreamOverlay({
+  wayBackHref,
+  connector,
   connectorName,
   initialSession,
   interactionId,
@@ -1718,8 +1724,10 @@ function StreamOverlay({
   interactionMessage,
   interactionRequiresResponse,
   onClose,
+  onRetry,
   onStatus,
   open,
+  previewState,
   runId,
   status,
 }: StreamOverlayProps) {
@@ -1745,8 +1753,11 @@ function StreamOverlay({
             and scroll-lock machinery behave. */}
         <IcDialogBackdrop className="pdpp-stream-dialog-backdrop" />
         <IcDialogPopup aria-label={`${connectorName} live browser`} className="pdpp-stream-dialog">
-          {open && initialSession ? (
+          {open && (initialSession || previewState) ? (
             <StreamStage
+              wayBackHref={wayBackHref}
+              connector={connector}
+              previewState={previewState}
               connectorName={connectorName}
               initialSession={initialSession}
               interactionId={interactionId}
@@ -1754,6 +1765,7 @@ function StreamOverlay({
               interactionMessage={interactionMessage}
               interactionRequiresResponse={interactionRequiresResponse}
               onClose={onClose}
+              onRetry={onRetry}
               onStatus={onStatus}
               runId={runId}
               status={status}
@@ -1766,6 +1778,9 @@ function StreamOverlay({
 }
 
 interface StreamStageProps {
+  wayBackHref?: string;
+  connector: ConnectorContext | null;
+  previewState?: string;
   connectorName: string;
   /**
    * Pre-minted session handed down from the orientation card click. The
@@ -1773,12 +1788,14 @@ interface StreamStageProps {
    * minting — that's the architectural fix for React StrictMode's dev
    * effect double-invoke producing duplicate mints + superseding tokens.
    */
-  initialSession: MintedStreamSession;
+  initialSession: MintedStreamSession | null;
   interactionId: string;
   interactionKind: string;
   interactionMessage: string;
   interactionRequiresResponse: boolean;
   onClose: () => void;
+  /** Opens a fresh browser session after the connection was lost. */
+  onRetry?: () => void;
   onStatus: (status: ConnectionStatus) => void;
   runId: string;
   status: ConnectionStatus;
@@ -1797,6 +1814,9 @@ interface StreamStageProps {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This existing stage owns the stream/session state machine; the explicit backend gate is part of that same lifecycle boundary.
 function StreamStage({
+  wayBackHref,
+  connector,
+  previewState,
   connectorName,
   initialSession,
   interactionId,
@@ -1804,6 +1824,7 @@ function StreamStage({
   interactionMessage,
   interactionRequiresResponse,
   onClose,
+  onRetry,
   onStatus,
   runId,
   status,
@@ -1838,7 +1859,7 @@ function StreamStage({
   // Armed when the corner X is pressed while a manual/browser interaction is
   // pending; renders the inline close-confirmation bubble instead of ending
   // the session outright. See `handleCloseRequest`.
-  const [closeConfirmArmed, setCloseConfirmArmed] = useState(false);
+  const [closeConfirmArmed, setCloseConfirmArmed] = useState(previewState === "stop-question");
   const eventSourceRef = useRef<EventSource | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -1877,7 +1898,7 @@ function StreamStage({
   const clipboardPolicy = decideClipboardPolicy({
     capabilities: clipboardCapabilities,
     directionPolicy: DEFAULT_CLIPBOARD_DIRECTION_POLICY,
-    hasStreamSession: Boolean(initialSession.input_url) && readyBackend !== "unknown",
+    hasStreamSession: Boolean(initialSession?.input_url) && readyBackend !== "unknown",
     helperMode: normalizeClipboardHelperMode(nekoSession?.stealthMode),
     sessionBackend: readyBackend,
   });
@@ -2120,7 +2141,7 @@ function StreamStage({
           onStatus({
             cause: "network",
             display: "trouble",
-            troubleMessage: "Stream attached but the handshake was malformed.",
+            troubleMessage: "The browser opened, but its connection was incomplete.",
           });
           return;
         }
@@ -2410,10 +2431,11 @@ function StreamStage({
           onStatus({
             cause: "network",
             display: "trouble",
-            troubleMessage:
+            troubleMessage: plainBrowserTrouble(
               typeof parsed.value.message === "string" && parsed.value.message.length > 0
                 ? parsed.value.message
-                : "The browser stream failed to start.",
+                : "The browser could not start."
+            ),
           });
           source.close();
           return;
@@ -2468,6 +2490,7 @@ function StreamStage({
   //     terminal trouble — no reconnect, no re-mint. The server has told
   //     us the companion is dead.
   useEffect(() => {
+    if (!initialSessionRef.current) return;
     mountedRef.current = true;
     let cancelled = false;
     let attached = false;
@@ -2631,7 +2654,7 @@ function StreamStage({
         onStatus({
           cause: "network",
           display: "trouble",
-          troubleMessage: "Couldn't reach the browser stream after several tries.",
+          troubleMessage: "Couldn't open the browser after several tries.",
         });
         diagnoseGiveUp(viewerUrl).catch(() => {
           // Best-effort diagnostic: the generic give-up message is already shown.
@@ -2648,7 +2671,7 @@ function StreamStage({
       onStatus({
         cause: "network",
         display: "trouble",
-        troubleMessage: "Connecting to the browser stream…",
+        troubleMessage: "Opening the browser…",
       });
       const delayIndex = Math.min(preAttachFailures - 1, RECONNECT_BACKOFF_MS.length - 1);
       const delay = RECONNECT_BACKOFF_MS[delayIndex];
@@ -3480,6 +3503,12 @@ function StreamStage({
 
   return (
     <div className="relative flex h-full w-full flex-col bg-black" data-pdpp-stream-debug={debugEnabled}>
+      {wayBackHref ? (
+        <div className="flex shrink-0 items-center gap-2 bg-background px-3 py-1.5 text-[13px] text-foreground" data-pdpp-stream-ui data-testid="stream-way-back">
+          <Link className="font-medium underline-offset-4 hover:underline" href={wayBackHref}>← DataConnect</Link>
+          <span className="text-muted-foreground">· signing in to {connectorName}</span>
+        </div>
+      ) : null}
       {nekoSession && (
         <NekoSurface
           adapterRef={nekoSurfaceAdapterRef}
@@ -3489,7 +3518,9 @@ function StreamStage({
           keyboardFocusStateRef={keyboardFocusStateRef}
           localSurfaceViewportInfo={nekoLocalSurfaceViewportInfo}
           logDebug={logDebug}
+          onMountFailure={(message) => onStatus({ cause: "network", display: "trouble", troubleMessage: message })}
           onPresentationViewportReady={handleNekoPresentationViewportReady}
+          onRetry={onRetry}
           presentationViewportInfo={nekoPresentationViewportInfo}
           session={nekoSession}
           setKeyboardAffordanceVisible={setKeyboardAffordanceVisible}
@@ -3543,7 +3574,7 @@ function StreamStage({
           ref={setStreamSurfaceNode}
         >
           <div className="pdpp-stream-frame relative flex h-full w-full items-center justify-center">
-            <SurfacePlaceholder display={status.display} />
+            {previewState ? <p className="text-white">Sample page, not a real sign-in</p> : <SurfacePlaceholder display={status.display} />}
           </div>
         </div>
       )}
@@ -3575,14 +3606,18 @@ function StreamStage({
       {closeConfirmArmed ? (
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
-      <StreamInteractionDock
+      {!closeConfirmArmed && status.display !== "trouble" ? <StreamInteractionDock
+        connector={connector}
+        preview={Boolean(previewState)}
+        previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined}
+        connectorName={connectorName}
         interactionId={interactionId}
         interactionKind={interactionKind}
         interactionRequiresResponse={interactionRequiresResponse}
         message={interactionMessage}
         runId={runId}
-      />
-      {status.display === "trouble" ? <TroubleToast message={status.troubleMessage} /> : null}
+      /> : null}
+      {status.display === "trouble" ? <TroubleToast message={status.troubleMessage} onRetry={onRetry} /> : null}
       {popup ? <PopupToast message={popup.message} /> : null}
       {readyBackend !== "unknown" &&
       (nekoSession || mountedCdpViewer) &&
@@ -3832,7 +3867,9 @@ function NekoSurface({
   keyboardFocusStateRef,
   localSurfaceViewportInfo,
   logDebug,
+  onMountFailure,
   onPresentationViewportReady,
+  onRetry,
   presentationViewportInfo,
   setKeyboardAffordanceVisible,
   session,
@@ -3847,10 +3884,14 @@ function NekoSurface({
   keyboardFocusStateRef: { current: MobileKeyboardFocusState };
   localSurfaceViewportInfo: StreamViewportInfo | null;
   logDebug: StreamDebugLogger;
+  /** Tells the parent the remote browser could not be mounted, so the sign-in can't be marked done. */
+  onMountFailure?: (message: string) => void;
   onPresentationViewportReady: (
     viewport: StreamViewportInfo,
     result: { reasons?: string[]; status: "degraded" | "settled" }
   ) => void;
+  /** Opens a fresh browser session; the same path as the toast's Try again. */
+  onRetry?: (() => void) | undefined;
   presentationViewportInfo: StreamViewportInfo | null;
   setKeyboardAffordanceVisible: (visible: boolean) => void;
   session: NekoSessionInfo;
@@ -3874,6 +3915,13 @@ function NekoSurface({
   const applyViewportRef = useRef(applyViewport);
   const [clientConfig, setClientConfig] = useState<NekoClientConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<SurfaceErrorKind>("mount");
+  // The parent's callback is a fresh closure each render; a ref keeps this effect firing once per error.
+  const onMountFailureRef = useRef(onMountFailure);
+  onMountFailureRef.current = onMountFailure;
+  useEffect(() => {
+    if (error && errorKind === "mount") onMountFailureRef.current?.(plainBrowserTrouble(error));
+  }, [error, errorKind]);
   const [configLoadRetryEpoch, setConfigLoadRetryEpoch] = useState(0);
   const [mediaRefreshEpoch, setMediaRefreshEpoch] = useState(0);
   const [mediaDisplayable, setMediaDisplayable] = useState(false);
@@ -3886,6 +3934,7 @@ function NekoSurface({
         type: event.type,
       });
       if (viewerRef.current?.getViewportState() === "error") {
+        setErrorKind("viewport");
         setError("The secure browser viewport could not be applied.");
       }
     },
@@ -4066,7 +4115,8 @@ function NekoSurface({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "n.eko direct stream failed");
+          setErrorKind("mount");
+          setError(err instanceof Error ? plainBrowserTrouble(err.message) : "The browser could not start. Try again.");
         }
       });
 
@@ -4675,7 +4725,7 @@ function NekoSurface({
   return (
     <div className="flex flex-1 items-center justify-center overflow-hidden">
       <div
-        aria-label="Connector browser stream"
+        aria-label="Data source browser"
         className="pdpp-stream-frame relative overflow-hidden"
         data-pdpp-stream-loading={showLoadingOverlay || undefined}
         ref={(node) => {
@@ -4690,11 +4740,16 @@ function NekoSurface({
             data-pdpp-stream-ui
           >
             <div className="max-w-sm">
-              <p className="font-medium text-foreground">The n.eko WebRTC stream did not attach.</p>
-              <p className="mt-2">{error}</p>
+              <p className="font-medium text-foreground">{COULDNT_REACH_BROWSER}</p>
+              <p className="mt-2">{LOST_BROWSER_MEANS}</p>
+              <p className="sr-only">{plainBrowserTrouble(error)}</p>
               <button
                 className="mt-4 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs hover:bg-muted"
                 onClick={() => {
+                  if (retryPlan(errorKind) === "new-session" && onRetry) {
+                    onRetry();
+                    return;
+                  }
                   setError(null);
                   setMediaReady(false);
                   setMediaDisplayable(false);
@@ -4702,7 +4757,7 @@ function NekoSurface({
                 }}
                 type="button"
               >
-                Retry secure browser
+                Try again
               </button>
             </div>
           </div>
@@ -4713,7 +4768,7 @@ function NekoSurface({
             className="absolute inset-0 z-20 flex items-center justify-center bg-black text-sm text-white/70"
             data-pdpp-stream-loading
           >
-            {status.display === "live" ? "Starting WebRTC stream..." : "Waiting for browser..."}
+            {status.display === "live" ? "Starting the browser…" : "Opening the browser…"}
           </div>
         ) : null}
         {/* Hidden soft-keyboard textarea — MobileTextInputController binds */}
@@ -4848,7 +4903,7 @@ function BrowserSurface({
   return (
     <div className="pdpp-stream-fit-host flex flex-1 items-center justify-center overflow-hidden">
       <div
-        aria-label="Connector browser stream"
+        aria-label="Data source browser"
         className="pdpp-stream-frame relative focus-within:ring-2 focus-within:ring-primary/40 focus-within:ring-inset"
         ref={surfaceRef}
         role="application"
@@ -4927,7 +4982,7 @@ function remoteClipboardStatus(copyState: ClipboardCopyState, remoteClipboard: R
     return "Copy failed. Use the selectable text fallback.";
   }
   if (remoteClipboard) {
-    return "Remote text is buffered only in this session.";
+    return "This text is kept only until you close this page.";
   }
   return "Copy text inside the browser first.";
 }
@@ -5474,9 +5529,11 @@ function CornerControls({
             aria-label={expanded ? `Hide ${connectorName} browser actions` : `More ${connectorName} browser actions`}
             className="pdpp-stream-control-button"
             data-pdpp-stream-ui
+            title="More actions"
             onClick={() => setExpanded((prev) => !prev)}
             type="button"
           >
+            <span aria-hidden className="pdpp-stream-control-label">More</span>
             <svg aria-hidden fill="none" height="16" viewBox="0 0 16 16" width="16">
               <title>More actions</title>
               <circle cx="3.25" cy="8" fill="currentColor" r="1.15" />
@@ -5598,10 +5655,10 @@ function CornerControls({
           // as "dismiss this notice" and lost their session. Say plainly that
           // this ends the live browser session, in both the tooltip and the
           // assistive label.
-          aria-label={`End ${connectorName} browser session`}
+          aria-label="Stop signing in"
           className="pdpp-stream-control-button"
           onClick={onClose}
-          title={`End ${connectorName} browser session`}
+          title="Stop signing in"
           type="button"
         >
           <svg
@@ -5614,9 +5671,10 @@ function CornerControls({
             viewBox="0 0 16 16"
             width="16"
           >
-            <title>End browser session</title>
+            <title>Stop signing in</title>
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
           </svg>
+          <span aria-hidden className="pdpp-stream-control-label">Stop</span>
         </button>
       </div>
     </div>
@@ -5661,20 +5719,32 @@ function statusTone(state: DisplayState): string {
 
 function statusLabel(state: DisplayState): string {
   if (state === "live") {
-    return "Stream is live";
+    return "Live";
   }
   if (state === "trouble") {
-    return "Stream has trouble";
+    return "Couldn't reach the browser";
   }
-  return "Stream is connecting";
+  return "Opening the browser";
+}
+
+/** The short word drawn beside the dot, so the state does not rest on colour alone. */
+function visibleStatusLabel(state: DisplayState): string {
+  if (state === "live") {
+    return "Live";
+  }
+  if (state === "trouble") {
+    return "Not connected";
+  }
+  return "Opening";
 }
 
 function StatusDot({ status }: { status: ConnectionStatus }) {
   const tone = statusTone(status.display);
   const label = statusLabel(status.display);
   return (
-    <span className="pointer-events-none inline-flex h-10 items-center justify-center px-1">
+    <span className="pointer-events-none inline-flex h-10 items-center justify-center gap-1.5 px-1">
       <span aria-hidden className={`inline-block h-2 w-2 rounded-full ring-2 ring-background/85 ${tone}`} />
+      <span aria-hidden className="pdpp-caption whitespace-nowrap rounded-full bg-background px-2 font-medium text-foreground">{visibleStatusLabel(status.display)}</span>
       <span className="sr-only" role="status">
         {label}
       </span>
@@ -5705,24 +5775,23 @@ function CloseConfirmBubble({
 }) {
   return (
     <div
-      aria-label="Confirm ending the browser session"
+      aria-label={`Stop signing in to ${connectorName}?`}
       className="pdpp-stream-toast-zone"
       data-pdpp-stream-ui
       data-slot="close-confirm"
       role="alertdialog"
     >
       <div className="pdpp-stream-toast-bubble flex w-full flex-col gap-2 text-left">
-        <p className="pdpp-caption font-medium text-foreground">End the {connectorName} browser session now?</p>
+        <p className="pdpp-caption font-medium text-foreground">Stop signing in to {connectorName}?</p>
         <p className="pdpp-caption text-muted-foreground">
-          The step in progress will be abandoned. To get the panel out of the way without ending the session, use “Hide
-          instructions” instead.
+          DataConnect can't copy your {connectorName} data until the sign-in is finished. You can start again from Data sources.
         </p>
         <div className="flex flex-wrap gap-2">
           <IcButton onClick={onConfirm} size="sm" type="button" variant="destructive">
-            End browser session
+            Stop
           </IcButton>
           <IcButton onClick={onCancel} size="sm" type="button" variant="ghost">
-            Keep working
+            Keep going
           </IcButton>
         </div>
       </div>
@@ -5733,12 +5802,23 @@ function CloseConfirmBubble({
 // ─── Interaction response dock ───────────────────────────────────────────────
 
 function StreamInteractionDock({
+  browserLost = false,
+  connector,
+  connectorName,
+  previewError,
+  preview = false,
   interactionId,
   interactionKind,
   interactionRequiresResponse,
   message,
   runId,
 }: {
+  /** The browser cannot be reached: nothing can be typed or finished here until it is back. */
+  browserLost?: boolean;
+  connector: ConnectorContext | null;
+  connectorName: string;
+  previewError?: string;
+  preview?: boolean;
   interactionId: string;
   interactionKind: string;
   interactionRequiresResponse: boolean;
@@ -5748,7 +5828,10 @@ function StreamInteractionDock({
   const router = useRouter();
   const [code, setCode] = useState("");
   const [collapsed, setCollapsed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Where the panel sits. At the top it stays clear of the bottom controls, so
+  // the person can read the page under it; the choice is kept while hidden.
+  const [atTop, setAtTop] = useState(false);
+  const [error, setError] = useState<string | null>(previewError ?? null);
   const [isPending, startTransition] = useTransition();
 
   if (!(interactionRequiresResponse && (interactionKind === "otp" || interactionKind === "manual_action"))) {
@@ -5756,6 +5839,8 @@ function StreamInteractionDock({
   }
 
   function submitInteraction(data?: Record<string, string>) {
+    if (browserLost) return;
+    if (preview) { setError(previewError ?? null); return; }
     const formData = new FormData();
     formData.set("run_id", runId);
     formData.set("interaction_id", interactionId);
@@ -5780,7 +5865,7 @@ function StreamInteractionDock({
     if (interactionKind === "otp") {
       const trimmed = code.trim();
       if (!trimmed) {
-        setError('Enter the code, or use "I entered it in the browser" after completing 2FA there.');
+        setError(`Type the code, or press "I typed it into ${connectorName} already".`);
         return;
       }
       submitInteraction({ code: trimmed });
@@ -5789,44 +5874,59 @@ function StreamInteractionDock({
     submitInteraction();
   }
 
-  let submitLabel = "Continue collection";
+  let submitLabel = "Done";
   if (interactionKind === "otp") {
-    submitLabel = "Submit code";
+    submitLabel = "Continue";
   }
   if (isPending) {
-    submitLabel = "Continuing...";
+    submitLabel = interactionKind === "otp" ? "Checking…" : "Saving…";
   }
+
+  const position = atTop ? "top" : "bottom";
+  const moveButton = (
+    <IcButton
+      className="shrink-0"
+      onClick={() => setAtTop(!atTop)}
+      size="sm"
+      type="button"
+      variant="ghost"
+    >
+      {atTop ? "Move to bottom" : "Move to top"}
+    </IcButton>
+  );
 
   if (collapsed) {
     return (
-      <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-slot="interaction">
-        <IcButton
-          aria-expanded="false"
-          className="pdpp-stream-toast-bubble"
-          onClick={() => setCollapsed(false)}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          Show continue controls
-        </IcButton>
+      <div className="pdpp-stream-toast-zone" data-collapsed="true" data-pdpp-stream-ui data-position={position} data-slot="interaction">
+        <div className="pdpp-stream-toast-bubble flex items-center gap-1 p-1">
+          <IcButton
+            aria-expanded="false"
+            onClick={() => setCollapsed(false)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            Show instructions
+          </IcButton>
+          {moveButton}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-slot="interaction">
+    <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-position={position} data-slot="interaction">
       <form
-        aria-label="Complete this connector step"
+        aria-label="Finish signing in"
         autoComplete="off"
         className="pdpp-stream-toast-bubble flex w-full flex-col gap-2 text-left"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-3">
-          <p className="pdpp-caption font-medium text-foreground">{message}</p>
+          <h1 className="pdpp-heading flex items-center gap-2">{connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connectorName} /> : null}Sign in to {connectorName}</h1>
           <IcButton
             aria-expanded="true"
-            aria-label="Hide connector step instructions"
+            aria-label="Hide instructions"
             className="shrink-0"
             onClick={() => setCollapsed(true)}
             size="sm"
@@ -5836,37 +5936,33 @@ function StreamInteractionDock({
             Hide instructions
           </IcButton>
         </div>
-        {interactionKind === "otp" ? (
-          <IcInput
+        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">{interactionStepLabel(interactionKind, message)}</p>}
+        {browserLost ? null : <p className="pdpp-caption text-foreground">{message}</p>}
+        <div className="flex flex-wrap gap-2">{moveButton}</div>
+        {interactionKind === "otp" && !browserLost ? (
+          <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
+            id={`code-${interactionId}`}
             autoComplete="one-time-code"
             inputMode="numeric"
             onChange={(event) => setCode(event.currentTarget.value)}
-            pattern="\\d{6}"
-            placeholder="6-digit code"
             value={code}
-          />
-        ) : null}
-        {interactionKind === "manual_action" ? (
-          <p className="pdpp-caption text-muted-foreground">
-            When the browser page is logged in or the requested action is complete, press Continue collection. Hiding
-            this panel only moves it out of the way; it does not resume the run.
-          </p>
+          /></label>
         ) : null}
         {error ? (
           <p className="pdpp-caption text-destructive" role="alert">
             {error}
           </p>
         ) : null}
-        <div className="flex flex-wrap gap-2">
+        {browserLost ? null : <div className="flex flex-wrap gap-2">
           <IcButton disabled={isPending} size="sm" type="submit">
             {submitLabel}
           </IcButton>
           {interactionKind === "otp" ? (
             <IcButton disabled={isPending} onClick={() => submitInteraction()} size="sm" type="button" variant="ghost">
-              I entered it in the browser
+              I typed it into {connectorName} already
             </IcButton>
           ) : null}
-        </div>
+        </div>}
       </form>
     </div>
   );
@@ -5874,13 +5970,21 @@ function StreamInteractionDock({
 
 // ─── Trouble toast (only shown when display === "trouble") ────────────────────
 
-function TroubleToast({ message }: { message: string | null }) {
+function TroubleToast({ message, onRetry }: { message: string | null; onRetry?: () => void }) {
   if (!message) {
     return null;
   }
   return (
-    <div aria-live="polite" className="pdpp-stream-toast-zone">
-      <p className="pdpp-caption pdpp-stream-toast-bubble">{message}</p>
+    <div aria-live="polite" className="pdpp-stream-toast-zone" data-slot="trouble">
+      <div className="pdpp-stream-toast-bubble flex flex-col gap-2">
+        <p className="pdpp-caption">{plainBrowserTrouble(message)}</p>
+        <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>
+        {onRetry ? (
+          <IcButton onClick={onRetry} size="sm" type="button">
+            Try again
+          </IcButton>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -5913,38 +6017,13 @@ function PopupToast({ message }: { message: string }) {
  * satisfied. Quiet and declarative; never promises browser-controlled tab
  * closing because browsers block scripted tab closing for normal navigations.
  */
-export function ResolvedSurface({ connector, runId }: { connector: ConnectorContext | null; runId: string }) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: the receiver here is a genuinely optional/nullable type per its declared interface; tsc rejects removing this guard.
-  const subject = connector?.displayName ?? "The connector";
-
-  return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
-        <section
-          aria-labelledby="stream-resolved-title"
-          className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
-          data-surface="human"
-        >
-          <p className="pdpp-body-lg text-foreground" id="stream-resolved-title">
-            <span className="flex items-center gap-2">
-              {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
-              {subject} is back on it.
-            </span>
-          </p>
-          <p className="pdpp-body text-foreground">
-            The browser step is complete. You can close this tab with your browser controls, or view run details.
-          </p>
-          <Link
-            className={buttonVariants({ className: "h-12 w-full justify-center", size: "lg", variant: "default" })}
-            href={`/syncs/${encodeURIComponent(runId)}`}
-          >
-            View run details (optional)
-          </Link>
-        </section>
-      </div>
-    </main>
-  );
+export function ResolvedSurface({ connector, statusHref = "/sources", preview = false }: { connector: ConnectorContext | null; runId: string; statusHref?: string; preview?: boolean }) {
+  const router = useRouter();
+  useEffect(() => {
+    if (preview) return;
+    return scheduleSignInContinuation(statusHref, (href) => router.replace(href));
+  }, [preview, router, statusHref]);
+  return <SignInFrame connector={connector} title={`You're signed in to ${connector?.displayName ?? "the data source"}.`}><IcButton onClick={() => router.replace(statusHref)} size="sm" type="button">Continue</IcButton></SignInFrame>;
 }
 
 // ─── Unsupported interaction kind (credentials / OTP) ────────────────────────
@@ -5955,41 +6034,6 @@ export function ResolvedSurface({ connector, runId }: { connector: ConnectorCont
  * not adding navigation chrome, but a stuck operator with no path forward is
  * worse — keep one explicit escape to the run timeline.
  */
-function UnsupportedSurface({
-  connector,
-  interactionMessage,
-  runHref,
-}: {
-  connector: ConnectorContext | null;
-  interactionMessage: string;
-  runHref: string;
-}) {
-  return (
-    <main className="relative min-h-dvh">
-      <WordmarkCorner />
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
-        <section
-          aria-labelledby="stream-unsupported-title"
-          className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
-          data-surface="human"
-        >
-          {connector ? (
-            <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
-              <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
-              {connector.displayName}
-            </p>
-          ) : null}
-          <p className="pdpp-body-lg text-foreground" id="stream-unsupported-title">
-            {interactionMessage}
-          </p>
-          <p className="pdpp-body text-foreground">This step takes a credential, not a browser.</p>
-          <Link className="block w-full" href={runHref}>
-            <IcButton className="h-12 w-full" size="lg" type="button">
-              View run details (optional)
-            </IcButton>
-          </Link>
-        </section>
-      </div>
-    </main>
-  );
+function UnsupportedSurface({ connector, interactionMessage, runHref }: { connector: ConnectorContext | null; interactionMessage: string; runHref: string }) {
+  return <SignInFrame connector={connector} title={`${connector?.displayName ?? "The data source"} needs your sign-in details`}><p className="text-muted-foreground">{interactionMessage}</p><Link className={buttonVariants({ size: "sm", variant: "default" })} href={runHref}>Continue</Link></SignInFrame>;
 }

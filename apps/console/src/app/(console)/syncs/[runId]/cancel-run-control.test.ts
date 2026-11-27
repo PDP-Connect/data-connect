@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const CONTROL_FILE = `${HERE}cancel-run-control.tsx`;
 const ACTIONS_FILE = `${HERE}actions.ts`;
-const PAGE_FILE = `${HERE}page.tsx`;
+const PAGE_FILE = `${HERE}technical-page.tsx`;
 
 // ── Page: render only when active, inside beforeTimeline ──────────────────────
 
@@ -42,18 +42,15 @@ test("run detail page renders the cancel control only when the run is active", a
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, PAGE_IMPORTS_CONTROL_RE);
   assert.match(src, PAGE_GATES_ON_ACTIVE_RE);
-  // The gate must live inside the before-timeline fragment that is handed to
-  // TimelineDetailView's `beforeTimelineContent` slot. The fragment is defined
-  // (`const beforeTimeline = (`) before it is passed (`beforeTimelineContent={`),
-  // and the active-gated control sits inside that fragment definition.
-  const fragmentDefAt = src.indexOf("const beforeTimeline = (");
-  const slotPassAt = src.indexOf("beforeTimelineContent={");
+  // DIRECTION.md, “What must stay true” #4: the cancel control remains available inside the folded details.
+  const fragmentDefAt = src.indexOf("const detailsContent = (");
+  const slotPassAt = src.indexOf("data-testid=\"sync-details\"");
   const gateAt = src.search(PAGE_GATES_ON_ACTIVE_RE);
-  assert.ok(fragmentDefAt >= 0, "before-timeline fragment must be defined");
-  assert.ok(slotPassAt > fragmentDefAt, "fragment must be passed to the beforeTimelineContent slot");
+  assert.ok(fragmentDefAt >= 0, "details content must be defined");
+  assert.ok(slotPassAt > fragmentDefAt, "the folded details must follow its content definition");
   assert.ok(
     gateAt > fragmentDefAt && gateAt < slotPassAt,
-    "the active-gated cancel control must render inside the before-timeline fragment"
+    "the active-gated cancel control must render inside the folded details content"
   );
 });
 

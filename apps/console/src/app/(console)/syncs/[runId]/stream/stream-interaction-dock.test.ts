@@ -7,12 +7,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./stream-viewer.tsx", import.meta.url)), "utf8");
-const manualCompletionLabelPattern = /Continue collection/;
+const manualCompletionLabelPattern = /let submitLabel = "Done";/;
+const submitButtonUsesLabelPattern = /<IcButton disabled=\{isPending\} size="sm" type="submit">\s*\{submitLabel\}/;
 const hideInstructionsPattern = /Hide instructions/;
-const showInstructionsPattern = /Show continue controls/;
+const showInstructionsPattern = /Show instructions/;
 const oldCompletionLabelPattern = /I'm done/;
 const oldBrowserStepLabelPattern = /Mark browser step complete/;
-const manualResumeCopyPattern = /it does not resume the run/;
 const collapsedStatePattern = /const \[collapsed, setCollapsed\] = useState\(false\)/;
 const hideClickPattern = /onClick=\{\(\) => setCollapsed\(true\)\}/;
 const showClickPattern = /onClick=\{\(\) => setCollapsed\(false\)\}/;
@@ -20,7 +20,7 @@ const hideButtonSubmitPattern = /onClick=\{\(\) => submitInteraction\(\)\}[\s\S]
 // The corner close button is the only stream-killer on this surface. An owner
 // mid-auth read the icon-only X as "dismiss this notice" and lost the session,
 // so its label must say it ENDS the browser session, never an ambiguous "Close".
-const endSessionLabelPattern = /aria-label=\{`End \$\{connectorName\} browser session`\}/;
+const endSessionLabelPattern = /aria-label="Stop signing in"/;
 const oldCloseLabelPattern = /aria-label=\{`Close \$\{connectorName\} browser`\}/;
 
 // Close-on-pending-interaction guard. The corner X must not call the raw
@@ -40,7 +40,7 @@ const confirmEndsSessionPattern = /handleCloseConfirm = useCallback\(\(\) => \{[
 const noNativeConfirmPattern = /window\.confirm\(/;
 // The bubble's copy must name ending as destructive and point the owner at the
 // non-destructive "Hide instructions" alternative so the two never blur.
-const guardCopyPattern = /End the \{connectorName\} browser session now\?[\s\S]{0,260}Hide\n?\s*instructions/;
+const guardCopyPattern = /Stop signing in to \{connectorName\}\?[\s\S]{0,260}can't copy your/;
 // When no interaction is pending, the guarded handler falls straight through
 // to onClose() outside the `if (interactionPending)` block — unchanged.
 const guardFallsThroughWhenIdlePattern = /if \(interactionPending\) \{[\s\S]{0,200}return;\n\s*\}\n\s*onClose\(\);/;
@@ -52,10 +52,11 @@ const responseRequiredDockGatePattern =
   /if \(!\(interactionRequiresResponse && \(interactionKind === "otp" \|\| interactionKind === "manual_action"\)\)\) \{[\s\S]{0,80}return null;/;
 
 test("manual browser step controls distinguish hiding from completion", () => {
+  // Brief item 4: use the concise Done label and one short instruction line for the person.
   assert.match(source, manualCompletionLabelPattern);
+  assert.match(source, submitButtonUsesLabelPattern);
   assert.match(source, hideInstructionsPattern);
   assert.match(source, showInstructionsPattern);
-  assert.match(source, manualResumeCopyPattern);
   assert.doesNotMatch(source, oldCompletionLabelPattern);
   assert.doesNotMatch(source, oldBrowserStepLabelPattern);
 });

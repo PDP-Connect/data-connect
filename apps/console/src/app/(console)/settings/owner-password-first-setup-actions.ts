@@ -12,6 +12,12 @@ import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-cred
 function actionMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Owner password operation failed.";
 }
+
+export async function canOpenOwnerPasswordWindowAction(): Promise<boolean> {
+  await requireDashboardAccess("/settings");
+  return process.env.PDPP_MANAGED_DESKTOP_HOST === "1" && (await hasValidLocalOwnerCredentialRevealProofCookie());
+}
+
 export async function requestOwnerPasswordWindowAction(): Promise<{ ok: true } | { ok: false; message: string }> {
   await requireDashboardAccess("/settings");
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {

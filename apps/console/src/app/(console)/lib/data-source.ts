@@ -23,6 +23,7 @@
  */
 
 import {
+  type AppAccess,
   type DatasetSummary,
   type DeploymentDiagnostics,
   type ExploreTimelinePage,
@@ -36,6 +37,7 @@ import {
   type ListResponse,
   listConnectorSummaries,
   listExploreTimeline,
+  listAppAccess,
   listGrants,
   listPendingApprovals,
   listRuns,
@@ -43,6 +45,9 @@ import {
   type PendingApproval,
   type RefConnectorIdentitySummariesResponse,
   type RefConnectorSummariesResponse,
+  removeAppAccess,
+  type RemoveAppAccessInput,
+  type RemoveAppAccessResult,
   type RunSummary,
   refSearch,
   type TimelineEnvelope,
@@ -73,6 +78,13 @@ import {
   type TimeBucketAggregate,
   type TimeBucketGranularity,
 } from "./rs-client.ts";
+
+export interface AppAccessDataSource {
+  listAppAccess: () => Promise<ListResponse<AppAccess>>;
+  removeAppAccess: (input: RemoveAppAccessInput) => Promise<RemoveAppAccessResult>;
+}
+
+export const liveAppAccessDataSource: AppAccessDataSource = { listAppAccess, removeAppAccess };
 
 export interface DashboardDataSource {
   /**
@@ -260,3 +272,15 @@ export const liveDashboardDataSource: DashboardDataSource = {
   searchRecordsSemantic,
   supportsExploreTimelineDirection: async () => process.env.PDPP_EXPLORE_TIMELINE_DIRECTION === "1",
 };
+
+export interface HistoryDataSource {
+  listSyncHistory: typeof import("./ref-client.ts").listSyncHistory;
+  listAppHistory: typeof import("./ref-client.ts").listAppHistory;
+}
+export const liveHistoryDataSource: HistoryDataSource = {
+  listSyncHistory: (input) => import("./ref-client.ts").then(client => client.listSyncHistory(input)),
+  listAppHistory: (input) => import("./ref-client.ts").then(client => client.listAppHistory(input)),
+};
+export function createHistoryPracticeDataSource(syncs: import("./ref-client.ts").SyncHistory, reads: import("./ref-client.ts").AppHistory): HistoryDataSource {
+  return { listSyncHistory: async () => structuredClone(syncs), listAppHistory: async () => structuredClone(reads) };
+}

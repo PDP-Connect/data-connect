@@ -7,12 +7,12 @@
  * and stream-selection logic can be executed directly under `node --test`
  * (mirroring `apps/site/src/lib/consent-connection-label.ts`).
  *
- * The only import is the shared, dependency-free connector-display labeler so
- * the operator flow names a connection exactly the way the consent card and
- * the records dashboard do — one definition of "owner-meaningful label".
+ * Connection names use one rule for owner labels, connector-key fallbacks, and
+ * manifest names across the console.
  */
 
-import { formatConnectorNameForDisplay, isFallbackConnectionLabel } from "@pdpp/display";
+import { isFallbackConnectionLabel } from "@pdpp/display";
+import { connectionDisplayName } from "./connection-display-name.ts";
 
 /** Source kinds a grant request can address. Only `connector` has connections. */
 export type GrantRequestSourceKind = "connector" | "provider_native";
@@ -21,6 +21,7 @@ export type GrantRequestSourceKind = "connector" | "provider_native";
 export interface ConnectionSummaryLike {
   connection_id?: string | null;
   connector_id?: string | null;
+  connector_display_name?: string | null;
   display_name?: string | null;
   streams?: readonly string[] | null;
 }
@@ -108,14 +109,16 @@ export function buildConnectionPinOptions(
     })
     .map((summary) => {
       const connectorId = trim(summary.connector_id);
-      const owned = !isFallbackConnectionLabel({
+      const isFallback = isFallbackConnectionLabel({
         connectorId,
         displayName: summary.display_name,
+        name: summary.connector_display_name,
       });
-      const base = formatConnectorNameForDisplay({
-        connectorId,
-        displayName: owned ? summary.display_name : null,
-      });
+      const base = connectionDisplayName(
+        isFallback ? null : summary.display_name,
+        summary.connector_display_name,
+        connectorId
+      );
       return { base, value: trim(summary.connection_id) };
     });
 

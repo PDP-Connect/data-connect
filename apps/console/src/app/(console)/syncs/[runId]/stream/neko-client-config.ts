@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export const NEKO_CLIENT_CONFIG_UNAVAILABLE_MESSAGE =
-  "The browser stream could not finish loading. Check your network connection and try again.";
+  "The browser could not finish loading. Check your network connection and try again.";
 
 const CONFIG_FETCH_ATTEMPTS = 3;
 const CONFIG_FETCH_RETRY_MS = 250;

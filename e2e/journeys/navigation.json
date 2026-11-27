@@ -1,0 +1,13 @@
+{
+  "id": "navigation",
+  "name": "Owner navigation home entry",
+  "seed": [],
+  "steps": [
+    {
+      "id": "route",
+      "open": "/",
+      "readyText": "Nothing needs you",
+      "assertText": "Nothing needs you"
+    }
+  ]
+}

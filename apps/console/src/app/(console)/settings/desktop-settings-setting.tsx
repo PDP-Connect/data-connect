@@ -97,7 +97,6 @@ export function DesktopSettingsSetting({
   const appConfig = useLiveQuery("desktop.app-config", loadAppConfig)
   const loadState = loadStateOf(autostart, appConfig)
   const [error, setError] = useState<string | null>(null)
-  const loadError = autostart.error ?? appConfig.error
 
   const autostartMutation = useLiveMutation("desktop.autostart", changeAutostart)
   const startMinimizedMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
@@ -109,6 +108,7 @@ export function DesktopSettingsSetting({
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown
+  const autostartStateKnown = stateIsKnown && autostart.data?.known !== false
   const autostartEnabled = asAutostartEnabled(autostart.data)
   const startMinimized = asStartMinimized(appConfig.data)
   const closeToTray = asCloseToTray(appConfig.data)
@@ -122,7 +122,8 @@ export function DesktopSettingsSetting({
   const busyCloseToTray = closeToTrayMutation.isPending
 
   const reportResult = {
-    onError: (reason: unknown) => setError(String(reason)),
+    // A thrown error carries framework text, not words for the person.
+    onError: () => setError("The change could not be saved. Try again."),
     onSuccess: (result: { ok: true } | { ok: false; message: string }) => {
       if (!result.ok) setError(result.message)
     },
@@ -146,36 +147,27 @@ export function DesktopSettingsSetting({
   return (
     <div className="grid gap-3">
       {loadState === "loading" ? (
-        <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+        <p className="pdpp-caption text-muted-foreground">
           Reading the current desktop settings…
         </p>
       ) : null}
       {loadState === "failed" ? (
-        <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-          The current desktop settings could not be read, so they are not
-          shown. The controls below are unavailable rather than assumed off.
-        </p>
-      ) : null}
-      {loadError && !error ? (
-        <p
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-          role="alert"
-        >
-          {String(loadError)}
+        <p className="pdpp-caption text-muted-foreground">
+          Desktop settings could not be read.
         </p>
       ) : null}
       <LiveReadAt updatedAt={Math.min(autostart.dataUpdatedAt, appConfig.dataUpdatedAt)} />
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
-        <label className="flex items-start gap-2" htmlFor="autostart-enabled">
+        <label className="flex min-h-11 items-start gap-3" htmlFor="autostart-enabled">
           <input
-            checked={stateIsKnown && autostartEnabled}
-            disabled={autostartMutation.isPending || desktopUnavailable}
+            checked={autostartStateKnown && autostartEnabled}
+            disabled={autostartMutation.isPending || !autostartStateKnown}
             id="autostart-enabled"
             onChange={event => toggleAutostart(event.currentTarget.checked)}
             type="checkbox"
@@ -183,7 +175,12 @@ export function DesktopSettingsSetting({
           <span className="grid gap-1">
             <span className="pdpp-caption font-medium text-foreground">
               Launch at login
-              {stateIsKnown && autostartApplying ? (
+              {stateIsKnown && !autostartStateKnown ? (
+                <span className="ml-2 font-normal text-muted-foreground" data-testid="autostart-unknown">
+                  Not known yet
+                </span>
+              ) : null}
+              {autostartStateKnown && autostartApplying ? (
                 <span
                   className="ml-2 font-normal text-muted-foreground"
                   data-testid="autostart-applying"
@@ -193,8 +190,8 @@ export function DesktopSettingsSetting({
               ) : null}
             </span>
             <span className="pdpp-caption text-muted-foreground">
-              Start DataConnect automatically when you sign in to this
-              computer. Off by default.
+              Start DataConnect automatically when you sign in to this computer.
+              {autostartStateKnown ? " Off by default." : null}
             </span>
           </span>
         </label>
@@ -202,12 +199,12 @@ export function DesktopSettingsSetting({
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
         <label
-          className="flex items-start gap-2"
+          className="flex min-h-11 items-start gap-3"
           htmlFor="start-minimized"
         >
           <input
@@ -224,7 +221,7 @@ export function DesktopSettingsSetting({
               Start minimized
             </span>
             <span className="pdpp-caption text-muted-foreground">
-              Keep the console window hidden at startup. DataConnect keeps
+              Start with the window hidden at startup. DataConnect keeps
               running in the tray; open it from there. Off by default.
             </span>
           </span>
@@ -233,11 +230,11 @@ export function DesktopSettingsSetting({
 
       <div
         className={cn(
-          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          "grid border-b border-border/70 py-3",
           desktopUnavailable && "opacity-60"
         )}
       >
-        <label className="flex items-start gap-2" htmlFor="close-to-tray">
+        <label className="flex min-h-11 items-start gap-3" htmlFor="close-to-tray">
           <input
             checked={stateIsKnown && closeToTray}
             disabled={busyCloseToTray || desktopUnavailable}
@@ -251,7 +248,7 @@ export function DesktopSettingsSetting({
             </span>
             <span className="pdpp-caption text-muted-foreground">
               Closing the window hides it to the tray instead of quitting.
-              DataConnect and its background connectors keep running; quit
+              DataConnect and its data sources stay active; quit
               from the tray menu to stop them. On by default.
             </span>
           </span>
@@ -260,7 +257,7 @@ export function DesktopSettingsSetting({
 
       {error ? (
         <p
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          className="text-[13px] text-destructive"
           role="alert"
         >
           {error}

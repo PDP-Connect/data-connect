@@ -2,19 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 
-/**
- * Route-level loading state for the event-subscriptions list.
- *
- * `/event-subscriptions` reads the client event-subscription list
- * (and optionally peeks one) from the reference deployment on every load. Keep
- * the shell stable and animate a list skeleton instead of a blank frame.
- */
+/** Route-level loading state for Webhooks: its trail, its title and the rows it shows. */
 export default function EventSubscriptionsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="event subscriptions" rows={6} />
+      <NamedPageLoadingSkeleton breadcrumbs={[{ href: "/settings", label: "Settings" }, { label: "Webhooks" }]} framed label="webhooks" shape="list" title="Webhooks" />
     </RecordroomShellWithPalette>
   );
 }

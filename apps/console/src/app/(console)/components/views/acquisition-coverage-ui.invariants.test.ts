@@ -29,141 +29,53 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const CATALOG_FILE = `${HERE}../source-setup-catalog.tsx`;
 const MANUAL_UPLOAD_FILE = `${HERE}../../connect/manual-upload/[connectorId]/page.tsx`;
 const MANUAL_UPLOAD_FORM_FILE = `${HERE}../../connect/manual-upload/[connectorId]/manual-upload-form.tsx`;
 const STATUS_FILE = `${HERE}../../connect/status/[connectionId]/page.tsx`;
+const STATUS_OUTCOME_FILE = `${HERE}../../connect/status/[connectionId]/first-sync-outcome.ts`;
+const STATUS_BODY_FILE = `${HERE}../../connect/status/[connectionId]/first-sync-body.tsx`;
 const STATUS_LINKS_FILE = `${HERE}../../connect/status/[connectionId]/connect-status-links.ts`;
 
-const ONE_STATUS_AND_ACTION_COPY = /one status and one next action/;
-const COMPACT_METHOD_LINE = /function sourceMethodLine/;
-const SUPPORT_FACT_TEST_ID = /data-testid="source-support-fact"/;
-const PUBLIC_TIER_COPY = /Supported|Preview/;
-const LEGACY_TIER_COPY = />Experimental\s*\(|Continue anyway|Not available from this page|No setup path available here/;
-const UNAVAILABLE_PROP = /unavailable\?: boolean/;
-const UNAVAILABLE_TEST_ID = /source-unavailable-fact/;
-const REDUNDANT_NEXT_COPY = /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/;
-const GENERIC_SUPPORT_DETAIL_COPY = /Why this, and what to expect/;
-const IMPORT_OPTIONS_DISCLOSURE = /Show import options/;
-const EXISTING_SOURCE_REUSE = /data-testid="existing-source-reuse"/;
-const EXISTING_SOURCE_LINKS = /data-testid="existing-source-links"/;
-const SOURCE_RECORDS_HELPER = /function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
-const SOURCE_DETAIL_HELPER = /function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
 // The status page's own sourceRecordsHref/sourceDetailHref now live in
 // connect-status-links.ts (extracted so setupHref's connection-id regression
 // — the draft-deadlock fix — is directly unit-testable). Same contract, same
 // helper names, different file.
 const STATUS_SOURCE_RECORDS_HELPER = /export function sourceRecordsHref[\s\S]*new URLSearchParams\(\{ connection:/;
 const STATUS_SOURCE_DETAIL_HELPER = /export function sourceDetailHref[\s\S]*new URLSearchParams\(\{ connection_id:/;
-const CATALOG_EXPLORE_LINK = /href=\{sourceRecordsHref\(source\.connectionId\)\}[\s\S]*Open in Explore/;
-const CATALOG_SOURCE_DETAILS_LINK =
-  /href=\{sourceDetailHref\(connectorKey, source\.connectionId\)\}[\s\S]*Source details/;
-const STATUS_EXPLORE_LINK = /href=\{sourceRecordsHref\(status\)\}[\s\S]*Open in Explore/;
-const STATUS_SOURCE_DETAILS_LINK = /href=\{sourceDetailHref\(status\)\}[\s\S]*Source details/;
+// RAISE-RULES.md 2 / setup-pages brief 4: the filled action after success is "Open <Source>".
 const CONNECTOR_LEVEL_STATUS_RECORDS_LINK = /href=\{`\/sources\/\$\{encodeURIComponent\(status\.connector_id\)\}`\}/;
-const OWNER_SAFE_STORAGE_COPY = /stored for this source and is not exposed to connected apps or clients/;
-const VALIDATES_BEFORE_COMMIT_COPY = /validates before committing/i;
-const COVERAGE_RECEIPT_COPY = /coverage receipt|coverage provenance/i;
-const PRIMARY_METHODS_IDENTIFIER = /primaryMethods/;
-const ADVANCED_METHODS_IDENTIFIER = /advancedMethods/;
-const OTHER_EXPORT_PATHS_DISCLOSURE = /<details[\s\S]*?Other ways to export this data/;
-const IMPORT_OWNER_ARTIFACT_CTA = /Import file[\s\S]*Preview only/;
+// RAISE-RULES.md 4 bans "coverage" on screen; the receipt stays revisitable through the status page link.
+const COVERAGE_RECEIPT_COPY = /\/connect\/status\/\$\{encodeURIComponent\(connectionId\)\}/;
 const OLD_FIRST_SYNC_CTA = /Upload and start first sync/;
 const PROVIDER_CREDENTIAL_COPY = /provider account sign-in is required|provider credential/;
 const DEPLOYMENT_SEMANTICS_COPY = /pnpm --dir|packages\/[a-z]|connector_instance_id|source_instance_id/;
-const IMPORT_COMPLETE_COPY = /Import complete/;
-const VALIDATED_AND_COMMITTED_COPY = /validated and committed/;
-const COVERAGE_PREVIEW_COPY = /Coverage preview/;
-const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
-const PARSED_RECORDS_COPY = /Parsed records/;
-const ACCEPTED_COUNT_COPY = /Accepted/;
-const DUPLICATE_COUNT_COPY = /Duplicates/;
-const SKIPPED_COUNT_COPY = /Skipped/;
-const FAILED_COUNT_COPY = /Failed/;
-const ESTIMATED_POINTS_COPY = /Estimated points/;
-const ESTIMATED_SEGMENTS_COPY = /Estimated segments/;
-const COVERAGE_WINDOW_COPY = /Coverage window/;
-const DURABLE_RECEIPT_COPY = /durable coverage receipt|committed acquisition-batch counts/i;
-const IDEMPOTENT_REPEAT_COPY = /Repeating the same file[\s\S]*returns[\s\S]*this receipt/i;
-const IMPORT_RECEIPT_REFERENCE = /status\.import_receipt/;
-const MANUAL_UPLOAD_BRANCH = /status\.setup_kind === "manual_upload"/;
-const IMPORT_STATE_FUNCTION = /function describeImportState/;
-const IMPORT_COMPLETE_HEADLINE = /headline: "Import complete"/;
-const IMPORT_FILE_COPY = /import file is captured/;
-const IMPORT_PROGRESS_TEST_ID = /data-testid="import-progress"/;
-const IMPORT_PHASES = [/Received/, /Parsed/, /Deduplicated/, /Committed/, /Indexed/, /Health projected/];
-const NO_PARALLEL_PROGRESS_ENUM = /type ImportPhaseState = "current" \| "done" \| "failed" \| "waiting"/;
-const SETUP_STATE_REFERENCE = /status\.setup_state/;
-const IMPORT_RECEIPT_STATE_REFERENCE = /status\.import_receipt/;
-
-// ── 1. Source catalog presents a source journey ─────────────────────────────
-
-test("source catalog no longer frames itself as one status and one next action", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.doesNotMatch(src, ONE_STATUS_AND_ACTION_COPY);
-  // The default picker is a compact decision surface: method line first,
-  // detailed acquisition paths only after import intent.
-  assert.match(src, COMPACT_METHOD_LINE);
-});
-
-test("source card keeps the support fact distinct from the recommended next action", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  // Current support/blocked fact is its own labelled element…
-  assert.match(src, SUPPORT_FACT_TEST_ID);
-  // …and the action is compact and placed after the card's content, without
-  // an extra label that repeats what the button already says.
-  assert.match(src, /sourceSetupAction/);
-  assert.doesNotMatch(src, REDUNDANT_NEXT_COPY);
-  // The old generic disclosure repeated on every row and made the picker noisy.
-  assert.doesNotMatch(src, GENERIC_SUPPORT_DETAIL_COPY);
-  // Import-specific detail is still available, but behind explicit import intent.
-  assert.match(src, IMPORT_OPTIONS_DISCLOSURE);
-  // The existing-vs-new source choice belongs on the import page, not in the picker.
-  assert.doesNotMatch(src, EXISTING_SOURCE_REUSE);
-});
-
-test("source catalog exposes only public Supported/Preview tiers and no latent unavailable card", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.match(src, PUBLIC_TIER_COPY);
-  assert.doesNotMatch(src, LEGACY_TIER_COPY);
-  assert.doesNotMatch(src, UNAVAILABLE_PROP);
-  assert.doesNotMatch(src, UNAVAILABLE_TEST_ID);
-});
-
-test("source catalog exposes exact existing-account links without turning the picker into a reuse flow", async () => {
-  const src = await readFile(CATALOG_FILE, "utf8");
-  assert.match(src, EXISTING_SOURCE_LINKS);
-  assert.match(src, SOURCE_RECORDS_HELPER);
-  assert.match(src, SOURCE_DETAIL_HELPER);
-  assert.match(src, CATALOG_EXPLORE_LINK);
-  assert.match(src, CATALOG_SOURCE_DETAILS_LINK);
-  assert.doesNotMatch(src, EXISTING_SOURCE_REUSE);
-});
 
 // ── 2. Manual/upload page is a coverage-assistant start ─────────────────────
 
-test("manual upload page has owner-safe storage and validate-before-commit language", async () => {
+// Design "File services": the page prints the service's own export steps and offers "Import" and "Check the file first".
+test("manual upload page prints the export steps and checks the file before importing", async () => {
   const pageSrc = await readFile(MANUAL_UPLOAD_FILE, "utf8");
   const formSrc = await readFile(MANUAL_UPLOAD_FORM_FILE, "utf8");
-  assert.match(pageSrc, OWNER_SAFE_STORAGE_COPY);
-  // Validates before durable commit when a validator exists.
-  assert.match(formSrc, VALIDATES_BEFORE_COMMIT_COPY);
+  const bodies = await readFile(`${HERE}../../sources/add/connect-bodies.tsx`, "utf8");
+  assert.match(bodies, /data-testid="export-steps"/);
+  assert.match(bodies, /data-testid="export-links"/);
+  assert.match(pageSrc, /exportInstructions\(/);
   // It speaks of a durable receipt the owner can revisit.
-  assert.match(pageSrc, COVERAGE_RECEIPT_COPY);
+  assert.match(formSrc, COVERAGE_RECEIPT_COPY);
 });
 
-test("manual upload page leads with primary methods and hides advanced behind one disclosure", async () => {
+test("manual upload page leads with primary methods and lists other ways as plain links", async () => {
   const src = await readFile(MANUAL_UPLOAD_FILE, "utf8");
-  assert.match(src, PRIMARY_METHODS_IDENTIFIER);
-  assert.match(src, ADVANCED_METHODS_IDENTIFIER);
-  // Exactly one disclosure for the secondary/advanced paths.
-  assert.match(src, OTHER_EXPORT_PATHS_DISCLOSURE);
+  const steps = await readFile(`${HERE}../../connect/manual-upload/[connectorId]/manual-upload-steps.ts`, "utf8");
+  assert.match(src, /exportInstructions\(setup\.acquisition_methods\)/);
+  assert.match(steps, /method\.posture === "primary"/);
+  assert.doesNotMatch(src, /<details/);
 });
 
 test("manual upload CTA imports an owner artifact rather than starting a sync", async () => {
   const src = await readFile(MANUAL_UPLOAD_FORM_FILE, "utf8");
   // The owner artifact is imported/validated, never "first sync".
-  assert.match(src, IMPORT_OWNER_ARTIFACT_CTA);
+  assert.match(src, /fileCopy\.button[\s\S]*fileCopy\.checkFirst/);
   assert.doesNotMatch(src, OLD_FIRST_SYNC_CTA);
 });
 
@@ -174,57 +86,27 @@ test("manual upload page does not imply provider credential or deployment semant
   assert.doesNotMatch(`${pageSrc}\n${formSrc}`, DEPLOYMENT_SEMANTICS_COPY);
 });
 
-// ── 3. Setup status page uses import/receipt language for manual_upload ──────
+// ── 3. Setup status page: one outcome sentence per design "Page 3" ───────────
+// Design "Page 3" and "Every item": the receipt table, the import-progress card and the
+// "Details" fold are removed; the page says the outcome in one sentence and offers the next button.
 
-test("status page uses import/receipt language for manual_upload", async () => {
+test("status page says the outcome and offers the data (design Page 3: worked)", async () => {
   const src = await readFile(STATUS_FILE, "utf8");
-  assert.match(src, IMPORT_COMPLETE_COPY);
-  assert.match(src, VALIDATED_AND_COMMITTED_COPY);
-  assert.match(src, COVERAGE_PREVIEW_COPY);
-  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
-  assert.match(src, PARSED_RECORDS_COPY);
-  assert.match(src, ACCEPTED_COUNT_COPY);
-  assert.match(src, DUPLICATE_COUNT_COPY);
-  assert.match(src, SKIPPED_COUNT_COPY);
-  assert.match(src, FAILED_COUNT_COPY);
-  assert.match(src, ESTIMATED_POINTS_COPY);
-  assert.match(src, ESTIMATED_SEGMENTS_COPY);
-  assert.match(src, COVERAGE_WINDOW_COPY);
-  assert.match(src, DURABLE_RECEIPT_COPY);
-  assert.match(src, IDEMPOTENT_REPEAT_COPY);
-  assert.match(src, IMPORT_RECEIPT_REFERENCE);
-  // Branch is keyed on the import setup_kind, not source-specific React.
-  assert.match(src, MANUAL_UPLOAD_BRANCH);
-});
-
-test("status page projects generic import progress phases from setup status", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
-  assert.match(src, IMPORT_PROGRESS_TEST_ID);
-  for (const phase of IMPORT_PHASES) {
-    assert.match(src, phase);
-  }
-  // This is a display projection from setup_state + receipt facts, not a second
-  // onboarding lifecycle enum with source-specific states.
-  assert.match(src, NO_PARALLEL_PROGRESS_ENUM);
-  assert.match(src, SETUP_STATE_REFERENCE);
-  assert.match(src, IMPORT_RECEIPT_STATE_REFERENCE);
-});
-
-test("status page never implies provider credential semantics for an import", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
-  // The active-import headline is a receipt, not "Connection active".
-  assert.match(src, IMPORT_STATE_FUNCTION);
-  assert.match(src, IMPORT_COMPLETE_HEADLINE);
-  // The manual material noun stays an import file, never a credential.
-  assert.match(src, IMPORT_FILE_COPY);
-});
-
-test("status page sends completed setup to the exact source and Explore scope", async () => {
-  const src = await readFile(STATUS_FILE, "utf8");
+  const outcomeSrc = await readFile(STATUS_OUTCOME_FILE, "utf8");
+  const bodySrc = await readFile(STATUS_BODY_FILE, "utf8");
   const linksSrc = await readFile(STATUS_LINKS_FILE, "utf8");
   assert.match(linksSrc, STATUS_SOURCE_RECORDS_HELPER);
   assert.match(linksSrc, STATUS_SOURCE_DETAIL_HELPER);
-  assert.match(src, STATUS_EXPLORE_LINK);
-  assert.match(src, STATUS_SOURCE_DETAILS_LINK);
-  assert.doesNotMatch(src, CONNECTOR_LEVEL_STATUS_RECORDS_LINK);
+  assert.match(outcomeSrc, /sourceRecordsHref\(status\)/);
+  assert.match(outcomeSrc, /See \$\{yourData\(name\)\}/);
+  assert.match(bodySrc, /<LinkButton link=\{outcome\.primary\} primary \/>/);
+  assert.doesNotMatch(src + outcomeSrc + bodySrc, CONNECTOR_LEVEL_STATUS_RECORDS_LINK);
+});
+
+test("status page no longer prints receipts, progress phases or a fold (design Page 3, banned list 1 and 9)", async () => {
+  const all = (await readFile(STATUS_FILE, "utf8")) +
+    (await readFile(STATUS_OUTCOME_FILE, "utf8")) +
+    (await readFile(STATUS_BODY_FILE, "utf8"));
+  assert.doesNotMatch(all, /<details|Coverage preview|Import progress|Health projected|Setup state/);
+  assert.doesNotMatch(all, /status\.connection_id\}<\/dd>/);
 });
