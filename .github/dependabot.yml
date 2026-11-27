@@ -32,6 +32,10 @@ updates:
     directory: /src-tauri
     schedule:
       interval: weekly
+    ignore:
+      # Keep soup3 on the 0.5 line that webkit2gtk links; see the soup3 pin in src-tauri/Cargo.toml.
+      - dependency-name: soup3
+        versions: [">= 0.6.0"]
     groups:
       cargo:
         applies-to: version-updates

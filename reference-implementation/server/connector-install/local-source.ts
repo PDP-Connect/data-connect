@@ -11,12 +11,17 @@
  */
 import { createHash } from "node:crypto"
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
+  type Stats,
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -95,11 +100,26 @@ function assertRecord(
   }
 }
 
+/** A regular file inside the source root, with the identity it had when checked. */
+export interface ConfinedFile {
+  readonly label: string
+  readonly path: string
+  readonly stat: Pick<Stats, "dev" | "ino">
+}
+
 function confinedFile(
   root: string,
   relativePath: string,
   label: string
 ): string {
+  return checkConfinedFile(root, relativePath, label).path
+}
+
+function checkConfinedFile(
+  root: string,
+  relativePath: string,
+  label: string
+): ConfinedFile {
   const candidate = resolve(root, relativePath)
   if (
     relative(root, candidate).startsWith(`..${sep}`) ||
@@ -111,10 +131,41 @@ function confinedFile(
   if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
     throw new Error(`${label} escapes the local source root.`)
   }
-  if (!lstatSync(resolved).isFile()) {
+  const stat = lstatSync(resolved)
+  if (!stat.isFile()) {
     throw new Error(`${label} must resolve to a file.`)
   }
-  return resolved
+  return { label, path: resolved, stat }
+}
+
+/**
+ * Reads at most `limit + 1` bytes from one descriptor, which must be the
+ * regular file that passed confinement. A file or parent directory replaced
+ * after the check opens another inode and is refused, and a file that grows
+ * mid-read cannot allocate past the limit.
+ */
+export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
+  const fd = openSync(file.path, "r")
+  try {
+    const opened = fstatSync(fd)
+    if (
+      !opened.isFile() ||
+      opened.dev !== file.stat.dev ||
+      opened.ino !== file.stat.ino
+    ) {
+      throw new Error(`${file.label} changed while it was being read.`)
+    }
+    const buffer = Buffer.alloc(limit + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const n = readSync(fd, buffer, length, buffer.length - length, null)
+      if (n === 0) break
+      length += n
+    }
+    return buffer.subarray(0, length)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 function canonicalRoot(sourcePath: string): string {
@@ -135,19 +186,21 @@ function readManifest(root: string): {
   readonly connectorKey: string
   readonly displayName: string
   readonly manifest: Record<string, unknown>
+  readonly manifestSha256: string
   readonly version: string
 } {
-  const manifestPath = confinedFile(
-    root,
-    MANIFEST_PATH,
-    "Collection Profile manifest"
+  // Parse and hash the bytes of one bounded read, so the recorded digest is
+  // of the parsed bytes.
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, MANIFEST_PATH, "Collection Profile manifest"),
+    MAX_PROFILE_BYTES
   )
-  if (lstatSync(manifestPath).size > MAX_PROFILE_BYTES) {
+  if (bytes.byteLength > MAX_PROFILE_BYTES) {
     throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(manifestPath, "utf8"))
+    parsed = JSON.parse(bytes.toString("utf8"))
   } catch (error) {
     throw new Error(
       `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -211,6 +264,7 @@ function readManifest(root: string): {
         ? parsed.display_name.trim()
         : connectorKey,
     manifest: parsed,
+    manifestSha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
     version: version.trim(),
   }
 }
@@ -224,11 +278,6 @@ function buildRecord(
   selected: boolean
 ): LocalConnectorSourceRecord {
   const profile = readManifest(root)
-  const manifestFile = confinedFile(
-    root,
-    MANIFEST_PATH,
-    "Collection Profile manifest"
-  )
   const entrypointFile = confinedFile(
     root,
     ENTRYPOINT_PATH,
@@ -257,7 +306,7 @@ function buildRecord(
     entrypointSha256: sha256(entrypointFile),
     manifest: profile.manifest,
     manifestPath: MANIFEST_PATH,
-    manifestSha256: sha256(manifestFile),
+    manifestSha256: profile.manifestSha256,
     ...(provenancePath && provenanceSha256 ? { provenancePath, provenanceSha256 } : {}),
     root,
     selected,
@@ -356,6 +405,11 @@ export function createFileLocalConnectorSourceStore(
         root,
         state.selectedByConnectorKey[existing?.connectorKey ?? ""] === sourceId
       )
+      if (existing && record.connectorKey !== existing.connectorKey) {
+        throw new Error(
+          "Added Collection Profile changed connector identity."
+        )
+      }
       write({
         selectedByConnectorKey: { ...state.selectedByConnectorKey },
         sources: { ...state.sources, [sourceId]: record },
@@ -365,7 +419,16 @@ export function createFileLocalConnectorSourceStore(
     async getSelectedForConnector(connectorId) {
       const state = read()
       const sourceId = selectedSourceId(state, connectorId)
-      return sourceId ? (state.sources[sourceId] ?? null) : null
+      const record = sourceId ? state.sources[sourceId] : undefined
+      if (!record || record.sourceId !== sourceId) return null
+      // State written before add() checked identity can select a record whose
+      // profile changed connector key. Never hand that profile to this connector.
+      const requestedKey = canonicalConnectorKey(connectorId)
+      return record.connectorId === connectorId ||
+        record.connectorKey === connectorId ||
+        record.connectorKey === requestedKey
+        ? record
+        : null
     },
     async list() {
       return records(read())

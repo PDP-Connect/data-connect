@@ -19,7 +19,12 @@
  */
 
 import { filterFreshPressureRows, resolveRecoveryFirstMode } from "../recovery-decision.ts";
-import { type BackoffDecision, computeNextRunWithBackoff, endsFailureStreak } from "../scheduler-backoff.ts";
+import {
+  type BackoffDecision,
+  computeNextRunWithBackoff,
+  endsFailureStreak,
+  RUN_CONFIG_STORE_FAILURE_CLASS,
+} from "../scheduler-backoff.ts";
 import type {
   ConnectorSchedule,
   GetForwardEvidenceDebtHandler,
@@ -777,7 +782,10 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     // only `!eligible`) lets bounded recovery win the tick whenever it is due,
     // regardless of ordinary forward-walk eligibility; forward collection still
     // runs normally once no eligible recovery remains (probe returns 0).
-    const recoveryCadenceElapsed = elapsed >= scheduleIntervalMs;
+    // Recovery also needs the configuration store, so an outage backs off
+    // both kinds of launch on the same schedule.
+    const recoveryCadenceElapsed =
+      decision.reasonClass === RUN_CONFIG_STORE_FAILURE_CLASS ? intervalElapsed : elapsed >= scheduleIntervalMs;
     let recoveryOnly = false;
     if (recoveryCadenceElapsed) {
       const nonPressureRecoverable = await probeNonPressureRecoverableCount(connectorId, key);

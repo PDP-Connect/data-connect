@@ -77,6 +77,7 @@ import {
   type StreamsListDependencies,
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
+import { validateReadQueryKeys } from "../read-query-params.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import { withTokenKindRecordShape } from "../record-wire-shape.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
@@ -685,6 +686,8 @@ export function mountRsConnectors(app: AppLike, ctx: MountRsReadContext): void {
           traceId,
         };
 
+        validateReadQueryKeys("connectors", req.query);
+
         let operationInput: Record<string, unknown>;
         let dependencies: Record<string, unknown>;
         if (tokenInfo.pdpp_token_kind === "owner") {
@@ -1077,6 +1080,8 @@ export function mountRsSchema(app: AppLike, ctx: MountRsReadContext): void {
         traceId,
       };
 
+      validateReadQueryKeys("schema", req.query);
+
       // Build the actor input + connector-item dependencies for this bearer.
       // Mutates `queryContext.sourceDescriptor` to the resolved source (mirrors
       // the inline behavior the route previously had and the `resolveReadScope`
@@ -1431,6 +1436,8 @@ export function mountRsStreamsList(app: AppLike, ctx: MountRsReadContext): void 
           traceId,
         };
 
+        validateReadQueryKeys("streams", req.query);
+
         const plan =
           tokenInfo.pdpp_token_kind === "owner"
             ? await buildStreamsListOwnerPlan(ctx, req, queryContext, tokenInfo)
@@ -1516,6 +1523,8 @@ export function mountRsStreamDetail(app: AppLike, ctx: MountRsReadContext): void
           tokenInfo,
           traceId,
         };
+
+        validateReadQueryKeys("stream", req.query);
 
         ({ storageBinding, manifest, sourceDescriptor } = await resolveReadScope(ctx, req, tokenInfo, queryContext));
 
@@ -1693,6 +1702,8 @@ export function mountRsStreamAggregate(app: AppLike, ctx: MountRsReadContext): v
           traceId,
         };
 
+        validateReadQueryKeys("aggregate", req.query);
+
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, requestParams);
 
         const scope = await resolveReadScope(ctx, req, tokenInfo, queryContext);
@@ -1841,6 +1852,8 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
           traceId,
         };
 
+        validateReadQueryKeys("records", req.query);
+
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, requestParams);
 
         // Self-export: owner can query without a client grant. `resolveReadScope`
@@ -1962,6 +1975,8 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
           tokenInfo,
           traceId,
         };
+
+        validateReadQueryKeys("record", req.query);
 
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, req.query);
 
@@ -2129,6 +2144,8 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
           tokenInfo,
           traceId,
         };
+
+        validateReadQueryKeys("fieldWindow", req.query);
 
         // `field` is required and selector-shaped before we resolve any scope,
         // so a malformed request fails fast with the same typed-error vocabulary
@@ -2703,6 +2720,7 @@ export function mountRsBlobRead(app: AppLike, ctx: MountRsReadContext): void {
     ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
+        validateReadQueryKeys("blob", req.query);
         const blobId = decodeURIComponent(req.params.blob_id as string);
         const { tokenInfo } = req;
         const { storageBinding, manifest } = await resolveBlobActorScope(ctx, req, tokenInfo);

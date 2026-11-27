@@ -41,6 +41,7 @@ import {
   OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { describeRunConfigFailure, RunConfigBlockedError } from "../server/connector-run-config.ts";
 import {
   assertConnectorLifecycleAvailable,
   connectorLifecycleDataDir,
@@ -4638,21 +4639,30 @@ export function createController(opts: ControllerOptions = {}): Controller {
         // Close the phantom-202 window: a throw before the runtime's
         // `run.started` emit (env/spawn prep) used to leave a 202-returned
         // run id with ZERO spine events — log-and-forget. Emit a typed
-        // terminal `run.failed` (reason: launch_failed) so the handle stays
+        // terminal `run.failed` with the config refusal or launch_failed so the handle stays
         // resolvable. Guarded by the same terminal-existence probe the boot
         // reconciler uses, because post-spawn rejections reach this catch
         // AFTER the runtime already recorded its own terminal event.
         try {
           if (!(await runAlreadyTerminal(runId, connectorInstanceId))) {
+            const configReason = err instanceof RunConfigBlockedError ? err.reason : null;
+            const configFailure = describeRunConfigFailure(configReason);
+            const reason = configReason ?? LAUNCH_FAILED_RUN_REASON;
             await emitSpineEvent({
               actor_id: connectorId,
               actor_type: "runtime",
               data: {
                 source: buildRunSource(connectorId),
                 ...buildRunConnectionIdentity(connectorInstanceId),
-                failure_reason: LAUNCH_FAILED_RUN_REASON,
+                ...(configFailure
+                  ? {
+                      failure_message: configFailure.message,
+                      runtime_failure: { code: configFailure.code, retryable: configFailure.retryable },
+                    }
+                  : {}),
+                failure_reason: reason,
                 message: boundedLaunchFailureMessage(message),
-                reason: LAUNCH_FAILED_RUN_REASON,
+                reason,
                 records_emitted: 0,
               },
               event_type: "run.failed",

@@ -15,6 +15,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 
 interface PackageManifest {
   name: string;
+  scripts: Record<string, string>;
   version: string;
   [key: string]: unknown;
 }
@@ -50,7 +51,7 @@ async function main(): Promise<void> {
 
   const receipt = {
     command: {
-      packageScript: "pnpm build && tsx scripts/verify-node-22.14.ts",
+      packageScript: manifest.scripts["verify:node-22.14"],
       invocation: [process.execPath, ...process.execArgv, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
     },
     tree: probe.dependencyTree,

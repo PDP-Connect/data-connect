@@ -3,7 +3,7 @@
 
 // GENERATED FILE — do not hand-edit. Produced verbatim from
 // packages/list-envelope/src/index.ts by
-// packages/cli/scripts/generate-list-envelope.ts (part of `pnpm build`).
+// reference-implementation/vendor/cli/scripts/generate-list-envelope.ts (part of `npm run build`).
 // packages/cli publishes publicly with zero runtime deps, so it cannot
 // import the private @pdpp/list-envelope workspace package directly; this
 // generated copy is the CLI's only version of that validator, never a

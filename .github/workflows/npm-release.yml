@@ -1,10 +1,11 @@
 name: npm-release
 
-# Publishes the three @pdpp collector packages to npm via
-# semantic-release, using OIDC trusted publishing (id-token: write, no
-# NPM_TOKEN) — the same mechanism PDP-Connect/pdpp already runs for
-# @pdpp/cli, @pdpp/mcp-server, and @pdpp/read-core. See .releaserc.yaml for
-# which commits actually trigger a release: this workflow's `quality` and
+# Publishes the lockstep @pdpp packages (the collector packages, and
+# @pdpp/read-core, @pdpp/cli and @pdpp/mcp-server, which PDP-Connect/pdpp
+# published up to 1.8.0) to npm via semantic-release, using OIDC trusted
+# publishing (id-token: write, no NPM_TOKEN). .releaserc.yaml's
+# @semantic-release/npm steps are the package list; see it also for which
+# commits actually trigger a release: this workflow's `quality` and
 # `release` jobs only run at all when resolve-version's dry run found one.
 #
 # Scoped to these npm packages: this repo also ships a Tauri
@@ -74,6 +75,7 @@ jobs:
       superseded-tag: ${{ steps.mode.outputs.superseded-tag }}
       superseded-version: ${{ steps.mode.outputs.superseded-version }}
       superseded-missing: ${{ steps.mode.outputs.superseded-missing }}
+      superseded-published: ${{ steps.mode.outputs.superseded-published }}
 
     steps:
       - name: Checkout
@@ -204,6 +206,25 @@ jobs:
           TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/local-collector verify
 
+      # The three packages that moved here from PDP-Connect/pdpp. mcp-server's
+      # `verify` builds the cli it depends on; package-verify.yml also runs
+      # the Node 22.14 floor gate for cli and read-core on every pull request
+      # that touches them.
+      - name: Verify read-core package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
+        run: npm run --workspace reference-implementation/vendor/read-core verify
+
+      - name: Verify cli package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
+        run: npm run --workspace reference-implementation/vendor/cli verify
+
+      - name: Verify mcp-server package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
+        run: npm run --workspace reference-implementation/vendor/mcp-server verify
+
       - name: Test commit-analyzer scope gate
         run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
 
@@ -274,16 +295,18 @@ jobs:
       # mean the version is immediately resolvable — observed ~3 minutes for
       # @pdpp/local-collector@2.1.1 to become fetchable after its publish
       # log said "Published". The script retries on E404 with a bounded
-      # wait rather than failing on the first lookup.
+      # wait rather than failing on the first lookup. The package names come
+      # from scripts/lockstep-packages.ts, which reads .releaserc.yaml.
       - name: Verify npm provenance attestation
         if: needs.resolve-version.outputs.new-release-published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          packages=$(node --import tsx scripts/lockstep-packages.ts)
+          # shellcheck disable=SC2086 # one package name per line, none with spaces
           node --import tsx scripts/verify-npm-provenance.ts \
             "${{ needs.resolve-version.outputs.new-release-version }}" \
-            "$GITHUB_SHA" \
-            "@pdpp/connector-protocol" "@pdpp/collector-runtime" "@pdpp/local-collector"
+            "$GITHUB_SHA" $packages
 
       # Attestation verification (above) proves provenance — that the
       # published tarballs were built by this workflow at this commit. It
@@ -299,7 +322,7 @@ jobs:
         run: |
           node scripts/verify-packed-install-capability-exports.mjs "${{ needs.resolve-version.outputs.new-release-version }}"
 
-  # The postcondition of the pipeline: all three lockstep packages are live at
+  # The postcondition of the pipeline: every lockstep package is live at
   # the version this run published.
   #
   # "The release job exited 0" is not the same claim as "the release
@@ -338,7 +361,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Assert all three packages are live at this version
+      - name: Assert every lockstep package is live at this version
         run: |
           node --import tsx scripts/verify-release-complete.ts \
             "${{ needs.resolve-version.outputs.new-release-version }}"
@@ -351,7 +374,8 @@ jobs:
         env:
           SUPERSEDED_TAG: ${{ needs.resolve-version.outputs.superseded-tag }}
           SUPERSEDED_MISSING: ${{ needs.resolve-version.outputs.superseded-missing }}
+          SUPERSEDED_PUBLISHED: ${{ needs.resolve-version.outputs.superseded-published }}
           NEW_VERSION: ${{ needs.resolve-version.outputs.new-release-version }}
         run: |
           node --import tsx scripts/report-superseded-release.ts \
-            "$SUPERSEDED_TAG" "$SUPERSEDED_MISSING" "$NEW_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
+            "$SUPERSEDED_TAG" "$SUPERSEDED_MISSING" "$SUPERSEDED_PUBLISHED" "$NEW_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"

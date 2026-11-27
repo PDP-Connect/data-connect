@@ -126,29 +126,50 @@ test("buildStreamMetadataEntry: default freshness is unknown when none supplied"
 });
 
 test("buildStreamMetadataEntry: an explicit freshness object is passed through verbatim", () => {
-  const freshness = { captured_at: "2024-01-01T00:00:00.000Z", status: "fresh" };
+  const freshness = { captured_at: "2024-01-01T00:00:00.000Z", status: "current" as const };
   const entry = buildStreamMetadataEntry({ freshness, manifestStream: { ...baseStream, primary_key: "id" } });
   assert.equal(entry.freshness, freshness, "supplied freshness wins over the default");
 });
 
-test("buildStreamMetadataEntry: builds field_capabilities and expand_capabilities from the manifest", () => {
+test("buildStreamMetadataEntry: an owner entry builds field_capabilities and expand_capabilities from the manifest", () => {
   const entry = buildStreamMetadataEntry({
-    grantStreams: [{ name: "order_items" }],
     manifestStream: {
       ...baseStream,
       primary_key: "id",
       query: { expand: [{ name: "items" }] },
       relationships: [{ cardinality: "has_many", name: "items", stream: "order_items" }],
     },
-    streamGrant: { fields: ["id"], name: "orders" },
+    manifestStreamNames: new Set(["orders", "order_items"]),
   });
   const fieldCapabilities = entry.field_capabilities as Record<string, unknown>;
   const expandCapabilities = entry.expand_capabilities as { name: string }[];
-  // field_capabilities is keyed by schema property.
   assert.ok(fieldCapabilities.id, "field_capabilities derived for declared property id");
-  // expand_capabilities surfaces the declared, relationship-backed expand.
-  assert.equal(expandCapabilities.length, 1);
-  assert.equal(expandCapabilities[0]?.name, "items");
+  assert.deepEqual(
+    expandCapabilities.map((capability) => capability.name),
+    ["items"]
+  );
+});
+
+test("buildStreamMetadataEntry: a grant entry projects the stream through the grant, not the live declaration", () => {
+  const entry = buildStreamMetadataEntry({
+    grantStreams: [{ name: "orders" }, { name: "order_items" }],
+    manifestStream: {
+      ...baseStream,
+      cursor_field: "id",
+      primary_key: "id",
+      query: { expand: [{ name: "items" }] },
+      relationships: [{ cardinality: "has_many", name: "items", stream: "order_items" }],
+    },
+    streamGrant: { fields: ["id"], instance_ids: ["cin_1"], name: "orders" },
+  });
+  assert.deepEqual(entry.schema, { additionalProperties: false, properties: { id: {} }, type: "object" });
+  assert.deepEqual(entry.query, {});
+  assert.deepEqual(entry.relationships, []);
+  assert.deepEqual(entry.expand_capabilities, []);
+  assert.deepEqual(entry.primary_key, []);
+  assert.equal(entry.cursor_field, undefined);
+  assert.deepEqual(entry.instance_ids, ["cin_1"]);
+  assert.deepEqual(Object.keys(entry.field_capabilities as Record<string, unknown>), ["id"]);
 });
 
 // ---------------------------------------------------------------------------

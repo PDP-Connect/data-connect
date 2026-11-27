@@ -38,6 +38,7 @@ export interface PackageManifest {
   exports: unknown;
   files: string[];
   name: string;
+  version: string;
 }
 
 interface ExportTarget {

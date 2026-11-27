@@ -666,6 +666,51 @@ test("inventory-minus-summary and summary-minus-inventory disagreements are both
   );
 });
 
+test("duplicate summaries remain visible without assessing that connection", () => {
+  const id = "duplicate-fixture";
+  const result = compose([inventory(id), inventory("unique-fixture")], [
+    summary(id, { display_name: "First fixture summary" }),
+    summary("unique-fixture"),
+    summary(id, { display_name: "Second fixture summary" }),
+  ]);
+
+  assert.deepEqual(result.scope.assessed.map((item) => item.connection_id), ["unique-fixture"]);
+  assert.deepEqual(result.scope.unassessed.map((item) => [item.connection_id, item.display_name]), [
+    [id, "First fixture summary"],
+    [id, "Second fixture summary"],
+  ]);
+  assert.equal(result.state, "indeterminate");
+});
+
+for (const status of ["paused", "draft", "setup_in_progress"] as const) {
+  test(`duplicate summaries of a ${status} connection keep it out of the unassessed set`, () => {
+    const id = "duplicate-fixture";
+    const result = compose([inventory(id, { status })], [summary(id), summary(id)]);
+    assert.deepEqual(result.scope.assessed, []);
+    assert.deepEqual(result.scope.unassessed, []);
+  });
+}
+
+test("a foreign summary cannot assess an inventory connection", () => {
+  const result = compose([inventory("configured-fixture")], [summary("foreign-fixture")]);
+  assert.deepEqual(result.scope.assessed, []);
+  assert.deepEqual(result.scope.unassessed.map((item) => item.connection_id), [
+    "configured-fixture",
+    "foreign-fixture",
+  ]);
+  assert.equal(result.state, "indeterminate");
+});
+
+for (const mismatch of [{ connector_instance_id: "other-instance" }, { connector_id: "other" }] as const) {
+  test(`a summary with a different ${Object.keys(mismatch)[0]} cannot assess the connection`, () => {
+    const id = "configured-fixture";
+    const result = compose([inventory(id)], [summary(id, mismatch)]);
+    assert.deepEqual(result.scope.assessed, []);
+    assert.deepEqual(result.scope.unassessed.map((item) => item.connection_id), [id]);
+    assert.equal(result.state, "indeterminate");
+  });
+}
+
 test("retryable recovery and stalled work each prevent fleet health", () => {
   const retryable = summary("retry-a", {
     connection_health: {

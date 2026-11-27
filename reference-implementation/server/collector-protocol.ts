@@ -54,9 +54,9 @@ export function isAcceptedCollectorProtocolVersion(
 export function readCollectorProtocolHeader(headers: Record<string, string | string[] | undefined>): string | null {
   const raw = headers[COLLECTOR_PROTOCOL_HEADER];
   if (Array.isArray(raw)) {
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    const first = raw[0];
-    return typeof first === "string" && first.trim() ? first.trim() : null;
+    if (raw.length !== 1) return null;
+    const [only] = raw;
+    return typeof only === "string" ? only.trim() || null : null;
   }
   if (typeof raw === "string" && raw.trim()) {
     return raw.trim();

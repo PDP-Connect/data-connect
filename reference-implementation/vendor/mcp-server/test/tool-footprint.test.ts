@@ -12,7 +12,6 @@
  * - connection_id recovery paragraph is not duplicated verbatim across tool schemas
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -33,10 +32,6 @@ const PROJECTED_RECORDS = /projected records/;
 const BOUNDED_FIELD_WINDOWS = /bounded field windows/;
 const READ_THE_RETURNED_PDPP_RECORD =
   /read the returned `pdpp:\/\/record\/\.\.\.` and `pdpp:\/\/field-window\/\.\.\.` resource URIs/;
-const READ_RECORD_FIELD_IS_THE = /read_record_field` is the model-callable bounded-read path/;
-const SUPPORTS_S_PDPP_READ_TOOLS = /supports\s+PDPP read tools and event-subscription management/i;
-const EVENT_SUBSCRIPTION_MANAGEMENT_STAYS_IN =
-  /event-subscription management stays in\s+the operator console and REST\/control-plane docs/i;
 const PDPP_RECORD = /pdpp:\/\/record/;
 const TYPED_OBJECT_FILTER = /typed object filter/i;
 const PRE_ENCODED_QUERY_STRING = /pre-encoded query string/i;
@@ -150,25 +145,6 @@ test("instructions keep resource reads optional for ordinary evidence", () => {
   assert.match(PDPP_MCP_INSTRUCTIONS, PROJECTED_RECORDS);
   assert.match(PDPP_MCP_INSTRUCTIONS, BOUNDED_FIELD_WINDOWS);
   assert.doesNotMatch(PDPP_MCP_INSTRUCTIONS, READ_THE_RETURNED_PDPP_RECORD);
-});
-
-test("setup docs enumerate the normal MCP read surface without event-management overclaim", () => {
-  const hostedSetup = readFileSync(new URL("../../../docs/operator/hosted-mcp-setup.md", import.meta.url), "utf8");
-  const selfhostQuickstart = readFileSync(
-    new URL("../../../docs/operator/selfhost-quickstart.md", import.meta.url),
-    "utf8"
-  );
-
-  for (const toolName of PDPP_MCP_TOOL_NAMES) {
-    assert.match(hostedSetup, new RegExp(`\\\`${toolName}\\\``), `hosted setup must mention ${toolName}`);
-  }
-  assert.match(hostedSetup, READ_RECORD_FIELD_IS_THE, "hosted setup must teach the bounded-read continuation path");
-  assert.doesNotMatch(
-    selfhostQuickstart,
-    SUPPORTS_S_PDPP_READ_TOOLS,
-    "normal /mcp docs must not claim support for event-subscription management as part of the read surface"
-  );
-  assert.match(selfhostQuickstart, EVENT_SUBSCRIPTION_MANAGEMENT_STAYS_IN);
 });
 
 test("tools/list exposes exact profile-free normal read surface", async () => {

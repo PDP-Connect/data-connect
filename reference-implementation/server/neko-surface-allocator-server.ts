@@ -345,6 +345,14 @@ export class NekoSurfaceAllocatorService {
     >;
   readonly #docker: DockerEngineTransport;
   #storageCheck: Promise<ProfileRootIdentity> | null = null;
+  /**
+   * The settlement of the last ensure or stop for each surface id still in
+   * progress. The surface id is the caller's key for one start, so an ensure
+   * or stop waits for the one before it: a repeated ensure then finds the
+   * container the first one created instead of creating a second, and a stop
+   * finds a container whose creation was still in flight when it arrived.
+   */
+  readonly #surfaceOperations = new Map<string, Promise<void>>();
 
   constructor(options: NekoSurfaceAllocatorServerOptions) {
     assertAllocatorOptions(options);
@@ -368,7 +376,27 @@ export class NekoSurfaceAllocatorService {
       );
   }
 
-  async ensureSurface(request: SurfaceRequest): Promise<BrowserSurface> {
+  ensureSurface(request: SurfaceRequest): Promise<BrowserSurface> {
+    return this.#afterSurfaceOperations(request.surfaceId, () => this.#ensureSurface(request));
+  }
+
+  stopSurface(request: StopBrowserSurfaceRequest): Promise<BrowserSurface | null> {
+    return this.#afterSurfaceOperations(request.surfaceId, () => this.#stopSurface(request));
+  }
+
+  #afterSurfaceOperations<T>(surfaceId: string, operation: () => Promise<T>): Promise<T> {
+    const result = (this.#surfaceOperations.get(surfaceId) ?? Promise.resolve()).then(operation);
+    const forget = (): void => {
+      if (this.#surfaceOperations.get(surfaceId) === settled) {
+        this.#surfaceOperations.delete(surfaceId);
+      }
+    };
+    const settled = result.then(forget, forget);
+    this.#surfaceOperations.set(surfaceId, settled);
+    return result;
+  }
+
+  async #ensureSurface(request: SurfaceRequest): Promise<BrowserSurface> {
     assertSurfaceRequest(request);
     // Before ANY Docker mutation (remove, start, port reclaim, network
     // migration, create): with unusable storage, replacing an existing
@@ -500,7 +528,7 @@ export class NekoSurfaceAllocatorService {
     return { ...surface, allocator_metadata: { ...surface.allocator_metadata, ensure_disposition: "replace" } };
   }
 
-  async stopSurface(request: StopBrowserSurfaceRequest): Promise<BrowserSurface | null> {
+  async #stopSurface(request: StopBrowserSurfaceRequest): Promise<BrowserSurface | null> {
     assertNonEmpty(request.surfaceId, "surface_id");
     const inspect = await this.#findOwnedContainer(request.surfaceId);
     if (inspect === null) {

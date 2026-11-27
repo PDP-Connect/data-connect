@@ -136,8 +136,8 @@ struct ActivePdppStream {
     name: String,
 }
 
-fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
-    let mut installs = read_active_connector_manifest()
+fn load_active_pdpp_platforms(app: &AppHandle) -> Result<Vec<Platform>, String> {
+    let mut installs = read_active_connector_manifest()?
         .map(|manifest| manifest.connectors.into_values().collect::<Vec<_>>())
         .unwrap_or_default();
     installs.extend(
@@ -147,7 +147,7 @@ fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
             .map(|source| super::developer_connector_sources::as_active_install(&source)),
     );
     let resource_dir = app.path().resource_dir().ok();
-    load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref())
+    Ok(load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref()))
 }
 
 #[cfg(test)]
@@ -306,7 +306,7 @@ fn pdpp_streams_to_dataconnect_scopes(
 #[tauri::command]
 pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
     let mut platforms: Vec<Platform> = Vec::new();
-    for platform in load_active_pdpp_platforms(&app) {
+    for platform in load_active_pdpp_platforms(&app)? {
         if !platforms.iter().any(|existing| existing.id == platform.id) {
             platforms.push(platform);
         }
@@ -345,20 +345,32 @@ pub async fn check_connected_platforms(
     platform_ids: Vec<String>,
     connection_ids: Option<HashMap<String, Vec<String>>>,
 ) -> Result<HashMap<String, bool>, String> {
-    let mut connected = HashMap::new();
-
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?
         .join("exported_data");
 
-    // Build a map from platform ID to company name so we can check both paths
-    let all_platforms = get_platforms(app).await.unwrap_or_default();
-    let id_to_company: HashMap<String, String> = all_platforms
-        .into_iter()
-        .map(|p| (p.id.clone(), p.company))
-        .collect();
+    check_connected_exports(&data_dir, platform_ids, connection_ids, || {
+        load_active_pdpp_platforms(&app)
+            .map(|platforms| platforms.into_iter().map(|p| (p.id, p.company)).collect())
+    })
+}
+
+fn check_connected_exports(
+    data_dir: &std::path::Path,
+    platform_ids: Vec<String>,
+    connection_ids: Option<HashMap<String, Vec<String>>>,
+    load_companies: impl Fn() -> Result<HashMap<String, String>, String>,
+) -> Result<HashMap<String, bool>, String> {
+    let mut connected = HashMap::new();
+    let id_to_company = std::cell::OnceCell::new();
+    let companies = || {
+        id_to_company
+            .get_or_init(&load_companies)
+            .as_ref()
+            .map_err(Clone::clone)
+    };
 
     for id in platform_ids {
         if let Some(accounts) = connection_ids
@@ -367,27 +379,24 @@ pub async fn check_connected_platforms(
         {
             for connection_id in accounts {
                 let key = format!("{id}:{connection_id}");
+                if exported_connection_exists(data_dir, connection_id)? {
+                    connected.insert(key, true);
+                    continue;
+                }
                 let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
                 let has_legacy_export = connection_id == &legacy_connection
-                    && id_to_company.get(&id).is_some_and(|company| {
+                    && companies()?.get(&id).is_some_and(|company| {
                         let sanitized_company = super::file_ops::sanitize_path_component(company);
-                        super::file_ops::legacy_export_exists(
-                            &data_dir,
-                            &sanitized_company,
-                            &id,
-                        )
-                        .unwrap_or(false)
+                        super::file_ops::legacy_export_exists(data_dir, &sanitized_company, &id)
+                            .unwrap_or(false)
                     });
-                connected.insert(
-                    key,
-                    has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,
-                );
+                connected.insert(key, has_legacy_export);
             }
             continue;
         }
         // Check by platform ID directory or company name directory
         let exists = data_dir.join(&id).exists()
-            || id_to_company
+            || companies()?
                 .get(&id)
                 .map(|company| data_dir.join(company).exists())
                 .unwrap_or(false);
@@ -837,8 +846,40 @@ fn clear_browser_session_from_profiles(
 
 #[cfg(test)]
 mod connection_export_tests {
-    use super::exported_connection_exists;
+    use super::{check_connected_exports, exported_connection_exists};
+    use std::collections::HashMap;
     use std::fs;
+
+    #[test]
+    fn modern_connection_does_not_need_registry_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("OpenAI/ChatGPT/run--account-a")).unwrap();
+        let result = check_connected_exports(
+            root.path(),
+            vec!["chatgpt".into()],
+            Some(HashMap::from([(
+                "chatgpt".into(),
+                vec!["account-a".into(), "missing".into()],
+            )])),
+            || Err("registry unavailable".into()),
+        )
+        .unwrap();
+        assert!(result["chatgpt:account-a"]);
+        assert!(!result["chatgpt:missing"]);
+    }
+
+    #[test]
+    fn legacy_connection_reports_registry_metadata_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_id = super::super::pdpp_connections::legacy_connection_id("chatgpt");
+        let result = check_connected_exports(
+            root.path(),
+            vec!["chatgpt".into()],
+            Some(HashMap::from([("chatgpt".into(), vec![legacy_id])])),
+            || Err("registry unavailable".into()),
+        );
+        assert_eq!(result.unwrap_err(), "registry unavailable");
+    }
 
     #[test]
     fn exported_data_presence_is_scoped_to_the_connection_id() {

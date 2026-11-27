@@ -37,7 +37,12 @@ type BuildExpandCapabilities = (
 
 type BuildStreamDiscoveryCapabilities = (args: {
   connectorId?: string | null;
-  stream: { name: string; query?: Record<string, unknown> };
+  stream: {
+    name: string;
+    schema?: { properties?: Record<string, unknown> };
+    relationships?: { name: string; stream: string; cardinality: string }[];
+    query?: Record<string, unknown>;
+  };
 }) => Record<string, unknown>;
 
 const buildFieldCapabilities = buildFieldCapabilitiesUntyped as BuildFieldCapabilities;
@@ -197,19 +202,27 @@ test("buildExpandCapabilities: null grant + null manifest names => everything kn
 // buildStreamDiscoveryCapabilities: URL + boolean projection
 // ---------------------------------------------------------------------------
 
+const ordersSchema = { properties: { total: { type: "number" } } };
+
 test("buildStreamDiscoveryCapabilities: aggregate flag/url present only when aggregations declared", () => {
   const withAgg = buildStreamDiscoveryCapabilities({
     connectorId: "amazon",
-    stream: { name: "orders", query: { aggregations: { sum: ["total"] } } },
+    stream: { name: "orders", schema: ordersSchema, query: { aggregations: { sum: ["total"] } } },
   });
   assert.equal(withAgg.aggregate, true);
   assert.equal(withAgg.aggregate_url, "/v1/streams/orders/aggregate?connector_id=amazon");
 
-  // hasObjectEntries short-circuits on a falsy input, so an ABSENT aggregations
-  // key yields a falsy `undefined` (not a literal false); the aggregate_url is
-  // still null. Pin both so a mutant that hard-codes aggregate:true is caught.
+  // A declaration on a field the schema does not have is not usable.
+  const unknownField = buildStreamDiscoveryCapabilities({
+    connectorId: "amazon",
+    stream: { name: "orders", query: { aggregations: { sum: ["total"] } } },
+  });
+  assert.equal(unknownField.aggregate, false, "sum over a field missing from the schema -> false");
+  assert.equal(unknownField.aggregate_url, null);
+
+  // Pin absent aggregations too, so a mutant that hard-codes aggregate:true is caught.
   const noAgg = buildStreamDiscoveryCapabilities({ connectorId: "amazon", stream: { name: "orders", query: {} } });
-  assert.ok(!noAgg.aggregate, "absent aggregations -> falsy aggregate flag");
+  assert.equal(noAgg.aggregate, false, "absent aggregations -> false");
   assert.equal(noAgg.aggregate_url, null, "no aggregate URL when no aggregations");
   // An explicit EMPTY aggregations object also yields a falsy flag.
   const emptyAgg = buildStreamDiscoveryCapabilities({ stream: { name: "orders", query: { aggregations: {} } } });
@@ -219,18 +232,30 @@ test("buildStreamDiscoveryCapabilities: aggregate flag/url present only when agg
 
 test("buildStreamDiscoveryCapabilities: range_filters flag reflects non-empty declaration", () => {
   const withRange = buildStreamDiscoveryCapabilities({
-    stream: { name: "orders", query: { range_filters: { total: ["gte"] } } },
+    stream: { name: "orders", schema: ordersSchema, query: { range_filters: { total: ["gte"] } } },
   });
   assert.equal(withRange.range_filters, true);
+  const unknownField = buildStreamDiscoveryCapabilities({
+    stream: { name: "orders", query: { range_filters: { total: ["gte"] } } },
+  });
+  assert.equal(unknownField.range_filters, false, "range filter on a field missing from the schema is not a capability");
   const noRange = buildStreamDiscoveryCapabilities({ stream: { name: "orders", query: { range_filters: {} } } });
   assert.equal(noRange.range_filters, false, "empty range_filters object is not a capability");
 });
 
-test("buildStreamDiscoveryCapabilities: expand flag true only for a non-empty expand array", () => {
+test("buildStreamDiscoveryCapabilities: expand flag true only for an expand entry backed by a relationship", () => {
   const withExpand = buildStreamDiscoveryCapabilities({
-    stream: { name: "orders", query: { expand: [{ name: "items" }] } },
+    stream: {
+      name: "orders",
+      relationships: [{ name: "items", stream: "line_items", cardinality: "many" }],
+      query: { expand: [{ name: "items" }] },
+    },
   });
   assert.equal(withExpand.expand, true);
+  const noRelationship = buildStreamDiscoveryCapabilities({
+    stream: { name: "orders", query: { expand: [{ name: "items" }] } },
+  });
+  assert.equal(noRelationship.expand, false, "expand with no matching relationship is not a capability");
   const emptyExpand = buildStreamDiscoveryCapabilities({ stream: { name: "orders", query: { expand: [] } } });
   assert.equal(emptyExpand.expand, false);
 });
