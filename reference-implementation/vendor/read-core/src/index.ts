@@ -18,10 +18,29 @@ const OMIT_FIELD_KEYS = new Set([
   "id",
   "record_id",
   "recordId",
-  "connection_id",
-  "connector_instance_id",
   "connector_key",
   "stream",
+  "metadata",
+  "_meta",
+]);
+const ENVELOPE_FIELD_KEYS = new Set([
+  "object",
+  "object_type",
+  "id",
+  "record_id",
+  "recordId",
+  "record_key",
+  "connector_key",
+  "stream",
+  "stream_name",
+  "instance_id",
+  "instanceId",
+  "connection_id",
+  "connectionId",
+  "connector_instance_id",
+  "result_id",
+  "deleted",
+  "emitted_at",
   "metadata",
   "_meta",
 ]);
@@ -122,8 +141,8 @@ export function summarizeFieldWindowEvidence(body: unknown) {
   const field = objectValue(bodyObject?.field);
   const fieldPath = firstString(field?.path, bodyObject?.field_path, bodyObject?.field);
   const stream = firstString(bodyObject?.stream);
-  const recordId = firstString(bodyObject?.record_id, bodyObject?.recordId);
-  const connectionId = firstString(bodyObject?.connection_id, bodyObject?.connector_instance_id);
+  const recordId = firstString(bodyObject?.id, bodyObject?.record_id, bodyObject?.recordId);
+  const instanceId = resolveInstanceId(bodyObject ?? {});
   const window = objectValue(bodyObject?.window) ?? {};
   const start = numberValue(window.start_chars);
   const end = numberValue(window.end_chars);
@@ -134,7 +153,7 @@ export function summarizeFieldWindowEvidence(body: unknown) {
   if (start !== null) {
     range = end === null ? `chars ${start}..` : `chars ${start}..${end}`;
   }
-  const identity = [connectionId, stream, recordId].filter(Boolean).join("/");
+  const identity = instanceId || stream || recordId ? JSON.stringify([instanceId, stream, recordId]) : "";
   const cursorText = [
     nextCursor ? `next_cursor=${formatScalar(nextCursor)}` : null,
     previousCursor ? `previous_cursor=${formatScalar(previousCursor)}` : null,
@@ -190,14 +209,13 @@ export function buildRecordContentLadder(record: unknown, options: AnyOptions = 
 
   return {
     id: identity.id,
-    connection_id: identity.connectionId,
+    instance_id: identity.instanceId,
     stream: identity.stream,
-    record_id: identity.recordId,
     handle_semantics: "live_lookup",
     record_uri: encodeResourceUri("record", {
-      connection_id: identity.connectionId,
+      id: identity.id,
+      instance_id: identity.instanceId,
       stream: identity.stream,
-      record_id: identity.recordId,
     }),
     field_windows: fieldWindows,
     ...(jsonFields.length > 0 ? { json_fields: jsonFields } : {}),
@@ -225,11 +243,16 @@ export function defaultEncodeResourceUri(kind: string, payload: AnyRecord) {
 }
 
 export function encodeContentHandle(kind: string, payload: AnyRecord) {
+  const canonicalPayload = { ...payload };
+  const instanceId = resolveInstanceId(canonicalPayload);
+  for (const key of INSTANCE_ALIAS_KEYS) delete canonicalPayload[key];
+  if (instanceId === null) throw new RecordIdentityConflictError("missing_instance_id");
+  canonicalPayload.instance_id = instanceId;
   return base64UrlEncode(
     JSON.stringify({
       v: 1,
       kind,
-      ...payload,
+      ...canonicalPayload,
     })
   );
 }
@@ -251,13 +274,22 @@ export function sanitizeRecordForEvidence(record: unknown) {
     return record;
   }
   const sanitized: AnyRecord = {};
+  const instanceId = resolveInstanceId(record);
   for (const [key, value] of Object.entries(record)) {
+    if (key !== "instance_id" && INSTANCE_ALIAS_KEYS.includes(key)) {
+      continue;
+    }
+    if (key === "instance_id") {
+      if (instanceId !== null) sanitized.instance_id = instanceId;
+      continue;
+    }
     if (key === "data" && value && typeof value === "object" && !Array.isArray(value)) {
       sanitized[key] = sanitizePayloadObject(value);
       continue;
     }
     sanitized[key] = binaryFieldMetadata(key, value) ?? sanitizeEvidenceValue(value);
   }
+  if (instanceId !== null) sanitized.instance_id = instanceId;
   return sanitized;
 }
 
@@ -293,56 +325,144 @@ export function binaryFieldMetadata(fieldPath: unknown, value: unknown) {
   return null;
 }
 
+class RecordIdentityConflictError extends Error {
+  readonly code: string;
+
+  constructor(code = "conflicting_instance_id") {
+    super(code === "conflicting_instance_id" ? "Record identity aliases conflict." : `Record identity is invalid (${code}).`);
+    this.code = code;
+    this.name = "RecordIdentityConflictError";
+  }
+}
+
 function recordContentIdentity(record: unknown, fallback: AnyRecord = {}) {
   const recordObject = objectValue(record) ?? {};
-  const payload = objectValue(recordObject.data) || objectValue(recordObject.record) || recordObject;
-  const directId = firstString(
-    fallback.id,
-    recordObject.id,
-    recordObject.result_id,
-    recordObject.record_id,
-    recordObject.recordId
-  );
-  const parsed = directId ? parseRecordResultId(directId) : null;
-  const stream = firstString(
-    fallback.stream,
-    recordObject.stream,
-    recordObject.stream_name,
-    payload.stream,
-    parsed?.stream
-  );
-  const recordId = firstString(
-    fallback.recordId,
-    fallback.record_id,
+  validateIdentityInputs(recordObject, fallback);
+  const isRecordEnvelope = recordObject.object === "record";
+  const streams = uniqueStrings([recordObject.stream, recordObject.stream_name, fallback.stream, fallback.stream_name]);
+  if (streams.length > 1) throw new RecordIdentityConflictError("conflicting_stream");
+  // Canonical record-key aliases. A canonical envelope's `id` is the key and a
+  // SearchResult `record_key` is ignored there; on any other row `id` may be a
+  // legacy self-contained handle and is never split when a key is known.
+  const keys = uniqueStrings([
+    isRecordEnvelope ? recordObject.id : recordObject.record_key,
     recordObject.record_id,
     recordObject.recordId,
-    payload.id,
-    payload.record_id,
-    parsed?.recordId
-  );
-  const connectionId = firstString(
-    fallback.connectionId,
-    fallback.connection_id,
-    recordObject.connection_id,
-    recordObject.connector_instance_id,
-    payload.connection_id,
-    parsed?.connectionId
-  );
+    fallback.recordId,
+    fallback.record_id,
+  ]);
+  if (keys.length > 1) throw new RecordIdentityConflictError("conflicting_record_id");
+  const handles = uniqueStrings([isRecordEnvelope ? undefined : recordObject.id, recordObject.result_id]);
+  let stream: string | null = streams[0] ?? null;
+  let instanceId = resolveInstanceId(recordObject, fallback);
+  let recordId: string | null = keys[0] ?? null;
 
-  if (!(stream && recordId)) {
+  if (recordId) {
+    for (const handle of handles) {
+      if (!isHandleForKey(handle, recordId, stream, instanceId)) {
+        throw new RecordIdentityConflictError("conflicting_record_id");
+      }
+    }
+  } else if (stream) {
+    // An unmarked row with an explicit stream carries its literal key. A
+    // fallback `id` is an adapter's self-contained handle: only exact known
+    // `instance/stream:` or `stream:` prefixes are removed.
+    recordId = handles[0] ?? stripKnownHandlePrefix(firstString(fallback.id), stream, instanceId);
+    if (recordId) {
+      for (const handle of handles) {
+        if (!isHandleForKey(handle, recordId, stream, instanceId)) {
+          throw new RecordIdentityConflictError("conflicting_record_id");
+        }
+      }
+    }
+  } else {
+    // Strict legacy compatibility: only a parseable self-contained id, and only
+    // when it names the same instance as any explicit instance alias.
+    const parsed = parseRecordResultId(firstString(handles[0], fallback.id) ?? "");
+    if (parsed && (parsed.instanceId === null || instanceId === null || parsed.instanceId === instanceId)) {
+      stream = parsed.stream;
+      recordId = parsed.recordId;
+      instanceId = instanceId ?? parsed.instanceId;
+      for (const handle of handles) {
+        if (!isHandleForKey(handle, recordId, stream, instanceId)) {
+          throw new RecordIdentityConflictError("conflicting_record_id");
+        }
+      }
+    }
+  }
+
+  if (!(stream && recordId && instanceId !== null)) {
     return null;
   }
-  const id = connectionId ? `${connectionId}/${stream}:${recordId}` : `${stream}:${recordId}`;
-  return { id, connectionId: connectionId ?? null, stream, recordId };
+  return { id: recordId, instanceId, stream, recordId };
+}
+
+function isHandleForKey(handle: string, key: string, stream: string | null, instanceId: string | null) {
+  if (handle === key) return true;
+  if (stream === null) return true;
+  if (handle === `${stream}:${key}`) return true;
+  if (instanceId === null) return handle.endsWith(`/${stream}:${key}`);
+  return handle === `${instanceId}/${stream}:${key}`;
+}
+
+function stripKnownHandlePrefix(handle: string | null, stream: string, instanceId: string | null) {
+  for (const prefix of [instanceId === null ? null : `${instanceId}/${stream}:`, `${stream}:`]) {
+    if (prefix && handle?.startsWith(prefix) && handle.length > prefix.length) return handle.slice(prefix.length);
+  }
+  return handle;
+}
+
+function uniqueStrings(values: unknown[]) {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0))];
+}
+
+const INSTANCE_ALIAS_KEYS = ["instance_id", "instanceId", "connection_id", "connectionId", "connector_instance_id"];
+const RECORD_KEY_ALIAS_KEYS = ["id", "result_id", "record_id", "recordId", "record_key"];
+const STREAM_ALIAS_KEYS = ["stream", "stream_name"];
+
+function resolveInstanceId(record: unknown, fallback: AnyRecord = {}) {
+  const recordObject = objectValue(record) ?? {};
+  validateAliases(recordObject, INSTANCE_ALIAS_KEYS, "malformed_instance_id");
+  validateAliases(fallback, INSTANCE_ALIAS_KEYS, "malformed_instance_id");
+  const uniqueValues = uniqueStrings([
+    ...INSTANCE_ALIAS_KEYS.map((key) => recordObject[key]),
+    ...INSTANCE_ALIAS_KEYS.map((key) => fallback[key]),
+  ]);
+  if (uniqueValues.length > 1) {
+    throw new RecordIdentityConflictError();
+  }
+  return uniqueValues[0] ?? null;
+}
+
+function validateIdentityInputs(record: AnyRecord, fallback: AnyRecord) {
+  for (const source of [record, fallback]) {
+    validateAliases(source, INSTANCE_ALIAS_KEYS, "malformed_instance_id");
+    validateAliases(source, RECORD_KEY_ALIAS_KEYS, "malformed_record_id");
+    validateAliases(source, STREAM_ALIAS_KEYS, "malformed_stream");
+  }
+}
+
+// An own key holding `undefined` is absent (optional JS inputs); `null`, empty
+// strings and non-strings are present and malformed.
+function validateAliases(source: AnyRecord, keys: string[], code: string) {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
+      throw new RecordIdentityConflictError(code);
+    }
+  }
 }
 
 function recordContentFields(record: unknown, identity: AnyRecord, options: AnyOptions) {
-  const payload =
-    objectValue(objectValue(record)?.data) || objectValue(objectValue(record)?.record) || objectValue(record) || {};
+  const payload = recordContentPayload(record);
+  if (objectValue(record)?.deleted === true) return [];
   return Object.entries(payload)
     .filter((entry): entry is [string, string] => isContentStringField(entry[0], entry[1]))
     .slice(0, numberOption(options.fieldLimit))
     .map(([fieldPath, value]) => ({
+      id: identity.id,
+      instance_id: identity.instanceId,
+      stream: identity.stream,
       field_path: fieldPath,
       text_like: true,
       handle_semantics: "live_lookup",
@@ -352,15 +472,17 @@ function recordContentFields(record: unknown, identity: AnyRecord, options: AnyO
         tool: "read_record_field",
         args: {
           id: identity.id,
+          instance_id: identity.instanceId,
+          stream: identity.stream,
           field_path: fieldPath,
           offset_chars: 0,
           limit_chars: numberOption(options.windowLimitChars),
         },
       },
       resource_uri: resourceUriEncoder(options.encodeResourceUri)("field-window", {
-        connection_id: identity.connectionId,
+        id: identity.id,
+        instance_id: identity.instanceId,
         stream: identity.stream,
-        record_id: identity.recordId,
         field_path: fieldPath,
         offset_chars: 0,
         limit_chars: numberOption(options.windowLimitChars),
@@ -369,8 +491,8 @@ function recordContentFields(record: unknown, identity: AnyRecord, options: AnyO
 }
 
 function recordContentBinaryFields(record: unknown, options: AnyOptions) {
-  const payload =
-    objectValue(objectValue(record)?.data) || objectValue(objectValue(record)?.record) || objectValue(record) || {};
+  if (objectValue(record)?.deleted === true) return [];
+  const payload = recordContentPayload(record);
   return Object.entries(payload)
     .map(([fieldPath, value]) => binaryFieldMetadata(fieldPath, value))
     .filter(Boolean)
@@ -378,14 +500,17 @@ function recordContentBinaryFields(record: unknown, options: AnyOptions) {
 }
 
 function recordContentJsonFields(record: unknown, identity: AnyRecord, options: AnyOptions) {
-  const payload =
-    objectValue(objectValue(record)?.data) || objectValue(objectValue(record)?.record) || objectValue(record) || {};
+  if (objectValue(record)?.deleted === true) return [];
+  const payload = recordContentPayload(record);
   return Object.entries(payload)
     .filter(([fieldPath, value]) => isJsonEvidenceField(fieldPath, value))
     .slice(0, numberOption(options.jsonLimit))
     .map(([fieldPath, value]) => {
       const rendered = stableInlineJson(value);
       return {
+        id: identity.id,
+        instance_id: identity.instanceId,
+        stream: identity.stream,
         field_path: fieldPath,
         json_field: true,
         text_like: false,
@@ -397,11 +522,28 @@ function recordContentJsonFields(record: unknown, identity: AnyRecord, options: 
           tool: "fetch",
           args: {
             id: identity.id,
+            instance_id: identity.instanceId,
+            stream: identity.stream,
             fields: [fieldPath],
           },
         },
+        resource_uri: resourceUriEncoder(options.encodeResourceUri)("json-window", {
+          id: identity.id,
+          instance_id: identity.instanceId,
+          stream: identity.stream,
+          field_path: fieldPath,
+        }),
       };
     });
+}
+
+function recordContentPayload(record: unknown) {
+  const recordObject = objectValue(record);
+  const nestedPayload = objectValue(recordObject?.data) || objectValue(recordObject?.record);
+  if (nestedPayload) return nestedPayload;
+  const flatPayload = { ...(recordObject ?? {}) };
+  for (const key of ENVELOPE_FIELD_KEYS) delete flatPayload[key];
+  return flatPayload;
 }
 
 function isJsonEvidenceField(fieldPath: unknown, value: unknown) {
@@ -499,20 +641,23 @@ function blobRefMetadata(value: unknown) {
 }
 
 function parseRecordResultId(id: string) {
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(id)) return null;
   const slash = id.indexOf("/");
   const colon = id.indexOf(":", slash + 1);
-  if (colon <= 0) {
+  if (colon <= 0 || id.indexOf(":", colon + 1) !== -1) {
     return null;
   }
   if (slash > 0) {
+    if (id.indexOf(":") < slash || colon <= slash || id.indexOf("/", slash + 1) !== -1) return null;
     return {
-      connectionId: id.slice(0, slash),
+      instanceId: id.slice(0, slash),
       stream: id.slice(slash + 1, colon),
       recordId: id.slice(colon + 1),
     };
   }
+  if (slash === 0 || id.includes("/")) return null;
   return {
-    connectionId: null,
+    instanceId: null,
     stream: id.slice(0, colon),
     recordId: id.slice(colon + 1),
   };
