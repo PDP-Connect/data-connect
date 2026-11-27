@@ -48,3 +48,9 @@
 
 - Developer mode is browser-local. Remote access is a desktop configuration and
   is unavailable in a normal browser session.
+
+Developer mode only affects development-tier visibility on Add source. Once
+package inventory has loaded, connectors with no package, no installed package,
+and no registration are filtered separately, even when developer mode is on.
+While package inventory is temporarily unavailable, that filter is deferred and
+Add source shows the catalog recovery notice. See `../components/source-setup-catalog.tsx`.
