@@ -139,7 +139,7 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
 test("row 2 words a setup that never completed", () => assertRow(2, "Example source was never connected.", "faint", { kind: "continue_setup", label: "Set up again", filled: true }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
-test("row 4 words a source whose collector is not installed", () => assertRow(4, "DataConnect doesn't have this service's program installed. Install it again to keep syncing.", "attention", { kind: "install", label: "Install again", filled: true }));
+test("row 4 words a source whose collector is not installed", () => assertRow(4, "The program for this service is not installed. Install it again to keep syncing.", "attention", { kind: "install", label: "Install again", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.

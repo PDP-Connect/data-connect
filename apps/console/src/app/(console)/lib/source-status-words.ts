@@ -149,7 +149,7 @@ function lifecycleRow(
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) , sentence: { text: "Disconnected. Your records stay.", slot: null }, problem: false };
   if (source.connector_implementation?.state === "not_installed") {
-    return { row: 4, words: "DataConnect doesn't have this service's program installed. Install it again to keep syncing.", tone: "attention", action: action("install", "Install again", true) , sentence: { text: `DataConnect needs to install ${name} again before it can sync.`, slot: null }, problem: true };
+    return { row: 4, words: "The program for this service is not installed. Install it again to keep syncing.", tone: "attention", action: action("install", "Install again", true) , sentence: { text: `DataConnect needs to install ${name} again before it can sync.`, slot: null }, problem: true };
   }
 
   switch (source.terminal_setup_disposition) {
