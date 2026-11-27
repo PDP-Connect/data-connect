@@ -1795,7 +1795,7 @@ function ConnectionIdentityLine({
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-      <div><p className="pdpp-body">Pause syncing</p><p className="pdpp-body text-muted-foreground">Stops checking for now. Your records are kept.</p></div>
+      <p className="pdpp-body text-muted-foreground">Stops checking for now. Your records are kept.</p>
       <form className="shrink-0" action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-pause-connection" size="sm" type="submit" variant="ghost">

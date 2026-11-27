@@ -526,3 +526,14 @@ test("a connector that must be installed again gives no schedule promise", async
   assert.match(html, /Not checked until Steam is installed again\./);
   assert.doesNotMatch(html, /checks Steam|Next check/);
 });
+
+test("Pause syncing is the button only, not also a heading above it", async () => {
+  let seen = 0;
+  for (const state of ["row-11-syncing", "atlas", "unknown-count", "status-8-owner-device", "status-10-local-device", "device-no-steps"]) {
+    const document = (await renderDemo(state)).window.document;
+    if (!document.querySelector('[data-testid="detail-action-pause-connection"]')) continue;
+    seen += 1;
+    assert.ok(![...document.querySelectorAll("p, h2, h3")].some((node) => node.textContent === "Pause syncing"), state);
+  }
+  assert.ok(seen > 0, "no sampled state shows the pause control");
+});
