@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { SyncNowButton } from "../../sources/[connector]/sync-now-button.tsx";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
@@ -25,7 +26,7 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
     <div className="mb-8 space-y-3"><p className={m.outcome === "failed" || m.outcome === "needs_you" ? "text-destructive" : "text-foreground"}>{sentence}</p>
     {m.outcome === "failed" ? <p>{cause.sentence}</p> : null}
     {m.currentSource?.currentState && m.outcome !== "needs_you" && currentStateAddsToFailure(m.outcome, cause.sentence, m.currentSource.currentState) ? <p>{m.currentSource.currentState}</p> : null}
-    {m.currentSource?.currentAnswer?.action && m.retryHref && m.outcome !== "needs_you" ? <Link className={buttonVariants()} href={m.retryHref}>{m.currentSource.currentAnswer.action.label}</Link> : null}
+    {m.currentSource?.currentAnswer?.action && m.retryHref && m.outcome !== "needs_you" ? (m.currentSource.currentAnswer.action.kind === "sync_now" && m.connection ? <SyncNowButton connectionId={m.connection} connectorId={m.connector} displayName={m.name} idleLabel={m.currentSource.currentAnswer.action.label} initialRunning={false} variant="default" /> : <Link className={buttonVariants()} href={m.retryHref}>{m.currentSource.currentAnswer.action.label}</Link>) : null}
     {m.outcome === "syncing" ? <StopCopying name={m.name} runId={m.id} preview={practice} /> : null}
     {m.outcome === "needs_you" ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(m.id)}/stream`}>{m.currentSource?.currentAnswer?.action?.label ?? "Continue"}</Link> : null}
     {m.assistance?.kind === "credentials" && m.assistance.responseContract === "response_required" && m.assistance.ownerAction === "provide_value" ? <RunInteractionForm fields={m.assistance.fields} interactionId={m.assistance.id} kind={m.assistance.kind} message={m.assistance.message} runId={m.id} serviceName={m.name} heading={false} preview={practice} /> : null}

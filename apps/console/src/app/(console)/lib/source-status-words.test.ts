@@ -235,7 +235,7 @@ test("a pending rendered status does not outrank the maintainer row when owner s
   assert.equal(result.row, 13);
 });
 test("row 12 words an automatic retry", () => assertRow(12, "Trying again on its own · last synced 2 hours ago", "plain"));
-test("row 13 words a stop DataConnect could not name, with the step", () => assertRow(13, "The last sync stopped for a reason DataConnect could not name.", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
+test("row 13 words a stop DataConnect could not name, with the step", () => assertRow(13, "The last sync stopped for a reason DataConnect could not name.", "plain", { kind: "sync_now", label: "Try again", filled: true }));
 test("row 14 words missing optional data", () => assertRow(14, "Some optional data is missing · last synced 2 hours ago", "plain"));
 test("row 15 words stuck records", () => assertRow(15, "Some records are stuck · last synced 2 hours ago", "plain"));
 test("row 16 words another degraded result", () => assertRow(16, "Something stopped Example source from syncing.", "plain", { kind: "sync_now", label: "Try again", filled: true }));
@@ -530,7 +530,7 @@ test("a service that was unavailable is not a wait on the maintainers", () => {
   const base = { connector_display_name: "Steam", owner_state: blockedByMaintainer, last_run: failedRun(unavailable), rendered_verdict: verdict("Can't collect", [maintainerAction]) };
   const withSchedule = sourceStatusWords(source({ ...base, schedule: automaticSchedule }), { now: NOW });
   assert.equal(withSchedule.words, "Steam was not available. DataConnect will try again at the next check.");
-  assert.equal(withSchedule.action, null);
+  assert.deepEqual(withSchedule.action, { kind: "sync_now", label: "Try again", filled: true });
   const manual = sourceStatusWords(source(base), { now: NOW });
   assert.equal(manual.words, "Steam was not available.");
   assert.deepEqual(manual.action, { kind: "sync_now", label: "Try again", filled: true });
@@ -607,7 +607,7 @@ test("a source with a schedule is told it will be retried; one without is not", 
   assert.equal(without, "The last sync stopped for a reason DataConnect could not name. Records already copied are kept.");
   const withSchedule = sourceStateSentence({ ...unknown, schedule: automaticSchedule }, { now: NOW, name: "Steam" }).text;
   assert.equal(withSchedule, `${without} DataConnect will try again at the next check.`);
-  assert.deepEqual(sourceStatusWords(unknown, { now: NOW }).action, { kind: "sync_now", label: "Sync now", filled: false });
+  assert.deepEqual(sourceStatusWords(unknown, { now: NOW }).action, { kind: "sync_now", label: "Try again", filled: true });
 });
 
 test("a list row never carries the completeness caveat; the page sentence does, once", () => {
@@ -628,4 +628,11 @@ test("the credential kind is read from a manifest the way the server reads it: k
   assert.equal(manifestCredentialKind({ setup: { credential_capture: { credential_kind: "api_key", kind: "username_password" } } }), "username_password");
   assert.equal(manifestCredentialKind({ setup: {} }), null);
   assert.equal(manifestCredentialKind(null), null);
+});
+
+// Closing judge, round 6 (F5, F16): one label and one action for "run it again after a failure".
+test("every failed state offers the same retry action, scheduled or not", () => {
+  const retry = { kind: "sync_now", label: "Try again", filled: true };
+  const failed = source({ last_run: { ...(source({}).last_run as object), status: "failed", failure_reason: "upstream_unavailable" } as never, schedule: { enabled: true, effective_mode: "automatic", interval_seconds: 3600 } as never });
+  assert.deepEqual(sourceStatusWords(failed, { now: NOW }).action, retry);
 });

@@ -35,8 +35,11 @@ export function oneSyncKindNames(sources: HistorySource[], connection: string | 
   return Object.fromEntries(kinds.map(kind=>[kind,historyKindName(sources,connection,kind)]));
 }
 
+const SAYS_SYNCING_OR_SYNCED = /^(?:Now: )?(?:Syncing|Synced)\b/;
+
 /** A failed run says its cause once; the source's current line is shown only when it says something else. */
 export function currentStateAddsToFailure(outcome: OneSyncModel["outcome"], causeSentence: string, currentState: string): boolean {
+  if ((outcome === "syncing" || outcome === "finished") && SAYS_SYNCING_OR_SYNCED.test(currentState)) return false;
   return !(outcome === "failed" && currentState.includes(causeSentence));
 }
 

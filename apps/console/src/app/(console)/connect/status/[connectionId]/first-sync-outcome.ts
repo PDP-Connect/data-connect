@@ -8,7 +8,7 @@
 
 import { NO_NAME_FALLBACK } from "../../../lib/connection-display-name.ts";
 import { classifyKnownGaps, type KnownGap } from "../../../lib/run-gaps.ts";
-import { resolveSyncCause } from "../../../lib/sync-cause.ts";
+import { RETRY_AFTER_FAILURE_LABEL, resolveSyncCause } from "../../../lib/sync-cause.ts";
 import type { StreamManifestEntry } from "@pdpp/display";
 import { sourceRecordLabel } from "../../../lib/source-record-label.ts";
 import type {
@@ -139,7 +139,7 @@ export const outcomeCopy = {
 	pausedHeadline: (name: string) => `${atStart(name)} is paused.`,
 	revokedHeadline: (name: string) => `${atStart(name)} was disconnected.`,
 	seeData: (name: string) => `See ${yourData(name)}`,
-	retry: "Try again",
+	retry: RETRY_AFTER_FAILURE_LABEL,
 } as const;
 
 /**

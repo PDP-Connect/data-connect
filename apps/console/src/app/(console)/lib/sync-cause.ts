@@ -1,6 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 /** needsPerson: the owner must act (sign in, finish a check); a retry cannot happen by itself. Separate from the button label, which depends on the kind of source. */
+/** The one label for running a sync again after a failure, on every page that offers it. */
+export const RETRY_AFTER_FAILURE_LABEL = "Try again";
+
 export interface SyncCauseEvidence { reason?: string | null; error?: string | null; connector_error?: unknown }
 export interface SyncCause { sentence: string; action: "Sign in again" | "Try again" | null; known: boolean; needsPerson: boolean; /** The service itself did not answer (retryable). Not a fault in DataConnect's program. */ unavailable?: boolean; /** The service refused the saved credential. */ credentialRejected?: boolean }
 /** Stored evidence only. Raw text selects an authored sentence; it is never displayed. */

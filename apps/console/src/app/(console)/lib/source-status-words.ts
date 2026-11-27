@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
-import { resolveSyncCause } from "./sync-cause.ts";
+import { RETRY_AFTER_FAILURE_LABEL, resolveSyncCause } from "./sync-cause.ts";
 import { isScheduled } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
@@ -123,6 +123,10 @@ function canStartSync(source: RefConnectorSummary): boolean {
 function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
   if (source.source_kind === "local_device") return action("view_device", "View this device", false);
   return canStartSync(source) ? action("sync_now", "Sync now", false) : null;
+}
+
+function retryAfterFailure(source: RefConnectorSummary): SourceStatusAction | null {
+  return canStartSync(source) ? action("sync_now", RETRY_AFTER_FAILURE_LABEL, true) : null;
 }
 
 export function sourceNeverConnected(source: RefConnectorSummary): boolean {
@@ -336,7 +340,7 @@ function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptio
   const scheduled = cause.unavailable && isScheduled(source.schedule ?? null);
   if (scheduled) {
     const text = `${sentence} DataConnect will try again at the next check.`;
-    return { row: 12, words: text, tone: "plain", action: null, sentence: { text, slot: null }, problem: true };
+    return { row: 12, words: text, tone: "plain", action: retryAfterFailure(source), sentence: { text, slot: null }, problem: true };
   }
   return { row: 16, words: sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: label && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", label, true) : null, sentence: { text: sentence, slot: null }, problem: true };
 }
@@ -364,7 +368,7 @@ function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions
     return { row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
   }
   const next = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";
-  return { row: 16, words, tone: "plain", action: canStartSync(source) ? action("sync_now", "Sync now", false) : null, sentence: { text: `${words}${next}`, slot: null }, problem: true };
+  return { row: 16, words, tone: "plain", action: retryAfterFailure(source), sentence: { text: `${words}${next}`, slot: null }, problem: true };
 }
 
 function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus {
@@ -397,7 +401,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     // Truly unknown: say what is true and what the owner can do. A retry is promised only when a schedule is on.
     const stopped = "The last sync stopped for a reason DataConnect could not name.";
     const retry = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";
-    return { row: 13, words: stopped, tone: "plain", action: canStartSync(source) ? action("sync_now", "Sync now", false) : null, sentence: { text: `${stopped} Records already copied are kept.${retry}`, slot: null }, problem: true };
+    return { row: 13, words: stopped, tone: "plain", action: retryAfterFailure(source), sentence: { text: `${stopped} Records already copied are kept.${retry}`, slot: null }, problem: true };
   }
   if (
     schedulerBackoff?.backoff_applied &&
