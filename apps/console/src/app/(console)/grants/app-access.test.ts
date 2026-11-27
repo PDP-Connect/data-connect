@@ -157,3 +157,18 @@ test("stopped service-wide access never widens an active single-account permissi
  assert.equal(current.length,1);assert.equal(current[0]?.source.connection_id,"mail");
  assert.deepEqual(current[0]?.kinds,["messages"]);
 });
+
+// Round 8 B1: "can read" lists only what an active grant allows; a stopped or expired sibling adds nothing.
+test("kinds from an expired grant never join the kinds an active grant can read", () => {
+  const active = registration("active");
+  active.sources[0]!.kinds = ["owned_games"];
+  const expired = registration("old");
+  expired.sources[0]!.kinds = ["steam_profile"];
+  expired.sources[0]!.expires_at = "2026-01-02T00:00:00Z";
+  const now = Date.parse("2026-02-01");
+  assert.deepEqual(groupGrantAccessByApp([active, expired], now)[0]?.sourceAccess[0]?.kinds, ["owned_games"]);
+  assert.deepEqual(groupGrantAccessByApp([expired, active], now)[0]?.sourceAccess[0]?.kinds, ["owned_games"]);
+  const second = registration("second");
+  second.sources[0]!.kinds = ["steam_profile"];
+  assert.deepEqual(groupGrantAccessByApp([active, second], now)[0]?.sourceAccess[0]?.kinds, ["owned_games", "steam_profile"]);
+});

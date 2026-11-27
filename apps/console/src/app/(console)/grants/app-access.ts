@@ -142,7 +142,10 @@ export function groupGrantAccessByApp(
       if (previous) {
         const wasInForce = previous.in_force;
         previous.in_force ||= inForce;
-        previous.kinds = [...new Set([...previous.kinds, ...row.kinds])];
+        // Only grants in force say what the app can read now; a stopped one adds nothing to an active one.
+        previous.kinds = wasInForce && !inForce ? previous.kinds
+          : !wasInForce && inForce ? [...row.kinds]
+          : [...new Set([...previous.kinds, ...row.kinds])];
         previous.grant_ids = [...new Set([...previous.grant_ids, ...row.grant_ids])];
         previous.active_grant_ids = [
           ...new Set([...previous.active_grant_ids, ...(inForce ? row.active_grant_ids : [])]),
