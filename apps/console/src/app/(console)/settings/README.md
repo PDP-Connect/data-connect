@@ -34,9 +34,13 @@
 ## Behavior
 
 - Developer mode is off by default.
-- When enabled, Add source shows development-tier connectors and the developer
-  connector sources panel. There is no separate development filter on Add
-  source; when any are hidden, its notice links back to Settings.
+- When enabled, Add source can show development-tier connectors and the
+  developer connector sources panel. This changes visibility, not whether a
+  connector can be installed or set up. Once the package catalog answers, a
+  connector with no offered package, no installed package, and no registered
+  setup is omitted. A visible connector can still be unavailable on this host.
+  There is no separate development filter on Add source; the hidden-count
+  notice links back to Settings.
 - Remote access is Off by default. Public URL requires an HTTPS origin and an
   owner password in the same blocking flow.
 
