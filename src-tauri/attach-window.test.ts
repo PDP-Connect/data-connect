@@ -70,6 +70,12 @@ async function openWindow(
       input.dispatchEvent(new dom.window.Event("input", { bubbles: true }))
       await settle()
     },
+    async trustNetwork(checked: boolean) {
+      const trust = $<HTMLInputElement>("trust-input")
+      trust.checked = checked
+      trust.dispatchEvent(new dom.window.Event("change", { bubbles: true }))
+      await settle()
+    },
     async continueWith(link: string) {
       await this.type(server, link)
       $("continue-button").click()
@@ -94,6 +100,28 @@ const serverA = { origin: "https://a.example.test", serverId: "id-a", serverKey:
 const serverB = { origin: "https://b.example.test", serverId: "id-b", serverKey: "key-b", matchesLink: true }
 
 describe("attach window pairing code", () => {
+  it.each([false, true])("carries trustPlainHttp=%s through preview, inspection and attach", async checked => {
+    const page = await openWindow([{ ...serverA, code: "code-a" }])
+    if (checked) await page.trustNetwork(true)
+    await page.continueWith("http://127.0.0.1:3000/attach?code=code-a")
+    await page.connect()
+    for (const command of ["preview_attach_target", "inspect_server", "attach_with_pairing_code"]) {
+      expect(page.calls.filter(call => call.command === command).at(-1)?.args)
+        .toMatchObject({ trustPlainHttp: checked })
+    }
+  })
+
+  it.each([
+    ["key-a", "Matches your link."],
+    ["different-key", "Check this matches Settings, then Attach a desktop app, on your server."],
+  ])("displays the inspected pairing-link verdict for server key %s", async (serverKey, expected) => {
+    const linkKey = "key-a"
+    const page = await openWindow([{ ...serverA, serverKey, matchesLink: serverKey === linkKey, code: "code-a" }])
+    await page.continueWith("https://a.example.test/attach?code=code-a")
+    expect(page.visible("confirm")).toBe(true)
+    expect(page.text("confirm-link")).toBe(expected)
+  })
+
   it("replacing a pairing link replaces its code before confirmation", async () => {
     const page = await openWindow(
       [
