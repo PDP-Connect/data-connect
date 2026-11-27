@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 import {
   describeConnectorIdRename,
   migrateRenamedConnectorIdsSqlite,
 } from "../server/connector-id-rename-migration.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { SqliteDriver } from "../server/sqlite-driver.ts";
 
 type Db = ReturnType<typeof getDb>;
 
@@ -246,5 +248,100 @@ test("initDb renames retired ids stored in an existing database file", () => {
     closeDb();
   } finally {
     rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("first start upgrades a v0.9.9 store that holds the retired ids, losing only collided old-id rows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-v099-connector-ids-"));
+  const quote = (identifier: string) => '"' + identifier.replaceAll('"', '""') + '"';
+  const retired = ["apple_photos", "claude_code", "google_messages", "google_takeout"];
+  type ReadableDb = Pick<Db, "prepare">;
+  function inspectTables<T>(db: ReadableDb, inspect: (table: string) => T): Record<string, T> {
+    const kinds = db.prepare("PRAGMA table_list").all() as { schema: string; name: string; type: string }[];
+    const byName = new Map(kinds.filter(row => row.schema === "main").map(row => [row.name, row.type]));
+    const tables = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    ).all() as { name: string }[];
+    const result: Record<string, T> = {};
+    for (const { name } of tables) {
+      try {
+        result[name] = inspect(quote(name));
+      } catch (error) {
+        const kind = byName.get(name);
+        if (kind !== "virtual" && kind !== "shadow") throw error;
+      }
+    }
+    return result;
+  }
+  const rowCounts = (db: ReadableDb) => inspectTables(db, table =>
+    (db.prepare("SELECT count(*) AS n FROM " + table).get() as { n: number }).n);
+  const countsByConnector = (db: Db, name: string) => Object.fromEntries(
+    (db.prepare("SELECT connector_id, count(*) AS n FROM " + quote(name) + " GROUP BY connector_id").all()
+      as { connector_id: string; n: number }[]).map(row => [row.connector_id, row.n]),
+  );
+  try {
+    const bytes = gunzipSync(readFileSync(new URL("./fixtures/connector-id-rename/v0.9.9-store.sqlite.gz", import.meta.url)));
+    const beforePath = join(dir, "before.sqlite");
+    const upgradePath = join(dir, "upgrade.sqlite");
+    writeFileSync(beforePath, bytes);
+    writeFileSync(upgradePath, bytes);
+    const original = new SqliteDriver(beforePath, { readonly: true, fileMustExist: true });
+    let before: Record<string, number>;
+    try { before = rowCounts(original); } finally { original.close(); }
+
+    closeDb();
+    initDb(upgradePath);
+    const db = getDb();
+    const retained = inspectTables(db, table => {
+      const columns = db.prepare("PRAGMA table_info(" + table + ")").all() as { name: string }[];
+      return columns.filter(({ name }) => name === "connector_id" || name === "connector_key").flatMap(({ name }) =>
+        db.prepare("SELECT " + quote(name) + " FROM " + table + " WHERE " + quote(name) + " IN (?, ?, ?, ?)")
+          .all(...retired));
+    });
+    for (const [table, rows] of Object.entries(retained)) assert.deepEqual(rows, [], table);
+
+    const expected = {
+      connectors: { "apple-photos": 1, "claude-code": 1, "google-takeout": 1 },
+      connector_installs: { "apple-photos": 1 },
+      connector_accepted_declarations: { "google-messages": 1 },
+      dataset_summary_stream_projection: { "claude-code": 2 },
+      connector_instances: { "apple-photos": 1, "claude-code": 1 },
+      connector_state: { "claude-code": 1 },
+      records: { "apple-photos": 1, "claude-code": 3 },
+      record_changes: { "apple-photos": 1, "claude-code": 3 },
+      version_counter: { "apple-photos": 1, "claude-code": 2 },
+      run_history: { "claude-code": 1 },
+      device_enrollment_codes: { "google-messages": 1 },
+    };
+    for (const [table, counts] of Object.entries(expected)) assert.deepEqual(countsByConnector(db, table), counts, table);
+
+    const connector = db.prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get("claude-code") as { manifest: string };
+    assert.equal(JSON.parse(connector.manifest).display_name, "current manifest");
+    assert.deepEqual(
+      db.prepare("SELECT stream, record_count FROM dataset_summary_stream_projection WHERE connector_id = ? ORDER BY stream")
+        .all("claude-code"),
+      [{ stream: "messages", record_count: 3 }, { stream: "sessions", record_count: 9 }],
+    );
+    const keys = db.prepare("SELECT record_key FROM records").all() as { record_key: string }[];
+    assert.deepEqual(new Set(keys.map(row => row.record_key)), new Set(["s1", "s2", "m1", "p1"]));
+    for (const table of ["connector_instances", "records", "record_changes"]) {
+      const rows = db.prepare("SELECT DISTINCT connector_instance_id FROM " + quote(table)).all() as { connector_instance_id: string }[];
+      assert.deepEqual(new Set(rows.map(row => row.connector_instance_id)), new Set(["cin_old_claude", "cin_old_photos"]), table);
+    }
+
+    const after = rowCounts(db);
+    for (const table of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const collided = table === "connectors" || table === "dataset_summary_stream_projection";
+      assert.equal(after[table] ?? 0, (before[table] ?? 0) - (collided ? 1 : 0), table);
+    }
+    closeDb();
+    initDb(upgradePath);
+    assert.deepEqual(rowCounts(getDb()), after, "a second start changes no table counts");
+    for (const [table, counts] of Object.entries(expected)) {
+      assert.deepEqual(countsByConnector(getDb(), table), counts, table);
+    }
+  } finally {
+    closeDb();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
