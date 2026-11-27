@@ -15,7 +15,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
   const needsRemote = needsRemoteAccess(origin);
   return (
     <>
-      <PageHeader title="Connect an app" />
+      <PageHeader breadcrumbs={[{ href: "/grants", label: "Apps" }, { label: "Connect an app" }]} title="Connect an app" />
       <p className="mb-6 text-muted-foreground">
         Give your assistant the address below. It will then ask you, on a DataConnect page, what it may read.
       </p>

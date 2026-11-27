@@ -23,3 +23,9 @@ test("the empty line has room above it, away from the button", async () => {
 test("with no data source updates the page says everything is up to date", () => {
   assert.equal(packagesCopy.empty, "Every data source is up to date.");
 });
+
+// Round 9 (F38): the pill is a small line above the title, never alone below it.
+test("the Experimental badge sits on its own line above the title", async () => {
+  const page = await readFile(`${HERE}page.tsx`, "utf8");
+  assert.match(page, /<span className="mb-1 flex w-fit[^"]*" data-testid="experimental-badge">Experimental<\/span>\s*Collectors on your devices/);
+});

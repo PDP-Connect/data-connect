@@ -193,8 +193,8 @@ function CollectorHeading({
       breadcrumbs={breadcrumbs ?? settingsTrail("Collectors on your devices")}
       title={
         <>
-          Collectors on your devices{" "}
-          <span className="ml-1 inline-flex items-center rounded-full border border-border px-2 py-0.5 align-middle text-xs font-medium text-muted-foreground" data-testid="experimental-badge">Experimental</span>
+          <span className="mb-1 flex w-fit items-center rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground" data-testid="experimental-badge">Experimental</span>
+          Collectors on your devices
         </>
       }
       description="A collector runs on a phone or computer that holds data DataConnect can’t reach from here, and sends it to DataConnect. Setting one up needs a terminal on that device."

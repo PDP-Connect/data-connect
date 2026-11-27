@@ -68,3 +68,9 @@ test("a loopback address says it only works on this computer; a private one says
   const lan = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://192.168.1.10:3000", apps: [] }));
   assert.match(lan, /address only works on your own network\./);
 });
+
+// Round 9 (F30): Connect an app sits under Apps.
+test("Connect an app has the trail Apps / Connect an app", () => {
+  const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "https://data.example", apps: [] }));
+  assert.match(html, /aria-label="Breadcrumb"[\s\S]*href="\/grants"[^>]*>Apps<[\s\S]*Connect an app/);
+});
