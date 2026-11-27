@@ -18,10 +18,10 @@ export default function ExploreLoading() {
   return (
     <RecordroomShellWithPalette host="this server">
       <div className="mx-auto w-full max-w-5xl">
-        <p aria-live="polite" className="mb-4 text-[13px] text-muted-foreground" role="status">
+        <NamedPageLoadingSkeleton label="records" rows={8} shape="list" title="Explore" />
+        <p aria-live="polite" className="mt-4 text-[13px] text-muted-foreground" role="status">
           {EXPLORE_LOADING_MESSAGE}
         </p>
-        <NamedPageLoadingSkeleton label="records" rows={8} shape="list" title="Explore" />
       </div>
     </RecordroomShellWithPalette>
   );

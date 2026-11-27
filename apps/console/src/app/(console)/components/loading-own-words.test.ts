@@ -47,3 +47,8 @@ test("pages with a title never load behind an untitled skeleton", () => {
     assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), untitled, rel);
   }
 });
+
+test("Explore's loading message sits under the title, so the title does not move", () => {
+  const src = readFileSync(join(ROOT, "explore/loading.tsx"), "utf8");
+  assert.ok(src.indexOf("<NamedPageLoadingSkeleton") < src.indexOf("EXPLORE_LOADING_MESSAGE}"));
+});
