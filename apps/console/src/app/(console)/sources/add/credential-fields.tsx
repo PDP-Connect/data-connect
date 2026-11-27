@@ -11,6 +11,8 @@ import { signInCopy } from "./connect-copy.ts";
 export interface CredentialFieldSpec {
   readonly autocomplete: string | null;
   readonly defaultValue?: string;
+  /** What to type, in the manifest's own words; shown under the label. */
+  readonly helpText?: string | null;
   readonly label: string;
   readonly name: string;
   readonly placeholder: string | null;
@@ -35,7 +37,13 @@ export function CredentialFields({
       {fields.map((field) => (
         <label className="grid gap-1" htmlFor={`${idPrefix}-${field.name}`} key={field.name}>
           <span className="pdpp-eyebrow">{field.label}</span>
+          {field.helpText ? (
+            <span className="pdpp-caption text-muted-foreground" id={`${idPrefix}-${field.name}-help`}>
+              {field.helpText}
+            </span>
+          ) : null}
           <IcInput
+            aria-describedby={field.helpText ? `${idPrefix}-${field.name}-help` : undefined}
             autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
             className="min-h-11"
             defaultValue={field.secret ? undefined : field.defaultValue}

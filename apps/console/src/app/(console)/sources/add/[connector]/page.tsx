@@ -9,9 +9,10 @@ import { sourceSetupCardModel } from "../../../lib/source-setup-presentation.ts"
 import { isDeterministicSourcesReadError } from "../../read-error-classification.ts";
 import { findCatalogEntry, readAddSourceCatalog } from "../add-source-catalog-read.ts";
 import { existingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
-import { addSourceHref, existingSourceHref, isConnectableEntry, notFreshCopy } from "../add-source-list-model.ts";
+import { addSourceHref, existingSourceHref, isConnectableEntry, notFreshCopy, signInBlocked } from "../add-source-list-model.ts";
 import { AddSourceLoadFailed } from "../add-source-list.tsx";
 import { CannotBeAddedHere, ConnectHeader, NewServiceNote } from "../connect-parts.tsx";
+import { cannotAddWhy } from "../connect-copy.ts";
 import { GettingReady } from "../getting-ready.tsx";
 import { ProgramConnect } from "../program-connect.tsx";
 import { connectPageHref, isProgramService } from "../service-setup-href.ts";
@@ -66,7 +67,15 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
     const hostBlock = lifecycle ? connectorInstallRowModel(entry, lifecycle).hostBlockReason : null;
     return (
       <RecordroomShellWithPalette>
-        <CannotBeAddedHere name={entry.displayName} reason={hostBlock} />
+        <CannotBeAddedHere connectorKey={entry.connectorKey} icon={entry.icon} instead={hostBlock ? undefined : cannotAddWhy(entry.displayName, null).instead} name={entry.displayName} reason={hostBlock} />
+      </RecordroomShellWithPalette>
+    );
+  }
+  if (signInBlocked(entry)) {
+    const why = cannotAddWhy(entry.displayName, entry.readiness?.reason ?? null);
+    return (
+      <RecordroomShellWithPalette>
+        <CannotBeAddedHere connectorKey={entry.connectorKey} icon={entry.icon} instead={why.instead} name={entry.displayName} reason={why.reason} />
       </RecordroomShellWithPalette>
     );
   }

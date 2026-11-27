@@ -8,7 +8,7 @@ import Link from "next/link";
 import { LoaderCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
-import { accountCopy, cannotAddCopy, connectHeading, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
+import { accountCopy, cannotAddCopy, cannotAddWhy, connectHeading, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
 
 export interface ExistingAccount {
   readonly connectionId: string;
@@ -39,7 +39,7 @@ export function ConnectHeader({
       breadcrumbs={[
         { href: dashboardRoutes.section.overview, label: "Home" },
         { href: dashboardRoutes.section.records, label: "Data sources" },
-        lastCrumb ?? { href: "/sources/add", label: "Add a data source" },
+        ...(lastCrumb ? [lastCrumb] : [{ href: "/sources/add", label: "Add a data source" }, { label: title ?? connectHeading(name) }]),
       ]}
       description={step ? <><span className="pdpp-caption">{step}</span>{description}</> : description}
       title={
@@ -128,18 +128,35 @@ export function AccountNameField({
   );
 }
 
-/** "<Name> can't be added here yet." and, when the server gives a reason, that reason. */
-export function CannotBeAddedHere({ name, reason }: { name: string; reason?: string | null }) {
+/** "<Name> can't be added here yet." with a title, the reason in plain words, and what to do instead. */
+export function CannotBeAddedHere({
+  connectorKey,
+  icon,
+  instead,
+  name,
+  reason,
+}: {
+  connectorKey?: string;
+  icon?: ConnectorIconLike | null | undefined;
+  instead?: string | null;
+  name: string;
+  reason?: string | null;
+}) {
+  const why = reason ? { instead: instead ?? cannotAddWhy(name, null).instead, reason } : cannotAddWhy(name, null);
   return (
-    <div className="grid max-w-xl gap-3" data-testid="cannot-be-added-here">
-      <p className="text-foreground">{cannotAddCopy.heading(name)}</p>
-      {reason ? <p className="pdpp-caption text-muted-foreground">{reason}</p> : null}
-      <div>
-        <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">
-          {cannotAddCopy.back}
-        </Link>
+    <>
+      <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={name} title={name} />
+      <div className="grid max-w-xl gap-3 py-4" data-testid="cannot-be-added-here">
+        <p className="text-foreground">{cannotAddCopy.heading(name)}</p>
+        <p className="pdpp-caption text-muted-foreground">{why.reason}</p>
+        <p className="pdpp-caption text-muted-foreground">{why.instead}</p>
+        <div>
+          <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">
+            {cannotAddCopy.back}
+          </Link>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 

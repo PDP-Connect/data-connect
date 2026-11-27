@@ -47,6 +47,7 @@ export default async function StaticSecretConnectPage({
   const fields = setup.credential_capture.fields.map((field) => ({
     autocomplete: field.autocomplete,
     defaultValue: field.secret ? undefined : firstValue(resolvedSearchParams[`field_${field.name}`]),
+    helpText: field.help_text,
     label: field.label,
     name: field.name,
     placeholder: field.placeholder,

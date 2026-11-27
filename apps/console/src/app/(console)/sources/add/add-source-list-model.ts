@@ -18,6 +18,8 @@ import { sourceSetupAction, sourceSetupCardModel } from "../../lib/source-setup-
 export interface AddSourceRow {
   /** True when the person already has an account of this service. */
   readonly added: boolean;
+  /** A short note when the server says this computer cannot set the service up; null when it can. */
+  readonly blockedNote: string | null;
   readonly connectorKey: string;
   readonly displayName: string;
   readonly href: string;
@@ -37,6 +39,14 @@ export interface AddSourceListInput {
   readonly existingConnectionIds: Readonly<Record<string, readonly string[]>>;
   /** `null` means the server has no install routes: no package facts exist. */
   readonly lifecycleFor: (entry: ConnectorCatalogEntry) => ConnectorInstallLifecycle | null;
+}
+
+export const BLOCKED_NOTE = "Can't be added on this computer yet";
+
+/** The server's verdict says a sign-in service cannot be set up here now (a package to install is not a block). */
+export function signInBlocked(entry: ConnectorCatalogEntry): boolean {
+  const readiness = entry.readiness;
+  return readiness !== null && readiness.browserBound && readiness.action !== "connect" && readiness.action !== "install";
 }
 
 export function addSourceHref(connectorKey: string): string {
@@ -106,6 +116,7 @@ export function buildAddSourceList(input: AddSourceListInput): AddSourceListMode
     if (connectable || firstAccount !== null) {
       rows.push({
         added: firstAccount !== null,
+        blockedNote: connectable && signInBlocked(entry) ? BLOCKED_NOTE : null,
         connectorKey: entry.connectorKey,
         displayName: entry.displayName,
         href: !connectable && firstAccount !== null ? existingSourceHref(entry.connectorKey, firstAccount) : addSourceHref(entry.connectorKey),

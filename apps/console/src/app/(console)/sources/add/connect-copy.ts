@@ -59,6 +59,25 @@ export const cannotAddCopy = {
   back: "Back to all services",
 } as const;
 
+/** Why a sign-in service cannot be added on this computer, and what to do instead. `reason` is the server's readiness reason. */
+export function cannotAddWhy(name: string, reason: string | null): { reason: string; instead: string } {
+  const pickAnother = "Pick another service from the list.";
+  switch (reason) {
+    case "host_requirement_unmet":
+      return { reason: `This computer can't open the browser that ${name} needs for signing in.`, instead: `Add ${name} from DataConnect on a computer that can open a browser. ${pickAnother}` };
+    case "not_published":
+      return { reason: `${name} has not been published for DataConnect yet.`, instead: `Check again after DataConnect updates. ${pickAnother}` };
+    case "catalog_unavailable":
+    case "inspection_unavailable":
+    case "artifact_invalid":
+      return { reason: `DataConnect couldn't check whether ${name} can run on this computer.`, instead: `Try again in a few minutes. ${pickAnother}` };
+    case "not_implemented":
+      return { reason: `DataConnect can't collect from ${name} yet.`, instead: `Check again after DataConnect updates. ${pickAnother}` };
+    default:
+      return { reason: `DataConnect can't set up ${name} on this computer yet.`, instead: pickAnother };
+  }
+}
+
 export const accountCopy = {
   nameLabel: "Name for this account",
   /** e.g. "Amazon, work" */

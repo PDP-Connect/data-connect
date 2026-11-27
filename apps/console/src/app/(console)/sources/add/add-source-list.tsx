@@ -23,7 +23,10 @@ function Row({ row }: { row: AddSourceRow }) {
     <li className="break-inside-avoid" data-testid={`add-source-row-${row.connectorKey}`}>
       <Link className="flex min-h-11 min-w-0 items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/40" href={row.href}>
         <ConnectorMark connectorId={row.connectorKey} icon={row.icon} name={row.displayName} />
-        <span className="min-w-0 flex-1 truncate text-foreground">{row.displayName}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-foreground">{row.displayName}</span>
+          {row.blockedNote ? <span className="pdpp-caption block text-muted-foreground">{row.blockedNote}</span> : null}
+        </span>
         {row.added ? <span className="pdpp-caption text-muted-foreground">Added</span> : null}
       </Link>
     </li>

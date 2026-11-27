@@ -35,7 +35,7 @@ test("a 404 from the readiness endpoint means the server predates it, so the con
     throw new ResourceServerHttpError("/v1/owner/connector-install/readiness", 404, "not found");
   };
   const support = await loadBrowserConnectSupport("linkedin");
-  assert.deepEqual(support, { browserBound: true, canAddAccount: true });
+  assert.deepEqual(support, { blockedReason: null, browserBound: true, canAddAccount: true });
 });
 
 test("any other failure is rethrown, so the page shows its retry state instead of not-found", async () => {

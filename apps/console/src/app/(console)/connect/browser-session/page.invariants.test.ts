@@ -86,7 +86,7 @@ test("browser-session setup page shows the design's pieces and none of the remov
   assert.match(src, /<NewServiceNote name=\{name\} tier=\{service\.tier\} \/>/);
   assert.match(src, /<OptionalSignIn checkboxName=\{capture\.checkboxName\}/);
   assert.match(src, /repairMode \? `Reconnect \$\{name\}` : signInCopy\.button\(name\)/);
-  assert.match(src, /<CannotBeAddedHere name=\{name\} \/>/);
+  assert.match(src, /<CannotBeAddedHere connectorKey=\{service.connectorKey\} icon=\{service.icon\} instead=\{why.instead\} name=\{name\} reason=\{why.reason\} \/>/);
   // Removed: "Connection name (optional)", the Details fold, "Create a new account in a secure browser", the second logo.
   assert.doesNotMatch(src, /connectionName|<details|Details|Create a new account|Choose an existing data source|ConnectorMark/);
   assert.doesNotMatch(src, PAGE_CONNECTION_ID_FIELD_RE);

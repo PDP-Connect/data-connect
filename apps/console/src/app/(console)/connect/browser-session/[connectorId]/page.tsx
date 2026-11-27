@@ -86,6 +86,7 @@ export default async function BrowserSessionConnectPage({
   return (
     <RecordroomShellWithPalette>
       <SignInConnectBody
+        blockedReason={browserConnect.blockedReason}
         canConnect={browserConnect.canAddAccount}
         capture={capture ? { checkboxName: capture.checkboxName, fields, required: capture.required } : null}
         error={pageParams.error}

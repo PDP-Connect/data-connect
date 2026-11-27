@@ -4,7 +4,7 @@
 import { buttonVariants, IcButton, type ConnectorIconLike } from "@pdpp/brand-react";
 import type { ReactNode } from "react";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
-import { connectHeading, fileCopy, keyCopy, signInCopy } from "./connect-copy.ts";
+import { cannotAddWhy, connectHeading, fileCopy, keyCopy, signInCopy } from "./connect-copy.ts";
 import {
   AccountNameField,
   CannotBeAddedHere,
@@ -46,12 +46,14 @@ export interface SignInCapture {
 
 /** Sign-in services (Amazon, Chase, ...). `repairConnectionId` reconnects an account that exists. */
 export function SignInConnectBody({
+  blockedReason,
   capture,
   canConnect,
   error,
   repairConnectionId,
   service,
 }: {
+  blockedReason?: string | null | undefined;
   canConnect: boolean;
   capture: SignInCapture | null;
   error?: string | undefined;
@@ -61,7 +63,8 @@ export function SignInConnectBody({
   const { name } = service;
   const repairMode = Boolean(repairConnectionId);
   if (!(repairMode || canConnect)) {
-    return <CannotBeAddedHere name={name} />;
+    const why = cannotAddWhy(name, blockedReason ?? null);
+    return <CannotBeAddedHere connectorKey={service.connectorKey} icon={service.icon} instead={why.instead} name={name} reason={why.reason} />;
   }
   const accounts = repairMode ? [] : service.accounts;
   return (

@@ -204,3 +204,12 @@ test("list and route lookup choose the connectable alias in either input order",
     assert.equal(findCatalogEntry(read, row.connectorKey), usable);
   }
 });
+
+// A service the server says cannot be set up on this computer is marked before it is picked.
+test("a sign-in service this computer cannot open is listed with a note, and the others are not", () => {
+  const blockedChase = { ...chase, readiness: { action: "configure", browserBound: true, connectorKey: "chase", detail: null, reason: "host_requirement_unmet" } } as ConnectorCatalogEntry;
+  const model = build({}, [blockedChase, ynab]);
+  const row = Object.fromEntries(model.rows.map((entryRow) => [entryRow.connectorKey, entryRow.blockedNote]));
+  assert.equal(row.chase, "Can't be added on this computer yet");
+  assert.equal(row.ynab, null);
+});
