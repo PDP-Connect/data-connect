@@ -34,6 +34,16 @@ describe("playwright-runner build options", () => {
     })).toBe("fixture-custom-cache")
   })
 
+  it("reports a missing hermetic browser package rather than using a global cache", () => {
+    const missingCore = Object.assign(new Error("playwright-core manifest not found"), {
+      code: "MODULE_NOT_FOUND",
+    })
+    expect(() => getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "0" },
+      resolveCoreManifest: () => { throw missingCore },
+    })).toThrow(missingCore)
+  })
+
   it("does not download a browser during npm install", () => {
     const packageDocument = JSON.parse(
       readFileSync(resolve("playwright-runner/package.json"), "utf8")
@@ -149,6 +159,23 @@ describe("playwright-runner build options", () => {
 })
 
 describe("copyBrowserDirectory", () => {
+  it("rejects a file in place of the destination directory without overwriting it", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-copy-conflict-"))
+    try {
+      const source = join(root, "source")
+      const destination = join(root, "browser-output")
+      mkdirSync(source)
+      writeFileSync(join(source, "browser"), "fixture binary")
+      writeFileSync(destination, "existing output")
+
+      expect(() => copyBrowserDirectory(source, destination)).toThrow()
+      expect(readFileSync(destination, "utf8")).toBe("existing output")
+      expect(readFileSync(join(source, "browser"), "utf8")).toBe("fixture binary")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("keeps the macOS framework symlinks relative", () => {
     const root = mkdtempSync(join(tmpdir(), "browser-copy-"))
     try {
