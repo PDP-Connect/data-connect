@@ -265,3 +265,28 @@ test("disabling local timeline preserves the non-timeline routes", () => {
     "/v1/pdpp/introspect",
   ])
 })
+
+test("consent handler forwards the full selection DTO and the adapter response", async () => {
+  let received
+  const agreed = { request_id: "fixture-request" }
+  const handle = consentHandler({
+    createConsentRequest(input) { received = input; return agreed },
+  })
+  const scopes = ["fixture.records"]
+  const details = [{ type: "fixture" }]
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture-session", scopes, authorization_details: details }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(received, { sessionId: "fixture-session", scopes, authorizationDetails: details })
+  assert.deepEqual(response, { status: 201, body: agreed })
+})
+
+test("consent handler assigns invalid_request when an adapter refusal has no code", async () => {
+  const handle = consentHandler({ createConsentRequest() { throw new Error("synthetic refusal") } })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture-session" }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, { status: 400, body: { code: "invalid_request", error: "synthetic refusal" } })
+})
