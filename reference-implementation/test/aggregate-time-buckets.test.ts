@@ -317,6 +317,34 @@ test("group_by_time hour buckets stay distinct across a DST fall-back (America/N
   });
 });
 
+test("group_by_time uses a real start for the repeated half hour in Australia/Lord_Howe", async () => {
+  const timeZone = "Australia/Lord_Howe";
+  const records = [
+    { id: "lh1", occurred_at: "2024-04-06T14:45:00Z", sender: "x" },
+    { id: "lh2", occurred_at: "2024-04-06T15:00:00Z", sender: "x" },
+    { id: "lh3", occurred_at: "2024-04-06T15:15:00Z", sender: "x" },
+  ];
+  await withSeeded(records, async () => {
+    const res = await countByTime("hour", timeZone);
+    assert.deepEqual(res.groups, [
+      { count: 1, key: "2024-04-07T01:00:00+11:00" },
+      { count: 2, key: "2024-04-07T01:30:00+10:30" },
+    ]);
+    const wallHour = new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
+    });
+    for (const [index, bucket] of res.groups.entries()) {
+      const start = Date.parse(String(bucket.key));
+      assert.ok(Number.isFinite(start));
+      for (const record of index === 0 ? records.slice(0, 1) : records.slice(1)) {
+        const instant = Date.parse(record.occurred_at);
+        assert.ok(start <= instant);
+        assert.equal(wallHour.format(start), wallHour.format(instant));
+      }
+    }
+  });
+});
+
 test("group_by_time hour buckets order chronologically across a fall-back east of UTC (Europe/Berlin)", async () => {
   // 2024-10-27: 03:00 CEST -> 02:00 CET. The first 02:xx is +02:00, the second is +01:00,
   // so a plain string sort would put the later hour first.

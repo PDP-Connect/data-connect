@@ -3237,8 +3237,8 @@ function pad2(n: number): string {
 
 // UTC offset (`+HH:MM` / `-HH:MM`) of `timeZone` at the instant `epochMs`,
 // derived from the zone's wall-clock parts so it needs no extra Intl surface.
-function zonedOffsetSuffix(epochMs: number, timeZone: string): string {
-  const { year, month, day, hour, minute, second } = zonedParts(epochMs, timeZone);
+function zonedOffsetSuffix(epochMs: number, timeZone: string, parts = zonedParts(epochMs, timeZone)): string {
+  const { year, month, day, hour, minute, second } = parts;
   const wallAsUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
   const offsetMinutes = Math.round((wallAsUtcMs - Math.floor(epochMs / 1000) * 1000) / 60_000);
   const sign = offsetMinutes < 0 ? "-" : "+";
@@ -3257,14 +3257,31 @@ export function bucketStartForGranularity(value: unknown, granularity: string, t
   if (epochMs === null) {
     return null;
   }
-  const { year, month, day, hour, minute } = zonedParts(epochMs, timeZone);
-  const offsetSuffix = () => zonedOffsetSuffix(epochMs, timeZone);
+  const local = zonedParts(epochMs, timeZone);
+  const { year, month, day, hour, minute, second } = local;
+  const offsetSuffix = () => zonedOffsetSuffix(epochMs, timeZone, local);
 
   switch (granularity) {
     case "minute":
       return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:00${offsetSuffix()}`;
-    case "hour":
-      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:00:00${offsetSuffix()}`;
+    case "hour": {
+      const suffix = offsetSuffix();
+      const wholeSecond = Math.floor(epochMs / 1000);
+      let start = wholeSecond - minute * 60 - second;
+      if (zonedOffsetSuffix(start * 1000, timeZone) !== suffix) {
+        // A partial-hour transition can make HH:00 with this offset imaginary.
+        // Find where this offset actually starts between HH:00 and the record.
+        let end = wholeSecond;
+        while (end - start > 1) {
+          const middle = start + Math.floor((end - start) / 2);
+          if (zonedOffsetSuffix(middle * 1000, timeZone) === suffix) end = middle;
+          else start = middle;
+        }
+        const boundary = zonedParts(end * 1000, timeZone);
+        return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(boundary.minute)}:${pad2(boundary.second)}${suffix}`;
+      }
+      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:00:00${suffix}`;
+    }
     case "day":
       return `${year}-${pad2(month)}-${pad2(day)}`;
     case "week": {
