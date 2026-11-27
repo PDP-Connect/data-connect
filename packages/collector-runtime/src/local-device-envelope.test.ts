@@ -297,3 +297,15 @@ test("envelope-only metadata changes the batch hash without leaking into records
   assert.deepEqual(changed.records, original.records);
   assert.notEqual(changed.body_hash, original.body_hash);
 });
+
+test("an empty local-device batch has a stable hash and a real empty wire list", () => {
+  const batch = buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records: [] });
+  assert.deepEqual(batch.records, []);
+  assert.equal(batch.body_hash, hashCanonicalJson([]));
+  assert.equal(batch.source_instance_id, fixtureSource);
+});
+
+test("canonical JSON keeps array order and serializes undefined array slots as null", () => {
+  assert.equal(canonicalJson([undefined, { z: 1, a: 2 }, null]), '[null,{"a":2,"z":1},null]');
+  assert.notEqual(hashCanonicalJson(["a", "b"]), hashCanonicalJson(["b", "a"]));
+});
