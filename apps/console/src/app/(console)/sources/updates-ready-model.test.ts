@@ -120,3 +120,32 @@ test("two accounts with the same name stay apart in the short list", () => {
   const model = buildUpdatesReadyModel(snapshot(["a"]), { a: [{ displayName: "Amazon" }, { displayName: "Amazon" }] });
   assert.equal(model?.namesText, "Amazon · account 1 and Amazon · account 2");
 });
+
+// Review: a source with no saved name is still a source. It is counted and listed under
+// a name taken from its service.
+test("counts a source without a saved name", () => {
+  const one = buildUpdatesReadyModel(snapshot(["alpha"]), { alpha: [{ displayName: "" }] });
+  assert.ok(one);
+  assert.equal(one.buttonLabel, "Update");
+  assert.deepEqual(one.names, ["Alpha"]);
+  const four = buildUpdatesReadyModel(snapshot(["a", "b", "c", "d"]), {
+    a: [{ displayName: "" }],
+    b: [{ displayName: "Chase" }],
+    c: [{ displayName: "Mail" }],
+    d: [{ displayName: "Photos" }],
+  });
+  assert.equal(four?.namesText, "4 data sources");
+  assert.equal(four?.names.length, 4);
+});
+
+// Review: a name made up to tell two accounts apart must not equal a name the person gave.
+test("a made-up account suffix does not collide with a name the person gave", () => {
+  const model = buildUpdatesReadyModel(snapshot(["a", "b"]), {
+    a: [{ displayName: "Amazon" }, { displayName: "Amazon" }],
+    b: [{ displayName: "Amazon · account 1" }],
+  });
+  assert.ok(model);
+  assert.equal(model.names.length, 3);
+  assert.equal(new Set(model.names).size, 3);
+  assert.ok(model.names.includes("Amazon · account 1"), "the person's own name is kept");
+});

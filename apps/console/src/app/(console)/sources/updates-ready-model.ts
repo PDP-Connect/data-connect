@@ -62,20 +62,36 @@ function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
   };
 }
 
-/** Tell sources that share a name apart: "Amazon · account 1", "Amazon · account 2". */
+/**
+ * Tell sources that share a name apart: "Amazon · account 1", "Amazon · account 2".
+ * A made-up name never equals a name the person gave or one already made up.
+ */
 function tellAccountsApart(kinds: UpdatesReadyKind[]): UpdatesReadyKind[] {
   const totals = new Map<string, number>();
   for (const name of kinds.flatMap((kind) => kind.sourceNames)) totals.set(name, (totals.get(name) ?? 0) + 1);
-  const seen = new Map<string, number>();
+  const taken = new Set(totals.keys());
+  const lastOrdinal = new Map<string, number>();
   return kinds.map((kind) => ({
     ...kind,
     sourceNames: kind.sourceNames.map((name) => {
       if ((totals.get(name) ?? 0) < 2) return name;
-      const ordinal = (seen.get(name) ?? 0) + 1;
-      seen.set(name, ordinal);
-      return `${name} · account ${ordinal}`;
+      let ordinal = lastOrdinal.get(name) ?? 0;
+      let candidate: string;
+      do {
+        ordinal += 1;
+        candidate = `${name} · account ${ordinal}`;
+      } while (taken.has(candidate));
+      lastOrdinal.set(name, ordinal);
+      taken.add(candidate);
+      return candidate;
     }),
   }));
+}
+
+/** "alpha" -> "Alpha"; "chase-bank" -> "Chase bank". Used when a source has no saved name. */
+function serviceFallbackName(connectorKey: string): string {
+  const words = (connectorKey.split("/").at(-1) ?? connectorKey).replace(/[-_]+/g, " ").trim();
+  return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : "Data source";
 }
 
 /** Build ready updates using the same install lifecycle rules as the Add page. */
@@ -114,7 +130,9 @@ export function buildUpdatesReadyModel(
     );
     if (row.action?.kind !== "update") continue;
 
-    const sourceNames = sources.map((source) => source.displayName).filter(Boolean);
+    // Count rows, not labels: a source with no saved name is still a source.
+    const fallbackName = serviceFallbackName(catalog.connector_key);
+    const sourceNames = sources.map((source) => source.displayName.trim() || fallbackName);
     if (sourceNames.length === 0) continue;
     const lifecycleKey = catalog.connector_key;
     const existing = kindsByLifecycle.get(lifecycleKey);
