@@ -43,3 +43,9 @@ export function remoteAccessRowWords(result: { ok: true; data: unknown } | { ok:
   const named = Object.hasOwn(ERROR_MESSAGES, result.code) && ERROR_MESSAGES[result.code] !== GENERIC_ERROR;
   return named ? (result.message.match(/^[^.]*/)?.[0] ?? "Could not check") : "Could not check";
 }
+
+/** The row carries the warning mark when the card says the owner must act, or names a failure. */
+export function remoteAccessRowNeedsAttention(result: { ok: true; data: unknown } | { ok: false; code: string; message: string }): boolean {
+  if (result.ok) return remoteAccessWords(result.data as RemoteAccessSummaryState) === "Needs your action";
+  return Object.hasOwn(ERROR_MESSAGES, result.code) && ERROR_MESSAGES[result.code] !== GENERIC_ERROR;
+}

@@ -48,6 +48,8 @@ test("before a code exists the section offers only the button and the one-line r
   const { DesktopPairingSetting } = await loadSetting()
   const html = renderToStaticMarkup(createElement(DesktopPairingSetting))
   assert.match(html, /Connect a DataConnect app on another computer/)
+  // Round 8 (F40): the row looks like its neighbours: foreground text and the same arrow.
+  assert.match(html, /text-foreground[^>]*>Connect a DataConnect app on another computer <span aria-hidden="true">→<\/span>/)
   // Brief settings-pages, decision 1: paired computers appear under Signed-in devices.
   assert.doesNotMatch(html, /Create pairing code/)
   assert.doesNotMatch(html, /Expires in/)

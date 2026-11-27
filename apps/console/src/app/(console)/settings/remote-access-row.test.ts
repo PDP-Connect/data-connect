@@ -47,3 +47,20 @@ test("when the card cannot read remote access, the row gives the card's own firs
   assert.equal(remoteAccessRowWords({ ok: false, ...publicError("not_a_known_code") }), "Could not check")
   assert.equal(remoteAccessRowWords({ ok: true, data: state([], null) }), "Off")
 })
+
+// Round 8 (F8): a failure the card names, such as a missing background service, is marked on the row, not plain grey text.
+test("a named failure or a lost route marks the Settings row as needing attention; Off and On do not", async () => {
+  const { remoteAccessRowNeedsAttention } = await import("./remote-access-summary.ts")
+  assert.equal(remoteAccessRowNeedsAttention({ ok: true, data: state([route({ state: "lost" })]) }), true)
+  assert.equal(remoteAccessRowNeedsAttention({ ok: true, data: state([], null) }), false)
+  assert.equal(remoteAccessRowNeedsAttention({ ok: true, data: state([route()]) }), false)
+  assert.equal(remoteAccessRowNeedsAttention({ ok: false, code: "no_such_code", message: "x" }), false)
+})
+
+test("a Settings row with attention carries the warning mark", async () => {
+  const { renderToStaticMarkup } = await import("react-dom/server")
+  const React = await import("react"); const { createElement } = React; (globalThis as { React?: unknown }).React = React
+  const { SettingsRow } = await import("./settings-row.tsx")
+  const html = renderToStaticMarkup(createElement(SettingsRow, { attention: true, href: "/x", state: "Needs your action", title: "Remote access" }))
+  assert.match(html, /aria-label="Needs attention"/)
+})
