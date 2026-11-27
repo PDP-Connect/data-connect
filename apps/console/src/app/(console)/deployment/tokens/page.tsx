@@ -16,6 +16,7 @@ import {
   tokenGroups,
   type TokenGroup,
 } from "./token-model.ts"
+import { settingsTrail } from "../../settings/settings-trail.ts"
 export const dynamic = "force-dynamic"
 export default async function TokensPage({
   searchParams,
@@ -46,7 +47,7 @@ export default async function TokensPage({
   return (
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
-        <PageHeader title="Tokens for scripts and tools" />
+        <PageHeader breadcrumbs={settingsTrail("Tokens for scripts and tools")} title="Tokens for scripts and tools" />
         <p className="text-muted-foreground">
           A token lets a script or tool of yours read all your data without
           signing in. Give one only to something you run yourself. For ChatGPT,

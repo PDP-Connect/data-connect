@@ -22,6 +22,7 @@ import { listConnectorManifests } from "../lib/rs-client.ts"
 import { CollectorSetup } from "./collector-setup.tsx"
 import { CollectorList } from "./collector-list.tsx"
 import { buildCollectorPractice } from "./collector-model.ts"
+import { settingsTrail } from "../settings/settings-trail.ts"
 
 export const metadata = {
   title: "Collectors on your devices",
@@ -96,7 +97,7 @@ export default async function DeviceExportersPage({
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Collectors on your devices" />
+          <PageHeader breadcrumbs={settingsTrail("Collectors on your devices")} title="Collectors on your devices" />
           <p>
             This could not be loaded.{" "}
             <Link href="/device-exporters">Try again</Link>.
@@ -189,11 +190,11 @@ function CollectorHeading({
 }) {
   return (
     <PageHeader
-      breadcrumbs={breadcrumbs}
+      breadcrumbs={breadcrumbs ?? settingsTrail("Collectors on your devices")}
       title={
         <>
           Collectors on your devices{" "}
-          <span className="text-sm text-muted-foreground">Experimental</span>
+          <span className="ml-1 inline-flex items-center rounded-full border border-border px-2 py-0.5 align-middle text-xs font-medium text-muted-foreground" data-testid="experimental-badge">Experimental</span>
         </>
       }
       description="A collector runs on a phone or computer that holds data DataConnect can’t reach from here, and sends it to DataConnect. Setting one up needs a terminal on that device."

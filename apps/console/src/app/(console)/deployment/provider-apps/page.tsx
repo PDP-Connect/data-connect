@@ -1,15 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants } from "@pdpp/brand-react";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getProviderAppConfig, type ProviderAppConfigGroup } from "../../lib/ref-client.ts";
 import { setProviderAppConfigAction } from "./actions.ts";
 import { GroupForm } from "./group-form.tsx";
+import { settingsTrail } from "../../settings/settings-trail.ts"
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +35,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <PageHeader title="Sign-in apps for data sources" />
+          <PageHeader breadcrumbs={settingsTrail("Sign-in apps for data sources")} title="Sign-in apps for data sources" />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );
@@ -47,12 +46,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        actions={
-          <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
-            Server
-          </Link>
-        }
-        breadcrumbs={[{ href: "/deployment", label: "Server" }, { label: "Sign-in apps for data sources" }]}
+        breadcrumbs={settingsTrail("Sign-in apps for data sources")}
         description="These details let data sources start a sign-in with their provider."
         title="Sign-in apps for data sources"
       />
@@ -69,7 +63,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
       {params.notice === "saved" ? <InlineNotice message="Saved." /> : null}
 
       {groups.length === 0 ? (
-        <p className="border-y border-border/70 py-4 text-[15px] text-muted-foreground">
+        <p className="py-4 text-[15px] text-muted-foreground">
           No data source needs shared sign-in details right now.
         </p>
       ) : (

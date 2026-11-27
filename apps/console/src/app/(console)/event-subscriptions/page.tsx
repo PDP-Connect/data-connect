@@ -15,6 +15,7 @@ import {
 } from "../lib/ref-client.ts"
 import { WebhookList } from "./webhook-view.tsx"
 import { type WebhookScope, buildWebhookPractice, practiceWebhookScope } from "./webhook-model.ts"
+import { settingsTrail } from "../settings/settings-trail.ts"
 export const dynamic = "force-dynamic"
 export const metadata = { title: "Webhooks" }
 export default async function WebhooksPage({
@@ -86,6 +87,7 @@ export default async function WebhooksPage({
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader
+          breadcrumbs={settingsTrail("Webhooks")}
           title="Webhooks"
           description="An app can ask to be told when your data changes. It gives DataConnect an address to send a short message to."
         />

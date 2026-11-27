@@ -24,7 +24,7 @@ export function CollectorList({
   const [removing, setRemoving] = useState<string | null>(null)
   const groups = collectorGroups(devices)
   if (groups.every(group => group.devices.length === 0))
-    return <p>No collectors yet.</p>
+    return <p className="pt-6 text-muted-foreground">No collectors yet.</p>
   return (
     <div className="grid gap-6">
       {groups.map((group, index) =>

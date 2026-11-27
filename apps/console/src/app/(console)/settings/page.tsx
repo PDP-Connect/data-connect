@@ -56,7 +56,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
         <NotificationsRow practice={!!practice} />
         <Section title="Updates">
           <Text as="p">DataConnect {identity.version}</Text>
-          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases" className="underline">See the latest version</OpenExternalLink>
+          <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases" className="inline-flex min-h-11 items-center underline">See the latest version</OpenExternalLink>
           <SettingsRow href="/settings/packages" title="Data source updates" state={summary.updates === null ? "Could not check" : summary.updates ? `${summary.updates} available` : "All up to date"} />
         </Section>
         <Section title="Advanced" description="For scripts, other devices, and people who run DataConnect on a server.">

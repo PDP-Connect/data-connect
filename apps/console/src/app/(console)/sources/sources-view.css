@@ -352,6 +352,19 @@
   gap: 8px;
 }
 
+/* The confirmation box is a real 44 px target on touch: the label is the press area for its checkbox. */
+@media (pointer: coarse) {
+  .rr-s-confirm label {
+    align-items: center;
+    min-height: 44px;
+  }
+  .rr-s-confirm input[type="checkbox"] {
+    flex: none;
+    height: 22px;
+    width: 22px;
+  }
+}
+
 .rr-s-confirm__actions {
   display: flex;
   flex-wrap: wrap;

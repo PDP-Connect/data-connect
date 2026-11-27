@@ -53,7 +53,7 @@ export function buildPackageRows(input: PackageRowsInput): PackageRow[] {
 
 export const packagesCopy = {
   couldNot: "Couldn't complete this. Try again.",
-  empty: "No data source updates to show.",
+  empty: "Every data source is up to date.",
   heading: "Data source updates",
   settingsLink: "Data source updates",
   uninstallConfirm: (service: string) => `Remove the piece for ${service}? You can only do this when no data source uses it.`,

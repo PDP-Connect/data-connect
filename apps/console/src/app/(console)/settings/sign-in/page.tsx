@@ -1,6 +1,5 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Text } from "@pdpp/brand-react"
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "../../components/recordroom-shell-with-palette.tsx"
@@ -10,6 +9,7 @@ import { OwnerPasswordSetting } from "../owner-password-setting.tsx"
 import { loadOwnerSessionInventory } from "../owner-sessions-data.ts"
 import { isManagedDesktopHost, settingsPracticeFor } from "../settings-host.ts"
 import { SignedInSessions } from "../signed-in-sessions.tsx"
+import { settingsTrail } from "../settings-trail.ts"
 
 export const metadata: Metadata = { title: "Password and sign-in" }
 
@@ -26,7 +26,7 @@ export default async function SignInPage({ searchParams }: { searchParams?: Prom
   return (
     <RecordroomShellWithPalette>
       <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6 px-4 py-6">
-        <PageHeader title="Password and sign-in" />
+        <PageHeader breadcrumbs={settingsTrail("Password and sign-in")} title="Password and sign-in" />
         <Section>
           {ownerPasswordSource ? (
             <div className="border-b border-border/70 pb-5" id="owner-password">
@@ -47,7 +47,6 @@ export default async function SignInPage({ searchParams }: { searchParams?: Prom
             </div>
           ) : null}
         </Section>
-        <Text as="a" href="/settings" link>Back to Settings</Text>
       </div>
     </RecordroomShellWithPalette>
   )

@@ -80,9 +80,10 @@ test("provider-app config page uses plain external copy, not internal 'provider 
   assert.doesNotMatch(src, NO_AUTHORIZE_ON_BEHALF_COPY_RE);
 });
 
-test("provider-app config page names its way back the menu's word, Server", async () => {
+test("provider-app config page has one way back, the Settings trail, and no second Server button", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   // RAISE-RULES.md 2 and 4: /deployment is "Server" in the menu and breadcrumb; no "Deployment overview".
   assert.doesNotMatch(src, /Deployment overview/);
-  assert.match(src, /href="\/deployment">\s*Server\s*</);
+  assert.match(src, /settingsTrail\("Sign-in apps for data sources"\)/);
+  assert.doesNotMatch(src, /href="\/deployment">\s*Server\s*</);
 });

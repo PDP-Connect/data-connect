@@ -8,6 +8,8 @@ import { WebPushSettings } from "@/app/(console)/components/web-push-settings.ts
 import { SupportCopy } from "../components/support-copy.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { getWebPushConfig, listWebPushSubscriptions } from "../lib/ref-client.ts";
+import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { settingsTrail } from "../settings/settings-trail.ts"
 
 export const dynamic = "force-dynamic";
 
@@ -65,11 +67,10 @@ export default async function NotificationsPage({ searchParams }: { searchParams
 
 function PageHeading() {
   return (
-    <header className="mb-2">
-      <h1 className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]">
-        Notifications
-      </h1>
-      <p className="mt-2 text-[15px] text-muted-foreground">A message on this device when a sync needs you.</p>
-    </header>
+    <PageHeader
+      breadcrumbs={settingsTrail("Notifications")}
+      description="A message on this device when a sync needs you."
+      title="Notifications"
+    />
   );
 }

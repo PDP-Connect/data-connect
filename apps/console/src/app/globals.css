@@ -65,8 +65,11 @@
 }
 
 /* Touch size. On a touch screen every control has a hit area of at least 44 px on its
-   short side. The drawn control does not change: an invisible box, centred on it, takes
-   the press. Written once here, so no page patches its own links or buttons. Utilities
+   short side. A link or button is not redrawn: an invisible box, centred on it, takes
+   the press. A text field, select or textarea is a replaced element and cannot carry
+   that box, so it takes the height itself and its drawn size does change. A checkbox
+   or radio is left to the label around it (see .rr-s-confirm label in sources-view.css).
+   Written once here, so no page patches its own links or buttons. Utilities
    (absolute, sticky, an own ::after) win over this base layer on purpose. */
 @media (pointer: coarse) {
   @layer base {
@@ -115,4 +118,12 @@
 .rr-rel__manage:hover,
 .rr-rel__manage:focus-visible {
   color: var(--primary);
+}
+
+/* One placeholder colour for every field: the muted text token at full strength.
+   The shared sheets set it at 70% opacity, which falls below 4.5:1 on the light theme. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-foreground) !important;
+  opacity: 1 !important;
 }
