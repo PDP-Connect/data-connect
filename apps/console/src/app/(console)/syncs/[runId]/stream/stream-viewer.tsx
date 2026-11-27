@@ -130,7 +130,7 @@ import {
 } from "./stream-keyboard-focus.ts";
 import { claimPopupNotice, createPopupNoticeSeenRegistry } from "./stream-popup-notice-dedupe.ts";
 import { beginPresentationSession } from "./stream-presentation-session.ts";
-import { COULDNT_REACH_BROWSER, LOST_BROWSER_MEANS, plainBrowserTrouble } from "./browser-trouble-words.ts";
+import { COULDNT_REACH_BROWSER, LOST_BROWSER_MEANS, plainBrowserTrouble, retryPlan, type SurfaceErrorKind } from "./browser-trouble-words.ts";
 import { classifyStreamReachFailure, type StreamReachProbeResult } from "./stream-reach-diagnostics.ts";
 import { createStreamSurfaceMeasureCoordinator } from "./stream-surface-measure-gate.ts";
 import {
@@ -3915,12 +3915,13 @@ function NekoSurface({
   const applyViewportRef = useRef(applyViewport);
   const [clientConfig, setClientConfig] = useState<NekoClientConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<SurfaceErrorKind>("mount");
   // The parent's callback is a fresh closure each render; a ref keeps this effect firing once per error.
   const onMountFailureRef = useRef(onMountFailure);
   onMountFailureRef.current = onMountFailure;
   useEffect(() => {
-    if (error) onMountFailureRef.current?.(plainBrowserTrouble(error));
-  }, [error]);
+    if (error && errorKind === "mount") onMountFailureRef.current?.(plainBrowserTrouble(error));
+  }, [error, errorKind]);
   const [configLoadRetryEpoch, setConfigLoadRetryEpoch] = useState(0);
   const [mediaRefreshEpoch, setMediaRefreshEpoch] = useState(0);
   const [mediaDisplayable, setMediaDisplayable] = useState(false);
@@ -3933,6 +3934,7 @@ function NekoSurface({
         type: event.type,
       });
       if (viewerRef.current?.getViewportState() === "error") {
+        setErrorKind("viewport");
         setError("The secure browser viewport could not be applied.");
       }
     },
@@ -4113,6 +4115,7 @@ function NekoSurface({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
+          setErrorKind("mount");
           setError(err instanceof Error ? plainBrowserTrouble(err.message) : "The browser could not start. Try again.");
         }
       });
@@ -4743,7 +4746,7 @@ function NekoSurface({
               <button
                 className="mt-4 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs hover:bg-muted"
                 onClick={() => {
-                  if (onRetry) {
+                  if (retryPlan(errorKind) === "new-session" && onRetry) {
                     onRetry();
                     return;
                   }

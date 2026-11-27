@@ -32,3 +32,9 @@ export function plainBrowserTrouble(message: string | null | undefined): string 
   const unknownBase = STREAM_REACH_MESSAGE.unknown;
   return text.startsWith(`${unknownBase} (error `) ? unknownBase : COULDNT_REACH_BROWSER;
 }
+
+/** What "Try again" does for a failed remote surface: a viewport problem is retried on the same session. */
+export type SurfaceErrorKind = "mount" | "viewport";
+export function retryPlan(kind: SurfaceErrorKind): "new-session" | "same-session" {
+  return kind === "viewport" ? "same-session" : "new-session";
+}

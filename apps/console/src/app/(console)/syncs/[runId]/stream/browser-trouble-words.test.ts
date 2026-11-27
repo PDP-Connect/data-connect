@@ -67,6 +67,17 @@ test("a failed remote-browser mount reaches the parent, hides Done, and Try agai
   const src = await readFile(VIEWER, "utf8");
   assert.match(src, /onMountFailure=\{\(message\) => onStatus\(\{ cause: "network", display: "trouble", troubleMessage: message \}\)\}/);
   assert.match(src, /onMountFailureRef\.current\?\.\(plainBrowserTrouble\(error\)\)/);
-  assert.match(src, /onClick=\{\(\) => \{\s*if \(onRetry\) \{\s*onRetry\(\);\s*return;/);
+  assert.match(src, /onClick=\{\(\) => \{\s*if \(retryPlan\(errorKind\) === "new-session" && onRetry\) \{\s*onRetry\(\);\s*return;/);
   assert.match(src, /function submitInteraction\(data\?: Record<string, string>\) \{\s*if \(browserLost\) return;/);
+});
+
+// Round 7 review B2: a viewport problem is retried on the same session; only a lost or expired session mints a new one.
+test("Try again re-applies the layout for a viewport failure and mints only for a lost or expired session", async () => {
+  const words = (await import("./browser-trouble-words.ts")) as unknown as { retryPlan?: (kind: string) => string };
+  const src = await readFile(VIEWER, "utf8");
+  assert.match(src, /retryPlan\(errorKind\) === "new-session" && onRetry/);
+  assert.match(src, /setErrorKind\("viewport"\)/);
+  assert.match(src, /if \(error && errorKind === "mount"\) onMountFailureRef/);
+  assert.equal(words.retryPlan?.("viewport"), "same-session");
+  assert.equal(words.retryPlan?.("mount"), "new-session");
 });
