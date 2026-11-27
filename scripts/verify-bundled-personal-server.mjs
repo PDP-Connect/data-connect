@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, rmdirSync, rmSync } from "node:fs"
 import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import {
@@ -729,7 +729,7 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
 }
 
-function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
+function runHdiutil(args, lastAttemptArgs, runCommand, pause, isDone) {
   const failures = []
   for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt += 1) {
     const attemptArgs = attempt === HDIUTIL_ATTEMPTS ? lastAttemptArgs : args
@@ -737,6 +737,7 @@ function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
       return runCommand("hdiutil", attemptArgs)
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error))
+      if (isDone?.()) return
       if (attempt < HDIUTIL_ATTEMPTS) pause(attempt * HDIUTIL_RETRY_DELAY_MS)
     }
   }
@@ -765,12 +766,81 @@ export function attachDmg(
   runHdiutil(args, args, runCommand, pause)
 }
 
-export function detachDmg(mountRoot, runCommand = run, pause = sleepSync) {
+function isDmgMounted(mountRoot) {
+  try {
+    const mount = statSync(mountRoot, { throwIfNoEntry: false })
+    if (!mount) return false
+    // A detached mount's directory can remain. A mounted DMG is a distinct
+    // filesystem from its parent, unlike the original empty directory.
+    return mount.dev !== statSync(dirname(mountRoot)).dev
+  } catch {
+    // If we cannot tell, retain the detach failure and do not remove the path.
+    return true
+  }
+}
+
+export function detachDmg(
+  mountRoot,
+  runCommand = run,
+  pause = sleepSync,
+  isMounted = isDmgMounted
+) {
   runHdiutil(
     ["detach", mountRoot],
     ["detach", "-force", mountRoot],
     runCommand,
-    pause
+    pause,
+    () => !isMounted(mountRoot)
+  )
+}
+
+// Top-level cleanup for the DMG mount root, run whether the verification
+// passed or failed: detach when attached, then remove the root.
+//
+// The removal stays non-recursive on purpose. What sits at the mount root
+// might still be the mounted image, so it must never be traversed; a
+// populated root fails the cleanup instead of being emptied. After a detach
+// that failed there is no removal at all, for the same reason.
+//
+// A mount root that is already gone is cleanup that already happened: the
+// mount probe treats a missing path as detached, so a successful verification
+// must not fail because its own temp directory disappeared. Only ENOENT
+// counts as already gone; every other removal failure is reported.
+//
+// A cleanup failure must not mask the verification's own failure. When both
+// fail, the primary error is rethrown with the cleanup error attached, so
+// the reason the verification failed stays visible.
+export function cleanupDmgMount(
+  mountRoot,
+  primaryError,
+  attached,
+  detach = detachDmg,
+  remove = rmdirSync
+) {
+  if (attached) {
+    try {
+      detach(mountRoot)
+    } catch (cleanupError) {
+      throw cleanupErrorWith(cleanupError, primaryError)
+    }
+  }
+  try {
+    remove(mountRoot)
+  } catch (cleanupError) {
+    if (cleanupError?.code === "ENOENT") return
+    throw cleanupErrorWith(cleanupError, primaryError)
+  }
+}
+
+// When cleanup fails with no primary error, its own failure is the report.
+// When it fails after a primary error, the primary error is the one thrown
+// and the cleanup error is attached to it, so the finally block cannot
+// replace the verification's error with a less important one.
+function cleanupErrorWith(cleanupError, primaryError) {
+  if (!primaryError) return cleanupError
+  return new AggregateError(
+    [primaryError, cleanupError],
+    primaryError instanceof Error ? primaryError.message : String(primaryError)
   )
 }
 
@@ -799,6 +869,7 @@ function verifyMacArtifacts(
     join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-dmg-")
   )
   let attached = false
+  let primaryError = null
   try {
     attachDmg(dmgArtifacts[0], mountRoot)
     attached = true
@@ -813,9 +884,11 @@ function verifyMacArtifacts(
       verifyCodeSignature,
       verifyReferenceStacks
     )
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
-    if (attached) detachDmg(mountRoot)
-    rmSync(mountRoot, { recursive: true, force: true })
+    cleanupDmgMount(mountRoot, primaryError, attached)
   }
 }
 
