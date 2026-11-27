@@ -75,9 +75,9 @@ export function plainServerChecks(
         ? "ok"
         : inputs.embeddingBackendAvailable && inputs.embeddingModelCachePresent
           ? "ok"
-          : warm?.status === "failed"
-            ? "warn"
-            : "info",
+          : warm?.status === "downloading" || warm?.status === "not_started"
+            ? "info"
+            : "warn",
       sentence: searchOff
         ? "Search by words works. Search by meaning is off."
         : inputs.embeddingBackendAvailable && inputs.embeddingModelCachePresent

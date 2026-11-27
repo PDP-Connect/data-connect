@@ -49,3 +49,19 @@ test("the missing-password repair opens the sign-in page", () => {
   const password = plainServerChecks(model.inputs, null, model.probe, true)[0]!;
   assert.equal(password.href, "/settings/sign-in");
 });
+
+test("a search check that could not run is not reported as working", () => {
+  const model = buildServerPractice("fine")!;
+  const inputs = { ...model.inputs, embeddingBackendAvailable: false, embeddingWarmStatus: null };
+  const rows = plainServerChecks(inputs, model.address, model.probe);
+  const search = rows.find(row => row.name === "Search")!;
+  assert.match(search.sentence, /could not check/);
+  assert.equal(search.status, "warn");
+  assert.equal(checksHeadline(rows), "1 check needs attention.");
+});
+
+test("the headline is a status line, so no heading is left with only another heading under it", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./server-checks.tsx", import.meta.url), "utf8");
+  assert.match(source, /<Text as="p" role="status" size="heading">\{checksHeadline\(rows\)\}<\/Text>/);
+});

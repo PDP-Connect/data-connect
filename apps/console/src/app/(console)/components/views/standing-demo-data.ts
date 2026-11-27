@@ -482,6 +482,7 @@ export function buildDemoInputs(scenario: DemoScenario, hrefs: HomeHrefs): HomeI
     grantsHaveMore: false,
     hrefs,
     now: NOW,
+    offeredSources: ["amazon", "chase", "github", "steam", "venmo"].map((key) => ({ connectorKey: key, displayName: key })),
     ownerClients: CLIENTS,
     ownerClientsFailed: false,
     ownerClientsHaveMore: false,

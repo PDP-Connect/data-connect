@@ -767,8 +767,10 @@ test("summary totals stay honest when the summary is stale, unknown, or failed",
   const stale = buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale" } } }));
   // DIRECTION.md, Home: stale record totals are omitted.
   assert.equal(stale.recordCount, "0");
-  // DIRECTION.md, Home: stale totals show the plain status link.
-  assert.equal(stale.warning, true);
+  // A stale total with no error is normal after a sync; nothing failed, so no warning.
+  assert.equal(stale.warning, false);
+  assert.equal(buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "stale", last_error: "rebuild stopped" } } })).warning, true);
+  assert.equal(buildHomeViewModel(base({ summary: { ...SUMMARY, projection: { state: "failed" } } })).warning, true);
   // The connection count lives in the same projection as the record count, so a
   // stale summary's count is not trusted: a full source list is counted instead.
   assert.equal(stale.dataSourceCount, "0");
@@ -1078,4 +1080,31 @@ test("a needs-you row does not repeat 'last synced' when the status words alread
   const row = data.needs.find((need) => need.name === "Steam");
   assert.match(row?.status?.words ?? "", /last synced /);
   assert.equal(row?.syncNote, null);
+});
+
+test("a failed source in Needs you says what happens next, with the same cause sentence and button as the list", () => {
+  const unavailable = { code: "upstream_unavailable", message: "Steam answered 503", origin: null, retryable: true };
+  const failed = statusSource(20, "Steam", {
+    last_run: { event_count: 0, failure_reason: null, finished_at: SUCCESS, first_at: SUCCESS, last_at: SUCCESS, run_id: "run-test", started_at: SUCCESS, status: "failed", terminal_reason: "connector_reported_failed", connector_error: unavailable } as never,
+    owner_state: { ...HEALTHY_STATE, owner_of_state: "maintainer", resolver: "blocked_maintainer" },
+    rendered_verdict: verdict("Can't collect", [requiredAction({ audience: "maintainer", kind: "code_fix", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" } })]),
+  });
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [failed] } }));
+  const need = data.needs[0]!;
+  assert.equal(need.status?.words, "Steam was not available.");
+  assert.equal(need.actionLabel, "Try again");
+  assert.equal(need.nextStep, "DataConnect checks Steam only when you ask.");
+  assert.equal(data.needs.length, 1);
+});
+
+test("a source that is only waiting for a sync has no next-step line", () => {
+  const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [statusSource(4, "Amazon")] } }));
+  assert.equal(data.needs[0]?.nextStep, null);
+});
+
+test("the first-run logo row shows only services this install's catalog offers, at most five", () => {
+  const offered = ["amazon", "chase", "github", "steam", "venmo", "ynab"].map((key) => ({ connectorKey: key, displayName: key }));
+  const data = buildHomeViewModel(base({ offeredSources: offered, sourcePage: { hasMore: false, kind: "ok", sources: [] } }));
+  assert.deepEqual(data.offeredSources.map((entry) => entry.iconId), ["amazon", "chase", "github", "steam", "venmo"]);
+  assert.deepEqual(buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [] } })).offeredSources, []);
 });

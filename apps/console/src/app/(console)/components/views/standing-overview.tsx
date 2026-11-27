@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { buttonVariants as primaryButtonVariants } from "@pdpp/brand-react";
 import { Text } from "@pdpp/brand-react";
 import "@pdpp/brand-react/components.css";
 import { buttonVariants } from "@pdpp/operator-ui/ui/button";
@@ -10,9 +11,9 @@ import { ConnectorMark } from "../connector-mark.tsx";
 import { SourceStatusText } from "../source-status-text.tsx";
 import type { HomeData, HomeNeedRow, HomeSourceRow } from "./standing-view-model.ts";
 
-const FILLED_BUTTON = buttonVariants({
+// One primary button for the same action everywhere: Apps uses the same maker.
+const FILLED_BUTTON = primaryButtonVariants({
   className: "h-[30px] rounded-[6px] px-2.5 text-[13px]",
-  size: "default",
   variant: "default",
 });
 
@@ -51,7 +52,7 @@ function DemoNotice({ notice }: { notice?: string }) {
 function PageWarning({ href }: { href: string }) {
   return (
     <Text as="p" className="mb-5 text-[13px] text-muted-foreground">
-      Some information could not be checked or may be out of date.{" "}
+      DataConnect could not check the record totals, so they may be out of date.{" "}
       <Link
         className="text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         href={href}
@@ -151,6 +152,11 @@ function NeedLines({ need }: { need: HomeNeedRow }) {
               <span className="block whitespace-nowrap min-[560px]:inline">{need.syncNote}</span>
             </span>
           ) : null}
+        </Text>
+      ) : null}
+      {need.nextStep ? (
+        <Text as="p" className={`${SECOND_LINE} mt-0.5`}>
+          {need.nextStep}
         </Text>
       ) : null}
     </>
@@ -324,7 +330,7 @@ function AppsBlock({ data }: { data: HomeData }) {
     <section aria-labelledby="home-apps-heading">
       <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <Text as="h2" className={SECTION_LABEL} id="home-apps-heading">
-          {data.appError ? "Apps" : `${data.apps.length} ${data.apps.length === 1 ? "app" : "apps"} can read your data`}
+          {data.appError || data.appsEmpty ? "Apps" : `${data.apps.length} ${data.apps.length === 1 ? "app" : "apps"} can read your data`}
         </Text>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {data.allAppsLink ? (
@@ -382,11 +388,13 @@ function FirstRun({ data, notice }: { data: HomeData; notice?: string }) {
     <div className="mx-auto max-w-2xl py-8">
       <DemoNotice notice={notice} />
       {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
-      <div aria-hidden="true" className="mb-7 flex items-center gap-3">
-        {["amazon", "facebook", "gmail", "notion", "spotify"].map((iconId) => (
-          <LogoTile iconId={iconId} key={iconId} name={iconId} size="large" />
-        ))}
-      </div>
+      {data.offeredSources.length > 0 ? (
+        <div aria-hidden="true" className="mb-7 flex items-center gap-3">
+          {data.offeredSources.map((entry) => (
+            <LogoTile iconId={entry.iconId} key={entry.iconId} name={entry.name} size="large" />
+          ))}
+        </div>
+      ) : null}
       <Text
         as="h1"
         className="font-semibold text-[23px] text-foreground leading-tight tracking-[-0.022em] min-[860px]:text-[26px]"

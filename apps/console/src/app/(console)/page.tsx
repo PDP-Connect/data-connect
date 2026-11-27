@@ -15,6 +15,8 @@ import {
 } from "./components/views/standing-view-model.ts";
 import { rethrowControlFlow } from "./lib/control-flow.ts";
 import { liveDashboardDataSource } from "./lib/data-source.ts";
+import { readAddSourceCatalog } from "./sources/add/add-source-catalog-read.ts";
+import { buildAddSourceList } from "./sources/add/add-source-list-model.ts";
 import { getReferencePublicOrigin } from "./lib/owner-token.ts";
 import {
   type DatasetSummary,
@@ -73,7 +75,7 @@ function listFallback<T>(): ListResponse<T> {
 async function loadHomeInputs(params: Record<string, string | string[] | undefined>): Promise<HomeInputs> {
   const ds = liveDashboardDataSource;
   const pageState = parseConnectorSummaryPageState(params);
-  const [summary, grants, traces, approvals, ownerClients, sourcePage] = await Promise.all([
+  const [summary, grants, traces, approvals, ownerClients, sourcePage, offered] = await Promise.all([
     safeRead<DatasetSummary | null>("dataset_summary", () => ds.getDatasetSummary(), null),
     safeRead("grants", () => listAppAccess(), listFallback<AppAccess>()),
     safeRead("traces", () => ds.listTraces({ limit: 6 }), listFallback<TraceSummary>()),
@@ -86,6 +88,12 @@ async function loadHomeInputs(params: Record<string, string | string[] | undefin
           ds.listConnectorSummaries({ ...opts, includeFleetHealth: false }),
         ),
       { kind: "error" as const, message: "Could not load this page." },
+    ),
+    // Only the first-run logo row reads this; a failed read leaves the row out.
+    safeRead(
+      "offered_sources",
+      async () => buildAddSourceList(await readAddSourceCatalog({ withAccounts: false })).rows.map((row) => ({ connectorKey: row.connectorKey, displayName: row.displayName })),
+      [] as { connectorKey: string; displayName: string }[],
     ),
   ]);
 
@@ -113,6 +121,7 @@ async function loadHomeInputs(params: Record<string, string | string[] | undefin
     appRegistrations: grants.value.data,
     grantsFailed: grants.issue !== null,
     grantsHaveMore: grants.value.has_more,
+    offeredSources: offered.value,
     ownerClients: ownerClients.value.data,
     ownerClientsFailed: ownerClients.issue !== null,
     ownerClientsHaveMore: ownerClients.value.has_more,

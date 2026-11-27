@@ -44,3 +44,22 @@ test("Home shows three app names and reading times, then links to the remaining 
   assert.match(html, HAS_NOT_READ_ANYTHING_YET_RE);
   assert.match(html, EIGHT_APPS_CAN_READ_YOUR_DATA_RE);
 });
+
+test("with no apps the zero is said once, in the empty line", () => {
+  const hrefs = {
+    addSource: "/sources/add",
+    connect: "/connect",
+    deployment: "/deployment",
+    deploymentTokens: "/deployment/tokens",
+    grant: (id: string) => `/grants/${id}`,
+    grants: "/grants",
+    source: (id: string) => `/sources/${id}`,
+    sources: "/sources",
+  };
+  const data = buildHomeViewModel(buildDemoInputs("calm", hrefs));
+  data.apps = [];
+  data.appsEmpty = true;
+  const html = renderToStaticMarkup(React.createElement(StandingOverview, { data }));
+  assert.doesNotMatch(html, /0 apps can read your data/);
+  assert.match(html, /No app can read your data yet/);
+});

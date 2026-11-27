@@ -14,6 +14,7 @@ import type {
   TraceSummary,
 } from "../../lib/ref-client.ts";
 import { connectionDisplayName, connectionNameDisambiguators } from "../../lib/connection-display-name.ts";
+import { isScheduled } from "../../lib/schedule-words.ts";
 import { isUpToDateRow, type SourceStatusWords, sourceStatusWords } from "../../lib/source-status-words.ts";
 
 
@@ -38,6 +39,8 @@ export interface HomeReads {
   grants: GrantSummary[];
   grantsFailed: boolean;
   grantsHaveMore: boolean;
+  /** Services this install's catalog offers, A to Z; the first-run logo row shows the first five. */
+  offeredSources?: { connectorKey: string; displayName: string }[];
   ownerClients: OwnerIssuedClient[];
   ownerClientsFailed: boolean;
   ownerClientsHaveMore: boolean;
@@ -73,6 +76,8 @@ export interface HomeNeedRow {
   name: string;
   source?: RefConnectorSummary;
   status?: SourceStatusWords;
+  /** What happens next after a failed sync; null when the status already says it. */
+  nextStep?: string | null;
   /** "last synced <when>" or "sync started <when>"; null when the data source has neither. */
   syncNote: string | null;
 }
@@ -105,6 +110,8 @@ export interface HomeData {
   needsMore: boolean;
   needsVisible: boolean;
   noSources: boolean;
+  /** Logos for the first-run row: only services this install's catalog offers. */
+  offeredSources: { iconId: string; name: string }[];
   recordCount: string | null;
   summaryError: boolean;
   reloadHref: string;
@@ -218,6 +225,14 @@ function approvalRow(
   };
 }
 
+/** Row 16 is a failed sync: say whether DataConnect will try again by itself. */
+function failedSyncNextStep(source: PreparedSource): string | null {
+  if (source.status.row !== 16 || !source.status.action) return null;
+  if (source.status.action.kind === "repair_sign_in") return "Nothing new is copied until you do.";
+  if (isScheduled(source.source.schedule ?? null)) return "DataConnect will also try again at the next check.";
+  return `DataConnect checks ${source.name} only when you ask.`;
+}
+
 function sourceNeedRow(source: PreparedSource, now: Date, waitingSync: boolean): HomeNeedRow {
   const lastSynced = relativeWhen(lastSuccessfulSync(source.source), now);
   const syncStarted =
@@ -236,6 +251,7 @@ function sourceNeedRow(source: PreparedSource, now: Date, waitingSync: boolean):
     id: source.id,
     kind: waitingSync ? "waiting_sync" : "source",
     name: source.name,
+    nextStep: failedSyncNextStep(source),
     source: source.source,
     status: source.status,
     syncNote,
@@ -358,10 +374,13 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     ]
       .filter(Boolean)
       .join(" · ") || null;
+  // A stale total with no error is the ordinary state after a sync: nothing
+  // failed, and Home counts the source list itself. Only a failed rebuild, or a
+  // stale total that carries an error, means the totals could not be checked.
+  const projection = input.summary?.projection;
   const warning =
     input.summaryFailed ||
-    input.summary?.projection?.state === "stale" ||
-    input.summary?.projection?.state === "failed";
+    projection?.state === "failed" || (projection?.state === "stale" && Boolean(projection.last_error));
 
   const showMoreSources = !sourceReadFailed && (input.sourcePage.hasMore || sortedDataSources.length > 12);
   const sourceTotalLink =
@@ -387,6 +406,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     needsMore: !needsReadFailed && input.approvalsHaveMore,
     needsVisible: needs.length > 0 || needsReadIncomplete,
     noSources,
+    offeredSources: (input.offeredSources ?? []).slice(0, 5).map((entry) => ({ iconId: entry.connectorKey, name: entry.displayName })),
     recordCount: recordTotal === null ? null : number(recordTotal),
     reloadHref: input.reloadHref,
     addSourceHref: input.hrefs.addSource,

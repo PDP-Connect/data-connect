@@ -27,21 +27,22 @@ export default async function AppsPage({
     const key = app ? JSON.stringify(app.clientIds) : approval.client_id || approval.approval_id;
     waiting.set(key, [...(waiting.get(key) || []), approval]);
   }
+  const empty = apps.length === 0 && approvals.length === 0;
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        actions={
+        actions={empty ? undefined : (
           <Link className={buttonVariants()} href="/connect">
             Connect an app
           </Link>
-        }
+        )}
         title="Apps"
       />
       <p className="mb-6 text-muted-foreground">Assistants and other apps you have allowed to read your data.</p>
       {query.approval_error ? (
         <p role="alert">The request could not be updated. Review the request and try again.</p>
       ) : null}
-      {apps.length === 0 && approvals.length === 0 ? (
+      {empty ? (
         <Section title="No app can read your data yet.">
           <p>Connect an assistant such as ChatGPT or Claude, and it can answer questions from your own data.</p>
           <Link className={buttonVariants()} href="/connect">
