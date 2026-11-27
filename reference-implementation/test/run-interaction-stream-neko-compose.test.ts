@@ -47,7 +47,7 @@ const TOP_LEVEL_REGEX_41 = /neko:[\s\S]*ports:[\s\S]*"\$\{NEKO_WEBRTC_PORT:-5900
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -233,6 +233,84 @@ test("the n.eko image installs the executable named by the proxy supervisor", as
   assert.ok(lines.some((line) => line.startsWith("RUN chmod +x ") && line.split(" ").includes(command)));
 });
 
+test("Patchright installer refuses a missing browser destination before reading packages", async () => {
+  const script = join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh");
+  const result = spawnSync("/bin/bash", [script], { env: { PATH: process.env.PATH }, encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /PLAYWRIGHT_BROWSERS_PATH must be set/);
+  assert.doesNotMatch(result.stdout, /downloading/);
+});
+
+test("Patchright installer refuses a package without Chromium without a download or output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neko-patchright-failure-"));
+  try {
+    const mod = join(root, "node_modules", "patchright-core");
+    await mkdir(mod, { recursive: true });
+    await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+    await writeFile(join(mod, "browsers.json"), JSON.stringify({ browsers: [] }));
+    const destination = join(root, "browser-output");
+    const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+      env: { PATH: process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: destination }, encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no chromium descriptor/);
+    assert.match(result.stderr, /failed to resolve chromium revision\/version/);
+    assert.doesNotMatch(result.stdout, /downloading/);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Patchright installer reports download and incomplete archive failures without marking Chromium installed", async (t) => {
+  for (const failure of ["download", "incomplete-archive"] as const) {
+    await t.test(failure, async () => {
+      const root = await mkdtemp(join(tmpdir(), "neko-patchright-archive-"));
+      try {
+        const mod = join(root, "node_modules", "patchright-core");
+        const bin = join(root, "bin");
+        await mkdir(mod, { recursive: true });
+        await mkdir(bin);
+        await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+        await writeFile(join(mod, "browsers.json"), JSON.stringify({
+          browsers: [{ name: "chromium", revision: "4321", browserVersion: "1.2.3.4" }],
+        }));
+        const unzipCalled = join(root, "unzip-called");
+        await writeFile(join(bin, "curl"), failure === "download"
+          ? "#!/bin/sh\necho 'synthetic CDN refusal' >&2\nexit 22\n"
+          : "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        await writeFile(join(bin, "unzip"), "#!/bin/sh\n: > \"$PATCHRIGHT_UNZIP_WITNESS\"\nexit 0\n", { mode: 0o755 });
+        const destination = join(root, "browser-output");
+        const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+          encoding: "utf8",
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            PLAYWRIGHT_BROWSERS_PATH: destination,
+            PATCHRIGHT_UNZIP_WITNESS: unzipCalled,
+          },
+          timeout: 5_000,
+        });
+        assert.equal(result.error, undefined);
+        assert.doesNotMatch(result.stdout, /installed chromium/);
+        await assert.rejects(readFile(join(destination, "chromium-4321", "INSTALLATION_COMPLETE")), { code: "ENOENT" });
+        if (failure === "download") {
+          assert.equal(result.status, 22);
+          assert.match(result.stderr, /synthetic CDN refusal/);
+          await assert.rejects(readFile(unzipCalled), { code: "ENOENT" });
+        } else {
+          assert.equal(result.status, 1);
+          assert.match(result.stderr, /expected chrome binary missing/);
+          assert.equal(await readFile(unzipCalled, "utf8"), "");
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
 
@@ -241,6 +319,28 @@ test("Chromium defaults its launch size to the active n.eko screen", async () =>
   assert.match(startScript, TOP_LEVEL_REGEX_39);
   assert.match(startScript, TOP_LEVEL_REGEX_40);
   assert.match(startScript, TOP_LEVEL_REGEX_18);
+});
+
+test("Chromium falls back to a usable window size for malformed n.eko screen dimensions", async () => {
+  const source = await readFile(NEKO_CHROMIUM_START, "utf8");
+  const start = source.indexOf("SCREEN=");
+  const end = source.indexOf("# Binary selection", start);
+  assert.ok(start >= 0 && end > start, "startup script has a window sizing block");
+  const sizing = source.slice(start, end);
+  const run = (screen: string) => {
+    const result = spawnSync("/bin/sh", ["-eu", "-c", sizing + 'printf "%s,%s\\n" "$WIDTH" "$HEIGHT"'], {
+      encoding: "utf8",
+      env: { NEKO_DESKTOP_SCREEN: screen },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+
+  assert.equal(run("390x844@30"), "390,844");
+  assert.equal(run("1280x720"), "1280,720");
+  for (const malformed of ["1600", "1440x", "x900", "1440x0", "14:40x900"]) {
+    assert.equal(run(malformed), "1440,900", malformed);
+  }
 });
 
 test("Chromium resize watcher only grows undersized visible windows", async (t) => {
@@ -333,6 +433,35 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
   }
 });
 
+test("n.eko startup forwards explicit portrait and landscape profiles to the launcher", async (t) => {
+  const source = await readFile(REPO_ROOT + "docker/neko/start-neko.sh", "utf8");
+  const launcher = "exec /usr/bin/neko serve";
+  assert.ok(source.includes(launcher));
+  const fixtures = [
+    { name: "portrait", screen: "390x844@30", desktop: ":14", display: ":7" },
+    { name: "landscape", screen: "844x390@30", desktop: "", display: ":31" },
+  ];
+  for (const { name, screen, desktop, display } of fixtures) {
+    await t.test(name, () => {
+      const result = spawnSync(
+        "/bin/sh", ["-eu", "-c", source.replace(launcher, "exec /usr/bin/printf '%s\\n' serve")],
+        { env: { NEKO_DESKTOP_SCREEN: screen, NEKO_DESKTOP_DISPLAY: desktop, DISPLAY: display }, encoding: "utf8" },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      const args = result.stdout.trim().split("\n");
+      const valueOf = (flag: string) => {
+        const index = args.indexOf(flag);
+        assert.notEqual(index, -1, flag);
+        return args[index + 1];
+      };
+      assert.equal(valueOf("--desktop.screen"), screen);
+      assert.equal(valueOf("--desktop.display"), desktop || display);
+      assert.equal(valueOf("--capture.video.display"), desktop || display);
+    });
+  }
+});
+
 async function startupDisplay(env: NodeJS.ProcessEnv): Promise<string> {
   const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
   const assignment = source.split("\n").find((line) => line.startsWith("DISPLAY_NAME="));
@@ -351,6 +480,29 @@ test("n.eko startup falls back to the container display when both display variab
 test("n.eko startup uses DISPLAY only when the dedicated desktop display is absent", async () => {
   assert.equal(await startupDisplay({ DISPLAY: ":7" }), ":7");
   assert.equal(await startupDisplay({ DISPLAY: ":7", NEKO_DESKTOP_DISPLAY: ":12" }), ":12");
+});
+
+async function startupNekoDefaultArg(flag: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const source = await readFile(REPO_ROOT + "docker/neko/start-neko.sh", "utf8");
+  const line = source.split("\n").map((value) => value.trim())
+    .find((value) => value.startsWith(flag + " "));
+  assert.ok(line, "n.eko defines " + flag + " on the serve command");
+  const args = line.slice(0, -1).trimEnd();
+  const result = spawnSync("/bin/sh", ["-eu", "-c", "set -- " + args + '\nprintf "%s" "$2"'], {
+    env, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
+test("standalone n.eko remains loopback-bound unless the bind address is configured", async () => {
+  assert.equal(await startupNekoDefaultArg("--server.bind", {}), "127.0.0.1:8080");
+  assert.equal(await startupNekoDefaultArg("--server.bind", { NEKO_SERVER_BIND: "127.0.0.1:9090" }), "127.0.0.1:9090");
+});
+
+test("n.eko preserves the configured screen mode or supplies its default for an empty setting", async () => {
+  assert.equal(await startupNekoDefaultArg("--desktop.screen", { NEKO_DESKTOP_SCREEN: "" }), "1280x720@30");
+  assert.equal(await startupNekoDefaultArg("--desktop.screen", { NEKO_DESKTOP_SCREEN: "800x600@24" }), "800x600@24");
 });
 
 test("ChatGPT large-history guardrails are wired into Docker runtime config", async () => {
@@ -459,4 +611,53 @@ test("runtime config routes USAA to a managed n.eko surface from the committed c
   // USAA acquires a managed surface instead of failing headed_browser_unavailable.
   assert.equal(options.browserSurfaceLeaseManager.isManagedConnector(USAA_CONNECTOR_ID), true);
   assert.equal(options.browserSurfaceLeaseManager.isManagedConnector("usaa"), true);
+});
+
+async function nekoLauncherArgs(env: NodeJS.ProcessEnv): Promise<string[]> {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  assert.ok(source.includes("exec /usr/bin/neko serve"));
+  const fixture = source.replace("exec /usr/bin/neko serve", 'set -- serve');
+  const result = spawnSync("/bin/sh", ["-eu", "-c", fixture + '\nfor arg do printf "%s\\n" "$arg"; done\n'], {
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trimEnd().split("\n");
+}
+
+test("n.eko launch retains the configured path prefix and proxy flag", async () => {
+  const args = await nekoLauncherArgs({ NEKO_SERVER_PATH_PREFIX: "/fixture/", NEKO_SERVER_PROXY: "true" });
+  assert.equal(args[args.indexOf("--server.path_prefix") + 1], "/fixture/");
+  assert.ok(args.includes("--server.proxy=true"));
+});
+
+test("n.eko launch passes each ICE settings array as a single argument", async () => {
+  const front = '[{ "urls": ["stun:front.invalid"] }]';
+  const back = '[{ "urls": ["stun:back.invalid"] }]';
+  const args = await nekoLauncherArgs({ NEKO_WEBRTC_ICESERVERS: front, NEKO_WEBRTC_ICESERVERS_BACKEND: back });
+  assert.equal(args[args.indexOf("--webrtc.iceservers.frontend") + 1], front);
+  assert.equal(args[args.indexOf("--webrtc.iceservers.backend") + 1], back);
+});
+
+test("Patchright installer rejects incomplete Chromium metadata before invoking curl", async () => {
+  const root = await mkdtemp(join(tmpdir(), "patchright-invalid-chromium-"));
+  try {
+    const mod = join(root, "node_modules", "patchright-core");
+    await mkdir(mod, { recursive: true });
+    await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+    await writeFile(join(mod, "browsers.json"), JSON.stringify({ browsers: [{ name: "chromium", revision: "1234" }] }));
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "curl"), "#!/bin/sh\nprintf 'unexpected curl invocation\\n' >&2\nexit 99\n", { mode: 0o755 });
+    const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+      env: { PATH: bin + ":" + process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: join(root, "unused-browser-output") },
+      encoding: "utf8", timeout: 5_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /invalid chromium revision\/version/);
+    assert.doesNotMatch(result.stderr, /unexpected curl invocation/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

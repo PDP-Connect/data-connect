@@ -16,6 +16,34 @@ import { basename, dirname, join, matchesGlob, resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
+describe("desktop sidecar lifeline", () => {
+  const preload = new URL("./parent-lifeline.mjs", import.meta.url).href
+
+  it("does not arm when a non-desktop launch has no flag", () => {
+    const env = { ...process.env }
+    delete env.PDPP_PARENT_LIFELINE
+    const result = spawnSync(process.execPath, ["--import", preload, "-e", "process.stdin.resume(); process.on('SIGTERM', () => process.exit(31))"], {
+      input: "", env, encoding: "utf8", timeout: 4000,
+    })
+    expect(result.status).toBe(0)
+    expect(result.stderr).not.toContain("[parent-lifeline]")
+  })
+
+  it.skipIf(process.platform === "win32")("strips the flag and signals once when the parent pipe closes", () => {
+    const script = [
+      "if (process.env.PDPP_PARENT_LIFELINE !== undefined) process.exit(30)",
+      "process.on('SIGTERM', () => { console.log('received TERM'); process.exit(31) })",
+      "setTimeout(() => process.exit(32), 1500)",
+    ].join(";")
+    const result = spawnSync(process.execPath, ["--import", preload, "-e", script], {
+      input: "", env: { ...process.env, PDPP_PARENT_LIFELINE: "stdin" }, encoding: "utf8", timeout: 4000,
+    })
+    expect(result.status).toBe(31)
+    expect(result.stdout.trim()).toBe("received TERM")
+    expect(result.stderr.match(/parent closed stdin/g)).toHaveLength(1)
+  })
+})
+
 const releaseWorkflowPath = resolve(
   process.cwd(),
   ".github/workflows/release.yml"
@@ -286,6 +314,34 @@ function substituteActionsExpressions(script: string) {
     return value
   })
 }
+
+describe("polyfill type shim packaging errors", () => {
+  for (const archivePresent of [false, true]) {
+    it(archivePresent ? "identifies an absent checked-in declaration shim" : "identifies an absent vendor archive", () => {
+      const root = mkdtempSync(join(tmpdir(), "type-shim-fixture-"))
+      try {
+        const script = "scripts/check-polyfill-connector-type-shims.sh"
+        mkdirSync(join(root, "scripts"))
+        writeFileSync(join(root, script), readFileSync(resolve(script), "utf8"))
+        const archive = join(root, "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz")
+        if (archivePresent) {
+          mkdirSync(dirname(archive), { recursive: true })
+          const fixture = "package/src/manual-upload-validation.d.ts"
+          mkdirSync(dirname(join(root, fixture)), { recursive: true })
+          writeFileSync(join(root, fixture), "export type Fixture = string;\n")
+          execFileSync("tar", ["-czf", archive, "-C", root, fixture])
+        }
+        const run = spawnSync("bash", [join(root, script)], { encoding: "utf8", timeout: 5_000 })
+        expect(run.status).toBe(1)
+        expect(run.stderr).toMatch(archivePresent
+          ? /missing checked-in type shim: src\/manual-upload-validation\.d\.ts/
+          : /missing declaration source archive: .*pdpp-polyfill-connectors-0\.0\.1\.tgz/)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+})
 
 describe("release workflow", () => {
   it("keeps every clean-install Bash script portable across runner shells", () => {
@@ -1244,6 +1300,49 @@ docker() {
       expect(uploadArgs.slice(3, -3).sort()).toEqual(
         expectedAssets.map(asset => `release-artifacts/${asset}`).sort()
       )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+
+describe("offline Fly Core release preflight CLI", () => {
+  const cli = resolve(process.cwd(), "scripts/check-flyio-deploy-env.ts")
+
+  it("reports a valid dotenv file as structured JSON without deployment output", () => {
+    const root = mkdtempSync(join(tmpdir(), "fly-preflight-"))
+    try {
+      const envFile = join(root, "core.env")
+      writeFileSync(envFile, [
+        "# synthetic values; no connection is made",
+        'PDPP_REFERENCE_ORIGIN = "https://core.example.invalid"',
+        'DATABASE_URL = "postgres://db.example.invalid/core?application_name=preflight"',
+        "",
+      ].join("\n"))
+      const result = spawnSync(process.execPath, [cli, "--core", envFile, "--json"], {
+        encoding: "utf8",
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(JSON.parse(result.stdout)).toEqual({ ok: true, violations: [] })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("fails without emitting a JSON verdict when the supplied dotenv file cannot be read", () => {
+    const root = mkdtempSync(join(tmpdir(), "fly-preflight-"))
+    try {
+      const envFile = join(root, "absent.env")
+      const result = spawnSync(process.execPath, [cli, "--core", envFile, "--json"], {
+        encoding: "utf8",
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(`Error reading env file "${envFile}"`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

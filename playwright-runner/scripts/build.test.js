@@ -14,6 +14,7 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   copyBrowserDirectory,
+  findChromiumDir,
   getBrowserDirectoryName,
   getPlaywrightBrowserPath,
   parseBuildOptions,
@@ -32,6 +33,35 @@ describe("playwright-runner build options", () => {
       env: { PLAYWRIGHT_BROWSERS_PATH: "fixture-custom-cache" },
       resolveCoreManifest: () => { throw new Error("unexpected package lookup") },
     })).toBe("fixture-custom-cache")
+  })
+
+  it("reports a missing hermetic browser package rather than using a global cache", () => {
+    const missingCore = Object.assign(new Error("playwright-core manifest not found"), {
+      code: "MODULE_NOT_FOUND",
+    })
+    expect(() => getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "0" },
+      resolveCoreManifest: () => { throw missingCore },
+    })).toThrow(missingCore)
+  })
+
+  it("uses the configured browser cache without resolving the hermetic package", () => {
+    const cache = join(tmpdir(), "release cache")
+    let calls = 0
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: cache },
+      resolveCoreManifest: () => {
+        calls++
+        throw new Error("the explicit cache must not look up playwright-core")
+      },
+    })).toBe(cache)
+    expect(calls).toBe(0)
+  })
+
+  it("keeps an absolute matrix output path when producing a lean binary", () => {
+    const outputPath = resolve(tmpdir(), "matrix output", "runner")
+    expect(parseBuildOptions(["--lean", "--output", outputPath, "--target", "node22-linux-x64"]))
+      .toEqual({ isLean: true, outputPath, requireBrowser: false, target: "node22-linux-x64" })
   })
 
   it("does not download a browser during npm install", () => {
@@ -121,6 +151,20 @@ describe("playwright-runner build options", () => {
     expect(supportsBrowserProvisioning("win32")).toBe(true)
   })
 
+  it("permits the verified Debian release but not adjacent releases", () => {
+    for (const version of ["11", "13"]) {
+      expect(supportsBrowserProvisioning("linux", `ID=debian\nVERSION_ID="${version}"\n`)).toBe(false)
+    }
+    expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12"\n')).toBe(true)
+  })
+
+  it("keeps only the cache basename for a POSIX runner with a space in its parent path", () => {
+    expect(getBrowserDirectoryName("/fixtures/cache with spaces/chromium-1234/", "linux"))
+      .toBe("chromium-1234")
+    expect(getBrowserDirectoryName("/fixtures/cache with spaces/chromium-1234", "darwin"))
+      .toBe("chromium-1234")
+  })
+
   it("uses only the Chromium cache directory name on Windows", () => {
     expect(
       getBrowserDirectoryName(
@@ -148,7 +192,68 @@ describe("playwright-runner build options", () => {
   })
 })
 
+describe("Chromium cache selection", () => {
+  it("reports an absent browser cache without creating it", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-absent-"))
+    try {
+      const absent = join(root, "not-installed")
+      expect(findChromiumDir(absent, "linux")).toBeNull()
+      expect(() => readFileSync(absent)).toThrow(/ENOENT/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("does not package a cached browser executable for the wrong platform", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-foreign-"))
+    try {
+      const dir = join(root, "chromium-1200")
+      const windows = join(dir, "chrome-win64")
+      mkdirSync(windows, { recursive: true })
+      writeFileSync(join(windows, "chrome.exe"), "synthetic Windows browser")
+      expect(findChromiumDir(root, "linux")).toBeNull()
+      expect(findChromiumDir(root, "win32")).toBe(dir)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("skips incomplete and headless-only caches in favor of a usable browser", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-selection-"))
+    try {
+      mkdirSync(join(root, "chromium-1000"))
+      mkdirSync(join(root, "chromium-headless-shell-1100"))
+      const usable = join(root, "chromium-1200")
+      const bin = join(usable, "chrome-linux64")
+      mkdirSync(bin, { recursive: true })
+      writeFileSync(join(bin, "chrome"), "synthetic browser")
+      expect(findChromiumDir(root, "linux")).toBe(usable)
+      rmSync(usable, { recursive: true })
+      expect(findChromiumDir(root, "linux")).toBeNull()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("copyBrowserDirectory", () => {
+  it("rejects a file in place of the destination directory without overwriting it", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-copy-conflict-"))
+    try {
+      const source = join(root, "source")
+      const destination = join(root, "browser-output")
+      mkdirSync(source)
+      writeFileSync(join(source, "browser"), "fixture binary")
+      writeFileSync(destination, "existing output")
+
+      expect(() => copyBrowserDirectory(source, destination)).toThrow()
+      expect(readFileSync(destination, "utf8")).toBe("existing output")
+      expect(readFileSync(join(source, "browser"), "utf8")).toBe("fixture binary")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("keeps the macOS framework symlinks relative", () => {
     const root = mkdtempSync(join(tmpdir(), "browser-copy-"))
     try {
@@ -173,4 +278,40 @@ describe("copyBrowserDirectory", () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+})
+
+
+it("refuses browser provisioning without an exact supported Linux release", () => {
+  expect(supportsBrowserProvisioning("linux", 'VERSION_ID="12"\n')).toBe(false)
+  expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12.1"\n')).toBe(false)
+  expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12"\n')).toBe(true)
+})
+
+it("does not leave a browser destination behind after a missing-cache copy", () => {
+  const root = mkdtempSync(join(tmpdir(), "browser-copy-missing-"))
+  try {
+    const output = join(root, "output")
+    expect(() => copyBrowserDirectory(join(root, "missing"), output))
+      .toThrow(expect.objectContaining({ code: "ENOENT" }))
+    expect(() => readFileSync(output)).toThrow(expect.objectContaining({ code: "ENOENT" }))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it("keeps an absolute output path independent of the working directory", () => {
+  const output = join(resolve(tmpdir()), "fixture-runner", "result")
+  expect(parseBuildOptions(["--output", output, "--lean"])).toMatchObject({
+    outputPath: output,
+    isLean: true,
+    requireBrowser: false,
+  })
+})
+
+it("keeps a non-hermetic browser cache path as configured, including spaces", () => {
+  const cache = join(resolve(tmpdir()), "fixture browser cache")
+  expect(getPlaywrightBrowserPath({
+    env: { PLAYWRIGHT_BROWSERS_PATH: cache },
+    resolveCoreManifest: () => { throw new Error("non-hermetic cache must not resolve a package") },
+  })).toBe(cache)
 })

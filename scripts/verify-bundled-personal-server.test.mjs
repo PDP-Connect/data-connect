@@ -1000,3 +1000,38 @@ describe("DMG mount root cleanup", () => {
     expect(removals).toEqual([])
   })
 })
+
+describe("packaged connector loader startup diagnostics", () => {
+  const loader = new URL("../pdpp-runtime/connector-loader.mjs", import.meta.url).href
+  const checkLoader = (env) =>
+    spawnSync(process.execPath, ["--input-type=module", "-e", "await import(process.argv[1])", loader], {
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+    })
+
+  it("identifies the missing configured runtime root", () => {
+    const result = checkLoader({})
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("DATACONNECT_PDPP_RUNTIME_ROOT is required")
+  })
+
+  it("identifies a staged Patchright package with no ESM entry", () => {
+    const root = mkdtempSync(join(tmpdir(), "pdpp-loader-invalid-package-"))
+    try {
+      const packageDir = join(root, "node_modules", "patchright")
+      mkdirSync(packageDir, { recursive: true })
+      writeFileSync(join(packageDir, "package.json"), JSON.stringify({
+        name: "patchright",
+        exports: { "./package.json": "./package.json", ".": { require: "./index.cjs" } },
+      }))
+      const result = checkLoader({ DATACONNECT_PDPP_RUNTIME_ROOT: root })
+      expect(result.error).toBeUndefined()
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain("Packaged patchright must declare an ESM import entry")
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+})

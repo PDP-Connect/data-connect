@@ -42,6 +42,9 @@ $(node -e '
   const browsers = JSON.parse(fs.readFileSync(dir + "browsers.json", "utf8"));
   const chromium = browsers.browsers.find((b) => b.name === "chromium");
   if (!chromium) throw new Error("no chromium descriptor in patchright browsers.json");
+  if (!/^\d+$/.test(String(chromium.revision)) || !/^\d+\.\d+\.\d+\.\d+$/.test(String(chromium.browserVersion))) {
+    throw new Error("invalid chromium revision/version in patchright browsers.json");
+  }
   process.stdout.write(`${chromium.revision} ${chromium.browserVersion}`);
 ')
 EOF

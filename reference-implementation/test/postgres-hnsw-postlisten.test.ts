@@ -98,6 +98,45 @@ if (POSTGRES_URL) {
     });
   });
 
+  test("an optional post-listen builder rejection does not unbind either listener", async () => {
+    await withTempDatabase(async (url) => {
+      let failBuilder!: (error: Error) => void;
+      const builder = new Promise<void>((_resolve, reject) => { failBuilder = reject; });
+      let starts = 0;
+      const server = await startServer({
+        asPort: 0,
+        autoEnrollEligibleSchedules: false,
+        databaseUrl: url,
+        postgresSemanticHnswMaintenanceImpl: () => { starts += 1; return builder; },
+        reconcilePolyfillManifests: false,
+        rsPort: 0,
+        storageBackend: "postgres",
+      });
+      const maintenance = Promise.allSettled([server.postgresSemanticHnswMaintenanceDone]);
+      try {
+        assert.equal(starts, 1);
+        failBuilder(new Error("synthetic optional maintenance failure"));
+        await maintenance;
+        const [asResponse, rsResponse] = await Promise.all([
+          fetch(`http://127.0.0.1:${server.asPort}/.well-known/oauth-authorization-server`),
+          fetch(`http://127.0.0.1:${server.rsPort}/.well-known/oauth-protected-resource`),
+        ]);
+        assert.equal(asResponse.status, 200);
+        assert.equal(rsResponse.status, 200);
+      } finally {
+        failBuilder(new Error("synthetic fixture shutdown"));
+        await maintenance;
+        await Promise.allSettled([
+          server.manifestReconciliationDone,
+          server.startupBackfillDone,
+          server.startupRunHistoryBackfillDone,
+          server.startupSummaryEvidenceSweepDone,
+        ]);
+        await closeStartedServer(server);
+      }
+    });
+  });
+
   test("the durable HNSW builder is single-owner, restart-safe, and idempotent", async () => {
     await withTempDatabase(async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });
@@ -277,6 +316,23 @@ if (POSTGRES_URL) {
       assert.equal(failure.rows[0]?.state, "failed");
       assert.match(failure.rows[0]?.last_error ?? "", RE_HNSW_FAILURE);
       assert.ok(logs.some((line) => line.includes("HNSW builder failed (retryable)")));
+    });
+  });
+
+  test("repeated optional failures keep one failed receipt and the primary pool usable", async () => {
+    await withTempDatabase(async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      await postgresQuery("DROP TABLE semantic_search_blob CASCADE");
+      await runPostgresSemanticHnswMaintenance();
+      await runPostgresSemanticHnswMaintenance();
+      const failures = await postgresQuery<{ state: string; last_error: string | null }>(
+        "SELECT state, last_error FROM semantic_hnsw_index_build WHERE build_key = 'semantic_hnsw'"
+      );
+      assert.equal(failures.rowCount, 1);
+      assert.equal(failures.rows[0]?.state, "failed");
+      assert.match(failures.rows[0]?.last_error ?? "", RE_HNSW_FAILURE);
+      const live = await postgresQuery<{ value: number }>("SELECT 1 AS value");
+      assert.equal(live.rows[0]?.value, 1);
     });
   });
 
