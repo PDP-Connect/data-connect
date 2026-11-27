@@ -1889,6 +1889,7 @@ export function ScheduleSummary({ displayName, notInstalled = false, schedule, s
   const device = sourceInstances[0];
   const deviceName = device?.device_display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);
+  if (!text && !next && !(device && deviceName && heard)) return null;
   return <Section title="Schedule" action={disconnected ? undefined : <Link className="text-primary hover:underline" href="/schedules">Change</Link>}>
     {text ? <p className="pdpp-body text-muted-foreground" data-testid="source-schedule-summary">{text}</p> : null}
     {next ? <p className="text-sm text-muted-foreground">Next check {next}.</p> : null}

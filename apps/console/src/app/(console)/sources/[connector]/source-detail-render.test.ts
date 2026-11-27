@@ -537,3 +537,13 @@ test("Pause syncing is the button only, not also a heading above it", async () =
   }
   assert.ok(seen > 0, "no sampled state shows the pause control");
 });
+
+// Round 7 (F25): a section with nothing under it must not draw its heading.
+test("a Schedule section with nothing to say draws no heading and no Change link", async () => {
+  const { ScheduleSummary } = await import("./source-page.tsx");
+  for (const scheduleError of [null, "The schedule could not be read."]) {
+    const html = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: "Venmo", schedule: null, scheduleError, sourceInstances: [], now: new Date("2027-01-01") }));
+    assert.doesNotMatch(html, /Schedule/, String(scheduleError));
+    assert.doesNotMatch(html, /Change/, String(scheduleError));
+  }
+});
