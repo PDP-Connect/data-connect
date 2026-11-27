@@ -18,7 +18,7 @@ const INLINE_ERROR_PANEL = /COULDNT_REACH_BROWSER/;
 const INLINE_RETRY_BUTTON = /Try again/;
 const RETRY_RELOADS_CONFIG = /setConfigLoadRetryEpoch\(\(epoch\) => epoch \+ 1\)/;
 const MOUNT_REJECTION_RETHROWS_TO_INLINE_CATCH =
-  /await mountNekoViewer\([\s\S]*?catch \((\w+)\) \{[\s\S]*?throw \1;[\s\S]*?\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setError\(/;
+  /await mountNekoViewer\([\s\S]*?catch \((\w+)\) \{[\s\S]*?throw \1;[\s\S]*?\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setErrorKind\("mount"\);\s+setError\(/;
 
 test("NekoSurface config-load source contract retains inline retry handling", async () => {
   // Brief item 4: update the fallback wording and keep the existing detailed error message.
