@@ -110,6 +110,11 @@ function canStartSync(source: RefConnectorSummary): boolean {
     !source.revoked_at;
 }
 
+/** The one rule for "the owner must do this": the status table marks a required action filled; an optional one (Sync now, View this device, Review result) is not. */
+export function actionIsRequired(action: SourceStatusAction | null): boolean {
+  return action?.filled === true;
+}
+
 function syncAction(source: RefConnectorSummary): SourceStatusAction | null {
   if (source.source_kind === "local_device") return action("view_device", "View this device", false);
   return canStartSync(source) ? action("sync_now", "Sync now", false) : null;
@@ -460,7 +465,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
 
 export function sourceAnswer(source: RefConnectorSummary, options: SourceStatusOptions): SourceAnswer {
   const matched = matchSourceStatus(source, options);
-  return { ...matched, needsYou: matched.action !== null };
+  return { ...matched, needsYou: actionIsRequired(matched.action) };
 }
 export function sourceStatusWords(source: RefConnectorSummary, options: SourceStatusOptions): SourceStatusWords {
   const {sentence: _sentence, problem: _problem, ...status} = sourceAnswer(source, options);

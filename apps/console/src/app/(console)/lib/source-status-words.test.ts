@@ -101,7 +101,7 @@ test("only the completed-import and up-to-date rows count as up to date", () => 
 
 function assertRow(row: SourceStatusRow, words: string, tone: "plain" | "attention" | "accent" | "faint", expectedAction: ReturnType<typeof sourceStatusWords>["action"] = null) {
   // DIRECTION.md, "One status table": row 2 is not a needs-you row.
-  const needsYou = expectedAction !== null;
+  const needsYou = expectedAction?.filled === true;
   assert.deepEqual(sourceStatusWords(fixture(row), { now: NOW }), { row, words, tone, action: expectedAction, needsYou });
 }
 
@@ -180,7 +180,7 @@ test("a lifecycle-paused source stays out of needs-you when an owner action is s
     owner_state: { ...healthyState, owner_of_state: "owner", resolver: "needs_owner" },
     rendered_verdict: verdict("Can't collect", [requiredAction({ kind: "reauth", surface: { kind: "browser_session" } })]),
   }), { now: NOW });
-  assert.deepEqual(result, { row: 10, words: "Paused", tone: "faint", action: { kind: "resume", label: "Resume", filled: false }, needsYou: true });
+  assert.deepEqual(result, { row: 10, words: "Paused", tone: "faint", action: { kind: "resume", label: "Resume", filled: false }, needsYou: false });
 });
 test("an automatic schedule paused by its owner uses the server action, not lifecycle resume", () => {
   const schedule = fixture(12).schedule;
@@ -197,7 +197,7 @@ test("an automatic schedule paused by its owner uses the server action, not life
     words: "Automatic sync is off · last synced 2 hours ago",
     tone: "faint",
     action: { kind: "server_cta", label: "Resume schedule", filled: false },
-    needsYou: true,
+    needsYou: false,
   });
   assert.equal(sourceStateSentence(ownerPaused, { now: NOW, name: "Example source" }).text, "Automatic sync is off. Last synced 2 hours ago.");
 
@@ -316,7 +316,7 @@ test("needsYou is true exactly on the rows where the person must act", () => {
   for (let row = 1; row <= 24; row += 1) {
     const result = sourceStatusWords(fixture(row as SourceStatusRow), { now: NOW });
     // DIRECTION.md, "One status table": row 2 does not count as needs-you.
-    assert.equal(result.needsYou, result.action !== null, `row ${row}`);
+    assert.equal(result.needsYou, result.action?.filled === true, `row ${row}`);
     if (result.action?.filled) assert.equal(result.needsYou, true, `row ${row}`);
   }
 });
@@ -635,4 +635,17 @@ test("every failed state offers the same retry action, scheduled or not", () => 
   const retry = { kind: "sync_now", label: "Try again", filled: true };
   const failed = source({ last_run: { ...(source({}).last_run as object), status: "failed", failure_reason: "upstream_unavailable" } as never, schedule: { enabled: true, effective_mode: "automatic", interval_seconds: 3600 } as never });
   assert.deepEqual(sourceStatusWords(failed, { now: NOW }).action, retry);
+});
+
+// Round 7 review B1: an optional "Sync now" is not something the owner must do.
+test("only a required action makes a source need the person; an optional Sync now stays quiet", () => {
+  const optional = sourceStatusWords(fixture(17), { now: NOW });
+  assert.equal(optional.action?.kind, "sync_now");
+  assert.equal(optional.action?.filled, false);
+  assert.equal(optional.needsYou, false);
+  const failed = sourceStatusWords(fixture(16), { now: NOW });
+  assert.equal(failed.action?.filled, true);
+  assert.equal(failed.needsYou, true);
+  const device = sourceStatusWords(fixture(20), { now: NOW });
+  assert.equal(device.needsYou, false);
 });

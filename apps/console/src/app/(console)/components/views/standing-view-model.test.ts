@@ -472,7 +472,7 @@ test("the title answers first run, one or many needs, sync, current data, and a 
 test("the row-22 never-synced state does not create an alarm on Home", () => {
   const neverSynced = statusSource(22, "Fitbit");
   // DIRECTION.md, Home: an ordinary never-synced source does not claim an owner action.
-  assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, true);
+  assert.equal(sourceStatusWords(neverSynced, { now: NOW }).needsYou, false);
   // DIRECTION.md, Home: use the source status, not the server-wide alarm, for the heading.
   assert.equal(
     buildHomeViewModel(
@@ -480,7 +480,7 @@ test("the row-22 never-synced state does not create an alarm on Home", () => {
         sourcePage: { hasMore: false, kind: "ok", sources: [neverSynced] },
       }),
     ).title,
-    "1 thing needs you",
+    "Nothing needs you",
   );
 });
 
@@ -513,7 +513,7 @@ test("the prior fleet alarm maps never-synced rows into an audit failure, while 
     }),
   );
   // DIRECTION.md, Home: source rows provide the title and never-synced rows are not an alarm.
-  assert.equal(home.title, "2 things need you");
+  assert.equal(home.title, "Nothing needs you");
 });
 
 test("needs-you rows contain their source or request details and follow the required order", () => {
@@ -610,7 +610,7 @@ test("the needs-you box holds exactly the rows whose status says needs you", () 
   );
   assert.deepEqual(
     data.needs.map((need) => need.name).sort(),
-    ["Needs install", "Paused", "Setting up", "Setup shell"],
+    ["Needs install", "Setting up", "Setup shell"],
   );
 
   for (const scenario of ["calm", "alarm", "decide"] as const) {
@@ -1074,12 +1074,11 @@ test("Home counts the same Sources inventory as its All link", () => {
   assert.equal(data.sourceTotalLink, "All 13 data sources");
 });
 
-test("a needs-you row does not repeat 'last synced' when the status words already say it", () => {
+test("an owner-paused schedule is not in Needs you", () => {
   const off = statusSource(10, "Steam", { status: "active", owner_state: { ...HEALTHY_STATE, owner_of_state: "owner", resolver: "owner_paused" }, rendered_verdict: verdict("Healthy", [requiredAction({ cta: "Resume schedule", kind: "reattach_schedule", satisfied_when: { kind: "schedule_attached_and_enabled" }, surface: { kind: "schedule" }, target: undefined })]) });
   const data = buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [off] } }));
-  const row = data.needs.find((need) => need.name === "Steam");
-  assert.match(row?.status?.words ?? "", /last synced /);
-  assert.equal(row?.syncNote, null);
+  // Round 7 review B1: an owner-paused schedule offers an optional Resume, so it is not in Needs you.
+  assert.equal(data.needs.find((need) => need.name === "Steam"), undefined);
 });
 
 test("a failed source in Needs you says what happens next, with the same cause sentence and button as the list", () => {
