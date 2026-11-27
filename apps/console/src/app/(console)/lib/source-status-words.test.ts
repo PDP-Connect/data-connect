@@ -705,3 +705,25 @@ test("a device that needs the owner but has no step to offer still counts as nee
   assert.equal(answer.needsYou, true);
   assert.equal(sourceAnswer({ ...fixture(10), source_kind: "local_device" }, { now: NOW }).needsYou, false);
 });
+
+// Round 10 (R2): a sign-in gap under system_degraded is the person's step, not a generic "Some records stuck".
+test("a sign-in gap under system_degraded still needs the owner", () => {
+  const expired = { kind: "skip_result", stream: "friends", reason: "auth_failed" };
+  const value = source({
+    connector_display_name: "Steam",
+    owner_state: { ...healthyState, resolver: "system_degraded" },
+    rendered_verdict: verdict("Some records stuck"),
+    collection_report: [{ stream: "friends", coverage_condition: "terminal_gap", collected: 0 }] as never,
+    last_run: partialRun([expired]),
+  });
+  const answer = sourceAnswer(value, { now: NOW });
+  assert.equal(answer.needsYou, true);
+  assert.match(answer.sentence.text, /^Not copied: friends\./);
+});
+
+// Round 10 (R2): the sentence above the sections reads the same schedule-confirmed fact as the status words.
+test("a stale cooling-off schedule promises no retry when the schedule read failed", () => {
+  const stale = fixture(12);
+  const words = sourceStateSentence(stale, { now: NOW, name: "Example source", scheduleConfirmed: false }).text;
+  assert.doesNotMatch(words, /try again on its own|Next check/);
+});

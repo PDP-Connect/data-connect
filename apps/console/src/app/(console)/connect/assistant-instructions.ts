@@ -37,7 +37,6 @@ export const assistantInstructions = [
     steps: ["Give the app the address above. Follow its help page to add a remote server."],
   },
 ] as const;
-import { mcpEndpoint } from "./remote-access.ts";
 
 /** Matches the existing technical setup command; quote the address for a shell. */
 export function claudeCodeCommand(origin: string): string {

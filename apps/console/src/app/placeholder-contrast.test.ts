@@ -27,6 +27,8 @@ function contrast(a: [number, number, number], b: [number, number, number]): num
 }
 function token(scope: string, name: string): [number, number, number] {
   const block = tokens.slice(tokens.indexOf(scope));
+  const alias = new RegExp(`--${name}:\\s*var\\(--([a-z-]+)\\)`).exec(block);
+  if (alias) return token(scope, alias[1] as string);
   const match = new RegExp(`--${name}:\\s*oklch\\(([\\d.]+) ([\\d.]+) ([\\d.]+)\\)`).exec(block);
   assert.ok(match, `${name} in ${scope}`);
   return [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -46,9 +48,9 @@ test("placeholder text reaches 4.5:1 on the field background in both themes", ()
 });
 
 // Round 9 (F10): a control's edge needs 3:1 against the page and the card; dividers keep their own softer token.
-test("the control border token reaches 3:1 on the page, the card and the secondary fill in both themes", () => {
+test("the control border token reaches 3:1 on the page, card, popover, sidebar and secondary fill in both themes", () => {
   for (const scope of [":root", '[data-theme="dark"]']) {
-    for (const surface of ["background", "card", "secondary"]) {
+    for (const surface of ["background", "card", "popover", "sidebar", "secondary"]) {
       const ratio = contrast(oklchToLinear(token(scope, "control-border")), oklchToLinear(token(scope, surface)));
       assert.ok(ratio >= 3, `${scope} control-border on ${surface}: ${ratio.toFixed(2)}`);
     }

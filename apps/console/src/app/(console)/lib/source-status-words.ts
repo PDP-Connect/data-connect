@@ -415,6 +415,9 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
+    // A sign-in the person must redo outranks the generic "stuck" / "missing" words.
+    const signInGap = didNotComeRow(source, options, name);
+    if (signInGap?.needsOwner) return signInGap;
     // "Something stopped" is the server's answer for a cause it did not name; the run may name it.
     if (label !== "Missing optional data" && label !== "Some records stuck") {
       const known = failedRunAnswer(source, options, name);

@@ -836,8 +836,10 @@ function ConnectorPageView({
   const signInRepairAvailable = credentialUpdateHref !== null;
   // The Schedule section reads this page's own schedule; do not promise cadence when that read failed.
   const answerSource = model.scheduleError ? source : { ...source, schedule: model.schedule };
-  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, scheduleConfirmed: model.scheduleError === null, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
-  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
+  // One input for the status words and the sentence above the sections, so both read the same schedule fact.
+  const statusOptions = { now: renderedAt, offset, scheduleConfirmed: model.scheduleError === null, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) };
+  const sourceStatus = sourceStatusWords(answerSource, statusOptions);
+  const stateSentence = sourceStateSentence(answerSource, { ...statusOptions, name: serviceName });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
   const deviceStepsAvailable = hasDeviceLocalRemediation;

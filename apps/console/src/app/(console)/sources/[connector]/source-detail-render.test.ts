@@ -614,3 +614,10 @@ test("the Schedule section is given the real not-installed fact", async () => {
   assert.match(source, /<ScheduleSummary [^>]*notInstalled=\{connectorNotInstalled\}/);
   assert.doesNotMatch(source, /<ScheduleSummary [^>]*notInstalled=\{installPromptShown\}/);
 });
+
+// Round 10 (R2): the sentence and the status words take one options object, so scheduleConfirmed reaches both.
+test("the source page gives the status words and the state sentence the same options", async () => {
+  const source = (await import("node:fs")).readFileSync(new URL("./source-page.tsx", import.meta.url), "utf8");
+  assert.match(source, /sourceStatusWords\(answerSource, statusOptions\)/);
+  assert.match(source, /sourceStateSentence\(answerSource, \{ \.\.\.statusOptions, name: serviceName \}\)/);
+});
