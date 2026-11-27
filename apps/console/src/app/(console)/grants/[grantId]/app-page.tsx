@@ -125,7 +125,7 @@ export function AppPage({
         <Section className="mt-8" title={reading ? "What it can read" : "What it could read"}>
           <ul className="divide-y divide-border">
             {app.sourceAccess
-              .filter((source) => !reading || source.in_force)
+              .filter((source) => !reading || (source.in_force && !removal.removed.includes(JSON.stringify(source.source))))
               .map((source) => {
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";

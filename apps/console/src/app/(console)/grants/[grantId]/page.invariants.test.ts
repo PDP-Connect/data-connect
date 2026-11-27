@@ -24,3 +24,8 @@ test("the per-row Remove control on an app's page is 44px tall on a coarse point
   const button = source.slice(source.lastIndexOf("<Button", at), at);
   assert.match(button, /pointer-coarse:min-h-11/);
 });
+// Round 8 B2: a source the owner just removed leaves "What it can read" at once.
+test("a removed source is filtered out of the current section, not only given no Remove button", () => {
+  const source = read("./app-page.tsx");
+  assert.match(source, /\.filter\(\(source\) => !reading \|\| \(source\.in_force && !removal\.removed\.includes\(JSON\.stringify\(source\.source\)\)\)\)/);
+});
