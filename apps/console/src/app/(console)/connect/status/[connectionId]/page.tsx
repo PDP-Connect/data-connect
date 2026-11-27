@@ -4,7 +4,7 @@
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { LivePoller } from "../../../components/live-poller.tsx";
-import { connectionDisplayName } from "../../../lib/connection-display-name.ts";
+import { existingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
 import {
   getConnectionSetupStatus,
   getConnectorSchedule,
@@ -19,6 +19,7 @@ import { getCollectedKinds, getCollectionTerminalEvent } from "../../../syncs/[r
 import { extractKnownGapsFromEventData, extractTerminalKnownGaps } from "../../../lib/run-gaps.ts";
 import { hasResolvedBrowserSurfaceAssistance } from "../../../lib/run-assistance.ts";
 import { FirstSyncBody } from "./first-sync-body.tsx";
+import { setupStatusName } from "./setup-status-name.ts";
 import { type FirstSyncFacts, firstSyncOutcome } from "./first-sync-outcome.ts";
 
 import { flowPreview, flowPreviewState, previewStatus, previewFacts } from "../../flow-preview.ts";
@@ -66,7 +67,7 @@ export default async function ConnectionSetupStatusPage({
   });
 
   const manifest = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id);
-  const name = connectionDisplayName(status.display_name, manifest?.display_name, status.connector_id);
+  const name = await setupStatusName(status, manifest?.display_name, existingSourcesForConnector);
   const outcome = firstSyncOutcome(status, name, await readFacts(status));
   return (
     <RecordroomShellWithPalette>

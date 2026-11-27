@@ -14,6 +14,7 @@ import {
 	ConnectWorkingMark,
 	WentWrong,
 } from "../../../sources/add/connect-parts.tsx";
+import { sourceDetailHref } from "./connect-status-links.ts";
 import {
 	type FirstSyncOutcome,
 	headlineFor,
@@ -216,6 +217,10 @@ export function FirstSyncBody({
 			<ConnectHeader
 				connectorKey={connectorId}
 				icon={icon}
+				lastCrumb={{
+					href: sourceDetailHref({ connection_id: connectionId, connector_id: connectorId, setup_kind: "", status: "" }),
+					label: name,
+				}}
 				name={name}
 				title={headlineFor(outcome, name)}
                 step={outcome.kind === "running" && outcome.signIn ? "Step 2 of 2: copy your data" : undefined}

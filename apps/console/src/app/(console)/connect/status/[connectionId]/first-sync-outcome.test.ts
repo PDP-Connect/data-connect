@@ -236,3 +236,42 @@ test("a first connection that failed before its sign-in page opened says what di
   const afterCopy = firstSyncOutcome(failed, "Northwind", { ...facts, kinds: [{ count: 1, kind: "messages" }] });
   assert.ok(afterCopy.kind === "failed" && afterCopy.reason === "Something went wrong while copying your data.");
 });
+
+// Phone walk, fault 1c: the page for a partly failed data source shows one plain sentence,
+// never the connector's own text or codes.
+const RAW_VENMO_GAP = "Venmo is showing a security check instead of the sign-in form (sign-in form did not render). Complete the check, then respond succe… venmo_session_failed: venmo_login_did_not_complete: no sign-in outcome within 30000ms after challenge replay Staged stream state was not committed";
+test("partial: a gap's raw connector text is replaced by one plain sentence", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const facts = { ...withOrders, gaps: [{ kind: "skip_result", reason: "venmo_session_failed", message: RAW_VENMO_GAP, recovery_hint: { retryable: true } }] };
+  const outcome = firstSyncOutcome(status(), "Venmo", facts);
+  assert.equal(outcome.kind, "partial");
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" }))).replace(/\s+/g, " ");
+  assert.doesNotMatch(text, /venmo_session_failed|Staged stream|succe…|30000ms|CAPTCHA/);
+  assert.match(text, /Venmo asked for a new sign-in\./);
+  assert.match(text, /It will try again the next time DataConnect checks Venmo\./);
+});
+test("partial: a gap with no known cause says DataConnect could not copy it", () => {
+  const outcome = firstSyncOutcome(status(), "Northwind", { ...withOrders, gaps: [{ kind: "skip_result", stream: "returns", reason: "odd", message: "odd_code: raw detail" }] });
+  assert.equal(outcome.kind === "partial" ? outcome.missing[0]?.message : null, "DataConnect could not copy this.");
+});
+
+// Phone walk, fault 1a: with no name at all the words stay grammatical.
+test("a data source with no name never reads 'your this data source data'", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const name = "this data source";
+  const outcome = firstSyncOutcome(status(), name, { ...withOrders, gaps: [{ kind: "skip_result", stream: "returns", reason: "x", recovery_hint: { retryable: true } }] });
+  assert.equal(headlineFor(outcome, name), "This data source is connected, but some of it didn't come.");
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name }))).replace(/\s+/g, " ");
+  assert.doesNotMatch(text, /your this data source/i);
+  assert.match(text, /See your data/);
+});
+
+// Phone walk, fault 1b: a source's own page does not end its trail with "Add a data source".
+test("the trail on a source's own page ends with that source, not 'Add a data source'", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(firstSyncOutcome(status(), "Amazon", withOrders)), name: "Amazon" }));
+  const nav = html.match(/<nav[\s\S]*?<\/nav>/)?.[0] ?? "";
+  assert.match(visibleText(nav), /Home\s*\/\s*Data sources\s*\/\s*Amazon/);
+  assert.doesNotMatch(nav, /Add a data source/);
+  assert.match(nav, /href="\/sources\/amazon\?connection_id=conn_1"/);
+});

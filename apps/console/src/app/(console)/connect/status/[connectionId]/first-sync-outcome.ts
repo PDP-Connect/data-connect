@@ -6,7 +6,9 @@
  * right next button. Pure, so every state can be tested without a server.
  */
 
+import { NO_NAME_FALLBACK } from "../../../lib/connection-display-name.ts";
 import { classifyKnownGaps, type KnownGap } from "../../../lib/run-gaps.ts";
+import { resolveSyncCause } from "../../../lib/sync-cause.ts";
 import { humanizeFieldLabel } from "@pdpp/display";
 import type {
 	ConnectionSetupStatus,
@@ -94,19 +96,32 @@ const ADD_ANOTHER: OutcomeLink = {
 	label: "Add another data source",
 };
 
+/** A name that starts a sentence: "this data source" becomes "This data source". */
+function atStart(name: string): string {
+	return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/** "your Venmo data"; with no name at all, just "your data". */
+function yourData(name: string): string {
+	return name === NO_NAME_FALLBACK ? "your data" : `your ${name} data`;
+}
+
 export const outcomeCopy = {
-	connected: (name: string) => `${name} is connected.`,
+	connected: (name: string) => `${atStart(name)} is connected.`,
 	emptyHeadline: (name: string) =>
-		`${name} is connected, but nothing came back.`,
-	runningHeadline: (name: string) => `Copying your ${name} data`,
+		`${atStart(name)} is connected, but nothing came back.`,
+	partialHeadline: (name: string) =>
+		`${atStart(name)} is connected, but some of it didn't come.`,
+	runningHeadline: (name: string) => `Copying ${yourData(name)}`,
 	watch: "Watch it",
-	needsYouHeadline: (name: string) => `${name} needs you to finish signing in.`,
+	needsYouHeadline: (name: string) =>
+		`${atStart(name)} needs you to finish signing in.`,
 	continue: "Continue",
-	failedHeadline: (name: string) => `${name} didn't connect.`,
+	failedHeadline: (name: string) => `${atStart(name)} didn't connect.`,
 	failedFallback: "Something went wrong while copying your data.",
-	pausedHeadline: (name: string) => `${name} is paused.`,
-	revokedHeadline: (name: string) => `${name} was disconnected.`,
-	seeData: (name: string) => `See your ${name} data`,
+	pausedHeadline: (name: string) => `${atStart(name)} is paused.`,
+	revokedHeadline: (name: string) => `${atStart(name)} was disconnected.`,
+	seeData: (name: string) => `See ${yourData(name)}`,
 	retry: "Try again",
 } as const;
 
@@ -155,6 +170,14 @@ const NEEDS_YOU_STATES = new Set([
 	"awaiting_browser_login",
 	"awaiting_credential",
 ]);
+
+function plainGapSentence(gap: KnownGap, name: string): string {
+	const cause = resolveSyncCause(
+		{ error: gap.message, reason: gap.reason },
+		name,
+	);
+	return cause.known ? cause.sentence : "DataConnect could not copy this.";
+}
 
 export function firstSyncOutcome(
 	status: ConnectionSetupStatus,
@@ -259,7 +282,9 @@ export function firstSyncOutcome(
 	const missing = classifyKnownGaps(facts.gaps ?? []).coverageGaps.map(
 		(gap) => ({
 			label: gap.stream ? humanizeFieldLabel(gap.stream) : "Some data",
-			message: gap.message?.trim() || "DataConnect could not copy this.",
+			// The service's own text and codes stay on the technical page. A cause we
+			// know gets its plain sentence; any other gets one generic sentence.
+			message: plainGapSentence(gap, name),
 			retryable: gap.recovery_hint?.retryable === true,
 		}),
 	);
@@ -320,7 +345,7 @@ export function headlineFor(outcome: FirstSyncOutcome, name: string): string {
 		case "worked":
 			return outcomeCopy.connected(name);
 		case "partial":
-			return `${name} is connected, but some of it didn't come.`;
+			return outcomeCopy.partialHeadline(name);
 		case "empty":
 			return outcomeCopy.emptyHeadline(name);
 		case "running":

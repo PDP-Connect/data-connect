@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { formatConnectionDisplayName, isFallbackConnectionLabel } from "@pdpp/display";
 
+/** What `formatConnectionDisplayName` returns when neither the connection nor its service has a name. */
+export const NO_NAME_FALLBACK = "this data source";
+
 /**
  * Resolve the name shown for a connection when the saved value may be its connector key.
  * The rule lives in `@pdpp/display` so the console and the vendored Explore assembler share it.

@@ -23,7 +23,10 @@ export function ConnectHeader({
   name,
   title,
   step,
+  lastCrumb,
 }: {
+  /** The trail's last step. Default: "Add a data source"; a source's own page names the source. */
+  lastCrumb?: { href: string; label: string };
   connectorKey: string;
   description?: ReactNode;
   icon: ConnectorIconLike | null | undefined;
@@ -36,7 +39,7 @@ export function ConnectHeader({
       breadcrumbs={[
         { href: dashboardRoutes.section.overview, label: "Home" },
         { href: dashboardRoutes.section.records, label: "Data sources" },
-        { href: "/sources/add", label: "Add a data source" },
+        lastCrumb ?? { href: "/sources/add", label: "Add a data source" },
       ]}
       description={step ? <><span className="pdpp-caption">{step}</span>{description}</> : description}
       title={
