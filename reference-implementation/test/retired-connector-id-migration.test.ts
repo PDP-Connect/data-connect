@@ -202,6 +202,36 @@ test(
   })
 );
 
+test(
+  "every SQLite table keyed by connector id is one whose collision rule was decided",
+  withDb((db) => {
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all() as { name: string }[];
+    const keyedByConnector = tables
+      .filter(({ name }) =>
+        (db.prepare(`PRAGMA table_info("${name.replaceAll('"', '""')}")`).all() as { name: string; pk: number }[]).some(
+          (c) => Number(c.pk) > 0 && (c.name === "connector_id" || c.name === "connector_key")
+        )
+      )
+      .map(({ name }) => name);
+    assert.deepEqual(
+      keyedByConnector,
+      [
+        "connector_accepted_declarations",
+        "connector_activations",
+        "connector_checkpoint_withholds",
+        "connector_installs",
+        "connector_lifecycle_locks",
+        "connector_observation_runs",
+        "connectors",
+        "dataset_summary_stream_projection",
+      ],
+      "a new table keyed by connector id needs a precedence decision in connector-id-rename-migration.ts: its old-id rows are deleted on a key collision"
+    );
+  })
+);
+
 test("initDb renames retired ids stored in an existing database file", () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-retired-ids-"));
   const path = join(dir, "pdpp.sqlite");
