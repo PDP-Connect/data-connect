@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { formatRelative } from "@pdpp/display";
-import type { RefSchedule } from "./ref-client.ts";
+import type { RefConnectorSummary, RefSchedule } from "./ref-client.ts";
 import { scheduleEnabled, scheduleIntervalSeconds } from "./schedule-evidence.ts";
 
 /**
@@ -52,6 +52,11 @@ export function scheduleState(schedule: ScheduleFacts | null | undefined): Sched
 
 export function isScheduled(schedule: ScheduleFacts | null | undefined): boolean {
   return scheduleState(schedule).kind === "scheduled";
+}
+
+/** The one "last synced" fact: what Last synced, the status sentences and the overdue Schedule line all read. */
+export function lastSuccessfulSync(source: RefConnectorSummary): string | null {
+  return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
 }
 
 /**

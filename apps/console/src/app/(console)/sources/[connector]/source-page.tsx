@@ -18,7 +18,7 @@ import {
   isSetupFailedSource,
 } from "@pdpp/display";
 import { StopCopying } from "../../connect/status/[connectionId]/stop-copying.tsx";
-import { overdueScheduleSentence } from "../../lib/schedule-words.ts";
+import { lastSuccessfulSync, overdueScheduleSentence } from "../../lib/schedule-words.ts";
 import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
 import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
@@ -86,7 +86,7 @@ import {
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
 } from "../../lib/source-actionability.ts";
-import { UNMEASURED_CAVEAT, type SourceStatusAction, lastSuccessfulSync, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
+import { UNMEASURED_CAVEAT, type SourceStatusAction, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { readConnectorUpdates } from "../connector-updates-read.ts";

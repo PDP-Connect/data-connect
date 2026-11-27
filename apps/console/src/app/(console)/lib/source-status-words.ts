@@ -4,7 +4,7 @@
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
 import { savedSecretNoun, savedSecretUpdateLabel } from "./saved-secret-words.ts";
 import { EMPTY_FIRST_SYNC_CHECK, RETRY_AFTER_FAILURE_LABEL, emptyFirstSyncWords, resolveSyncCause } from "./sync-cause.ts";
-import { isScheduled } from "./schedule-words.ts";
+import { isScheduled, lastSuccessfulSync } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
@@ -81,10 +81,6 @@ export interface SourceStatusOptions {
 export const ENTER_THE_CODE = "Enter the code";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-export function lastSuccessfulSync(source: RefConnectorSummary): string | null {
-  return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
-}
 
 /** One form for "when" on every page: the relative form ("10 days ago"), as the Recent syncs list uses. */
 function formatWhen(value: string | null, now: Date, _offset = -now.getTimezoneOffset()): string | null {
