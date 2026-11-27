@@ -8,7 +8,7 @@ import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 export default function GrantsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <NamedPageLoadingSkeleton label="apps" rows={5} shape="list" title="Apps" />
+      <NamedPageLoadingSkeleton label="apps" rowAction={false} rows={3} shape="list" title="Apps" />
     </RecordroomShellWithPalette>
   );
 }

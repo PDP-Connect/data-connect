@@ -23,6 +23,7 @@ export function NamedPageLoadingSkeleton({
   children,
   framed = false,
   label,
+  rowAction = true,
   rows = 5,
   shape,
   title,
@@ -34,6 +35,8 @@ export function NamedPageLoadingSkeleton({
   framed?: boolean;
   /** The page's own name, e.g. "apps": announced as "Loading apps…". */
   label: string;
+  /** Whether each row of a "list" has a button at its right; the loaded rows of some pages have none. */
+  rowAction?: boolean;
   rows?: number;
   shape: LoadingShape;
   title: string;
@@ -42,7 +45,7 @@ export function NamedPageLoadingSkeleton({
     <LoadingRegion label={label}>
       <PageHeader breadcrumbs={breadcrumbs ? [...breadcrumbs] : undefined} title={title} />
       {shape === "rows" ? <RowsShape rows={rows} /> : null}
-      {shape === "list" ? <ListShape rows={rows} /> : null}
+      {shape === "list" ? <ListShape action={rowAction} rows={rows} /> : null}
       {shape === "form" ? <FormShape /> : null}
       {shape === "text" ? <TextShape /> : null}
       {children}
@@ -66,7 +69,7 @@ function RowsShape({ rows }: { rows: number }) {
 }
 
 /** A mark, two lines and an action: a list of things the person owns. */
-function ListShape({ rows }: { rows: number }) {
+function ListShape({ action, rows }: { action: boolean; rows: number }) {
   return (
     <div aria-hidden="true" className="divide-y divide-border/70 overflow-hidden rounded-md border border-border/70">
       {ROW_KEYS.slice(0, rows).map((key) => (
@@ -76,7 +79,7 @@ function ListShape({ rows }: { rows: number }) {
             <Bar className="h-4 w-40 max-w-[60%]" />
             <Bar className="h-3 w-28 max-w-[40%]" />
           </div>
-          <Bar className="h-7 w-20 shrink-0 rounded-md" />
+          {action ? <Bar className="h-7 w-20 shrink-0 rounded-md" /> : null}
         </div>
       ))}
     </div>
