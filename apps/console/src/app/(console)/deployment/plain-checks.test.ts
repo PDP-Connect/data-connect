@@ -81,3 +81,16 @@ test("the headline does not say everything works while configured search is stil
   const off = buildServerPractice("search-off")!
   assert.match(checksHeadline(plainServerChecks(off.inputs, off.address, off.probe)), /Everything is working/)
 })
+
+// Round 8 (F9): a check marked as needing attention offers the step; it never leaves the person guessing.
+test("every check that needs attention names a step", () => {
+  for (const state of ["fine", "search-off", "attention", "blocked", "checking"]) {
+    const model = buildServerPractice(state)!;
+    const searchUnknown = { ...model.inputs, embeddingBackendAvailable: false, embeddingWarmStatus: null };
+    for (const inputs of [model.inputs, searchUnknown]) {
+      for (const row of plainServerChecks(inputs, model.address, model.probe, true)) {
+        if (row.status === "warn" || row.status === "error") assert.ok(row.action || row.href, `${state}: ${row.name}`);
+      }
+    }
+  }
+});

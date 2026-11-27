@@ -29,6 +29,13 @@ export function plainServerChecks(
     warm?.mode === "lexical_only" ||
     (inputs.embeddingModelCachePresent === false &&
       inputs.embeddingDownloadAllowed === false)
+  const searchStatus = searchOff
+      ? "ok"
+      : inputs.embeddingBackendAvailable && inputs.embeddingModelCachePresent
+        ? "ok"
+        : warm?.status === "downloading" || warm?.status === "not_started"
+          ? "info"
+          : "warn" as const;
   return [
     {
       name: "Password",
@@ -71,13 +78,7 @@ export function plainServerChecks(
     },
     {
       name: "Search",
-      status: searchOff
-        ? "ok"
-        : inputs.embeddingBackendAvailable && inputs.embeddingModelCachePresent
-          ? "ok"
-          : warm?.status === "downloading" || warm?.status === "not_started"
-            ? "info"
-            : "warn",
+      status: searchStatus,
       sentence: searchOff
         ? "Search by words works. Search by meaning is off."
         : inputs.embeddingBackendAvailable && inputs.embeddingModelCachePresent
@@ -89,9 +90,7 @@ export function plainServerChecks(
               : warm?.status === "not_started"
                 ? "Search by meaning has not started yet. Search by words works."
                 : "DataConnect could not check search by meaning. Search by words works.",
-      ...(warm?.status === "failed" && !searchOff
-        ? { action: "Restart DataConnect." }
-        : {}),
+      ...(searchStatus === "warn" ? { action: "Restart DataConnect." } : {}),
     },
     {
       name: "Apps staying connected",
