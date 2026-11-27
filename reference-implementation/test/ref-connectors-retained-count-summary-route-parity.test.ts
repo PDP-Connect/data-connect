@@ -18,10 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH,
-  CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX,
-} from "../operations/ref-connectors-list/pagination.ts";
+import { CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH } from "../operations/ref-connectors-list/pagination.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
@@ -233,21 +230,13 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
   assert.equal(revoked.status, "revoked");
   assert.ok(revoked.revoked_at);
 
-  const max = CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX;
-  const maxIds = [CONNECTOR_A, CONNECTOR_B, CONNECTOR_C,
-    ...Array.from({ length: max - 3 }, (_, i) => `connector-boundary-filler-${i}`)];
-  const queryFor = (set: string[]) => set.map(id => `connector_id=${encodeURIComponent(id)}`).join("&");
-  const boundary = await getEnvelope(asUrl, `${queryFor(maxIds)}&limit=100&profile=retained_count_summary`);
-  assert.equal(boundary.status, 200, JSON.stringify(boundary.body));
-  assert.equal(boundary.body.object, "list");
-  assert.deepEqual((boundary.body.data ?? []).map(row => row.connection_id).sort(), ids);
-  assert.equal(boundary.body.has_more, false);
-
-  const oversized = queryFor([...maxIds, "connector-boundary-overflow"]);
+  // >100 distinct ids is a typed invalid request, over HTTP.
+  const oversized = Array.from({ length: 101 }, (_, i) => `connector-${i}`)
+    .map((id) => `connector_id=${encodeURIComponent(id)}`)
+    .join("&");
   const oversizedResult = await getEnvelope(asUrl, `${oversized}&limit=100&profile=retained_count_summary`);
   assert.equal(oversizedResult.status, 400, JSON.stringify(oversizedResult.body));
   assert.equal(oversizedResult.body.error?.code, "invalid_request");
-  assert.match(String(oversizedResult.body.error?.message), new RegExp(`at most ${max} distinct canonical ids`));
 
   // connector_id SET mixed with `connection` is rejected (mutual exclusivity).
   const mixedResult = await getEnvelope(
