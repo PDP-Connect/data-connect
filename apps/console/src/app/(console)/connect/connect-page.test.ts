@@ -13,7 +13,7 @@ import { ConnectView } from "./connect-page.tsx";
 
 const REMOTE_ACCESS_GIVES_THIS_DATACONNECT_AN_RE = /Remote access gives this DataConnect an address on the internet/;
 const PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE = /pdpp-btn[^>]*href="\/settings\/remote-access"/;
-const SCROLLS_SIDEWAYS_RE = /overflow-x-auto whitespace-nowrap/;
+const WRAPS_RE = /whitespace-pre-wrap break-words/;
 const COPY_COMMAND_RE = /Copy command/;
 const NOW_ASK_IT_ANOTHER_APP_X27_RE = /Now ask it|Another app&#x27;s help/;
 const ONE_OTHER_APP_ARE_CONNECTED_RE = /1 other app are connected/;
@@ -24,8 +24,10 @@ test("local setup explains remote access, wraps the address and supplies a copya
   const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://localhost:7663", apps: [] }));
   assert.match(html, REMOTE_ACCESS_GIVES_THIS_DATACONNECT_AN_RE);
   assert.match(html, PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE);
-  assert.match(html, SCROLLS_SIDEWAYS_RE);
-  assert.doesNotMatch(html, /break-all/);
+  assert.match(html, WRAPS_RE);
+  assert.doesNotMatch(html, /break-all|whitespace-nowrap|overflow-x-auto/);
+  // Copy sits under the text on a phone, so the text has the whole width.
+  assert.match(html, /flex min-w-0 flex-col gap-3 [^"]*sm:flex-row/);
   assert.match(html, COPY_COMMAND_RE);
   assert.doesNotMatch(html, NOW_ASK_IT_ANOTHER_APP_X27_RE);
   assert.equal(

@@ -7,8 +7,8 @@ export function CopyAddress({ address, command = false }: { address: string; com
   const { copied, error, copy } = useCopyAddress(address);
   return (
     <>
-      <div className="flex min-w-0 items-center gap-3 rounded-md border border-border p-3">
-        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap" data-command={command || undefined}>
+      <div className="flex min-w-0 flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center">
+        <code className="min-w-0 flex-1 whitespace-pre-wrap break-words" data-command={command || undefined}>
           {address}
         </code>
         <IcButton
