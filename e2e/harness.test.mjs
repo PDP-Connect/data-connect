@@ -246,6 +246,32 @@ test("ownership guard refuses each unsafe condition before a write", async t => 
   }
 })
 
+test("ownership guard fails without an existing owned data path or marker", async t => {
+  const root = await mkdtemp(join(tmpdir(), "e2e-owner-missing-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const data = join(root, "data")
+  const sentinel = join(root, "sentinel")
+  await writeFile(sentinel, "untouched")
+  const before = await snapshot(sentinel)
+  const env = {
+    E2E_BASE_URL: "http://127.0.0.1:1234",
+    E2E_HARNESS_ROOT: root,
+    E2E_DATA_DIR: data,
+    E2E_HARNESS_NONCE: "fixture-nonce",
+    E2E_OWNER_PASSWORD: "test-only",
+  }
+  await t.test("a missing data directory is not created", async () => {
+    await assert.rejects(assertHarnessOwnership(env, loopback), { code: "ENOENT", path: data })
+    assert.deepEqual(await snapshot(sentinel), before)
+  })
+  await t.test("an existing data directory without a marker is not adopted", async () => {
+    await mkdir(data)
+    await assert.rejects(assertHarnessOwnership(env, loopback), { code: "ENOENT", path: join(data, MARKER) })
+    await assert.rejects(readFile(join(data, MARKER), "utf8"), { code: "ENOENT" })
+    assert.deepEqual(await snapshot(sentinel), before)
+  })
+})
+
 test("watcher stop waits for an in-flight write and prevents subsequent ticks", async () => {
   let release
   let started
