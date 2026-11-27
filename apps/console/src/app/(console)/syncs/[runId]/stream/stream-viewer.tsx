@@ -3605,7 +3605,7 @@ function StreamStage({
       {closeConfirmArmed ? (
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
-      {!closeConfirmArmed ? <StreamInteractionDock
+      {!closeConfirmArmed && status.display !== "trouble" ? <StreamInteractionDock
         browserLost={status.display === "trouble"}
         connector={connector}
         preview={Boolean(previewState)}
@@ -5975,7 +5975,7 @@ function TroubleToast({ message, onRetry }: { message: string | null; onRetry?: 
     return null;
   }
   return (
-    <div aria-live="polite" className="pdpp-stream-toast-zone">
+    <div aria-live="polite" className="pdpp-stream-toast-zone" data-slot="trouble">
       <div className="pdpp-stream-toast-bubble flex flex-col gap-2">
         <p className="pdpp-caption">{plainBrowserTrouble(message)}</p>
         <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>

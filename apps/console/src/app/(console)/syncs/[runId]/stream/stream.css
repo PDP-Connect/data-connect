@@ -262,6 +262,10 @@ html:has(.pdpp-stream-dialog) {
   --pdpp-stream-toast-offset: 4rem;
 }
 
+.pdpp-stream-toast-zone[data-slot="trouble"] {
+  --pdpp-stream-toast-offset: 4rem;
+}
+
 .pdpp-stream-toast-zone[data-slot="interaction"] {
   --pdpp-stream-toast-offset: 4rem;
   max-inline-size: min(34rem, 100vw);

@@ -81,3 +81,12 @@ test("Try again re-applies the layout for a viewport failure and mints only for 
   assert.equal(words.retryPlan?.("viewport"), "same-session");
   assert.equal(words.retryPlan?.("mount"), "new-session");
 });
+
+// Round 8 (F3 / s111): the error card sat on top of the instruction panel and the Stop control.
+test("a lost browser replaces the instruction panel and leaves the corner Stop reachable", async () => {
+  const src = await readFile(VIEWER, "utf8");
+  assert.match(src, /\{!closeConfirmArmed && status\.display !== "trouble" \? <StreamInteractionDock/);
+  assert.match(src, /<div aria-live="polite" className="pdpp-stream-toast-zone" data-slot="trouble">/);
+  const css = await readFile(fileURLToPath(new URL("./stream.css", import.meta.url)), "utf8");
+  assert.match(css, /\.pdpp-stream-toast-zone\[data-slot="trouble"\]\s*\{\s*--pdpp-stream-toast-offset: 4rem;/);
+});

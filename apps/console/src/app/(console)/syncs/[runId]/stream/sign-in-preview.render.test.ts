@@ -49,6 +49,8 @@ test("practice draws the real full-screen dialog, controls and panel without a b
       assert.ok(dialog.querySelector('button[aria-label="Stop signing in"]'));
       assert.deepEqual(bannedCopyProblems(dialog.innerHTML), [], state);
       const panel = dialog.querySelector('form[aria-label="Finish signing in"]');
+      // Round 8: a lost browser replaces the instruction panel with its own card.
+      if (state === "browser-trouble") { assert.equal(panel, null); assert.match(dialog.textContent ?? "", /Try again/); continue; }
       if (state === "stop-question") assert.ok(dialog.querySelector('[role="alertdialog"]'));
       else {
         assert.match(panel?.querySelector("h1")?.textContent ?? "", /Sign in to Northwind/);
