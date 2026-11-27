@@ -9,7 +9,7 @@ import Link from "next/link";
 import { LoaderCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
-import { accountCopy, cannotAddCopy, cannotAddWhy, connectHeading, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
+import { accountCopy, cannotAddCopy, cannotAddWhy, connectHeading, sentenceName, gettingReadyCopy, isNewService, newServiceNote } from "./connect-copy.ts";
 
 export interface ExistingAccount {
   readonly connectionId: string;
@@ -147,15 +147,22 @@ export function CannotBeAddedHere({
   reason?: string | null;
 }) {
   const why = reason ? { instead: instead ?? cannotAddWhy(name, null).instead, reason } : cannotAddWhy(name, null);
+  // "Could not tell" is its own verdict: it does not also say "can't be added", and it offers a retry.
+  const undecided = reason ? reason === cannotAddWhy(name, "inspection_unavailable").reason : cannotAddWhy(name, null).undecided;
   return (
     <>
       <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={name} title={name} />
       <div className="grid max-w-xl gap-3 py-4" data-testid="cannot-be-added-here">
-        <p className="text-foreground">{cannotAddCopy.heading(name)}</p>
-        {why.reason ? <p className="pdpp-caption text-muted-foreground">{why.reason}</p> : null}
+        {undecided ? null : <p className="text-foreground">{cannotAddCopy.heading(sentenceName(name))}</p>}
+        {why.reason ? <p className={undecided ? "text-foreground" : "pdpp-caption text-muted-foreground"}>{why.reason}</p> : null}
         <p className="pdpp-caption text-muted-foreground">{why.instead}</p>
-        <div>
-          <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">
+        <div className="flex flex-wrap gap-2">
+          {undecided && connectorKey ? (
+            <Link className={buttonVariants({ size: "sm", variant: "default" })} href={`/sources/add/${encodeURIComponent(connectorKey)}`}>
+              {gettingReadyCopy.retry}
+            </Link>
+          ) : null}
+          <Link className={buttonVariants({ size: "sm", variant: undecided && connectorKey ? "ghost" : "default" })} href="/sources/add">
             {cannotAddCopy.back}
           </Link>
         </div>

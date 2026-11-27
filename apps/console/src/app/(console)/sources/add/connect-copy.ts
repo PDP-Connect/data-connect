@@ -59,23 +59,29 @@ export const cannotAddCopy = {
   back: "Back to all services",
 } as const;
 
+/** The name a sentence uses: the catalog's qualifier "(browser session)" tells two entries apart and has no place in prose. */
+export function sentenceName(name: string): string {
+  return name.replace(/\s*\(browser session\)\s*$/i, "");
+}
+
 /** Why a sign-in service cannot be added on this computer, and what to do instead. `reason` is the server's readiness reason. */
-export function cannotAddWhy(name: string, reason: string | null): { reason: string | null; instead: string } {
+export function cannotAddWhy(fullName: string, reason: string | null): { reason: string | null; instead: string; undecided: boolean } {
+  const name = sentenceName(fullName);
   const pickAnother = "Pick another service from the list.";
   switch (reason) {
     case "host_requirement_unmet":
-      return { reason: `This computer can't open the browser that ${name} needs for signing in.`, instead: `Add ${name} from DataConnect on a computer that can open a browser. ${pickAnother}` };
+      return { reason: `This computer can't open the browser that ${name} needs for signing in.`, instead: `Add ${name} from DataConnect on a computer that can open a browser. ${pickAnother}`, undecided: false };
     case "not_published":
-      return { reason: `${name} has not been published for DataConnect yet.`, instead: `Check again after DataConnect updates. ${pickAnother}` };
+      return { reason: `${name} has not been published for DataConnect yet.`, instead: `Check again after DataConnect updates. ${pickAnother}`, undecided: false };
     case "catalog_unavailable":
     case "inspection_unavailable":
     case "artifact_invalid":
-      return { reason: `DataConnect couldn't check whether ${name} can run on this computer.`, instead: `Try again in a few minutes. ${pickAnother}` };
+      return { reason: `DataConnect couldn't check whether ${name} can run on this computer.`, instead: `Try again in a few minutes. ${pickAnother}`, undecided: true };
     case "not_implemented":
-      return { reason: `DataConnect can't collect from ${name} yet.`, instead: `Check again after DataConnect updates. ${pickAnother}` };
+      return { reason: `DataConnect can't collect from ${name} yet.`, instead: `Check again after DataConnect updates. ${pickAnother}`, undecided: false };
     default:
       // An unknown reason still gets a neutral explanation and a way to retry.
-      return { reason: `DataConnect couldn't tell whether ${name} can be set up on this computer.`, instead: `Try again in a few minutes. ${pickAnother}` };
+      return { reason: `DataConnect couldn't tell whether ${name} can be set up on this computer.`, instead: `Try again in a few minutes. ${pickAnother}`, undecided: true };
   }
 }
 
