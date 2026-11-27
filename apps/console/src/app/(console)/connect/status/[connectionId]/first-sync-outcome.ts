@@ -74,6 +74,8 @@ export type FirstSyncOutcome =
 			readonly missing: readonly {
 				label: string;
 				message: string;
+				/** What the page says about trying again; null says nothing. */
+				retryNote: string | null;
 				retryable: boolean;
 				/** The cause needs the person (sign-in again), so it cannot retry by itself. */
 				needsPerson: boolean;
@@ -210,8 +212,25 @@ function plainGap(gap: KnownGap, name: string, status: ConnectionSetupStatus) {
 	);
 	return {
 		action: cause.known ? cause.action : null,
+		needsPerson: cause.known && cause.needsPerson,
 		sentence: kindSentence(status, cause),
 	};
+}
+
+/**
+ * Promise a retry only when a schedule will make it and the cause does not need
+ * the person. No schedule at all: say so plainly. Schedule unknown: say nothing.
+ */
+function retryNote(
+	name: string,
+	schedule: ScheduleFacts | null | undefined,
+	needsPerson: boolean,
+	retryable: boolean,
+): string | null {
+	if (!retryable || needsPerson || schedule === undefined) return null;
+	if (schedule !== null && /^Every\b/.test(formatSourceRowSchedule(schedule)))
+		return `It will try again the next time DataConnect checks ${name}.`;
+	return `Nothing is scheduled for ${name}, so it will not try again by itself.`;
 }
 
 /** The raw text and codes live on the run's technical page; this is the way there. */
@@ -348,7 +367,8 @@ export function firstSyncOutcome(
 				// The service's own text and codes stay on the technical page. A cause we
 				// know gets its plain sentence; any other gets one generic sentence.
 				message: plain.sentence,
-				needsPerson: plain.action === "Sign in again",
+				retryNote: retryNote(name, facts.schedule, plain.needsPerson, gap.recovery_hint?.retryable === true),
+				needsPerson: plain.needsPerson,
 				retryable: gap.recovery_hint?.retryable === true,
 			};
 		},
@@ -372,6 +392,7 @@ export function firstSyncOutcome(
 								? gap.message
 								: `${previous.message} ${gap.message}`,
 						needsPerson: previous.needsPerson || gap.needsPerson,
+						retryNote: previous.retryNote ?? gap.retryNote,
 						retryable: previous.retryable || gap.retryable,
 					}
 				: gap,

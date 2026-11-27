@@ -141,7 +141,7 @@ function Body({
 								<p className="text-foreground">{gap.label}</p>
 								<p className="pdpp-caption text-muted-foreground">
 									{gap.message}
-									{gap.retryable && !gap.needsPerson ? ` It will try again the next time DataConnect checks ${name}.` : ""}
+									{gap.retryNote ? ` ${gap.retryNote}` : ""}
 								</p>
 							</li>
 						))}

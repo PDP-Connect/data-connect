@@ -330,3 +330,19 @@ test("known recovery matches setup kind", () => {
   assert.equal(failedFile.kind === "failed" ? failedFile.retry.label : null, "Choose another file");
   assert.doesNotMatch(JSON.stringify(failedFile), /[Ss]ign[- ]in/);
 });
+
+// Round 3, finding 2: promise a retry only when a schedule will make it and the cause does not need the person.
+test("partial: no automatic-retry promise without an active schedule or when the person is needed", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const render = (facts: FirstSyncFacts, name = "Amazon") => visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(firstSyncOutcome(status(), name, facts)), name }))).replace(/\s+/g, " ");
+  const retryable = { kind: "skip_result", reason: "stream_collection_failed", message: "x", recovery_hint: { retryable: true } };
+  const manual = render({ ...withOrders, schedule: null, gaps: [retryable] });
+  assert.doesNotMatch(manual, /It will try again/);
+  assert.match(manual, /Nothing is scheduled for Amazon, so it will not try again by itself\./);
+  assert.match(manual, /Try again/);
+  const timeout = render({ ...withOrders, gaps: [{ kind: "skip_result", reason: "assistance_timed_out", message: "x", recovery_hint: { retryable: true } }] });
+  assert.doesNotMatch(timeout, /It will try again|Nothing is scheduled/);
+  assert.match(timeout, /Try again/);
+  assert.match(render({ ...withOrders, gaps: [retryable] }), /It will try again the next time DataConnect checks Amazon\./);
+  assert.doesNotMatch(render({ ...withOrders, schedule: undefined, gaps: [retryable] }), /It will try again|Nothing is scheduled/);
+});
