@@ -461,3 +461,14 @@ test("a rejected saved key says key and what to check; a rejected password says 
   const password = firstSyncOutcome(status({ setup_kind: "static_secret", credential: { credential_kind: "username_password" }, setup_state: "first_sync_failed", last_error: { reason: "invalid_credentials", remediation: "x" } } as never), "Steam", withOrders);
   assert.match(password.kind === "failed" ? password.reason : "", /Check the username and password\./);
 });
+
+// Round 9 (F34): a paused first-sync page says in one line what paused means, above its buttons.
+test("paused says what paused means before its buttons", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const paused = firstSyncOutcome(status({ setup_state: "paused" }), "Steam", withOrders);
+  assert.equal(paused.kind, "paused");
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(paused)));
+  const said = html.indexOf("Paused. Your records and sign-in are kept.");
+  assert.ok(said >= 0, "the one-line meaning is shown");
+  assert.ok(said < html.indexOf("Resume"), "and comes before the buttons");
+});

@@ -200,6 +200,8 @@ function Body({
 		case "paused":
 			// The same Resume action the Data sources list offers for a paused data source.
 			return (
+				<>
+				<p className="text-muted-foreground">Paused. Your records and sign-in are kept.</p>
 				<div className="flex flex-wrap gap-2">
 					<form action={resumeAction}>
 						<input name="connection_id" type="hidden" value={connectionId} />
@@ -214,6 +216,7 @@ function Body({
 					</form>
 					<LinkButton link={outcome.open} primary={false} />
 				</div>
+				</>
 			);
 		case "revoked":
 			return (
