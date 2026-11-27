@@ -269,8 +269,8 @@ export function ScheduleRow({ connectorIcon, summary, runsHref, deviceName, pres
           {pausedScheduleReason(summary) ? <p className="text-sm text-muted-foreground">{pausedScheduleReason(summary)}</p> : null}
         </div>
         {!localDevice ? <div className="flex gap-2">
-          <IcButton disabled={isPending} onClick={() => setEditState(editState === "editing" ? "idle" : "editing")} size="sm" variant="ghost">Change</IcButton>
-          {schedule ? <IcButton disabled={isPending || practice} onClick={enabled ? handlePause : handleResume} size="sm" variant="ghost">{enabled ? "Pause" : "Resume"}</IcButton> : null}
+          <IcButton aria-label={`Change how often ${displayName} syncs`} className="min-h-11" disabled={isPending} onClick={() => setEditState(editState === "editing" ? "idle" : "editing")} size="sm" variant="ghost">Change</IcButton>
+          {schedule ? <IcButton aria-label={`${enabled ? "Pause" : "Resume"} syncing ${displayName}`} className="min-h-11" disabled={isPending || practice} onClick={enabled ? handlePause : handleResume} size="sm" variant="ghost">{enabled ? "Pause" : "Resume"}</IcButton> : null}
         </div> : null}
       </div>
       {editState === "editing" ? <div className="grid justify-items-start gap-1 py-3" aria-label="How often to sync">

@@ -14,7 +14,7 @@ export function scheduleSentence(source: RefConnectorSummary, now = Date.now(), 
   if (schedule.next_due_at) {
     const hours = Math.round((Date.parse(schedule.next_due_at) - now) / 3_600_000);
     sentence += hours > 0 ? ` · next sync in about ${hours} ${hours === 1 ? "hour" : "hours"}` : " · next sync due soon";
-  } else sentence += " · next sync time is not known";
+  } else sentence = sentence.replace(/^Every /, "About every ");
   return sentence;
 }
 export function scheduleChoices(source: RefConnectorSummary) {
@@ -47,4 +47,9 @@ export function pausedScheduleReason(source: RefConnectorSummary): string | null
   if (source.source_kind === "local_device") return "Resume it on the device that sends this data.";
   if (!source.schedule) return "Choose a sync frequency to resume automatic syncs.";
   return null;
+}
+
+const dataSources = (count: number) => `${count} data ${count === 1 ? "source" : "sources"}`;
+export function scheduleSummaryLine(total: number, scheduled: number, partial: boolean): string {
+  return `${dataSources(total)} · ${scheduled} syncing on a schedule${partial ? " on this page" : ""}.`;
 }

@@ -1,7 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { IcButton } from "@pdpp/brand-react";
+import { buttonVariants, IcButton } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { cancelRunAction } from "../../../syncs/[runId]/actions.ts";
@@ -55,7 +55,7 @@ export function StopCopying({
 				/>
 			) : (
 				<button
-					className="pdpp-caption min-h-11 text-muted-foreground underline"
+					className={`${buttonVariants({ size: "sm", variant: "ghost" })} min-h-11`}
 					onClick={() => setConfirming(true)}
 					type="button"
 				>

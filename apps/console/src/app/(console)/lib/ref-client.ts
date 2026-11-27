@@ -2037,10 +2037,12 @@ export async function getConnectorSchedule(
   options: { connectorInstanceId?: string | null } = {}
 ): Promise<RefSchedule | null> {
   try {
-    const path = options.connectorInstanceId
-      ? `/_ref/connections/${encodeURIComponent(options.connectorInstanceId)}/schedule`
-      : `/_ref/connectors/${encodeURIComponent(connectorId)}/schedule`;
-    return (await refFetch(path)) as RefSchedule;
+    // The server answers a schedule read on the connector route only; the connection route has no GET.
+    const path = `/_ref/connectors/${encodeURIComponent(connectorId)}/schedule`;
+    return (await refFetch(
+      path,
+      options.connectorInstanceId ? { connector_instance_id: options.connectorInstanceId } : undefined
+    )) as RefSchedule;
   } catch (err) {
     if (err instanceof RefNotFoundError) {
       return null;

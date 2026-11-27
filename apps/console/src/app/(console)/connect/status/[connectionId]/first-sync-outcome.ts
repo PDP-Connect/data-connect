@@ -209,9 +209,14 @@ const COULD_NOT_COPY = "DataConnect could not copy this.";
  */
 function kindSentence(
 	status: ConnectionSetupStatus,
-	cause: { sentence: string; known: boolean },
+	cause: { sentence: string; known: boolean; credentialRejected?: boolean },
 ): string {
 	if (!cause.known) return COULD_NOT_COPY;
+	if (cause.credentialRejected && status.setup_kind === "static_secret") {
+		return status.credential.credential_kind === "username_password"
+			? `${cause.sentence} Check the username and password.`
+			: `${cause.sentence.replace(/the sign-in\.$/, "that key.")} Check that all of the key was copied and that it has not expired.`;
+	}
 	return status.setup_kind === "manual_upload" &&
 		/sign[- ]?in/i.test(cause.sentence)
 		? COULD_NOT_COPY

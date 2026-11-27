@@ -36,7 +36,7 @@ test("collector schedule sentences name the device when the server supplies it",
 
 test("automatic timing stays honest when the next run is not known", () => {
   const source = buildSchedulePractice("mixed")![0]!;
-  assert.match(scheduleSentence({ ...source, schedule: { ...source.schedule!, next_due_at: null } }), /next sync time is not known/);
+  assert.match(scheduleSentence({ ...source, schedule: { ...source.schedule!, next_due_at: null } }), /^About every day$/);
 });
 test("the current standard interval is marked even when it is recommended", () => {
   const source = buildSchedulePractice("mixed")![0]!;
@@ -61,4 +61,11 @@ test("choice labels use dots, not nested brackets", () => {
   const choices = scheduleChoices(buildSchedulePractice("mixed")![2]!);
   for (const choice of choices) { assert.doesNotMatch(choice.label, /[()]/); }
   assert.ok(choices.some((choice) => /^.+ · recommended/.test(choice.label)));
+});
+
+test("the summary line counts with the right plurals and says 'on a schedule'", async () => {
+  const { scheduleSummaryLine } = await import("./schedule-presentation.ts");
+  assert.equal(scheduleSummaryLine(1, 1, false), "1 data source · 1 syncing on a schedule.");
+  assert.equal(scheduleSummaryLine(6, 2, false), "6 data sources · 2 syncing on a schedule.");
+  assert.equal(scheduleSummaryLine(3, 0, true), "3 data sources · 0 syncing on a schedule on this page.");
 });

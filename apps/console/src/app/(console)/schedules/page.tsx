@@ -13,7 +13,7 @@ import { listDeviceExporterSourceInstances, listConnectorSummaries } from "../li
 import { listConnectorManifests } from "../lib/rs-client.ts";
 import { SupportCopy } from "../components/support-copy.tsx";
 import { ScheduleRow } from "./schedule-row.tsx";
-import { buildSchedulePractice } from "./schedule-presentation.ts";
+import { buildSchedulePractice, scheduleSummaryLine } from "./schedule-presentation.ts";
 import { SchedulesPoller } from "./schedules-poller.tsx";
 
 const SCHEDULES_PATH = "/schedules";
@@ -43,13 +43,13 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+          <div className="mx-auto w-full max-w-5xl">
             <PageHeading />
             <p className="text-[15px] text-muted-foreground">
               This could not be loaded. <Link className="text-primary underline" href="/schedules">Try again</Link>.
             </p>
             <SupportCopy details={err.message} />
-          </main>
+          </div>
         </RecordroomShellWithPalette>
       );
     }
@@ -59,13 +59,13 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
   if (page.kind === "error") {
     return (
       <RecordroomShellWithPalette>
-        <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-5xl">
           <PageHeading />
           <p className="text-[15px] text-muted-foreground">
             This could not be loaded. <Link className="text-primary underline" href="/schedules">Try again</Link>.
           </p>
           <SupportCopy details={page.message} />
-        </main>
+        </div>
       </RecordroomShellWithPalette>
     );
   }
@@ -80,9 +80,9 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
   return (
     <RecordroomShellWithPalette>
       <SchedulesPoller enabled={hasActiveRun} />
-      <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-5xl">
         <PageHeading />
-        {summaries.length > 0 ? <p className="mb-6 text-muted-foreground">{summaries.length} data sources · {summaries.filter((s) => s.source_kind !== "local_device" && s.schedule?.enabled).length} sync by themselves{page.hasMore ? " on this page" : ""}.</p> : null}
+        {summaries.length > 0 ? <p className="mb-6 text-muted-foreground">{scheduleSummaryLine(summaries.length, summaries.filter((s) => s.source_kind !== "local_device" && s.schedule?.enabled).length, page.hasMore)}</p> : null}
         {summaries.length > 0 ? (
           <ul className="border-t border-border/70">
             {summaries.map((summary) => (
@@ -110,7 +110,7 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
           nextCursor={page.nextCursor}
         />
 
-      </main>
+      </div>
     </RecordroomShellWithPalette>
   );
 }

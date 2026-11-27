@@ -450,3 +450,14 @@ test("partial expired session makes the repair step primary and See your data se
   assert.ok(signIn >= 0 && seeData > signIn, JSON.stringify(links));
   assert.notEqual(links[signIn]?.cls, links[seeData]?.cls, "the repair step is styled as the main button");
 });
+
+// Round 5, F16: a rejected saved key is a key, and one line says what to check.
+test("a rejected saved key says key and what to check; a rejected password says password", () => {
+  const key = firstSyncOutcome(status({ setup_kind: "static_secret", setup_state: "first_sync_failed", last_error: { reason: "invalid_credentials", remediation: "x" } }), "Steam", withOrders);
+  const keyReason = key.kind === "failed" ? key.reason : "";
+  assert.match(keyReason, /didn't accept that key\./);
+  assert.match(keyReason, /Check that all of the key was copied/);
+  assert.doesNotMatch(keyReason, /sign-in/);
+  const password = firstSyncOutcome(status({ setup_kind: "static_secret", credential: { credential_kind: "username_password" }, setup_state: "first_sync_failed", last_error: { reason: "invalid_credentials", remediation: "x" } } as never), "Steam", withOrders);
+  assert.match(password.kind === "failed" ? password.reason : "", /Check the username and password\./);
+});
