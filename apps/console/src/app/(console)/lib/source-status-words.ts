@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
+import { savedSecretNoun, savedSecretUpdateLabel } from "./saved-secret-words.ts";
 import { RETRY_AFTER_FAILURE_LABEL, resolveSyncCause } from "./sync-cause.ts";
 import { isScheduled } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
@@ -218,7 +219,7 @@ function lifecycleRow(
           ? action("resume", "Resume", false)
           : action("repair_credential", "Resume", false)
         : action("resume", "Resume", false);
-    return { row: 10, words: "Paused", tone: "faint", action: pausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? " and sign-in" : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+    return { row: 10, words: "Paused", tone: "faint", action: pausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${savedSecretNoun(options.credentialKind) === "key" ? "key" : "sign-in"}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
@@ -241,11 +242,11 @@ function lifecycleRow(
     const deviceText = deviceHasSteps && typeof devicePending === "number" && devicePending > 0
       ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send ${devicePending.toLocaleString()} record${devicePending === 1 ? "" : "s"}.`
       : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${name}.`;
-    const sentence = waitingForCode ? `${name} is waiting for a security code.` : isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
+    const sentence = waitingForCode ? `${name} is waiting for a security code.` : isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved ${savedSecretNoun(options.credentialKind)} updated.` : `${name} is waiting for you to finish a step.`;
     const words = waitingForCode ? sentence : isDevice ? (typeof devicePending === "number" && devicePending > 0 ? deviceText.replace(FINAL_STOP, "") : "Needs attention on your device") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
-        ? "Needs its saved sign-in details updated"
+        ? `Needs its saved ${savedSecretNoun(options.credentialKind)} updated`
         : surface === "provider_interaction"
           ? "Waiting for you to finish a step"
           : "Needs you";
@@ -254,7 +255,7 @@ function lifecycleRow(
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
-      action: waitingForCode ? action("server_cta", ENTER_THE_CODE, true) : isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: waitingForCode ? action("server_cta", ENTER_THE_CODE, true) : isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? savedSecretUpdateLabel(options.credentialKind) : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {
@@ -378,7 +379,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
       : reattachAction
         ? action("server_cta", reattachAction.cta, false)
         : null;
-    return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? " and sign-in" : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+    return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${savedSecretNoun(options.credentialKind) === "key" ? "key" : "sign-in"}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "blocked_maintainer") {
     if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}`, tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. ${UNMEASURED_CAVEAT}`, slot: null }, problem: false };

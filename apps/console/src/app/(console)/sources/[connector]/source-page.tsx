@@ -106,6 +106,7 @@ import { AddAnotherAccount } from "./add-another-account.tsx";
 import { RenameConnection } from "./rename-connection.tsx";
 import { SourceStateSentenceText } from "./source-state-sentence.tsx";
 import { StreamCollectionFactsLine } from "./stream-collection-facts.tsx";
+import { savedSecretNoun, savedSecretUpdateLabel } from "../../lib/saved-secret-words.ts";
 import { SyncNowButton } from "./sync-now-button.tsx";
 import { SourceUpdateSlot, type SourceUpdateModel } from "./source-update-section.tsx";
 import { buildSourceUpdateModel } from "./source-update-view-model.ts";
@@ -921,7 +922,8 @@ function ConnectorPageView({
               storedCredentialUpdateHref={credentialUpdateHref}
               hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
               topButtonShown={sourceStatus.action?.kind === "repair_sign_in"}
-              label={sourceStatus.action?.kind === "repair_sign_in" ? sourceStatus.action.label : "Update sign-in details"}
+              label={sourceStatus.action?.kind === "repair_sign_in" ? sourceStatus.action.label : savedSecretUpdateLabel(manifestCredentialKind(manifest))}
+              noun={savedSecretNoun(manifestCredentialKind(manifest))}
             />
             {!neverConnected && !revoked ? addAnotherAccountAction : null}
             <ConnectionDangerZone
@@ -1793,7 +1795,7 @@ function ConnectionIdentityLine({
 function PauseConnectionSection({ connectionId }: { connectionId: string | null }) {
   return (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-      <div><p className="pdpp-body">Pause syncing</p><p className="pdpp-body text-muted-foreground">Stops checking for now. Your records and sign-in are kept.</p></div>
+      <div><p className="pdpp-body">Pause syncing</p><p className="pdpp-body text-muted-foreground">Stops checking for now. Your records are kept.</p></div>
       <form className="shrink-0" action={pauseConnectionAction}>
         {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
         <IcButton data-testid="detail-action-pause-connection" size="sm" type="submit" variant="ghost">
@@ -1900,8 +1902,11 @@ function CredentialRepairLinks({
   storedCredentialUpdateHref,
   hasStaticSecretCredentialUpdate,
   label,
+  noun,
   topButtonShown,
 }: {
+  /** The saved secret's one name ("key" or "sign-in details"). */
+  noun: string;
   /** The top of the page already offers this step: Manage does not repeat the button. */
   topButtonShown: boolean;
   /** The same words the row and the status line use for this step. */
@@ -1914,7 +1919,7 @@ function CredentialRepairLinks({
   if (setupFailed || topButtonShown) return null;
   return storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate ? (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-      <p className="pdpp-body text-muted-foreground">Replace the saved sign-in details. Your records are kept.</p>
+      <p className="pdpp-body text-muted-foreground">Replace the saved {noun}. Your records are kept.</p>
       <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={storedCredentialUpdateHref}>{label}</Link>
     </div>
   ) : null;

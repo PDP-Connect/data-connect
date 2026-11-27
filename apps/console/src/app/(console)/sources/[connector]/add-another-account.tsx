@@ -25,7 +25,7 @@ export async function AddAnotherAccount({
   }
   return (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-      <p className="pdpp-body text-muted-foreground">Connect a second {entry.displayName} sign-in. This one stays as it is.</p>
+      <p className="pdpp-body text-muted-foreground">Connect a second {entry.displayName} account. This one stays as it is.</p>
       <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={addSourceHref(entry.connectorKey)}>
         Add another {entry.displayName} account
       </Link>
