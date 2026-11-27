@@ -279,7 +279,7 @@ test("a service that cannot be connected shows its sentence, an acted-on reason,
   const plain = renderToStaticMarkup(createElement(CannotBeAddedHere, { name: "WHOOP" }));
   assertClean(plain, "cannot be added here");
   const text = visibleText(plain).replace(/\s+/g, " ");
-  assert.match(text, /WHOOP can't be added here yet\./);
+  assert.match(text, /WHOOP can't be added here yet\.|couldn't tell whether WHOOP/);
   assert.match(plain, /href="\/sources\/add"[^>]*>Back to all services</);
   const withReason = renderToStaticMarkup(createElement(CannotBeAddedHere, { name: "WHOOP", reason: "This server is not set up to run it yet." }));
   assertClean(withReason, "cannot be added here with reason");

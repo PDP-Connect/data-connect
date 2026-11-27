@@ -75,6 +75,7 @@ test("Home, data sources, and data source pages use the shared status wording", 
   assert.match(sourcesModel, /statusWords: statusWordsNow/);
   assert.deepEqual(importedNames(detail, "\\.\\.\\/\\.\\.\\/lib\\/source-status-words\\.ts"), [
     "SourceStatusAction",
+    "UNMEASURED_CAVEAT",
     "manifestCredentialKind",
     "sourceNeverConnected",
     "sourceStateSentence",

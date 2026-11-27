@@ -40,7 +40,7 @@ const DIALOG_COMPOUND_RULE_STILL_PRESENT_RE = /\.pdpp-dialog\.pdpp-stream-dialog
 
 test("the pre-open page uses the normal frame without the old viewport-height padded wrapper", async () => {
   const src = await readFile(STREAM_VIEWER_FILE, "utf8");
-  assert.match(src, /<SignInFrame connector=\{connector\} title=\{`Sign in to/);
+  assert.match(src, /<SignInFrame connector=\{connector\} step=\{status.display !== "trouble"\} title=\{`Sign in to/);
   assert.doesNotMatch(src, /className="pdpp-stream-orientation-shell/);
 });
 
