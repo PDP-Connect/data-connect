@@ -54,3 +54,10 @@ test("large counts in the fold use separators", () => {
   const html = renderToStaticMarkup(createElement(SyncHistoryDays, { offset: 0, rows, sources: model.sources }));
   assert.match(html, /1,204 data sources checked/);
 });
+
+// Round 8 (F45): the empty state's text and its button have a gap, as other pages' empty states do.
+test("the empty history keeps a gap between its text and its button", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./daily-syncs-view.tsx", import.meta.url), "utf8");
+  assert.match(source, /<div className="grid justify-items-start gap-4"><p>Nothing has synced yet\.<\/p>[\s\S]*?Add a data source<\/Link><\/div>/);
+});
