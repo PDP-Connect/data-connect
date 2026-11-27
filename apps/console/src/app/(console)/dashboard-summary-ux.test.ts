@@ -100,3 +100,9 @@ test("the page keeps the seeded demos and route-level loading skeleton", async (
   assert.match(loading, /<LoadingRegion[^>]*label="this page"/);
   assert.doesNotMatch(loading, /ListLoadingSkeleton/);
 });
+
+test("the first-run Home title sits where the loading screen's title bar sits", async () => {
+  const overview = await readFile(OVERVIEW_FILE, "utf8");
+  const firstRun = overview.slice(overview.indexOf("function FirstRun"));
+  assert.match(firstRun.slice(0, 200), /className="mx-auto max-w-2xl pb-8"/, "no extra top padding: the loading screen has none");
+});

@@ -385,7 +385,7 @@ function AppsBlock({ data }: { data: HomeData }) {
 
 function FirstRun({ data, notice }: { data: HomeData; notice?: string }) {
   return (
-    <div className="mx-auto max-w-2xl py-8">
+    <div className="mx-auto max-w-2xl pb-8">
       <DemoNotice notice={notice} />
       {data.warning ? <PageWarning href={data.deploymentHref} /> : null}
       {data.offeredSources.length > 0 ? (
