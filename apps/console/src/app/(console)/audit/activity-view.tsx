@@ -64,7 +64,8 @@ function ChangeTarget({app,children}: {app:AppAccess;children:ReactNode}) {
   const href=accessChangeHref(app);
   return href ? <Link className="flex justify-between gap-4" href={href}>{children}</Link> : <div className="flex justify-between gap-4">{children}</div>;
 }
-export function ActivityDays({rows,changes,apps,sources,offset,params={},demo,days=10_000}: {rows:NamedAppDay[];changes:AccessChange[];apps:AppAccess[];sources:HistorySource[];offset:number;params?:Record<string,string|undefined>;demo?:string;days?:number}) {
+/** Everything the Activity list can show; the page's empty state reads this same list, so the two cannot disagree. */
+export function activityItems({rows,changes,apps,sources,params={}}: {rows:NamedAppDay[];changes:AccessChange[];apps:AppAccess[];sources:HistorySource[];params?:Record<string,string|undefined>}) {
   const byClient = new Map(apps.flatMap(app => app.clientIds.map(id => [id,app] as const)));
   const repeats = new Map<string,AccessChange & {count:number}>();
   for(const change of changes) {
@@ -73,11 +74,15 @@ export function ActivityDays({rows,changes,apps,sources,offset,params={},demo,da
     const key=JSON.stringify([change.day,app.hrefId,changeSentence(change,app,sources)]);
     const prior=repeats.get(key);if(prior) { prior.count++; }else { repeats.set(key,{...change,count:1}); }
   }
-  const items = [
+  return [
     ...rows.filter(row => params.only_access !== "true" && row.reads).map(row => ({ day: row.day, at: row.last_at ?? "", key: `read-${row.app.hrefId}`, row })),
     ...rows.filter(row => row.permission_refusals).map(row => ({ day: row.day, at: row.last_refusal_at ?? row.last_at ?? "", key: `refused-${row.app.hrefId}`, refusal: row })),
     ...[...repeats.values()].map(change => ({ day: change.day, at: change.at, key: change.id, change })),
   ].sort((a,b) => b.at.localeCompare(a.at));
+}
+export function ActivityDays({rows,changes,apps,sources,offset,params={},demo,days=10_000}: {rows:NamedAppDay[];changes:AccessChange[];apps:AppAccess[];sources:HistorySource[];offset:number;params?:Record<string,string|undefined>;demo?:string;days?:number}) {
+  const byClient = new Map(apps.flatMap(app => app.clientIds.map(id => [id,app] as const)));
+  const items = activityItems({rows,changes,apps,sources,params});
   const shown = visibleDays(items,days);
   return <>
     {shown.map(day => <Section key={day} title={dayLabel(day,offset)}><ul className="divide-y divide-border">{items.filter(item=>item.day===day).map(item => <li className="py-4" key={item.key}>{"row" in item && item.row ? <div><Link className="flex justify-between gap-4" href={appDayHref(item.row,demo,params.connection_id)}><div><p>{item.row.app.name} read your data {item.row.reads.toLocaleString("en-US")} time{item.row.reads===1?"":"s"}</p>{apps.some(app=>app.name === item.row.app.name && app !== item.row.app) ? <p className="text-[13px] text-muted-foreground">{item.row.app.place}</p> : null}</div><span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(item.row.last_at,offset)}</span></Link><ReadDayLines row={item.row} sources={sources} linked demo={demo} /></div> : "refusal" in item && item.refusal ? <Link className="flex justify-between gap-4" href={appDayHref(item.refusal,demo,params.connection_id)}><p><span className="mr-2" aria-hidden="true">◇</span>{item.refusal.app.name} was refused · {item.refusal.permission_refusals.toLocaleString("en-US")} time{item.refusal.permission_refusals===1?"":"s"}: it asked for something it may not read.</p><span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(item.at,offset)}</span></Link> : "change" in item && item.change ? <ChangeTarget app={byClient.get(item.change.client_id) as AppAccess}><p><span className="mr-2" aria-hidden="true">◇</span>{changeSentence(item.change,byClient.get(item.change.client_id) as AppAccess,sources)}{item.change.count>1 ? ` · ${item.change.count.toLocaleString("en-US")} times` : ""}</p><span className="shrink-0 text-[13px] text-muted-foreground">{historyTime(item.at,offset)}</span></ChangeTarget> : null}</li>)}</ul></Section>)}
@@ -87,7 +92,7 @@ export function ActivityView({ rows, changes, apps, sources, offset, days = 7, p
   firstDay?:string|null;beforeDay?:string|null;loadMore?:(cursor:string)=>Promise<HistoryPageChunk>;
   rows: NamedAppDay[]; changes: AccessChange[]; apps: AppAccess[]; sources: HistorySource[]; offset: number; days?: number; params?: Record<string,string | undefined>; demo?: string;
 }) {
-  const hasItems=rows.some(row=>(params.only_access!=="true" && row.reads>0) || row.permission_refusals>0) || changes.some(change=>apps.some(app=>app.clientIds.includes(change.client_id)));
+  const hasItems=activityItems({rows,changes,apps,sources,params}).length>0;
   return <>
     <PageHeader title="Activity" description="What apps read, and when." />
     <p className="mb-6 text-[13px] text-muted-foreground">DataConnect records what an app read, not what it asked for.</p>

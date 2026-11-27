@@ -67,3 +67,12 @@ test("an empty Activity says so above 'History starts'",()=>{
  assert.ok(said>=0,"the empty sentence is shown");
  assert.ok(html.indexOf("History starts")<0 || said<html.indexOf("History starts"),"and comes before the start line");
 });
+
+// Round 10 (F23): a change DataConnect's own sync made, with no sentence to show, is not an entry; the real scene has one.
+test("an Activity whose only change is DataConnect's own unnamed sync is empty", () => {
+  const runtime = { name: "DataConnect", clientIds: ["dataconnect-connector-runtime"], sourceAccess: [], hrefId: "own", grantIds: [], state: "stopped" } as never;
+  const change = { id: "e", trace_id: "t", day: "2026-11-25", at: "2026-11-25T12:00:00Z", client_id: "dataconnect-connector-runtime", change: "allowed", source_id: null, source_kind: null, connection_id: null } as never;
+  const html = renderToStaticMarkup(React.createElement(ActivityView, { apps: [runtime], rows: [], changes: [change], sources: [], offset: 0, firstDay: "2026-11-25" }));
+  assert.match(html, /No app has read your data yet\./);
+  assert.doesNotMatch(html, /Only changes to access/);
+});
