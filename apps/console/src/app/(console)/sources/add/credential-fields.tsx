@@ -64,7 +64,7 @@ export function CredentialFields({
             />
             {help?.more ? (
               <details className="pdpp-caption text-muted-foreground">
-                <summary className="inline-flex min-h-11 cursor-pointer items-center underline decoration-dotted underline-offset-4">Where to find it</summary>
+                <summary className="inline-flex min-h-11 cursor-pointer items-center underline decoration-dotted underline-offset-4">More help</summary>
                 <p className="mt-1 break-words">{help.more}</p>
               </details>
             ) : null}

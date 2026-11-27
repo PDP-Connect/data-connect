@@ -79,3 +79,16 @@ test("the sign-in body hands the alert id to the optional fields", async () => {
   const src = await readFile(new URL("./connect-bodies.tsx", import.meta.url), "utf8");
   assert.match(src, /<OptionalSignIn checkboxName=\{capture\.checkboxName\} errorId=\{error \? CONNECT_ERROR_ID : undefined\}/);
 });
+
+// Round 8 (F19): the page's "Where to find it" link and a field's disclosure never share one label.
+test("a field's long help sits behind 'More help', not a second 'Where to find it'", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(CredentialFields, {
+      fields: [{ autocomplete: null, helpText: "Enter your 17-digit SteamID64. Use the profile page while logged in. Do not enter your login name.", label: "Steam identity", name: "steamid", placeholder: null, required: true, secret: false, type: "text" }],
+      idPrefix: "key",
+      required: true,
+    })
+  );
+  assert.match(html, /<summary[^>]*>More help<\/summary>/);
+  assert.doesNotMatch(html, /Where to find it/);
+});
