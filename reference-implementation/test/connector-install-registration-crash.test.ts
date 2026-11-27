@@ -26,7 +26,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -459,6 +459,32 @@ test("killed between the pointer write and the registry commit: startup reconcil
 
     const summary = await startupReconcile(dir);
     assert.equal(summary.registered, 1, "the missing manifest of a listed install is registered");
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a first install retries after a crash between publishing and activating", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const store = createConnectorInstallStore();
+    assert.ok(existsSync(root), "the child published the digest root before crashing");
+    assert.equal((await store.listActive()).length, 0);
+    assert.equal(await registeredVersion(), null);
+
+    const stagedFixture = join(dir, "expected-artifact");
+    writeArtifact(stagedFixture, installedGmail);
+    const installed = await installService(dataDir, { store }).install("gmail", GMAIL_INSTALL_DIGEST);
+    assert.equal(installed.root, root);
+    assert.deepEqual((await store.listActive()).map(record => record.digest), [GMAIL_INSTALL_DIGEST]);
+    for (const file of ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"]) {
+      assert.deepEqual(readFileSync(join(root, file)), readFileSync(join(stagedFixture, file)));
+    }
+    assert.equal(await registeredVersion(), installedGmail.version);
     assert.equal((await agreement()).agree, true);
   });
 });
