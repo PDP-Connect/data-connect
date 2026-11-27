@@ -15,9 +15,16 @@ test("raw technical browser errors never reach the owner", () => {
   }
 });
 
-test("a sentence the server wrote in plain words passes through", () => {
-  assert.equal(plainBrowserTrouble("The browser could not start."), "The browser could not start.");
+// Round 7 review B3: a closed mapping. Only sentences DataConnect itself wrote are shown.
+test("only authored sentences pass; any other text becomes the one generic sentence", () => {
+  for (const raw of ["The browser could not start.", "Something odd happened with sk-live-abc123", "The server said no", "Timeout"]) {
+    assert.equal(plainBrowserTrouble(raw), COULDNT_REACH_BROWSER, raw);
+  }
+  for (const known of ["The browser isn't available right now.", "This browser session expired. Try again.", "The browser could not start. Try again.", COULDNT_REACH_BROWSER]) {
+    assert.equal(plainBrowserTrouble(known), known);
+  }
 });
+
 
 test("the helper says what a lost browser means, offers Try again and hides Done", async () => {
   const src = await readFile(VIEWER, "utf8");

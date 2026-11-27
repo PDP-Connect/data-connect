@@ -46,7 +46,7 @@ const STREAM_REACH_REASON_SET = new Set<string>(STREAM_REACH_REASONS);
  * — that silence is exactly what let the 503/streaming_companion_unavailable
  * case go unnoticed before this reason was mapped.
  */
-const STREAM_REACH_MESSAGE: Record<StreamReachReason, string> = {
+export const STREAM_REACH_MESSAGE: Record<StreamReachReason, string> = {
   companion_unavailable: "The browser is no longer running. Try again.",
   invalid_token: "This browser link isn't valid. Try again.",
   session_consumed: "This browser was already opened elsewhere. Try again.",
