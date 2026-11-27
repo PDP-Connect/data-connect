@@ -34,7 +34,7 @@ test("a small button that asks for min-h-11 gets it, whatever the brand sheet sa
 
 // Round 11 (F3): the drawn box of a button is 44px on a touch screen; the invisible hit area is not enough.
 test("buttons that draw a box get a 44px min-height under a coarse pointer, outside any layer", () => {
-  const rule = /@media \(pointer: coarse\) \{\s*\.pdpp-btn,\s*\[data-slot="button"\],[^{]*\{\s*min-height: 44px;/.exec(globals);
+  const rule = /@media \(pointer: coarse\) \{\s*\.pdpp-btn,\s*\[data-slot="button"\],\s*\[class~="group\/button"\],[^{]*\{[^}]*min-height: 44px !important;/.exec(globals);
   assert.ok(rule, "one unlayered coarse-pointer rule for every button");
 });
 

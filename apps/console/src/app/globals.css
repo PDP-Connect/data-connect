@@ -144,8 +144,15 @@ textarea::placeholder {
 @media (pointer: coarse) {
   .pdpp-btn,
   [data-slot="button"],
-  button.rr-lens {
-    min-height: 44px;
+  [class~="group/button"],
+  .rr-lens,
+  .rr-x-queryinput__chevron,
+  .rr-x-queryinput__jump,
+  .rr-x-toolbar-button,
+  .rr-x-chip__x,
+  .rr-x-datechip__x {
+    /* !important: several of these carry their own min-height or height from page sheets of equal weight. */
+    min-height: 44px !important;
   }
 }
 
