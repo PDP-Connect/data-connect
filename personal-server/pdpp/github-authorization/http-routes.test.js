@@ -133,6 +133,32 @@ test("consent handler returns the adapter's explicit refusal code", async () => 
   })
 })
 
+test("consent handler forwards rich authorization details without replacing legacy scopes", async () => {
+  const details = [{ type: "fixture", locations: ["https://example.invalid/collection"] }]
+  const payload = { session_id: "fixture", scopes: ["repo:read"], authorization_details: details }
+  const seen = []
+  const grant = { request_id: "request-fixture" }
+  const handle = consentHandler({ createConsentRequest(input) { seen.push(input); return grant } })
+  const response = await handle({
+    req: { json: async () => payload },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(seen, [{ sessionId: "fixture", scopes: ["repo:read"], authorizationDetails: details }])
+  assert.deepEqual(response, { body: grant, status: 201 })
+})
+
+test("consent handler supplies a stable default code for an uncoded adapter error", async () => {
+  const handle = consentHandler({ createConsentRequest() { throw new Error("synthetic fixture error") } })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture", scopes: ["repo:read"] }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    body: { error: "synthetic fixture error", code: "invalid_request" },
+    status: 400,
+  })
+})
+
 test("credential redemption accepts direct local request origin", async () => {
   const { app, redemptions } = createRedemptionApp()
   const authorization = await redemptionAuthorization({
