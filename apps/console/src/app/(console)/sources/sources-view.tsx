@@ -63,6 +63,8 @@ export function SourcesView({
   ));
   const filteredRows = filterSourcesForList(listRows, query);
   const showFilter = listRows.length > 10;
+  // Nothing is connected: the disconnected group is the page, so it starts open.
+  const onlyDisconnected = listRows.length === 0 && disconnected.length > 0;
 
   if (instances.length === 0 && !pagingInPlay) {
     return (
@@ -127,12 +129,12 @@ export function SourcesView({
           ))}
           {filteredRows.length === 0 ? (
             <li className="rr-s-no-results">
-              {query ? "No data sources match that filter." : "No data sources on this page."}
+              {query ? "No data sources match that filter." : onlyDisconnected ? `No connected data sources. ${disconnected.length.toLocaleString()} ${disconnected.length === 1 ? "is" : "are"} disconnected.` : "No data sources on this page."}
             </li>
           ) : null}
         </ul>
 
-      <FoldedGroup instances={disconnected} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Disconnected" note="These data sources are disconnected. Their records stay available. Set up again to start collecting again." />
+      <FoldedGroup open={onlyDisconnected} instances={disconnected} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Disconnected" note="These data sources are disconnected. Their records stay available. Set up again to start collecting again." />
       <FoldedGroup instances={archived} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Archived" note="These data sources no longer sync. Their records stay available." />
       <FoldedGroup instances={setupNotCompleted} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Setup never completed" note="These setup attempts did not finish. No records were collected. Continue setup to try again." />
       </section>
@@ -391,8 +393,9 @@ function ReactivateCeremony({
   );
 }
 
-function FoldedGroup({ instances, interactive, reactivateAction, resumeAction, resumeScheduleAction, resumeSetupAction, revokeAction, runNowAction, label, note }: {
+function FoldedGroup({ instances, interactive, open = false, reactivateAction, resumeAction, resumeScheduleAction, resumeSetupAction, revokeAction, runNowAction, label, note }: {
   instances: SourceInstanceView[];
+  open?: boolean;
   interactive: boolean;
   reactivateAction: FormAction;
   resumeAction: FormAction;
@@ -405,7 +408,7 @@ function FoldedGroup({ instances, interactive, reactivateAction, resumeAction, r
 }) {
   if (instances.length === 0) return null;
   return (
-    <details className="rr-s-folded">
+    <details className="rr-s-folded" open={open}>
       <summary>{label} · {instances.length.toLocaleString()}</summary>
       <Text as="p" className="rr-s-folded__note" color="muted">{note}</Text>
       <ul className="rr-s-folded__list">
