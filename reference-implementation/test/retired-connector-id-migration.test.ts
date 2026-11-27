@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { gunzipSync } from "node:zlib";
 import {
   describeConnectorIdRename,
@@ -13,7 +14,6 @@ import {
 } from "../server/connector-id-rename-migration.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { SqliteDriver } from "../server/sqlite-driver.ts";
 
 type Db = ReturnType<typeof getDb>;
 
@@ -259,7 +259,10 @@ const RENAMED: Readonly<Record<string, string>> = {
 };
 const renamed = (id: string): string => RENAMED[id] ?? id;
 
-type Readable = Pick<Db, "prepare">;
+/** The read surface shared by the server's handle and a plain node:sqlite connection. */
+interface Readable {
+  prepare(sql: string): { all(...params: string[]): unknown[]; get(...params: string[]): unknown };
+}
 
 /** Ordinary tables (not virtual or FTS shadow tables), with whether each has a connector_id column. */
 function plainTables(db: Readable): { name: string; hasConnectorId: boolean }[] {
@@ -310,7 +313,7 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
   const path = join(dir, "pdpp.sqlite");
   try {
     writeFileSync(path, gunzipSync(readFileSync(fixture)));
-    const original = new SqliteDriver(path, { fileMustExist: true, readonly: true });
+    const original = new DatabaseSync(path, { readOnly: true });
     const before = snapshot(original);
     original.close();
 
