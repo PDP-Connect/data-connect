@@ -3514,7 +3514,9 @@ function StreamStage({
           keyboardFocusStateRef={keyboardFocusStateRef}
           localSurfaceViewportInfo={nekoLocalSurfaceViewportInfo}
           logDebug={logDebug}
+          onMountFailure={(message) => onStatus({ cause: "network", display: "trouble", troubleMessage: message })}
           onPresentationViewportReady={handleNekoPresentationViewportReady}
+          onRetry={onRetry}
           presentationViewportInfo={nekoPresentationViewportInfo}
           session={nekoSession}
           setKeyboardAffordanceVisible={setKeyboardAffordanceVisible}
@@ -3862,7 +3864,9 @@ function NekoSurface({
   keyboardFocusStateRef,
   localSurfaceViewportInfo,
   logDebug,
+  onMountFailure,
   onPresentationViewportReady,
+  onRetry,
   presentationViewportInfo,
   setKeyboardAffordanceVisible,
   session,
@@ -3877,10 +3881,14 @@ function NekoSurface({
   keyboardFocusStateRef: { current: MobileKeyboardFocusState };
   localSurfaceViewportInfo: StreamViewportInfo | null;
   logDebug: StreamDebugLogger;
+  /** Tells the parent the remote browser could not be mounted, so the sign-in can't be marked done. */
+  onMountFailure?: (message: string) => void;
   onPresentationViewportReady: (
     viewport: StreamViewportInfo,
     result: { reasons?: string[]; status: "degraded" | "settled" }
   ) => void;
+  /** Opens a fresh browser session; the same path as the toast's Try again. */
+  onRetry?: (() => void) | undefined;
   presentationViewportInfo: StreamViewportInfo | null;
   setKeyboardAffordanceVisible: (visible: boolean) => void;
   session: NekoSessionInfo;
@@ -3904,6 +3912,12 @@ function NekoSurface({
   const applyViewportRef = useRef(applyViewport);
   const [clientConfig, setClientConfig] = useState<NekoClientConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The parent's callback is a fresh closure each render; a ref keeps this effect firing once per error.
+  const onMountFailureRef = useRef(onMountFailure);
+  onMountFailureRef.current = onMountFailure;
+  useEffect(() => {
+    if (error) onMountFailureRef.current?.(plainBrowserTrouble(error));
+  }, [error]);
   const [configLoadRetryEpoch, setConfigLoadRetryEpoch] = useState(0);
   const [mediaRefreshEpoch, setMediaRefreshEpoch] = useState(0);
   const [mediaDisplayable, setMediaDisplayable] = useState(false);
@@ -4726,6 +4740,10 @@ function NekoSurface({
               <button
                 className="mt-4 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs hover:bg-muted"
                 onClick={() => {
+                  if (onRetry) {
+                    onRetry();
+                    return;
+                  }
                   setError(null);
                   setMediaReady(false);
                   setMediaDisplayable(false);
@@ -5815,6 +5833,7 @@ function StreamInteractionDock({
   }
 
   function submitInteraction(data?: Record<string, string>) {
+    if (browserLost) return;
     if (preview) { setError(previewError ?? null); return; }
     const formData = new FormData();
     formData.set("run_id", runId);

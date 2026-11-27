@@ -48,3 +48,18 @@ test("the helper keeps a one-line DataConnect bar with the way back to the sourc
   assert.match(src, /data-testid="stream-way-back"/);
   assert.match(src, /← DataConnect/);
 });
+
+// Review B6.
+test("a raw fetch failure from the browser is never shown or spoken", () => {
+  for (const raw of ["Failed to fetch", "TypeError: Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource.", "fetch failed"]) {
+    assert.equal(plainBrowserTrouble(raw), COULDNT_REACH_BROWSER, raw);
+  }
+});
+
+test("a failed remote-browser mount reaches the parent, hides Done, and Try again re-mints", async () => {
+  const src = await readFile(VIEWER, "utf8");
+  assert.match(src, /onMountFailure=\{\(message\) => onStatus\(\{ cause: "network", display: "trouble", troubleMessage: message \}\)\}/);
+  assert.match(src, /onMountFailureRef\.current\?\.\(plainBrowserTrouble\(error\)\)/);
+  assert.match(src, /onClick=\{\(\) => \{\s*if \(onRetry\) \{\s*onRetry\(\);\s*return;/);
+  assert.match(src, /function submitInteraction\(data\?: Record<string, string>\) \{\s*if \(browserLost\) return;/);
+});
