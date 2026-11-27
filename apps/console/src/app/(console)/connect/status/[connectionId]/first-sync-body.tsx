@@ -210,7 +210,15 @@ function Body({
 				</div>
 			);
 		case "revoked":
-			return <LinkButton link={outcome.addAnother} primary />;
+			return (
+				<>
+					<p className="text-muted-foreground">{outcome.note}</p>
+					<div className="flex flex-wrap gap-2">
+						<LinkButton link={outcome.open} primary />
+						<LinkButton link={outcome.connectAgain} primary={false} />
+					</div>
+				</>
+			);
 	}
 }
 

@@ -95,7 +95,12 @@ export type FirstSyncOutcome =
 			readonly technical: OutcomeLink | null;
 	  }
 	| { readonly kind: "paused"; readonly open: OutcomeLink }
-	| { readonly kind: "revoked"; readonly addAnother: OutcomeLink };
+	| {
+			readonly kind: "revoked";
+			readonly note: string;
+			readonly open: OutcomeLink;
+			readonly connectAgain: OutcomeLink;
+	  };
 
 const ADD_ANOTHER: OutcomeLink = {
 	href: "/sources/add",
@@ -250,7 +255,15 @@ export function firstSyncOutcome(
 ): FirstSyncOutcome {
 	const retryHref = setupHref(status);
 	if (status.setup_state === "revoked")
-		return { addAnother: { ...ADD_ANOTHER }, kind: "revoked" };
+		return {
+			connectAgain: {
+				href: `/sources/add?source_q=${encodeURIComponent(status.connector_id)}`,
+				label: `Connect ${name} again`,
+			},
+			kind: "revoked",
+			note: "Your records stay.",
+			open: { href: sourceRecordsHref(status), label: outcomeCopy.seeData(name) },
+		};
 	if (status.setup_state === "paused") {
 		return {
 			kind: "paused",

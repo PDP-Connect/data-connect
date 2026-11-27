@@ -358,3 +358,21 @@ test("partial: Try again is the primary button and See your data the secondary",
   assert.doesNotMatch(cls("Try again"), /pdpp-btn--ghost/);
   assert.match(cls("See your Amazon data"), /pdpp-btn--ghost/);
 });
+
+// A disconnected data source is not a dead end: the page says the records stay and offers both ways on.
+test("revoked: says the records stay, and offers the data and a new connection", async () => {
+  const outcome = firstSyncOutcome(status({ setup_state: "revoked" }), "Steam", withOrders);
+  assert.equal(outcome.kind, "revoked");
+  if (outcome.kind !== "revoked") return;
+  assert.equal(headlineFor(outcome, "Steam"), "Steam was disconnected.");
+  assert.equal(outcome.note, "Your records stay.");
+  assert.equal(outcome.open.label, "See your Steam data");
+  assert.match(outcome.open.href, /^\/explore\?connection=conn_1/);
+  assert.equal(outcome.connectAgain.label, "Connect Steam again");
+  assert.equal(outcome.connectAgain.href, "/sources/add?source_q=amazon");
+  const { FirstSyncBody } = await bodyModule;
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Steam" })));
+  assert.match(text, /Your records stay\./);
+  assert.match(text, /See your Steam data/);
+  assert.match(text, /Connect Steam again/);
+});
