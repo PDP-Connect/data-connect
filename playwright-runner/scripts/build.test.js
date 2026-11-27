@@ -259,3 +259,20 @@ it("does not leave a browser destination behind after a missing-cache copy", () 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+it("keeps an absolute output path independent of the working directory", () => {
+  const output = join(resolve(tmpdir()), "fixture-runner", "result")
+  expect(parseBuildOptions(["--output", output, "--lean"])).toMatchObject({
+    outputPath: output,
+    isLean: true,
+    requireBrowser: false,
+  })
+})
+
+it("keeps a non-hermetic browser cache path as configured, including spaces", () => {
+  const cache = join(resolve(tmpdir()), "fixture browser cache")
+  expect(getPlaywrightBrowserPath({
+    env: { PLAYWRIGHT_BROWSERS_PATH: cache },
+    resolveCoreManifest: () => { throw new Error("non-hermetic cache must not resolve a package") },
+  })).toBe(cache)
+})
