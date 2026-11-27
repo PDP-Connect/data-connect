@@ -17,7 +17,10 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { spawnCrashChild } from "./crash-harness.ts";
 
@@ -47,15 +50,19 @@ export interface ContentionResult {
 export async function runContention(options: {
   attachments?: readonly string[];
   backend: "postgres" | "sqlite";
+  holdWriteLock?: { acquire(): void; release(): void };
   sqlitePath?: string;
   writers: number;
   writesPerWriter: number;
 }): Promise<ContentionResult> {
+  const startDir = options.holdWriteLock ? mkdtempSync(join(tmpdir(), "pdpp-ingest-start-")) : undefined;
+  const gatedRounds = new Set<number>();
   const children = Array.from({ length: options.writers }, (_, n) =>
     spawnCrashChild(CHILD, {
       args: [options.backend, options.sqlitePath ?? "-", `w${n}`, String(options.writesPerWriter)],
       env: {
         ...(options.attachments ? { CONTENTION_CHILD_ATTACHMENT: options.attachments[n] } : {}),
+        ...(startDir ? { CONTENTION_START_DIR: startDir } : {}),
         // This test asserts the allocation contract, not the queueing budget:
         // a loaded host may stall one writer past the 2 s production default
         // and get a retryable `connector_instance_busy`, which is not a defect here.
@@ -68,7 +75,24 @@ export async function runContention(options: {
   try {
     for (let round = 0; round < options.writesPerWriter; round += 1) {
       await Promise.all(children.map((child) => child.parked(CONTENTION_POINT)));
-      for (const child of children) child.resume();
+      if (!startDir || !options.holdWriteLock) {
+        for (const child of children) child.resume();
+        continue;
+      }
+      options.holdWriteLock.acquire();
+      try {
+        for (const child of children) child.resume();
+        const markers = children.map((_, n) => join(startDir, `w${n}-${round}`));
+        // The writers have a 60 s SQLite busy timeout; do not leave a failed test holding the lock.
+        const deadline = Date.now() + 45_000;
+        while (!markers.every((file) => existsSync(file))) {
+          assert.ok(Date.now() < deadline, `round ${round}: not all writers reached the ingest call`);
+          await sleep(5);
+        }
+        gatedRounds.add(round);
+      } finally {
+        options.holdWriteLock.release();
+      }
     }
     const exits = await Promise.all(children.map((child) => child.exited));
     const acks: Ack[] = [];
@@ -106,9 +130,11 @@ export async function runContention(options: {
     let overlappedRounds = 0;
     for (let round = 0; round < options.writesPerWriter; round += 1) {
       const writes = timings.filter((timing) => timing.index === round);
+      const lastStart = Math.max(...writes.map((timing) => timing.resumed));
+      const firstCommit = Math.min(...writes.map((timing) => timing.committed));
       if (
         new Set(writes.map((timing) => timing.writer)).size === options.writers &&
-        Math.max(...writes.map((timing) => timing.resumed)) < Math.min(...writes.map((timing) => timing.committed))
+        (gatedRounds.has(round) ? lastStart <= firstCommit : lastStart < firstCommit)
       ) {
         overlappedRounds += 1;
       }
@@ -118,7 +144,11 @@ export async function runContention(options: {
     );
     return { acks, children: result, overlappedRounds };
   } finally {
-    await Promise.all(children.map((child) => child.kill()));
+    try {
+      await Promise.all(children.map((child) => child.kill()));
+    } finally {
+      if (startDir) rmSync(startDir, { force: true, recursive: true });
+    }
   }
 }
 

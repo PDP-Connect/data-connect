@@ -16,6 +16,8 @@
 // host clock shared by all children.
 // A rejected write prints {"writer","key","index","error"} and the child
 // exits 1 after the loop, so the parent sees both the ack set and the failure.
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { crashPoint } from "../../../server/crash-point.ts";
 import { closeDb, initDb } from "../../../server/db.ts";
 import { closePostgresStorage, initPostgresStorage } from "../../../server/postgres-storage.ts";
@@ -51,6 +53,8 @@ for (let index = 0; index < writes; index += 1) {
   crashPoint("contention:before-ingest");
   const resumed = Date.now();
   try {
+    const startDir = process.env.CONTENTION_START_DIR;
+    if (startDir) writeFileSync(join(startDir, `${writerId}-${index}`), "", { flag: "wx" });
     await ingestRecord(
       CONTENTION_CONNECTOR_ID,
       {
