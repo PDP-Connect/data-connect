@@ -52,3 +52,10 @@ test("the activity page's words use no internal names", async () => {
     assert.doesNotMatch(text, /audit events|not what it asked\./, file);
   }
 });
+
+// Closing judge, round 6 (F12): the own-sync line names the source or is not shown.
+test("DataConnect's own sync line gives an empty line (not shown) when it cannot name the source", () => {
+  const runtime = { name: "DataConnect", clientIds: ["dataconnect-connector-runtime"], sourceAccess: [], hrefId: "x" } as never;
+  const sentence = changeSentence({ id: "e", trace_id: "t", day: "2026-11-25", at: "2026-11-25T12:00:00Z", client_id: "dataconnect-connector-runtime", change: "allowed", source_id: null, source_kind: null, connection_id: null }, runtime, []);
+  assert.equal(sentence, "");
+});

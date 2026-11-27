@@ -45,7 +45,8 @@ export function changeSentence(change: AccessChange, app: AppAccess, sources: Hi
   }).filter(name=>name !== "Data source"))];
   const knownSource = names.length ? `${names.slice(0,3).join(", ")}${names.length > 3 ? ` and ${names.length-3} more` : ""}` : null;
   if (OWN_SYNC_CLIENT_IDS.has(change.client_id) || app.clientIds.some((id) => OWN_SYNC_CLIENT_IDS.has(id))) {
-    return knownSource ? `DataConnect's own sync was set up for ${knownSource}.` : "DataConnect's own sync was set up for a data source.";
+    // An own-sync line that cannot name the source says nothing a person can use: "" means do not show it.
+    return knownSource ? `DataConnect's own sync was set up for ${knownSource}.` : "";
   }
   if (change.change === "not_allowed") { return `You didn't allow ${app.name}.`; }
   if (change.change === "removed") { return knownSource ? `You stopped ${app.name} reading ${knownSource}.` : `You removed ${app.name}'s access.`; }
@@ -68,6 +69,7 @@ export function ActivityDays({rows,changes,apps,sources,offset,params={},demo,da
   const repeats = new Map<string,AccessChange & {count:number}>();
   for(const change of changes) {
     const app=byClient.get(change.client_id);if(!app) { continue; }
+    if(!changeSentence(change,app,sources)) { continue; }
     const key=JSON.stringify([change.day,app.hrefId,changeSentence(change,app,sources)]);
     const prior=repeats.get(key);if(prior) { prior.count++; }else { repeats.set(key,{...change,count:1}); }
   }
