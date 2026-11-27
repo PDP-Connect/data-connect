@@ -25,8 +25,8 @@ test("no loading screen announces a word the finished page does not use", () => 
   }
 });
 
-test("Schedules and Search loading screens draw their page's own title", () => {
-  for (const [rel, title] of [["schedules/loading.tsx", "Schedules"], ["search/loading.tsx", "Search"]] as const) {
+test("Schedules and Search loading screens draw the title the finished page ends on (Search hands text to Explore)", () => {
+  for (const [rel, title] of [["schedules/loading.tsx", "Schedules"], ["search/loading.tsx", "Explore"]] as const) {
     const src = readFileSync(join(ROOT, rel), "utf8");
     assert.match(src, /NamedPageLoadingSkeleton/, rel);
     assert.ok(src.includes(`title="${title}"`), rel);

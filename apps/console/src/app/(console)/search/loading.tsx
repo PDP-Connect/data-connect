@@ -9,13 +9,14 @@ import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
  *
  * `/search` is `force-dynamic` and awaits a reference `refSearch`
  * read across grants, runs, and traces before it can render its result groups.
- * Keep the shell stable and animate a list skeleton while that read resolves,
+ * Free text is handed to Explore (page.tsx), so this screen carries the name of the page it
+ * ends on: one name while loading and when loaded. Keep the shell stable and animate a list skeleton while that read resolves,
  * rather than painting a blank frame.
  */
 export default function SearchLoading() {
   return (
     <RecordroomShellWithPalette>
-      <NamedPageLoadingSkeleton label="search" rows={6} shape="list" title="Search" />
+      <NamedPageLoadingSkeleton label="records" rows={6} shape="list" title="Explore" />
     </RecordroomShellWithPalette>
   );
 }
