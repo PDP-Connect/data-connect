@@ -264,50 +264,51 @@ interface Readable {
   prepare(sql: string): { all(...params: string[]): unknown[]; get(...params: string[]): unknown };
 }
 
-/** Ordinary tables (not virtual or FTS shadow tables), with their connector id columns. */
-function plainTables(db: Readable): { name: string; idColumns: string[] }[] {
-  const tables = db
+const ID_COLUMNS = new Set(["connector_id", "connector_key"]);
+
+/** One row as a stable string over the given columns, blobs as hex, so two drivers' rows compare equal. */
+function rowKey(row: Record<string, unknown>, columns: readonly string[]): string {
+  return JSON.stringify(
+    columns.map((column) => {
+      const value = row[column];
+      if (value instanceof Uint8Array) {
+        return `blob:${Buffer.from(value).toString("hex")}`;
+      }
+      return typeof value === "bigint" ? Number(value) : value;
+    })
+  );
+}
+
+interface Table {
+  columns: string[];
+  rows: Record<string, unknown>[];
+}
+
+/**
+ * Every row of every ordinary table (not virtual or FTS shadow tables). `columns` limits a
+ * table to the columns the old store had, so columns a later migration adds do not count.
+ */
+function snapshot(db: Readable, columnsOf: Record<string, Table> = {}): Record<string, Table> {
+  const names = db
     .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as { name: string }[];
-  return tables.map(({ name }) => ({
-    idColumns: (db.prepare("SELECT name FROM pragma_table_info(?)").all(name) as { name: string }[])
-      .map((column) => column.name)
-      .filter((column) => column === "connector_id" || column === "connector_key"),
-    name,
-  }));
-}
-
-/** Everything the upgrade must preserve, read from one store. */
-function snapshot(db: Readable) {
-  const rowCounts: Record<string, number> = {};
-  // Keyed by "table.column".
-  const connectorIds: Record<string, string[]> = {};
-  for (const { name, idColumns } of plainTables(db)) {
-    rowCounts[name] = Number((db.prepare(`SELECT count(*) AS n FROM "${name}"`).get() as { n: number }).n);
-    for (const column of idColumns) {
-      connectorIds[`${name}.${column}`] = (
-        db.prepare(`SELECT "${column}" AS id FROM "${name}" ORDER BY 1`).all() as { id: string | null }[]
-      ).map((row) => String(row.id));
-    }
+  const tables: Record<string, Table> = {};
+  for (const { name } of names) {
+    const columns =
+      columnsOf[name]?.columns ??
+      (db.prepare("SELECT name FROM pragma_table_info(?)").all(name) as { name: string }[]).map((c) => c.name).sort();
+    tables[name] = { columns, rows: db.prepare(`SELECT * FROM "${name}"`).all() as Record<string, unknown>[] };
   }
-  const rows = (sql: string) => db.prepare(sql).all() as Record<string, unknown>[];
-  return {
-    connectorIds,
-    instances: rows(
-      "SELECT connector_instance_id, connector_id, owner_subject_id, source_kind, source_binding_key, status FROM connector_instances ORDER BY 1"
-    ),
-    recordChanges: rows(
-      "SELECT connector_id, connector_instance_id, stream, record_key, version, record_json FROM record_changes ORDER BY 2, 3, 5"
-    ),
-    records: rows(
-      "SELECT connector_id, connector_instance_id, stream, record_key, version, record_json FROM records ORDER BY 2, 3, 4"
-    ),
-    rowCounts,
-  };
+  return tables;
 }
 
-const withRenamedIds = (rows: Record<string, unknown>[]) =>
-  rows.map((row) => ({ ...row, connector_id: renamed(String(row.connector_id)) }));
+function tableOf(tables: Record<string, Table>, name: string): Table {
+  const table = tables[name];
+  assert.ok(table, `${name} exists`);
+  return table;
+}
+
+const keys = (table: Table): string[] => table.rows.map((row) => rowKey(row, table.columns)).sort();
 
 test("first start upgrades a v0.9.9 store that holds the retired ids, losing only collided old-id rows", () => {
   // v0.9.9 is the last release before the rename; provenance.json says how the store was made.
@@ -321,37 +322,74 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
     original.close();
 
     initDb(path);
-    const after = snapshot(getDb());
+    const after = snapshot(getDb(), before);
 
-    // Every retired id is renamed, and the only rows lost are the two old-id rows whose key a
-    // current-id row already held: connectors (claude-code) and dataset_summary_stream_projection
-    // (claude-code, sessions).
-    const collided: Record<string, string> = {
-      "connectors.connector_id": "claude-code",
-      "dataset_summary_stream_projection.connector_id": "claude-code",
+    // The only rows lost are the two old-id rows whose key a current-id row already held; the
+    // current-id row wins.
+    const collided: Record<string, (row: Record<string, unknown>) => boolean> = {
+      connectors: (row) => row.connector_id === "claude_code",
+      dataset_summary_stream_projection: (row) => row.connector_id === "claude_code" && row.stream === "sessions",
     };
-    for (const [column, ids] of Object.entries(before.connectorIds)) {
-      const expected = ids.map(renamed).sort();
-      if (collided[column]) {
-        expected.splice(expected.indexOf(collided[column]), 1);
-      }
-      assert.deepEqual(after.connectorIds[column], expected, column);
-    }
-    // Tables without a connector id keep their row count. Only the migration ledger may grow,
-    // because first start records the migrations it ran.
+    // First start records the migrations it ran.
     const bookkeeping = new Set(["storage_migration_ledger"]);
-    for (const [table, count] of Object.entries(before.rowCounts)) {
-      if (Object.keys(before.connectorIds).some((column) => column.startsWith(`${table}.`))) {
-        continue;
+    // What the upgrade may change in a value: id columns, a connection named after its retired
+    // id, and the id field inside a stored manifest.
+    const upgraded = (name: string, column: string, value: unknown): unknown => {
+      if (typeof value !== "string") {
+        return value;
       }
-      if (bookkeeping.has(table)) {
-        assert.ok((after.rowCounts[table] ?? 0) >= count, `${table}: ${after.rowCounts[table]} < ${count}`);
+      if (ID_COLUMNS.has(column) || (name === "connector_instances" && column === "display_name")) {
+        return renamed(value);
+      }
+      if (name === "connectors" && column === "manifest") {
+        const manifest = JSON.parse(value) as { connector_id?: string };
+        return JSON.stringify({ ...manifest, connector_id: renamed(String(manifest.connector_id)) });
+      }
+      return value;
+    };
+    // source_revision counts writes to a connection's rows, so renaming them advances it.
+    // Compare it on its own below; every other column must be unchanged.
+    const advancing: Record<string, string> = { connector_instances: "source_revision" };
+
+    assert.ok(
+      tableOf(before, "records").rows.length > 0 && tableOf(before, "record_changes").rows.length > 0,
+      "the fixture holds owner records"
+    );
+    for (const [name, table] of Object.entries(before)) {
+      // Every column of every row is unchanged, except that each retired id is renamed.
+      const columns = table.columns.filter((column) => column !== advancing[name]);
+      const expected: Table = {
+        columns,
+        rows: table.rows
+          .filter((row) => !collided[name]?.(row))
+          .map((row) =>
+            Object.fromEntries(
+              Object.entries(row).map(([column, value]) => [column, upgraded(name, column, value)])
+            )
+          ),
+      };
+      const got: Table = { columns, rows: tableOf(after, name).rows };
+      if (bookkeeping.has(name)) {
+        const present = new Set(keys(got));
+        assert.deepEqual(keys(expected).filter((key) => !present.has(key)), [], name);
       } else {
-        assert.equal(after.rowCounts[table], count, table);
+        assert.deepEqual(keys(got), keys(expected), name);
       }
     }
 
-    // The current-id row wins each collision; the lone old-id projection row is renamed.
+    const revisions = (tables: Record<string, Table>) =>
+      new Map(
+        tableOf(tables, "connector_instances").rows.map((row) => [
+          String(row.connector_instance_id),
+          Number(row.source_revision),
+        ])
+      );
+    const revisionsBefore = revisions(before);
+    for (const [id, revision] of revisions(after)) {
+      assert.ok(revision >= (revisionsBefore.get(id) ?? 0), `${id}: source_revision went back`);
+    }
+
+    // The winning rows are the current-id ones: the current manifest, and 9 sessions rather than 7.
     const db = getDb();
     const manifest = db.prepare("SELECT manifest FROM connectors WHERE connector_id = 'claude-code'").get() as {
       manifest: string;
@@ -369,15 +407,12 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
       ]
     );
 
-    // Owner data keeps its connection, stream, key, version and content; only the id is renamed.
-    assert.ok(before.records.length > 0 && before.recordChanges.length > 0, "the fixture holds owner records");
-    assert.deepEqual(after.records, withRenamedIds(before.records));
-    assert.deepEqual(after.recordChanges, withRenamedIds(before.recordChanges));
-    assert.deepEqual(after.instances, withRenamedIds(before.instances));
-
     closeDb();
     initDb(path);
-    assert.deepEqual(snapshot(getDb()), after, "a second start changes nothing");
+    const again = snapshot(getDb(), before);
+    for (const [name, table] of Object.entries(after)) {
+      assert.deepEqual(keys(again[name] ?? { columns: [], rows: [] }), keys(table), `a second start changes nothing in ${name}`);
+    }
   } finally {
     closeDb();
     rmSync(dir, { force: true, recursive: true });
