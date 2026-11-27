@@ -8,7 +8,7 @@
 
 import { NO_NAME_FALLBACK } from "../../../lib/connection-display-name.ts";
 import { classifyKnownGaps, type KnownGap } from "../../../lib/run-gaps.ts";
-import { RETRY_AFTER_FAILURE_LABEL, resolveSyncCause } from "../../../lib/sync-cause.ts";
+import { RETRY_AFTER_FAILURE_LABEL, emptyFirstSyncWords, resolveSyncCause } from "../../../lib/sync-cause.ts";
 import type { StreamManifestEntry } from "@pdpp/display";
 import { sourceRecordLabel } from "../../../lib/source-record-label.ts";
 import type {
@@ -123,8 +123,7 @@ function yourData(name: string): string {
 
 export const outcomeCopy = {
 	connected: (name: string) => `${atStart(name)} is connected.`,
-	emptyHeadline: (name: string) =>
-		`${atStart(name)} is connected, but nothing came back.`,
+	emptyHeadline: (name: string) => emptyFirstSyncWords(atStart(name)),
 	partialHeadline: (name: string, step: string | null = null) =>
 		step
 			? `${atStart(name)} needs ${step} to copy the rest.`

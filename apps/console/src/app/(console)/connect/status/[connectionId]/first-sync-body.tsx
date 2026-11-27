@@ -14,6 +14,7 @@ import {
 	ConnectWorkingMark,
 	WentWrong,
 } from "../../../sources/add/connect-parts.tsx";
+import { EMPTY_FIRST_SYNC_CHECK } from "../../../lib/sync-cause.ts";
 import { recordCountLabel } from "../../../lib/record-count-label.ts";
 import { sourceDetailHref } from "./connect-status-links.ts";
 import {
@@ -120,7 +121,12 @@ function Body({
 				</>
 			);
 		case "empty":
-			return <LinkButton link={outcome.retry} primary />;
+			return (
+				<>
+					<p className="text-muted-foreground">{EMPTY_FIRST_SYNC_CHECK}</p>
+					<LinkButton link={outcome.retry} primary />
+				</>
+			);
 		case "running":
 			return (
 				<>

@@ -383,7 +383,7 @@ test("settings show one explanation per choice, a narrow number, and only useful
 
 test("the unmeasured-completeness practice state uses the shared plain sentence and sync button", async () => {
   const document = (await renderDemo("unmeasured-completeness")).window.document;
-  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /DataConnect can't yet tell whether it got everything/);
+  assert.match(document.querySelector('[data-testid="source-state-sentence"]')?.textContent ?? "", /DataConnect can't yet tell whether it got everything\. Nothing for you to do/);
   assert.ok([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "Sync now"));
 });
 

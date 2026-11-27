@@ -3,7 +3,7 @@
 
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
 import { savedSecretNoun, savedSecretUpdateLabel } from "./saved-secret-words.ts";
-import { RETRY_AFTER_FAILURE_LABEL, resolveSyncCause } from "./sync-cause.ts";
+import { EMPTY_FIRST_SYNC_CHECK, RETRY_AFTER_FAILURE_LABEL, emptyFirstSyncWords, resolveSyncCause } from "./sync-cause.ts";
 import { isScheduled } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
@@ -139,7 +139,7 @@ function onlyUnmeasuredCompleteness(source: RefConnectorSummary): boolean {
 }
 
 /** The one sentence for a copy DataConnect cannot yet check. The list row says "Synced {when}" only. */
-export const UNMEASURED_CAVEAT = "DataConnect can't yet tell whether it got everything.";
+export const UNMEASURED_CAVEAT = "DataConnect can't yet tell whether it got everything. Nothing for you to do.";
 
 /** The sentence for a source whose last copy is old. Says "a refresh is due" only when a schedule is on. */
 function refreshRow(source: RefConnectorSummary, name: string, when: string | null): MatchedStatus {
@@ -201,7 +201,7 @@ function lifecycleRow(
       sentence: { text: `The first copy of ${name} may not be complete.`, slot: "what_you_can_do" }, problem: true };
     }
     case "unverified_zero":
-      return { row: 6, words: "First sync found no records", tone: "attention", action: action("retry_first_sync", "Try again", true) , sentence: { text: "First sync found no records.", slot: "what_you_can_do" }, problem: true };
+      return { row: 6, words: emptyFirstSyncWords(name), tone: "attention", action: action("retry_first_sync", "Try again", true) , sentence: { text: `${emptyFirstSyncWords(name)} ${EMPTY_FIRST_SYNC_CHECK}`, slot: "what_you_can_do" }, problem: true };
     case "verified_empty":
       return { row: 7, words: "No records found", tone: "plain", action: action("review_result", "Review result", false) , sentence: { text: "No records found.", slot: "what_you_can_do" }, problem: false };
   }

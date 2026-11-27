@@ -41,3 +41,11 @@ export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): Syn
 export function copiedRecords(count: number): string {
   return count === 0 ? "Nothing to copy" : `copied ${count.toLocaleString("en-US")} record${count === 1 ? "" : "s"}`;
 }
+
+/** One sentence for a first sync that connected and brought nothing, on the list row and on the first-sync page. */
+export function emptyFirstSyncWords(name: string): string {
+  return `${name} is connected, but nothing came back.`;
+}
+
+/** The one thing to check after an empty first sync. */
+export const EMPTY_FIRST_SYNC_CHECK = "Check that the account has something to copy, then try again.";

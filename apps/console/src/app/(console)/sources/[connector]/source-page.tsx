@@ -84,7 +84,7 @@ import {
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
 } from "../../lib/source-actionability.ts";
-import { type SourceStatusAction, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
+import { UNMEASURED_CAVEAT, type SourceStatusAction, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { readConnectorUpdates } from "../connector-updates-read.ts";
@@ -890,7 +890,7 @@ function ConnectorPageView({
       </Suspense>
       {!neverConnected ? <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         <SourceRecords model={model} />
-        {recordTotal.conflicting && !/can.t yet tell whether/.test(stateSentence.text) ? <p className="pdpp-body mt-3 text-muted-foreground">DataConnect can't yet tell whether it got everything.</p> : null}
+        {recordTotal.conflicting && !/can.t yet tell whether/.test(stateSentence.text) ? <p className="pdpp-body mt-3 text-muted-foreground">{UNMEASURED_CAVEAT}</p> : null}
         {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>{source.acquisition_coverage?.latest_batch || source.last_successful_run ? "Add another export" : "Add an export"}</Link>
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />

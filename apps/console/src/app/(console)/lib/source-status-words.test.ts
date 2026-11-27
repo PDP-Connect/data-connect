@@ -171,7 +171,7 @@ test("first-sync retry actions use one label for both unverified first-sync rows
   assert.equal(rowFive?.label, "Try again");
   assert.equal(rowSix?.label, "Try again");
 });
-test("row 6 words an unverified empty first sync", () => assertRow(6, "First sync found no records", "attention", { kind: "retry_first_sync", label: "Try again", filled: true }));
+test("row 6 words an unverified empty first sync", () => assertRow(6, "Example source is connected, but nothing came back.", "attention", { kind: "retry_first_sync", label: "Try again", filled: true }));
 test("row 7 words a verified empty first sync", () => assertRow(7, "No records found", "plain", { kind: "review_result", label: "Review result", filled: false }));
 test("row 8 words a required owner action", () => assertRow(8, "Needs you to sign in again", "attention", { kind: "server_cta", label: "Review this source", filled: true }));
 test("a lifecycle-paused source stays out of needs-you when an owner action is stored", () => {
@@ -253,7 +253,7 @@ test("the unchecked pill belongs to row 21, not the row 20 fixture", () => {
   assert.equal(fixture(20).rendered_verdict?.pill.label, "Healthy");
   assert.equal(fixture(21).rendered_verdict?.pill.label, "Collected, not independently checked");
   // DIRECTION.md row 21: use plain words instead of the banned word "gaps".
-  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
+  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything. Nothing for you to do.");
 });
 
 test("pending detail work uses one shared sentence for rows 19 and 20", () => {
@@ -482,7 +482,7 @@ test("only the sole unmeasured-completeness maintainer cause gets the plain sync
   assert.equal(words.needsYou, words.action !== null);
   assert.equal(words.tone, "plain");
   assert.equal(words.action, null);
-  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
+  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything. Nothing for you to do.");
   for (const actions of [[{ ...unmeasured, cta: "Fix the copy" }], [{ ...unmeasured, terminal: true }], [unmeasured, requiredAction()]]) {
     assert.match(sourceStateSentence({ ...base, rendered_verdict: verdict("Not measured", actions) }, { now: NOW, name: "Northwind" }).text, /stopped for a reason DataConnect could not name/);
   }
