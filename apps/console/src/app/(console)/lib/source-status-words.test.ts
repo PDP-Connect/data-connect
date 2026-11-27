@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RefConnectionHealthSnapshot, RefConnectorSummary, RefRenderedVerdict, RefRequiredAction } from "./ref-client.ts";
-import { isUpToDateRow, manifestCredentialKind, sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "./source-status-words.ts";
+import { isUpToDateRow, manifestCredentialKind, sourceAnswer, sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "./source-status-words.ts";
 
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 const SUCCESS = "2026-11-24T10:00:00.000Z";
@@ -663,4 +663,13 @@ test("a kind that did not come says Not copied with its cause, and a slow-down i
   assert.equal(result.action?.label, "Try again");
   assert.equal(result.action?.filled, false);
   assert.match(sourceStateSentence(slow, { now: NOW, name: "Steam" }).text, /will try again by itself at the next check/);
+});
+
+// Round 8 B3: "needs the owner" is its own fact; a device state with no local step still needs them.
+test("a device that needs the owner but has no step to offer still counts as needing the owner", () => {
+  const value = source({ source_kind: "local_device", local_device_progress: { device_name: "Den PC" } as RefConnectorSummary["local_device_progress"], owner_state: { resolver: "needs_owner" } as RefConnectorSummary["owner_state"], rendered_verdict: verdict("Some records stuck", [requiredAction({ surface: { kind: "local_device" } })]) });
+  const answer = sourceAnswer(value, { now: NOW });
+  assert.equal(answer.action, null);
+  assert.equal(answer.needsYou, true);
+  assert.equal(sourceAnswer({ ...fixture(10), source_kind: "local_device" }, { now: NOW }).needsYou, false);
 });

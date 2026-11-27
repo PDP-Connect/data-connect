@@ -48,7 +48,7 @@ export interface SourceStatusWords {
 
 const FINAL_STOP = /\.$/;
 const BROWSER_SIGN_IN_SUFFIX = / \(Browser Sign-In\)$/i;
-type MatchedStatus = Omit<SourceStatusWords, "needsYou"> & { sentence: SourceStateSentence; problem: boolean };
+type MatchedStatus = Omit<SourceStatusWords, "needsYou"> & { sentence: SourceStateSentence; problem: boolean; /** The owner must act, whether or not this page has an action to offer for it. */ needsOwner?: boolean };
 
 export interface SourceAnswer extends SourceStatusWords { sentence: SourceStateSentence; problem: boolean }
 
@@ -257,6 +257,7 @@ function lifecycleRow(
           : "Needs you";
     return {
       row: 8,
+      needsOwner: true,
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
@@ -468,7 +469,8 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
 
 export function sourceAnswer(source: RefConnectorSummary, options: SourceStatusOptions): SourceAnswer {
   const matched = matchSourceStatus(source, options);
-  return { ...matched, needsYou: actionIsRequired(matched.action) };
+  const { needsOwner, ...rest } = matched;
+  return { ...rest, needsYou: needsOwner ?? actionIsRequired(matched.action) };
 }
 export function sourceStatusWords(source: RefConnectorSummary, options: SourceStatusOptions): SourceStatusWords {
   const {sentence: _sentence, problem: _problem, ...status} = sourceAnswer(source, options);
