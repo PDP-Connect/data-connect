@@ -149,18 +149,15 @@
   min-width: 0;
 }
 
+/* A long name wraps to a second line; the row menu stays at the top right. */
 .rr-s-row__name {
-  overflow: hidden;
   font-size: 15px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .rr-s-row__kind {
-  overflow: hidden;
   font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .rr-s-row__status,
