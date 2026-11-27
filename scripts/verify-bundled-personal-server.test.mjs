@@ -829,6 +829,40 @@ describe("hdiutil mount retries", () => {
     expect(fake.pauses).toEqual([])
   })
 
+  it("finishes after the second failed detach when the volume then disappears", () => {
+    const fake = fakeHdiutil(Infinity, attempt =>
+      attempt === 1 ? "Resource busy" : "No such file or directory"
+    )
+    const probes = [true, false]
+    const paths = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        paths.push(path)
+        return probes.shift()
+      })
+    ).not.toThrow()
+    expect(paths).toEqual([mountRoot, mountRoot])
+    expect(probes).toEqual([])
+    expect(fake.calls).toEqual([["hdiutil", detachArgs], ["hdiutil", detachArgs]])
+  })
+
+  it("rejects missing-path diagnostics while the volume is still mounted", () => {
+    const fake = fakeHdiutil(Infinity, () => "No such file or directory")
+    const paths = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        paths.push(path)
+        return true
+      })
+    ).toThrow("No such file or directory")
+    expect(paths).toEqual([mountRoot, mountRoot, mountRoot])
+    expect(fake.calls).toEqual([
+      ["hdiutil", detachArgs],
+      ["hdiutil", detachArgs],
+      ["hdiutil", forceDetachArgs],
+    ])
+  })
+
   describe("with the default mount probe", () => {
     it("stops after one detach error when the mount path is gone", () => {
       const parent = mkdtempSync(join(tmpdir(), "dmg-probe-"))
