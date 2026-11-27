@@ -1,0 +1,14 @@
+{
+  "file": "v0.9.9-store.sqlite.gz",
+  "sha256_uncompressed": "f69b18ef72b9874cd1de648e461fd82b389cf0e497594b466ac16e3bcef76ed1",
+  "release": "v0.9.9",
+  "release_commit": "0fab78cc2d902ca309e87ad88236ec0e1fb83974",
+  "why": "v0.9.9 is the last release before the connector-id rename migration. It read the four underscore ids through aliases and wrote current ids for new rows, so a store it upgraded can hold both spellings.",
+  "how": [
+    "In a checkout of release_commit, from reference-implementation/: initDb(path) from server/db.ts, then db.exec(seed.sql), then closeDb().",
+    "sqlite3 <path> \"VACUUM INTO 'v0.9.9-store.sqlite'\"",
+    "gzip -9 -n v0.9.9-store.sqlite"
+  ],
+  "seed": "seed.sql",
+  "data": "synthetic; no owner data"
+}
