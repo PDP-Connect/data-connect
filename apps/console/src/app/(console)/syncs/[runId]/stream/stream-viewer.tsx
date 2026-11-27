@@ -1583,7 +1583,7 @@ function LiveStreamSurface({
   const connectorName = connector?.displayName ?? "the data source";
 
   return (
-    <SignInFrame connector={connector} title={`Sign in to ${connectorName}`}>
+    <SignInFrame connector={connector} step={status.display !== "trouble"} title={`Sign in to ${connectorName}`}>
         <OrientationCard
           buttonLabel={`Open ${connectorName}`}
           isMinting={isMinting}
@@ -1633,7 +1633,7 @@ interface OrientationCardProps {
   troubleMessage: string | null;
 }
 
-function OrientationCard({
+export function OrientationCard({
   buttonLabel,
   isMinting,
   message,
@@ -1654,7 +1654,8 @@ function OrientationCard({
   }
   return (
     <section
-      aria-labelledby="stream-orientation-title"
+      aria-labelledby={troubleMessage ? undefined : "stream-orientation-title"}
+      aria-label={troubleMessage ? "The browser is not reachable" : undefined}
       className="flex flex-col gap-5 p-4"
       data-surface="human"
     >
@@ -1664,9 +1665,11 @@ function OrientationCard({
           <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>
         </div>
       ) : null}
-      <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
-        {message}
-      </p>
+      {troubleMessage ? null : (
+        <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
+          {message}
+        </p>
+      )}
       <IcButton
         aria-busy={isMinting || undefined}
         aria-describedby={troubleMessage ? "stream-trouble-note" : undefined}
