@@ -345,6 +345,19 @@ test("group_by_time uses a real start for the repeated half hour in Australia/Lo
   });
 });
 
+[
+  { key: "2024-04-06T21:00:00+05:45", timeZone: "Asia/Kathmandu" },
+  { key: "2024-04-07T00:00:00+08:45", timeZone: "Australia/Eucla" },
+].forEach(({ key, timeZone }) => {
+  test(`group_by_time hour keys keep the 45-minute offset in ${timeZone}`, async () => {
+    // 15:20Z is 20 minutes past a local hour in both zones, not a UTC hour boundary.
+    await withSeeded([{ id: "q1", occurred_at: "2024-04-06T15:20:00Z", sender: "x" }], async () => {
+      const res = await countByTime("hour", timeZone);
+      assert.deepEqual(res.groups, [{ count: 1, key }]);
+    });
+  });
+});
+
 test("group_by_time hour buckets order chronologically across a fall-back east of UTC (Europe/Berlin)", async () => {
   // 2024-10-27: 03:00 CEST -> 02:00 CET. The first 02:xx is +02:00, the second is +01:00,
   // so a plain string sort would put the later hour first.
