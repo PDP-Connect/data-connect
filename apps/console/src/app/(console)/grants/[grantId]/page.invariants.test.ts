@@ -17,3 +17,10 @@ test("the app page asks before removing all registrations or one source", () => 
   assert.match(source, /removal.remove\("all"\)/); assert.match(source, /removal.remove\(key, source.source\)/);
   assert.match(source, /source.name \|\| appSourceName\(source.source\)/);
 });
+test("the per-row Remove control on an app's page is 44px tall on a coarse pointer", () => {
+  const source = read("./app-page.tsx");
+  const at = source.indexOf("Remove {name}");
+  assert.ok(at > 0);
+  const button = source.slice(source.lastIndexOf("<Button", at), at);
+  assert.match(button, /pointer-coarse:min-h-11/);
+});

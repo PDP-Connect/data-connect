@@ -166,7 +166,7 @@ export function AppPage({
                         </div>
                       </div>
                       {canRead ? (
-                        <Button onClick={() => removal.setQuestion(key)} size="sm" variant="link">
+                        <Button className="pointer-coarse:min-h-11" onClick={() => removal.setQuestion(key)} size="sm" variant="link">
                           Remove {name}
                         </Button>
                       ) : null}
