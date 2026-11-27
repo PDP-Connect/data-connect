@@ -129,7 +129,7 @@ impl CredentialStore for SystemKeyring {
         let started = Instant::now();
         let result = (|| {
             refuse_keychain_under_test()?;
-            let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
+            let entry = keyring::Entry::new(&crate::profile::keyring_service(KEYRING_SERVICE), &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             match entry.get_password() {
                 Ok(value) => Ok(Some(value)),
@@ -151,7 +151,7 @@ impl CredentialStore for SystemKeyring {
         let started = Instant::now();
         let result = (|| {
             refuse_keychain_under_test()?;
-            let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
+            let entry = keyring::Entry::new(&crate::profile::keyring_service(KEYRING_SERVICE), &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             entry
                 .set_password(credential)
