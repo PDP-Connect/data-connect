@@ -13,9 +13,12 @@ import { RunInteractionForm } from "./interaction-form.tsx";
 import { currentStateAddsToFailure, durationWords, hereNowTitle, recordKindName, type OneSyncModel } from "./one-sync-model.ts";
 export function OneSyncView({ model, offset, practice = false }: { model: OneSyncModel; offset: number; practice?: boolean }) {
   const m = model; const took = durationWords(m.started,m.completed);
+  // The one sentence and tone the source page uses for this state, from the shared status words.
+  const answer = m.currentSource?.currentAnswer;
+  const waiting = answer?.row === 8 ? answer.sentence.text.split(/(?<=\.)\s/)[0] ?? null : null;
   const sentence = m.outcome === "finished" ? `Finished.${took ? ` It took ${took}.` : ""}`
     : m.outcome === "syncing" ? `Syncing now.${m.started ? ` Started ${startedAgo(m.started)}.` : ""}`
-    : m.outcome === "needs_you" ? "Needs you to finish signing in."
+    : m.outcome === "needs_you" ? (waiting ?? "Needs you to finish signing in.")
     : m.outcome === "could_not_start" ? "DataConnect could not start this sync."
     : m.outcome === "stopped" ? "You stopped this. What was copied before you stopped is kept."
     : m.outcome === "interrupted" ? "Interrupted when DataConnect restarted."
@@ -23,7 +26,7 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
   const cause = resolveSyncCause(m.evidence ?? {reason:m.cause},m.currentSource?.serviceName ?? m.name);
   return <>
     <PageHeader breadcrumbs={[{ href: "/syncs", label: "Sync history" }, { href: m.connection ? `/sources/${encodeURIComponent(m.connection)}` : "/sources", label: m.name }]} title={<span className="inline-flex items-center gap-3"><ConnectorMark connectorId={m.connector} name={m.name} /><span>{m.name}{m.at ? `, ${sentenceDayLabel(personDay(m.at,offset),offset)} at ${clockLabel(m.at,offset)}` : ""}</span></span>} />
-    <div className="mb-8 space-y-3"><p className={m.outcome === "failed" || m.outcome === "needs_you" ? "text-destructive" : "text-foreground"}>{sentence}</p>
+    <div className="mb-8 space-y-3"><p className={m.outcome === "failed" ? "text-destructive" : m.outcome === "needs_you" ? "font-medium text-attention" : "text-foreground"}>{sentence}</p>
     {m.outcome === "failed" ? <p>{cause.sentence}</p> : null}
     {m.currentSource?.currentState && m.outcome !== "needs_you" && currentStateAddsToFailure(m.outcome, cause.sentence, m.currentSource.currentState) ? <p>{m.currentSource.currentState}</p> : null}
     {m.currentSource?.currentAnswer?.action && m.retryHref && m.outcome !== "needs_you" ? (m.currentSource.currentAnswer.action.kind === "sync_now" && m.connection ? <SyncNowButton connectionId={m.connection} connectorId={m.connector} displayName={m.name} idleLabel={m.currentSource.currentAnswer.action.label} initialRunning={false} variant="default" /> : <Link className={buttonVariants()} href={m.retryHref}>{m.currentSource.currentAnswer.action.label}</Link>) : null}
