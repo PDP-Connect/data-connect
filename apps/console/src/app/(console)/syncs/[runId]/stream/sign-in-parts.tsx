@@ -9,7 +9,7 @@ import { ConnectHeader, ConnectWorkingMark } from "../../../sources/add/connect-
 import type { ConnectorContext } from "./connector-context-resolution.ts";
 
 export function SignInFrame({ children, connector, title, step = true }: { children?: ReactNode; connector: ConnectorContext | null; title: string; step?: boolean }) {
-  return <RecordroomShellWithPalette><ConnectHeader connectorKey={connector?.connectorId ?? ""} icon={connector?.icon} name={connector?.displayName ?? "the data source"} title={title} step={step ? "Step 1 of 2: sign in" : undefined} /><div className="grid max-w-xl gap-4">{children}</div></RecordroomShellWithPalette>;
+  return <RecordroomShellWithPalette><ConnectHeader lastCrumb={connector?.connectorId ? { href: `/sources/${encodeURIComponent(connector.connectorId)}`, label: connector.displayName } : { href: "/sources", label: "Sign-in" }} connectorKey={connector?.connectorId ?? ""} icon={connector?.icon} name={connector?.displayName ?? "the data source"} title={title} step={step ? "Step 1 of 2: sign in" : undefined} /><div className="grid max-w-xl gap-4">{children}</div></RecordroomShellWithPalette>;
 }
 
 export function PreparingBrowserSurface({ connector, poll = true, runId }: { connector: ConnectorContext | null; poll?: boolean; runId: string }) {

@@ -130,6 +130,7 @@ import {
 } from "./stream-keyboard-focus.ts";
 import { claimPopupNotice, createPopupNoticeSeenRegistry } from "./stream-popup-notice-dedupe.ts";
 import { beginPresentationSession } from "./stream-presentation-session.ts";
+import { COULDNT_REACH_BROWSER, LOST_BROWSER_MEANS, plainBrowserTrouble } from "./browser-trouble-words.ts";
 import { classifyStreamReachFailure, type StreamReachProbeResult } from "./stream-reach-diagnostics.ts";
 import { createStreamSurfaceMeasureCoordinator } from "./stream-surface-measure-gate.ts";
 import {
@@ -448,7 +449,7 @@ function classifyMintError(err: unknown): ConnectionStatus {
   return {
     cause: "network",
     display: "trouble",
-    troubleMessage: "Couldn't reach the browser.",
+    troubleMessage: COULDNT_REACH_BROWSER,
   };
 }
 
@@ -1604,6 +1605,11 @@ function LiveStreamSurface({
           // an already-torn-down companion.
           setMintedSession(null);
         }}
+        onRetry={() => {
+          setOpen(false);
+          setMintedSession(null);
+          void openBrowser();
+        }}
         onStatus={setStatus}
         open={open}
         previewState={previewState}
@@ -1647,9 +1653,15 @@ function OrientationCard({
   return (
     <section
       aria-labelledby="stream-orientation-title"
-      className="flex flex-col gap-5"
+      className="flex flex-col gap-5 p-4"
       data-surface="human"
     >
+      {troubleMessage ? (
+        <div className="grid gap-1" id="stream-trouble-note" role="status">
+          <p className="font-medium text-destructive">{plainBrowserTrouble(troubleMessage)}</p>
+          <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>
+        </div>
+      ) : null}
       <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
         {message}
       </p>
@@ -1664,11 +1676,6 @@ function OrientationCard({
       >
         {label}
       </IcButton>
-      {troubleMessage ? (
-        <p className="pdpp-caption text-destructive/85" id="stream-trouble-note" role="status">
-          {troubleMessage}
-        </p>
-      ) : null}
     </section>
   );
 }
@@ -1690,6 +1697,8 @@ interface StreamOverlayProps {
   interactionMessage: string;
   interactionRequiresResponse: boolean;
   onClose: () => void;
+  /** Opens a fresh browser session after the connection was lost. */
+  onRetry?: () => void;
   onStatus: (status: ConnectionStatus) => void;
   open: boolean;
   previewState?: string;
@@ -1706,6 +1715,7 @@ function StreamOverlay({
   interactionMessage,
   interactionRequiresResponse,
   onClose,
+  onRetry,
   onStatus,
   open,
   previewState,
@@ -1745,6 +1755,7 @@ function StreamOverlay({
               interactionMessage={interactionMessage}
               interactionRequiresResponse={interactionRequiresResponse}
               onClose={onClose}
+              onRetry={onRetry}
               onStatus={onStatus}
               runId={runId}
               status={status}
@@ -1772,6 +1783,8 @@ interface StreamStageProps {
   interactionMessage: string;
   interactionRequiresResponse: boolean;
   onClose: () => void;
+  /** Opens a fresh browser session after the connection was lost. */
+  onRetry?: () => void;
   onStatus: (status: ConnectionStatus) => void;
   runId: string;
   status: ConnectionStatus;
@@ -1799,6 +1812,7 @@ function StreamStage({
   interactionMessage,
   interactionRequiresResponse,
   onClose,
+  onRetry,
   onStatus,
   runId,
   status,
@@ -2405,10 +2419,11 @@ function StreamStage({
           onStatus({
             cause: "network",
             display: "trouble",
-            troubleMessage:
+            troubleMessage: plainBrowserTrouble(
               typeof parsed.value.message === "string" && parsed.value.message.length > 0
                 ? parsed.value.message
-                : "The browser could not start.",
+                : "The browser could not start."
+            ),
           });
           source.close();
           return;
@@ -3572,6 +3587,7 @@ function StreamStage({
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
       {!closeConfirmArmed ? <StreamInteractionDock
+        browserLost={status.display === "trouble"}
         connector={connector}
         preview={Boolean(previewState)}
         previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined}
@@ -3582,7 +3598,7 @@ function StreamStage({
         message={interactionMessage}
         runId={runId}
       /> : null}
-      {status.display === "trouble" ? <TroubleToast message={status.troubleMessage} /> : null}
+      {status.display === "trouble" ? <TroubleToast message={status.troubleMessage} onRetry={onRetry} /> : null}
       {popup ? <PopupToast message={popup.message} /> : null}
       {readyBackend !== "unknown" &&
       (nekoSession || mountedCdpViewer) &&
@@ -4066,7 +4082,7 @@ function NekoSurface({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "The browser could not start. Try again.");
+          setError(err instanceof Error ? plainBrowserTrouble(err.message) : "The browser could not start. Try again.");
         }
       });
 
@@ -4690,8 +4706,9 @@ function NekoSurface({
             data-pdpp-stream-ui
           >
             <div className="max-w-sm">
-              <p className="font-medium text-foreground">Can't show the browser.</p>
-              <p className="mt-2">{error}</p>
+              <p className="font-medium text-foreground">{COULDNT_REACH_BROWSER}</p>
+              <p className="mt-2">{LOST_BROWSER_MEANS}</p>
+              <p className="sr-only">{plainBrowserTrouble(error)}</p>
               <button
                 className="mt-4 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs hover:bg-muted"
                 onClick={() => {
@@ -5474,6 +5491,7 @@ function CornerControls({
             aria-label={expanded ? `Hide ${connectorName} browser actions` : `More ${connectorName} browser actions`}
             className="pdpp-stream-control-button"
             data-pdpp-stream-ui
+            title="More actions"
             onClick={() => setExpanded((prev) => !prev)}
             type="button"
           >
@@ -5664,17 +5682,29 @@ function statusLabel(state: DisplayState): string {
     return "Live";
   }
   if (state === "trouble") {
-    return "Can't show the browser";
+    return "Couldn't reach the browser";
   }
   return "Opening the browser";
+}
+
+/** The short word drawn beside the dot, so the state does not rest on colour alone. */
+function visibleStatusLabel(state: DisplayState): string {
+  if (state === "live") {
+    return "Live";
+  }
+  if (state === "trouble") {
+    return "Not connected";
+  }
+  return "Opening";
 }
 
 function StatusDot({ status }: { status: ConnectionStatus }) {
   const tone = statusTone(status.display);
   const label = statusLabel(status.display);
   return (
-    <span className="pointer-events-none inline-flex h-10 items-center justify-center px-1">
+    <span className="pointer-events-none inline-flex h-10 items-center justify-center gap-1.5 px-1">
       <span aria-hidden className={`inline-block h-2 w-2 rounded-full ring-2 ring-background/85 ${tone}`} />
+      <span aria-hidden className="pdpp-caption font-medium text-foreground">{visibleStatusLabel(status.display)}</span>
       <span className="sr-only" role="status">
         {label}
       </span>
@@ -5732,6 +5762,7 @@ function CloseConfirmBubble({
 // ─── Interaction response dock ───────────────────────────────────────────────
 
 function StreamInteractionDock({
+  browserLost = false,
   connector,
   connectorName,
   previewError,
@@ -5742,6 +5773,8 @@ function StreamInteractionDock({
   message,
   runId,
 }: {
+  /** The browser cannot be reached: nothing can be typed or finished here until it is back. */
+  browserLost?: boolean;
   connector: ConnectorContext | null;
   connectorName: string;
   previewError?: string;
@@ -5865,7 +5898,7 @@ function StreamInteractionDock({
         <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
         <p className="pdpp-caption text-foreground">{message}</p>
         <div className="flex flex-wrap gap-2">{moveButton}</div>
-        {interactionKind === "otp" ? (
+        {interactionKind === "otp" && !browserLost ? (
           <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
             id={`code-${interactionId}`}
             autoComplete="one-time-code"
@@ -5879,7 +5912,7 @@ function StreamInteractionDock({
             {error}
           </p>
         ) : null}
-        <div className="flex flex-wrap gap-2">
+        {browserLost ? null : <div className="flex flex-wrap gap-2">
           <IcButton disabled={isPending} size="sm" type="submit">
             {submitLabel}
           </IcButton>
@@ -5888,7 +5921,7 @@ function StreamInteractionDock({
               I typed it into {connectorName} already
             </IcButton>
           ) : null}
-        </div>
+        </div>}
       </form>
     </div>
   );
@@ -5896,13 +5929,21 @@ function StreamInteractionDock({
 
 // ─── Trouble toast (only shown when display === "trouble") ────────────────────
 
-function TroubleToast({ message }: { message: string | null }) {
+function TroubleToast({ message, onRetry }: { message: string | null; onRetry?: () => void }) {
   if (!message) {
     return null;
   }
   return (
     <div aria-live="polite" className="pdpp-stream-toast-zone">
-      <p className="pdpp-caption pdpp-stream-toast-bubble">{message}</p>
+      <div className="pdpp-stream-toast-bubble flex flex-col gap-2">
+        <p className="pdpp-caption">{plainBrowserTrouble(message)}</p>
+        <p className="pdpp-caption text-muted-foreground">{LOST_BROWSER_MEANS}</p>
+        {onRetry ? (
+          <IcButton onClick={onRetry} size="sm" type="button">
+            Try again
+          </IcButton>
+        ) : null}
+      </div>
     </div>
   );
 }

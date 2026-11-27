@@ -26,7 +26,7 @@ const VIEWPORT_DIAGNOSTIC_WIRING_RE = /onDiagnostic: handleViewerDiagnostic/;
 const VIEWPORT_ERROR_STATE_RE = /viewerRef\.current\?\.getViewportState\(\) === "error"/;
 const VIEWPORT_ERROR_AFFORDANCE_RE = /setError\("The secure browser viewport could not be applied\."\)/;
 // Brief item 4 and DIRECTION.md, “What must stay true” #3: show plain failure words and retry action.
-const INLINE_ERROR_PANEL_RE = /Can't show the browser\./;
+const INLINE_ERROR_PANEL_RE = /COULDNT_REACH_BROWSER/;
 const INLINE_ERROR_RETRY_RE = /Try again/;
 const PRESENTATION_ATTACHMENT_GATE_RE =
   /if \(!presentationAttachmentReadyRef\.current\) \{[\s\S]{0,450}viewport\.skip\.awaiting-presentation-attachment/;

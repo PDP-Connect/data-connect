@@ -128,7 +128,7 @@ test("browser assistance keeps the server's OTP kind through to the live code fi
   ]);
   assert.equal(structured?.kind, "assistance");
   assert.match(pageSource, BROWSER_ASSISTANCE_STREAM_KIND_RE);
-  assert.match(streamViewerSource, /interactionKind === "otp" \? \(\s*<label[\s\S]{0,150}<IcInput/);
+  assert.match(streamViewerSource, /interactionKind === "otp" && !browserLost \? \(\s*<label[\s\S]{0,150}<IcInput/);
   // DIRECTION.md, “What must stay true” #4: keep the one-time code control reachable.
 });
 
